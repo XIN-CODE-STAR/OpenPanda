@@ -34,8 +34,13 @@ import (
 // and caches the verdict so a burst of tasks pays it once.
 const (
 	// endpointProbeTimeout bounds a single probe. On a dead route the TCP
-	// connect fails fast; a live API answers a tiny request well under it.
-	endpointProbeTimeout = 5 * time.Second
+	// connect fails fast, so this only ever pays for itself on a relay that is
+	// alive but slow — and account-pool relays in front of coding CLIs are
+	// exactly that: measured at 3.4-6.0s to answer a 1-token request, because
+	// they pick an upstream account before forwarding. Five seconds put the
+	// ceiling inside that spread, so roughly a quarter of probes timed out and
+	// the agent behind a healthy relay was reported unreachable.
+	endpointProbeTimeout = 10 * time.Second
 	// endpointProbeOKTTL caches a healthy verdict: a provider that answered a
 	// minute ago is almost certainly still up, and re-probing per task would
 	// make routing latency depend on the provider's RTT.
