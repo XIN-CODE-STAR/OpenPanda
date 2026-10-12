@@ -980,7 +980,15 @@ func (r *Router) agentUsable(name string, ag ledger.Agent) (usable bool, reason 
 		}
 	}
 	if spec := r.agentTarget(name, ag); spec.Endpoint != "" {
-		if v := r.endpointProbe(spec); !v.OK {
+		// A probe that drew no answer inside its deadline falls through to the
+		// pass below. This gate exists to stop an agent that is configured but
+		// broken from winning a plan and dying at exec — a refused connect or a
+		// dead host proves exactly that, and still disqualifies. A timeout proves
+		// nothing: it is what a healthy relay behind its own account-pool queue
+		// looks like from here, and blocking on it hid a working Claude Code
+		// while the very next request answered 200. The run keeps its own
+		// deadline to fail on.
+		if v := r.endpointProbe(spec); !v.OK && !v.Unknown {
 			if v.Rejected {
 				return false, "model credentials/quota rejected by " + spec.Endpoint + " (" + v.Detail + ")"
 			}

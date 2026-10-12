@@ -5,8 +5,10 @@ package commander
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -79,7 +81,7 @@ type ProbeSpec struct {
 	// KeyDefinitive marks APIKey as literally the credential the run sends —
 	// an env var, an inline token, the injected key — not a possibly-stale
 	// OAuth access token extracted from an auth store the CLI would refresh.
-	// Only a definitive key lets a 401/402/403/429 verdict mean "the run
+	// Only a definitive key lets a 401/402/403 verdict mean "the run
 	// would fail the same way"; without one that response just proves the
 	// service is up.
 	KeyDefinitive bool
@@ -105,6 +107,13 @@ type ProbeVerdict struct {
 	// (401/402/403): the service is up but the run would fail on
 	// auth or quota — a different fix than a dead route.
 	Rejected bool
+	// Unknown is true when the probe drew no answer within its deadline. That
+	// single outcome carries no information about the agent: the route may be
+	// dead, or alive and queued behind its own upstream, and nothing observed
+	// distinguishes the two. Routing must not disqualify on it. A refused
+	// connect or an unknown host is NOT unknown — that is a deterministic
+	// answer that nothing serves this address, and it still disqualifies.
+	Unknown bool
 }
 
 // probeKey is the cache identity: everything that can change the verdict
@@ -117,6 +126,7 @@ type endpointVerdict struct {
 	ok       bool
 	detail   string // e.g. "http 200", "http 503", "dial tcp …: connect refused"
 	rejected bool
+	unknown  bool // no answer arrived: deadline or transport failure
 	checked  time.Time
 }
 
@@ -151,15 +161,19 @@ func modelProbe(spec ProbeSpec) ProbeVerdict {
 		}
 		if probeNow().Sub(v.checked) < ttl {
 			endpointMu.Unlock()
-			return ProbeVerdict{OK: v.ok, Detail: v.detail, Rejected: v.rejected}
+			return ProbeVerdict{OK: v.ok, Detail: v.detail, Rejected: v.rejected, Unknown: v.unknown}
 		}
 	}
 	endpointMu.Unlock()
 
 	v := probeModelOnce(spec)
 
+	// An unknown verdict keeps the short failure TTL on purpose: it stops the
+	// routing path from paying another full deadline on an endpoint that is
+	// already known not to answer quickly, and caching it costs nothing now
+	// that unknown no longer disqualifies the agent.
 	endpointMu.Lock()
-	endpointCache[key] = endpointVerdict{ok: v.OK, detail: v.Detail, rejected: v.Rejected, checked: probeNow()}
+	endpointCache[key] = endpointVerdict{ok: v.OK, detail: v.Detail, rejected: v.Rejected, unknown: v.Unknown, checked: probeNow()}
 	endpointMu.Unlock()
 	return v
 }
@@ -187,7 +201,10 @@ func probeModelOnce(spec ProbeSpec) ProbeVerdict {
 	}
 	resp, err := endpointClient.Do(req)
 	if err != nil {
-		return ProbeVerdict{Detail: trimProbeErr(err)}
+		// Only a deadline is unknown. A refused connect, an unreachable host or
+		// a TLS failure is a deterministic statement about the address, and the
+		// gate that keeps a misconfigured agent from winning a plan needs it.
+		return ProbeVerdict{Detail: trimProbeErr(err), Unknown: isDeadline(err)}
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<10))
@@ -221,6 +238,15 @@ func credentialRejected(code int) bool {
 		return true
 	}
 	return false
+}
+
+// isDeadline reports whether err is a timeout rather than a deterministic
+// transport refusal. The http.Client's own deadline, its ResponseHeaderTimeout
+// and the TLS handshake timeout all surface as a net.Error with Timeout set,
+// wrapped in a *url.Error that errors.As walks through.
+func isDeadline(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 // trimProbeErr shortens a transport error for display: url.Error wraps the

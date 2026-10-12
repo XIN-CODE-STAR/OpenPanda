@@ -707,3 +707,79 @@ func TestExecAgentReportsUnusableReason(t *testing.T) {
 		t.Fatalf("stderr lacks a dispatch reason: %q", res.Stderr)
 	}
 }
+
+// withProbeDeadline shortens the probe's own client deadline so a test can wait
+// on a timeout without paying the production budget.
+func withProbeDeadline(t *testing.T, d time.Duration) {
+	t.Helper()
+	saved := endpointClient.Timeout
+	endpointClient.Timeout = d
+	t.Cleanup(func() { endpointClient.Timeout = saved })
+}
+
+// slowEndpoint accepts the request and then answers nothing, holding it open
+// past the deadline — what a relay queued behind its own upstream looks like.
+// srv.Close is registered first so the release runs before it: Close waits for
+// outstanding handlers, and the handler is waiting on that channel.
+func slowEndpoint(t *testing.T) string {
+	t.Helper()
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		<-release
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+	return srv.URL
+}
+
+// TestProbeDeadlineIsUnknown pins the distinction the routing gate now rests on:
+// a probe that drew no answer inside its deadline reports Unknown, and a refused
+// connect does not. Without that split, either a slow relay blacklists a working
+// agent, or a dead address stops disqualifying one.
+func TestProbeDeadlineIsUnknown(t *testing.T) {
+	resetEndpointProbeCache()
+	withProbeDeadline(t, 150*time.Millisecond)
+
+	v := modelProbe(ProbeSpec{
+		Endpoint: slowEndpoint(t), APIType: config.APITypeOpenAI,
+		APIKey: "sk-slow", KeyDefinitive: true,
+	})
+	if v.OK || v.Rejected || !v.Unknown {
+		t.Fatalf("deadline = %+v, want !OK, !Rejected, Unknown", v)
+	}
+
+	resetEndpointProbeCache()
+	v = modelProbe(ProbeSpec{Endpoint: deadEndpoint(t), APIType: config.APITypeOpenAI})
+	if v.OK || v.Unknown {
+		t.Fatalf("refused connect = %+v, want !OK and not Unknown — nothing serves that address, and that is a verdict", v)
+	}
+}
+
+// TestAgentUsableDeadlineDoesNotBlock pins the gate both ways: a relay that has
+// not answered inside the deadline must not disqualify the agent behind it,
+// while an address that refuses connections still must.
+func TestAgentUsableDeadlineDoesNotBlock(t *testing.T) {
+	cleanCredentialEnv(t)
+	if !pyexec.Available() {
+		t.Skip("no python interpreter on this host")
+	}
+	withProbeDeadline(t, 150*time.Millisecond)
+
+	resetEndpointProbeCache()
+	r := probeRouter(config.ModelConfig{
+		APIType: config.APITypeOpenAI, BaseURL: slowEndpoint(t),
+		APIKey: "sk-test", Model: "m",
+	})
+	if ok, reason := r.agentUsable("codex", usableAgent("codex.py")); !ok {
+		t.Fatalf("agentUsable = false (%q) — a probe deadline carries no information about the agent", reason)
+	}
+
+	resetEndpointProbeCache()
+	r = probeRouter(config.ModelConfig{
+		APIType: config.APITypeOpenAI, BaseURL: deadEndpoint(t),
+		APIKey: "sk-test", Model: "m",
+	})
+	if ok, reason := r.agentUsable("codex", usableAgent("codex.py")); ok {
+		t.Fatalf("a refused connect must still disqualify, got usable with reason %q", reason)
+	}
+}
