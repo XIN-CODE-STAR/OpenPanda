@@ -113,7 +113,7 @@ func TestProbeServerErrorUnreachable(t *testing.T) {
 }
 
 // TestProbeCredentialRejected: when the probe carries the literal credential
-// the run sends and the endpoint refuses it — 401/402/403/429 — the verdict
+// the run sends and the endpoint refuses it — 401/402/403 — the verdict
 // is rejected, not reachable: a relay with no quota would hang the run
 // exactly the same way.
 func TestProbeCredentialRejected(t *testing.T) {
@@ -145,6 +145,32 @@ func TestProbeCredentialRejected(t *testing.T) {
 	v = modelProbe(ProbeSpec{Endpoint: srv.URL + "/anon", APIType: config.APITypeOpenAI})
 	if !v.OK {
 		t.Fatalf("anonymous 403 = %+v, want reachable", v)
+	}
+}
+
+// TestProbeRateLimitedIsReachable pins the 429 carve-out. A rate limit is a
+// service that is alive and answering, and the rest of the tree already retries
+// 429 as a transient on the model call (entry/model.go, entry/fallback.go)
+// rather than reading it as a verdict on the key. This matters for account-pool
+// relays: asked to serve a name it cannot route, a relay answers 429 "no
+// account can take this" — which says nothing about the credential, and used to
+// disqualify an otherwise healthy agent from every task until the pool freed up.
+func TestProbeRateLimitedIsReachable(t *testing.T) {
+	resetEndpointProbeCache()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	t.Cleanup(srv.Close)
+
+	v := modelProbe(ProbeSpec{
+		Endpoint: srv.URL, APIType: config.APITypeOpenAI,
+		APIKey: "sk-rate-limited", KeyDefinitive: true,
+	})
+	if !v.OK || v.Rejected {
+		t.Fatalf("definitive-key 429 = %+v, want reachable: a rate limit is not a credential refusal", v)
+	}
+	if !strings.Contains(v.Detail, "429") {
+		t.Fatalf("429 = %+v, want the status kept in the detail", v)
 	}
 }
 

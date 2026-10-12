@@ -97,8 +97,8 @@ type ProbeVerdict struct {
 	// transport error text.
 	Detail string
 	// Rejected is true when the endpoint refused the definitive credential
-	// (401/402/403/429): the service is up but the run would fail on
-	// auth/quota — a different fix than a dead route.
+	// (401/402/403): the service is up but the run would fail on
+	// auth or quota — a different fix than a dead route.
 	Rejected bool
 }
 
@@ -127,12 +127,13 @@ var probeNow = time.Now
 // within the probe budget. Verdict rules:
 //   - transport error or HTTP ≥500 → unreachable: the model cannot serve
 //     right now (the "configured but cannot connect" case).
-//   - 401/402/403/429 with a definitive key → rejected: the run would send
+//   - 401/402/403 with a definitive key → rejected: the run would send
 //     the same credential and fail the same way (auth or quota).
 //   - any other HTTP response → reachable: the service answers API-shaped
 //     requests; without a definitive key a 4xx only proves the host, and a
 //     wrong model name earns a 4xx too — both are the adapter's business,
-//     not routing's.
+//     not routing's. 429 lands here as well, because a rate limit is a
+//     service that is alive and answering.
 //
 // Results are cached per probe key with asymmetric TTLs.
 func modelProbe(spec ProbeSpec) ProbeVerdict {
@@ -199,12 +200,19 @@ func probeModelOnce(spec ProbeSpec) ProbeVerdict {
 }
 
 // credentialRejected reports whether the status means "the credential or the
-// account behind it was refused": bad auth, no quota, or rate-limited — all
-// failures the run would hit identically.
+// account behind it was refused": bad auth or no quota — failures the run would
+// hit identically with the same key.
+//
+// 429 is deliberately absent. It reports "rate limited right now", a transient
+// the run may well ride out, not a verdict on the credential — and the rest of
+// the tree already reads it that way, retrying 429 alongside 5xx
+// (entry/model.go, entry/fallback.go). Counting it here let a busy relay
+// permanently disqualify an otherwise healthy agent: a relay that answers
+// "which of my accounts can serve this?" with 429 says nothing about the key.
 func credentialRejected(code int) bool {
 	switch code {
 	case http.StatusUnauthorized, http.StatusPaymentRequired,
-		http.StatusForbidden, http.StatusTooManyRequests:
+		http.StatusForbidden:
 		return true
 	}
 	return false
