@@ -115,6 +115,12 @@ func (m tuiModel) mainChatView(live string) string {
 	if h <= 0 {
 		h = 24
 	}
+	// Paint one row short of the screen. A frame of exactly Height rows leaves
+	// the cursor on the last line, and a terminal that scrolls there shifts every
+	// later repaint up by a row: Bubble Tea then moves up "lines rendered" from a
+	// position that has drifted, so the previous frame's tail is never erased and
+	// the composer piles up down the screen, one copy per repaint.
+	h = max(1, h-1)
 
 	inputView := m.inputView()
 	inputLines := strings.Split(inputView, "\n")
