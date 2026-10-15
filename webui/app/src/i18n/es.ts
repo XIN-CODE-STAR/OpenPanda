@@ -989,6 +989,7 @@ const es: Messages = {
   'models.fetch': 'Listar modelos',
   'models.fetchFail': 'Error al listar',
   'models.fetched': '{n} modelos disponibles — elige uno arriba.',
+  'models.pickFromList': 'Elige de la lista obtenida…',
   'models.keySaved': 'clave guardada',
   'models.keyReuseHint': 'se reutilizará la clave guardada',
   'models.keyReuseHelp': 'Ya hay una clave para este proveedor — déjalo vacío para reutilizarla.',

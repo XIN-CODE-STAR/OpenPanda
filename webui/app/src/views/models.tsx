@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { api, type ModelEntry, type ModelsResponse, type ProviderInfo } from '../api/client'
 import { useLocaleRerender } from '../hooks'
 import { t } from '../i18n'
+import { ModelPicker } from '../components/model-picker'
 import { useModalFocus } from '../components/modal-focus'
 
 /** The multi-model registry — web parity with the TUI's `/model` verb table:
@@ -395,25 +396,17 @@ function AddModelWizard(props: {
             <div class="field-group">
               <label>{t('settings.model')}</label>
               <div class="field-row">
-                <input
-                  class="input mono u-flex-1"
+                <ModelPicker
                   value={model}
-                  onInput={(e) => setModel((e.target as HTMLInputElement).value)}
+                  onValue={setModel}
+                  options={remoteModels ?? []}
                   placeholder={provider.default_model || 'model-id'}
-                  list="wizard-remote-models"
                   required={provider.id === 'custom'}
                 />
                 <button type="button" class="btn" disabled={busy !== ''} onClick={fetchRemote}>
                   {busy === 'fetch' ? '…' : t('models.fetch')}
                 </button>
               </div>
-              {remoteModels && (
-                <datalist id="wizard-remote-models">
-                  {remoteModels.map((id) => (
-                    <option key={id} value={id} />
-                  ))}
-                </datalist>
-              )}
               {remoteModels && (
                 <p class="hint">
                   {t('models.fetched', { n: remoteModels.length })}

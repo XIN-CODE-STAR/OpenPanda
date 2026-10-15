@@ -11,6 +11,7 @@ import { useLocaleRerender } from '../hooks'
 import { locale, localeNames, locales, setLocale, t, type Locale } from '../i18n'
 import { toast } from '../components/toast'
 import { TermsContent } from '../components/terms'
+import { ModelPicker } from '../components/model-picker'
 import { useModalFocus } from '../components/modal-focus'
 
 // First-run onboarding: `panda web` boots zero-config — the panel is fully
@@ -515,30 +516,21 @@ function ModelStep(props: { onSaved(): void }) {
       <div class="field-group">
         <label for="onboarding-model">{t('settings.model')}</label>
         <div class="field-row">
-          <input
+          <ModelPicker
             id="onboarding-model"
-            class="input mono u-flex-1"
-            type="text"
-            required={provider.id === 'custom'}
-            placeholder={provider.default_model || EXAMPLES[apiType].model}
             value={model}
-            list="onboarding-remote-models"
-            onInput={(e) => {
-              setModel((e.target as HTMLInputElement).value)
+            onValue={(v) => {
+              setModel(v)
               setTestResult(null)
             }}
+            options={remoteModels ?? []}
+            placeholder={provider.default_model || EXAMPLES[apiType].model}
+            required={provider.id === 'custom'}
           />
           <button type="button" class="btn" disabled={busy !== ''} onClick={fetchRemote}>
             {busy === 'fetch' ? '…' : t('models.fetch')}
           </button>
         </div>
-        {remoteModels && (
-          <datalist id="onboarding-remote-models">
-            {remoteModels.map((id) => (
-              <option key={id} value={id} />
-            ))}
-          </datalist>
-        )}
         {remoteModels && <p class="hint">{t('models.fetched', { n: remoteModels.length })}</p>}
       </div>
 

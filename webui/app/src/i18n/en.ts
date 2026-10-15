@@ -998,6 +998,7 @@ const en: Messages = {
   'models.fetch': 'Fetch models',
   'models.fetchFail': 'Fetch failed',
   'models.fetched': '{n} models available — pick one above.',
+  'models.pickFromList': 'Pick from the fetched list…',
   'models.keySaved': 'key saved',
   'models.keyReuseHint': 'saved key will be reused',
   'models.keyReuseHelp': 'A key for this provider is already on file — leave empty to reuse it.',

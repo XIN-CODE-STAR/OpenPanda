@@ -46,6 +46,10 @@ OpenPanda (**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **A
 
 ## [Unreleased]
 
+### Fixed
+
+- **Web console: the add-model model picker actually opens** — the field used `<input list="…">`, and a browser filters datalist suggestions by the value already in the input, so the prefilled catalogue default (e.g. `glm-4-plus`) left the caret showing only that one id — the dropdown read as dead. The field now carries its own picker: a caret inside the input opens every id the provider returned, a pick writes straight back into the field, and the model name is never echoed in a second control.
+
 ## [0.0.11] - 2026-10-15 — "Rendezvous"
 
 The stable v0.0.11 — codename **Rendezvous**, the orbital meeting. This cut folds the preview line — per-session AEAD inside the signed hello, Bluetooth-style pairing, signed discovery beacons and stable `k:<pub>` identities, hard node pins across multi-hop routes, the partial-mesh data plane, the inter-task message board, and git rollback for agent work — together with this cycle's additions: desktop nodes grow computer-use eyes and hands (screen capture and synthesized input as first-class actuators, on POSIX and stock Windows alike), task output becomes retrievable as packed artifacts from the CLI and the console, and display content travels under its own mesh-only trust rule end to end — through delegation, pushes, pulls, and a screen stage's output consumed as the next stage's input.
