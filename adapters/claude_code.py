@@ -122,7 +122,8 @@ def main():
                           req.cwd, req.timeout,
                           disable_settings=_injected(), v2=True)
     except ProviderFailure as e:
-        harness.emit(False, str(e), 1)
+        harness.emit(False, str(e), 1,
+                     session_id=getattr(e, "session_id", "") or None)
         return
     except Unsupported:
         # Middle tier: the CLI streams fine but lacks the v2 flags
@@ -134,7 +135,8 @@ def main():
                               model, req.cwd, req.timeout,
                               disable_settings=_injected(), v2=False)
         except ProviderFailure as e:
-            harness.emit(False, str(e), 1)
+            harness.emit(False, str(e), 1,
+                         session_id=getattr(e, "session_id", "") or None)
             return
         except Unsupported:
             try:
@@ -282,13 +284,24 @@ def _run_stream(base, req, model, cwd, timeout, disable_settings=False, v2=True)
     the result event."""
     cmd = _stream_argv(base, req, model, disable_settings, v2)
 
-    state = {"final": None, "saw_event": False}
+    state = {"final": None, "saw_event": False, "session_id": ""}
 
     def on_line(line):
         ev = harness.parse_json_line(line)
         if ev is None:
             return
         state["saw_event"] = True
+        # Every stream-json event carries the session id (the init envelope
+        # first, the result envelope last). Capturing it mid-stream is what
+        # lets a timeout or provider abort still report a resumable
+        # checkpoint instead of a dead end.
+        sid = ev.get("session_id")
+        if isinstance(sid, str) and sid and not state["session_id"]:
+            state["session_id"] = sid
+            # Announce the handle early: a run killed before its result
+            # envelope (watchdog, stall, host hard limit) still leaves a
+            # resumable checkpoint the Go side latched.
+            harness.emit_event("session", id=sid)
         et = ev.get("type")
         if et == "assistant":
             _emit_assistant_events(ev)
@@ -310,12 +323,20 @@ def _run_stream(base, req, model, cwd, timeout, disable_settings=False, v2=True)
                 # Fast failover: if provider returns 5xx or auth error on retries,
                 # abort quickly so PANDA dynamic injection or fallback chain can rescue the task.
                 if attempt >= 2 and code in (401, 403, 500, 502, 503, 504):
-                    raise ProviderFailure(f"api_retry error {code}: server_error")
+                    exc = ProviderFailure(f"api_retry error {code}: server_error")
+                    # The session minted so far is still resumable: report it
+                    # so the orchestrator's retry continues the conversation
+                    # rather than re-burning the exploration.
+                    exc.session_id = state["session_id"]
+                    raise exc
 
     returncode, err, timed_out = harness.run_stream(
         cmd, cwd=cwd, timeout=timeout, on_line=on_line)
     if timed_out:
-        raise subprocess.TimeoutExpired(cmd, timeout)
+        # A killed run that minted a session is a checkpoint, not a dead
+        # end: the retry resumes it (--resume <id>) and keeps the work.
+        return {"ok": False, "result": "claude timed out", "exit_code": 124,
+                "session_id": state["session_id"]}
 
     final = state["final"]
     if final is not None:

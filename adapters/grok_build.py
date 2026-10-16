@@ -55,12 +55,18 @@ def main():
     # must not be re-logged), the result row the bounded output.
     harness.emit_event("tool_use", id="grok", name="grok",
                        input={"argc": len(cmd) - 1})
+    # Announce the session name before the run: grok creates it lazily, and
+    # a run killed before its result envelope (stall, hard limit) still
+    # leaves a resumable checkpoint the Go side latched.
+    harness.emit_event("session", id=session)
     try:
         returncode, out, err = harness.run_plain(cmd, cwd=cwd, timeout=timeout)
     except subprocess.TimeoutExpired:
         harness.emit_event("tool_result", tool_use_id="grok", is_error=True,
                            content="grok timed out")
-        harness.emit(False, "grok timed out", 124)
+        # The named session exists grok-side even though this run died —
+        # reporting it lets the retry resume rather than cold-start.
+        harness.emit(False, "grok timed out", 124, session_id=session)
         return
     except FileNotFoundError:
         harness.emit_event("tool_result", tool_use_id="grok", is_error=True,
@@ -75,12 +81,12 @@ def main():
             "unknown option" in low or "unrecognized" in low
             or "unknown flag" in low or "invalid option" in low):
         cmd = [c for c in cmd if c not in ("-s", session)]
+        session = ""  # nameless run: nothing a later round could resume
         try:
             returncode, out, err = harness.run_plain(cmd, cwd=cwd, timeout=timeout)
         except subprocess.TimeoutExpired:
             harness.emit(False, "grok timed out", 124)
             return
-        session = ""  # nameless run: nothing a later round could resume
 
     result = out.strip() or err.strip()
     harness.emit_event("tool_result", tool_use_id="grok",

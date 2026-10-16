@@ -283,6 +283,10 @@ def _build_request(req, default_timeout):
         max_budget = float(req.get("max_budget_usd", 0) or 0)
     except (TypeError, ValueError):
         max_budget = 0.0
+    try:
+        complexity = float(req.get("complexity", 0) or 0)
+    except (TypeError, ValueError):
+        complexity = 0.0
     return Request(
         prompt, timeout, cwd, resume, tools_policy, cmd, max_turns, restricted,
         system_prompt=req.get("system_prompt") or "",
@@ -292,6 +296,7 @@ def _build_request(req, default_timeout):
         effort=req.get("effort") or "",
         session=bool(req.get("session")),
         task_id=req.get("task_id") or "",
+        complexity=complexity,
     )
 
 
@@ -303,7 +308,7 @@ class Request:
     def __init__(self, prompt, timeout, cwd, resume, tools_policy, cmd="",
                  max_turns=0, restricted=False, system_prompt="",
                  result_schema="", mcp_config="", max_budget_usd=0.0,
-                 effort="", session=False, task_id=""):
+                 effort="", session=False, task_id="", complexity=0.0):
         self.prompt = prompt
         self.timeout = timeout
         self.cwd = cwd
@@ -348,6 +353,10 @@ class Request:
         # injected as PANDA_TASK_ID env by the Go side — adapters that need
         # it in-band (e.g. a flag) read it here.
         self.task_id = task_id
+        # complexity is the entry classifier's 0–1 difficulty score for the
+        # task; adapters that pick among several served models (opencode)
+        # read it to prefer their free tier on simple tasks. 0 = unset.
+        self.complexity = complexity
 
     def __iter__(self):
         return iter((self.prompt, self.timeout, self.cwd))

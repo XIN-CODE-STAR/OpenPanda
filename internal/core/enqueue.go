@@ -447,6 +447,7 @@ func (c *Core) forwardScheduled(ctx context.Context, t Task) bool {
 	// that minted it, so it is offered only when the route leads back there.
 	if t.AgentSessionID != "" && t.AgentSessionNode == decision.Target {
 		p.ResumeSessionID = t.AgentSessionID
+		p.ResumeSessionAdapter = t.AgentSessionAdapter
 	}
 	// Same project carriage as the synchronous path: a queued task delegated to a
 	// peer must arrive with its project context or the peer cannot use it.

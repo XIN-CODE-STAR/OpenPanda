@@ -148,6 +148,24 @@ print(json.dumps({"type":"result", "is_error":False, "result":"resumed",
         self.assertEqual(payload["result"], "resumed")
         self.assertEqual(payload["session_id"], "sess-next")
 
+    def test_claude_timeout_reports_session_checkpoint(self):
+        """A watchdog-killed stream run reports the session id the init
+        envelope carried, so the orchestrator's retry resumes the same
+        conversation instead of cold-starting."""
+        payload, _, _ = run_adapter(
+            "claude_code.py", "claude", r'''
+import json, sys, time
+print(json.dumps({"type":"system","subtype":"init","session_id":"sess-t9"}))
+sys.stdout.flush()
+time.sleep(10)
+''',
+            extra_request={"timeout_s": 2},
+            timeout=8,
+        )
+        self.assertFalse(payload["ok"], payload)
+        self.assertEqual(payload["exit_code"], 124)
+        self.assertEqual(payload["session_id"], "sess-t9")
+
     def test_claude_minimal_policy_keeps_whitelist(self):
         payload, _, _ = run_adapter(
             "claude_code.py", "claude", r'''
@@ -230,16 +248,20 @@ print(json.dumps({"type":"item.completed","item":{"id":"i3","type":"agent_messag
         events = [json.loads(l) for l in lines if l.startswith("{")]
         events = [e for e in events if e.get("type") == "event"]
         kinds = [e["ev"] for e in events]
-        self.assertEqual(kinds, ["tool_use", "thinking", "tool_result", "text"])
-        self.assertEqual(events[0]["name"], "shell")
-        self.assertEqual(events[0]["input"], {"command": "ls -la"})
-        self.assertEqual(events[0]["id"], "i1")
-        self.assertEqual(events[1]["thinking"], "pondering")
-        self.assertEqual(events[2]["tool_use_id"], "i1")
-        self.assertEqual(events[2]["content"], "total 0")
-        self.assertFalse(events[2]["is_error"])
-        self.assertEqual(events[3]["text"], "codex answer")
-        self.assertEqual(events[3]["id"], "i3")
+        # "session" announces the minted conversation id the moment it is
+        # known — Go latches it so a killed run can resume — ahead of the
+        # transcript items.
+        self.assertEqual(kinds, ["session", "tool_use", "thinking", "tool_result", "text"])
+        self.assertEqual(events[0]["id"], "cs-1")
+        self.assertEqual(events[1]["name"], "shell")
+        self.assertEqual(events[1]["input"], {"command": "ls -la"})
+        self.assertEqual(events[1]["id"], "i1")
+        self.assertEqual(events[2]["thinking"], "pondering")
+        self.assertEqual(events[3]["tool_use_id"], "i1")
+        self.assertEqual(events[3]["content"], "total 0")
+        self.assertFalse(events[3]["is_error"])
+        self.assertEqual(events[4]["text"], "codex answer")
+        self.assertEqual(events[4]["id"], "i3")
 
     def test_codex_completion_only_tool_pair(self):
         """Older codex streams emit item.completed with no item.started:
@@ -348,6 +370,339 @@ print(json.dumps({"type":"message.updated","properties":{"info":{"tokens":{"inpu
         self.assertEqual(payload["tokens"], 12)
         self.assertEqual(payload["cost"], 0.02)
 
+    # The roster `opencode models` serves on this fake install — the probe the
+    # adapter runs before passing --model, because free tiers get renamed.
+    OC_MODELS = r'''
+import sys
+if sys.argv[1:2] == ["models"]:
+    print("opencode/deepseek-v4.1-flash-free")
+    print("opencode/foo-v4-flash-free")
+    print("opencode/ll-alpha-free")
+    sys.exit(0)
+'''
+
+    def test_opencode_model_roster_substitutes_stale_request(self):
+        """A requested model the install no longer serves is re-anchored to the
+        closest live one — the stale id used to make every run die in seconds
+        with a yargs resolution error, which then read as a task failure."""
+        payload, progress, _ = run_adapter(
+            "opencode.py", "opencode", OC_HELP_CURRENT + self.OC_MODELS + r'''
+import json, sys
+args = sys.argv[1:]
+assert "--model" in args and args[args.index("--model") + 1] == "opencode/foo-v4-flash-free", args
+print(json.dumps({"type":"text","sessionID":"ses_m1","part":{"id":"px","type":"text","text":"ok"}}))
+''',
+            env={"OPENPANDA_INJECTED_MODEL": "1", "OPENCODE_MODEL": "openai/foo-flash"},
+        )
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["result"], "ok")
+        # The swap is visible: the progress stream names both ids.
+        self.assertTrue(
+            any("openai/foo-flash is not available; using opencode/foo-v4-flash-free" in line
+                for line in progress),
+            progress,
+        )
+
+    def test_opencode_model_roster_fails_fast_when_nothing_matches(self):
+        """No served model matches the request: fail with the roster instead of
+        handing the CLI a model it will reject opaquely."""
+        payload, _, _ = run_adapter(
+            "opencode.py", "opencode", OC_HELP_CURRENT + self.OC_MODELS + r'''
+import sys
+raise SystemExit("the run must never start on an unresolvable model")
+''',
+            env={"OPENPANDA_INJECTED_MODEL": "1", "OPENCODE_MODEL": "openai/zzz-unicorn"},
+        )
+        self.assertFalse(payload["ok"], payload)
+        self.assertIn("available models", payload["result"])
+        self.assertIn("opencode/foo-v4-flash-free", payload["result"])
+
+    def test_opencode_model_roster_probe_failure_keeps_passthrough(self):
+        """A build without `opencode models` (probe fails) keeps the old
+        contract: the requested model passes through untouched."""
+        payload, _, _ = run_adapter(
+            "opencode.py", "opencode", OC_HELP_CURRENT + r'''
+import json, sys
+args = sys.argv[1:]
+assert args[:2] == ["run", "--print-logs=true"], args
+assert "--model" in args and args[args.index("--model") + 1] == "deepseek/deepseek-chat", args
+print(json.dumps({"type":"text","part":{"id":"px","type":"text","text":"ok"}}))
+''',
+            env={"OPENCODE_MODEL": "deepseek/deepseek-chat"},
+        )
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["result"], "ok")
+
+    # The metadata catalog `opencode api model.list` serves on a v2 install —
+    # the capability data behind the auto pick: context/output limits, tool
+    # support, modalities, reasoning variants and cost.
+    OC_API_MODELS = r'''
+import json, sys
+if sys.argv[1:3] == ["api", "model.list"]:
+    print(json.dumps({"data": [
+        {"id": "deepseek-v4.1-flash-free", "providerID": "opencode",
+         "capabilities": {"tools": True, "input": ["text"]},
+         "limit": {"context": 200000, "output": 32000},
+         "status": "active", "enabled": True,
+         "variants": [{"id": "low"}, {"id": "high"}]},
+        {"id": "foo-v4-flash-free", "providerID": "opencode",
+         "capabilities": {"tools": True, "input": ["text"]},
+         "limit": {"context": 200000, "output": 32000},
+         "status": "active", "enabled": True},
+        {"id": "ll-alpha-free", "providerID": "opencode",
+         "capabilities": {"tools": True, "input": ["text"]},
+         "limit": {"context": 262144, "output": 65536},
+         "status": "active", "enabled": True,
+         "variants": [{"id": "low"}, {"id": "high"}]},
+        {"id": "nemotron-3.5-super-vl-free", "providerID": "opencode",
+         "capabilities": {"tools": True, "input": ["text", "image"]},
+         "limit": {"context": 1048576, "output": 131072},
+         "status": "active", "enabled": True,
+         "variants": [{"id": "low"}, {"id": "medium"}, {"id": "high"}]},
+        {"id": "tooless-free", "providerID": "opencode",
+         "capabilities": {"tools": False, "input": ["text"]},
+         "limit": {"context": 1048576, "output": 131072},
+         "status": "active", "enabled": True},
+    ]}))
+    sys.exit(0)
+'''
+
+    # The pick roster: a 1M-context flagship, a mid flash, a marked alpha and
+    # a tool-less chat model the pick must never take for agent work.
+    OC_PICK_ROSTER = r'''
+import sys
+if sys.argv[1:2] == ["models"]:
+    print("opencode/deepseek-v4.1-flash-free")
+    print("opencode/foo-v4-flash-free")
+    print("opencode/ll-alpha-free")
+    print("opencode/nemotron-3.5-super-vl-free")
+    print("opencode/tooless-free")
+    sys.exit(0)
+'''
+
+    def test_opencode_auto_picks_most_capable_catalog_model(self):
+        """No env pin: every run re-reads the roster and picks by capability —
+        the 1M-context flagship with reasoning variants beats the flash tier
+        and the alpha, and the tool-less model never qualifies."""
+        payload, progress, _ = run_adapter(
+            "opencode.py", "opencode",
+            OC_HELP_CURRENT + self.OC_PICK_ROSTER + self.OC_API_MODELS + r'''
+import json, sys
+args = sys.argv[1:]
+assert "--model" in args, args
+assert args[args.index("--model") + 1] == "opencode/nemotron-3.5-super-vl-free", args
+print(json.dumps({"type":"text","sessionID":"ses_p1","part":{"id":"px","type":"text","text":"ok"}}))
+''',
+        )
+        self.assertTrue(payload["ok"], payload)
+        self.assertTrue(
+            any("auto-selected model opencode/nemotron-3.5-super-vl-free" in line
+                for line in progress),
+            progress,
+        )
+
+    def test_opencode_auto_pick_slug_heuristic_without_catalog(self):
+        """A build whose `api` subcommand fails still picks by slug heuristics:
+        the coding-family model outranks the small/alpha entries."""
+        payload, _, _ = run_adapter(
+            "opencode.py", "opencode", OC_HELP_CURRENT + r'''
+import sys
+if sys.argv[1:2] == ["models"]:
+    print("opencode/mimo-v2.6-flash-free")
+    print("opencode/ll-alpha-free")
+    print("opencode/qwen3-coder-free")
+    sys.exit(0)
+if sys.argv[1:3] == ["api", "model.list"]:
+    sys.stderr.write("Operation not found: model.list\n")
+    sys.exit(1)
+''' + r'''
+import json, sys
+args = sys.argv[1:]
+assert "--model" in args, args
+assert args[args.index("--model") + 1] == "opencode/qwen3-coder-free", args
+print(json.dumps({"type":"text","sessionID":"ses_p2","part":{"id":"px","type":"text","text":"ok"}}))
+''',
+        )
+        self.assertTrue(payload["ok"], payload)
+
+    def test_opencode_auto_pick_effort_maps_to_variant(self):
+        """A requested reasoning effort rides the model's declared variant
+        (provider/model#variant); an undeclared level leaves the bare id."""
+        payload, _, _ = run_adapter(
+            "opencode.py", "opencode",
+            OC_HELP_CURRENT + self.OC_PICK_ROSTER + self.OC_API_MODELS + r'''
+import json, sys
+args = sys.argv[1:]
+assert args[args.index("--model") + 1] == "opencode/nemotron-3.5-super-vl-free#high", args
+print(json.dumps({"type":"text","sessionID":"ses_p3","part":{"id":"px","type":"text","text":"ok"}}))
+''',
+            extra_request={"effort": "high"},
+        )
+        self.assertTrue(payload["ok"], payload)
+        payload, _, _ = run_adapter(
+            "opencode.py", "opencode",
+            OC_HELP_CURRENT + self.OC_PICK_ROSTER + self.OC_API_MODELS + r'''
+import json, sys
+args = sys.argv[1:]
+assert args[args.index("--model") + 1] == "opencode/nemotron-3.5-super-vl-free", args
+print(json.dumps({"type":"text","sessionID":"ses_p4","part":{"id":"px","type":"text","text":"ok"}}))
+''',
+            extra_request={"effort": "ultra"},
+        )
+        self.assertTrue(payload["ok"], payload)
+
+    # A paid model that outscores every free entry on raw capability — the
+    # default pick, which a simple task must still skip for a free model.
+    OC_PAID_ROSTER = r'''
+import sys
+if sys.argv[1:2] == ["models"]:
+    print("opencode/nemotron-3.5-super-vl-free")
+    print("anthropic/claude-4.6-opus")
+    sys.exit(0)
+'''
+
+    OC_PAID_API = r'''
+import json, sys
+if sys.argv[1:3] == ["api", "model.list"]:
+    print(json.dumps({"data": [
+        {"id": "nemotron-3.5-super-vl-free", "providerID": "opencode",
+         "capabilities": {"tools": True, "input": ["text", "image"]},
+         "limit": {"context": 1048576, "output": 131072},
+         "status": "active", "enabled": True,
+         "cost": [{"input": 0, "output": 0}],
+         "variants": [{"id": "low"}, {"id": "medium"}, {"id": "high"}]},
+        {"id": "claude-4.6-opus", "providerID": "anthropic",
+         "capabilities": {"tools": True, "input": ["text", "image"]},
+         "limit": {"context": 1000000, "output": 500000},
+         "status": "active", "enabled": True,
+         "cost": [{"input": 15, "output": 75}],
+         "variants": [{"id": "low"}, {"id": "high"}]},
+    ]}))
+    sys.exit(0)
+'''
+
+    def test_opencode_simple_task_prefers_free_models(self):
+        """The default pick chases capability — the paid opus wins. A task the
+        entry classifier scored as simple (complexity < 0.4) demotes every paid
+        entry to last resort: the free flagship serves instead."""
+        # Capability-first: the paid model's score carries the run.
+        payload, _, _ = run_adapter(
+            "opencode.py", "opencode",
+            OC_HELP_CURRENT + self.OC_PAID_ROSTER + self.OC_PAID_API + r'''
+import json, sys
+args = sys.argv[1:]
+assert args[args.index("--model") + 1] == "anthropic/claude-4.6-opus", args
+print(json.dumps({"type":"text","sessionID":"ses_f1","part":{"id":"px","type":"text","text":"ok"}}))
+''',
+            extra_request={"complexity": 0.9},
+        )
+        self.assertTrue(payload["ok"], payload)
+        # Simple task: the same roster resolves to the free entry, and the
+        # progress note says why.
+        payload, progress, _ = run_adapter(
+            "opencode.py", "opencode",
+            OC_HELP_CURRENT + self.OC_PAID_ROSTER + self.OC_PAID_API + r'''
+import json, sys
+args = sys.argv[1:]
+assert args[args.index("--model") + 1] == "opencode/nemotron-3.5-super-vl-free", args
+print(json.dumps({"type":"text","sessionID":"ses_f2","part":{"id":"px","type":"text","text":"ok"}}))
+''',
+            extra_request={"complexity": 0.1},
+        )
+        self.assertTrue(payload["ok"], payload)
+        self.assertTrue(
+            any("simple task prefers free" in line for line in progress),
+            progress,
+        )
+        # A light effort request means the same thing — and rides the picked
+        # model's matching variant.
+        payload, _, _ = run_adapter(
+            "opencode.py", "opencode",
+            OC_HELP_CURRENT + self.OC_PAID_ROSTER + self.OC_PAID_API + r'''
+import json, sys
+args = sys.argv[1:]
+assert args[args.index("--model") + 1] == "opencode/nemotron-3.5-super-vl-free#low", args
+print(json.dumps({"type":"text","sessionID":"ses_f3","part":{"id":"px","type":"text","text":"ok"}}))
+''',
+            extra_request={"effort": "low"},
+        )
+        self.assertTrue(payload["ok"], payload)
+
+    def test_opencode_simple_task_free_preference_without_catalog(self):
+        """Without catalog coverage the provider id is the cost tell: only
+        opencode's own provider counts as the free tier."""
+        payload, _, _ = run_adapter(
+            "opencode.py", "opencode", OC_HELP_CURRENT + r'''
+import sys
+if sys.argv[1:2] == ["models"]:
+    print("opencode/ll-alpha-free")
+    print("anthropic/claude-4.6-opus")
+    sys.exit(0)
+if sys.argv[1:3] == ["api", "model.list"]:
+    sys.exit(1)
+''' + r'''
+import json, sys
+args = sys.argv[1:]
+assert args[args.index("--model") + 1] == "opencode/ll-alpha-free", args
+print(json.dumps({"type":"text","sessionID":"ses_f4","part":{"id":"px","type":"text","text":"ok"}}))
+''',
+            extra_request={"complexity": 0.2},
+        )
+        self.assertTrue(payload["ok"], payload)
+
+    def test_opencode_reprobes_roster_and_retries_on_rejected_model(self):
+        """Every dispatch identifies the served models first — and when the
+        roster rotates mid-flight (the picked model retired between probe and
+        run), the adapter drops its caches, re-identifies and retries on the
+        fresh pick instead of reporting the task as failed."""
+        # Probe 1 serves two models (deepseek wins the pick) and the run
+        # rejects it; probe 2 serves a rotated set whose new flagship proves
+        # the caches were actually dropped — the retry runs on it.
+        payload, progress, _ = run_adapter(
+            "opencode.py", "opencode", OC_HELP_CURRENT + r'''
+import json, pathlib, sys
+# Cross-call state lives in a file next to this fake CLI — each invocation
+# is a fresh process, so env vars cannot carry the probe count.
+probes = pathlib.Path(__file__).with_name("probes")
+n = int(probes.read_text()) if probes.exists() else 0
+probes.write_text(str(n + 1))
+if sys.argv[1:2] == ["models"]:
+    if n == 0:
+        print("opencode/deepseek-v4.1-flash-free")
+        print("opencode/mimo-v2.6-flash-free")
+    else:
+        print("opencode/mimo-v2.6-flash-free")
+        print("opencode/nemotron-3.5-super-vl-free")
+    sys.exit(0)
+if sys.argv[1:3] == ["api", "model.list"]:
+    sys.exit(1)
+if sys.argv[1:2] == ["run"]:
+    args = sys.argv[1:]
+    model = args[args.index("--model") + 1] if "--model" in args else ""
+    if model == "opencode/deepseek-v4.1-flash-free":
+        # v2 answers a stale id with a provider.no-route error event.
+        print(json.dumps({"type": "error", "error": {
+            "type": "provider.no-route",
+            "message": "Model unavailable: " + model}}))
+        sys.exit(0)
+    print(json.dumps({"type": "text", "sessionID": "ses_r1",
+                      "part": {"id": "px", "type": "text",
+                               "text": "ok on " + model}}))
+''',
+        )
+        self.assertTrue(payload["ok"], payload)
+        # The retry landed on the flagship only the re-probe could see.
+        self.assertEqual(payload["result"],
+                         "ok on opencode/nemotron-3.5-super-vl-free")
+        self.assertTrue(
+            any("auto-selected model opencode/deepseek-v4.1-flash-free" in l
+                for l in progress), progress)
+        self.assertTrue(
+            any("re-probed roster, retrying on opencode/nemotron-3.5-super-vl-free" in l
+                for l in progress), progress)
+        self.assertTrue(
+            any("identified served models:" in l for l in progress), progress)
+
     def test_opencode_current_stream_shape_contract(self):
         """The shipped 1.18.x CLI puts the payload on the event, not under
         "properties".
@@ -377,6 +732,126 @@ print(json.dumps({"type":"text","timestamp":1789547927591,"sessionID":"ses_real"
             any("bash" in line for line in progress),
             "a completed tool call must surface as a progress note: %r" % (progress,),
         )
+
+    def test_opencode_session_id_requires_ses_prefix(self):
+        """The event-envelope `id` (a UUID) must never mint the session handle.
+
+        A poisoned handle travels back as the task's resume checkpoint: every
+        follow-up `--session <uuid>` hits opencode's "Expected a string
+        starting with ses" 400, cold-starts, and re-burns the whole run —
+        the exact loop this regression prevents. Only ses_-prefixed ids are
+        real handles.
+        """
+        payload, _, _ = run_adapter(
+            "opencode.py", "opencode", OC_HELP_CURRENT + r'''
+import json
+# Envelope-level `id` is the EVENT's own uuid, not a session.
+print(json.dumps({"type":"session.updated","id":"bc47c3fd-29e9-4cbf-91b0-e4c84918f54b"}))
+print(json.dumps({"type":"text","sessionID":"ses_real1","part":{"id":"px","type":"text","text":"ok"}}))
+''',
+        )
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["session_id"], "ses_real1")
+
+        # UUIDs everywhere and no ses_ id: the handle stays empty — a cold
+        # start next round beats resuming a handle that can only fail.
+        payload, _, _ = run_adapter(
+            "opencode.py", "opencode", OC_HELP_CURRENT + r'''
+import json
+print(json.dumps({"type":"session.updated","id":"bc47c3fd-29e9-4cbf-91b0-e4c84918f54b"}))
+print(json.dumps({"type":"text","part":{"id":"px","type":"text","text":"ok"}}))
+''',
+        )
+        self.assertTrue(payload["ok"], payload)
+        # Empty handles are omitted from the envelope entirely.
+        self.assertEqual(payload.get("session_id", ""), "")
+
+    def test_opencode_timeout_reports_session_checkpoint(self):
+        """A watchdog-killed run must still report the session it minted.
+
+        The session is the checkpoint the orchestrator's retry resumes —
+        dropping it makes every timeout a cold start, which is the loop that
+        kept long tasks from ever finishing."""
+        payload, _, _ = run_adapter(
+            "opencode.py", "opencode", OC_HELP_CURRENT + r'''
+import json, sys, time
+if sys.argv[1:2] == ["models"]:
+    sys.exit(0)
+if sys.argv[1:3] == ["api", "model.list"]:
+    sys.exit(1)
+if sys.argv[1:2] == ["run"]:
+    print(json.dumps({"type":"text","sessionID":"ses_t1",
+                      "part":{"id":"px","type":"text","text":"still working"}}))
+    sys.stdout.flush()
+    time.sleep(10)
+''',
+            extra_request={"timeout_s": 2},
+            timeout=8,
+        )
+        self.assertFalse(payload["ok"], payload)
+        self.assertEqual(payload["exit_code"], 124)
+        self.assertEqual(payload["session_id"], "ses_t1")
+
+    def test_opencode_announces_session_event_early(self):
+        """The adapter announces the minted session as an event, not only in
+        the result envelope: a run the harness kills mid-stream (stall,
+        tool-call fuse, host hard limit) produces no envelope, so the event
+        is the only channel a checkpoint can ride."""
+        payload, lines, _ = run_adapter(
+            "opencode.py", "opencode", OC_HELP_CURRENT + r'''
+import json, sys
+if sys.argv[1:2] == ["models"]:
+    sys.exit(0)
+if sys.argv[1:3] == ["api", "model.list"]:
+    sys.exit(1)
+print(json.dumps({"type":"text","sessionID":"ses_ann",
+                  "part":{"id":"px","type":"text","text":"ok"}}))
+''',
+        )
+        self.assertTrue(payload["ok"], payload)
+        events = [json.loads(l) for l in lines if l.startswith("{")]
+        sessions = [e for e in events
+                    if e.get("type") == "event" and e.get("ev") == "session"]
+        self.assertTrue(sessions, f"no session event in {lines}")
+        self.assertEqual(sessions[0]["id"], "ses_ann")
+        self.assertEqual(payload["session_id"], "ses_ann")
+
+    def test_claude_announces_session_event_early(self):
+        payload, lines, _ = run_adapter(
+            "claude_code.py", "claude", r'''
+import json, sys
+print(json.dumps({"type":"system","subtype":"init","session_id":"sess-ann"}))
+print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]},"session_id":"sess-ann"}))
+print(json.dumps({"type":"result","is_error":False,"result":"hi","session_id":"sess-ann"}))
+''',
+        )
+        self.assertTrue(payload["ok"], payload)
+        events = [json.loads(l) for l in lines if l.startswith("{")]
+        sessions = [e for e in events
+                    if e.get("type") == "event" and e.get("ev") == "session"]
+        self.assertTrue(sessions, f"no session event in {lines}")
+        self.assertEqual(sessions[0]["id"], "sess-ann")
+
+    def test_opencode_provider_failure_reports_session_checkpoint(self):
+        """A mid-run provider error rides the result with the minted session —
+        the orchestrator's retry can resume the conversation instead of
+        cold-starting."""
+        payload, _, _ = run_adapter(
+            "opencode.py", "opencode", OC_HELP_CURRENT + r'''
+import json, sys
+if sys.argv[1:2] == ["models"]:
+    sys.exit(0)
+if sys.argv[1:3] == ["api", "model.list"]:
+    sys.exit(1)
+if sys.argv[1:2] == ["run"]:
+    print(json.dumps({"type":"text","sessionID":"ses_p9",
+                      "part":{"id":"px","type":"text","text":"work"}}))
+    print(json.dumps({"type":"error","error":{"type":"api",
+                      "message":"rate limit exceeded"}}))
+''',
+        )
+        self.assertFalse(payload["ok"], payload)
+        self.assertEqual(payload["session_id"], "ses_p9")
 
     def test_opencode_textless_stream_fails_instead_of_reporting_success(self):
         """Events with no assistant text must be a failure, not a green result.

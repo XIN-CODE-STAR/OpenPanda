@@ -5,6 +5,8 @@ package core
 import (
 	"context"
 	"testing"
+
+	"github.com/Xustalis/OpenPanda/internal/config"
 )
 
 // §6.1 token budget: the persisted quota is the mesh-wide remainder — 0 means
@@ -73,5 +75,56 @@ func TestTokenBudgetWire(t *testing.T) {
 	}
 	if _, err := c.tokenBudgetWire(ctx, tk.TaskID, 500); err == nil {
 		t.Fatal("exhausted budget allowed to forward")
+	}
+}
+
+// TestCreateTaskStampsTokenBudget: a locally submitted top-level task must
+// not stay unbounded — §6.1's safety floor stamps the configured default at
+// creation, and an explicit disable leaves the row untouched. Children are
+// skipped because plan.go assigns them the parent's remainder.
+func TestCreateTaskStampsTokenBudget(t *testing.T) {
+	ctx := context.Background()
+	c := &Core{store: newTestStore(t), nodeID: "stamp-node", logger: testLogger()}
+	c.SetTimeouts(config.TimeoutsConfig{})
+
+	tk, _, _, err := c.createTask(ctx, TaskInput{Title: "bounded", Intent: "x"})
+	if err != nil {
+		t.Fatalf("createTask: %v", err)
+	}
+	row, err := c.store.Get(ctx, tk.TaskID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if row.TokenBudget != config.DefaultTaskTokenBudget {
+		t.Fatalf("token_budget = %d, want default %d", row.TokenBudget, config.DefaultTaskTokenBudget)
+	}
+
+	// Explicitly disabled (task_token_budget: -1): new rows stay unbounded.
+	c.SetTimeouts(config.TimeoutsConfig{TaskTokenBudget: -1})
+	tk2, _, _, err := c.createTask(ctx, TaskInput{Title: "unbounded", Intent: "x"})
+	if err != nil {
+		t.Fatalf("createTask disabled: %v", err)
+	}
+	row2, err := c.store.Get(ctx, tk2.TaskID)
+	if err != nil {
+		t.Fatalf("get2: %v", err)
+	}
+	if row2.TokenBudget != 0 {
+		t.Fatalf("disabled token_budget = %d, want 0 (unbounded)", row2.TokenBudget)
+	}
+
+	// Re-enable: a child task is NOT stamped — it inherits the parent's
+	// remainder via plan.go instead.
+	c.SetTimeouts(config.TimeoutsConfig{})
+	tk3, _, _, err := c.createTask(ctx, TaskInput{Title: "child", Intent: "x", ParentID: tk.TaskID})
+	if err != nil {
+		t.Fatalf("createTask child: %v", err)
+	}
+	row3, err := c.store.Get(ctx, tk3.TaskID)
+	if err != nil {
+		t.Fatalf("get3: %v", err)
+	}
+	if row3.TokenBudget != 0 {
+		t.Fatalf("child token_budget = %d, want 0 (inherits parent)", row3.TokenBudget)
 	}
 }

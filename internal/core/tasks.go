@@ -224,7 +224,7 @@ func (s *TaskStore) scanTask(row rowScanner) (Task, error) {
 	var approvalDisposition, operationDecision sql.NullString
 	var complexity sql.NullFloat64
 	var sessionID, resourceKeysJSON, workDir, execWorkDir sql.NullString
-	var agentSession, agentSessionNode sql.NullString
+	var agentSession, agentSessionNode, agentSessionAdapter sql.NullString
 	var scheduled int
 	var remote int
 	var screenOut int
@@ -237,7 +237,7 @@ func (s *TaskStore) scanTask(row rowScanner) (Task, error) {
 		&t.Priority, &t.Seq, &sessionID, &resourceKeysJSON, &workDir, &execWorkDir, &scheduled,
 		&planID, &stageID, &needsJSON, &inputsJSON, &outputArt,
 		&t.Transport, &t.DeadlineUnix, &t.DelegationBudget, &t.TokenBudget,
-		&agentSession, &agentSessionNode, &t.AuthSig, &t.AuthPub, &t.AuthTs,
+		&agentSession, &agentSessionNode, &agentSessionAdapter, &t.AuthSig, &t.AuthPub, &t.AuthTs,
 		&remote, &screenOut); err != nil {
 		return Task{}, err
 	}
@@ -274,6 +274,7 @@ func (s *TaskStore) scanTask(row rowScanner) (Task, error) {
 	t.OutputArtifact = outputArt.String
 	t.AgentSessionID = agentSession.String
 	t.AgentSessionNode = agentSessionNode.String
+	t.AgentSessionAdapter = agentSessionAdapter.String
 	t.Remote = remote != 0
 	t.ScreenOutput = screenOut != 0
 	return t, nil
@@ -709,6 +710,47 @@ func (s *TaskStore) RetryCount(ctx context.Context, taskID string) (int, error) 
 	return n, nil
 }
 
+// HardRetries counts the EvRetry events that are NOT resumable checkpoints —
+// the population the persisted failure budget (S2-6) actually bounds. A
+// checkpoint retry resumes a timed-out session rather than re-attempting a
+// failure, so it must not draw down the allowance meant for "this keeps
+// failing": counting it here would let five checkpoint slices exhaust a
+// budget the hard failures beneath them never used.
+func (s *TaskStore) HardRetries(ctx context.Context, taskID string) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM task_events
+		 WHERE task_id=? AND type=?
+		   AND COALESCE(json_extract(data_json, '$.checkpoint'), 0)=0`,
+		taskID, EvRetry).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("hard retry count: %w", err)
+	}
+	return n, nil
+}
+
+// CheckpointRetries counts resumable-checkpoint retries — EvRetry events
+// flagged checkpoint — recorded since the task's most recent review park.
+// A checkpoint is a run that hit its wall-clock bound with a live session:
+// interrupted progress, not a failure, so it draws a budget separate from
+// RetryCount's hard-failure one. Counting only post-review events is the
+// semantics a human re-queue implies: "keep going" grants a fresh set of
+// resumed rounds, while S2-6's all-time hard-failure count stays untouched.
+func (s *TaskStore) CheckpointRetries(ctx context.Context, taskID string) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM task_events
+		 WHERE task_id=? AND type=?
+		   AND COALESCE(json_extract(data_json, '$.checkpoint'), 0)=1
+		   AND id > COALESCE((
+		     SELECT MAX(id) FROM task_events WHERE task_id=? AND type=?), 0)`,
+		taskID, EvRetry, taskID, EvReview).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("checkpoint retry count: %w", err)
+	}
+	return n, nil
+}
+
 // QueuedDelegatedRemotely lists this node's queued tasks whose most recent
 // dispatch targeted a DIFFERENT node: delegations handed to a peer that came
 // back to queued (a restart's Recover, a decline) with nobody left to drive
@@ -957,10 +999,17 @@ func (s *TaskStore) Fail(ctx context.Context, taskID, owner, reason string) erro
 // distinguish from a completed one. The state+owner guard keeps the same
 // exactly-once semantics as the separate calls; on conflict nothing is written.
 // Returns the new attempt id.
-func (s *TaskStore) RequeueForRetry(ctx context.Context, taskID, owner string) (string, error) {
+func (s *TaskStore) RequeueForRetry(ctx context.Context, taskID, owner string, checkpoint bool) (string, error) {
 	aid, err := util.UUIDv7()
 	if err != nil {
 		return "", fmt.Errorf("uuid: %w", err)
+	}
+	// A checkpoint retry resumes a session-minted run that hit its
+	// wall-clock bound — progress interrupted, not a failure — so the audit
+	// event is flagged for CheckpointRetries to count on its own budget.
+	var retryData map[string]any
+	if checkpoint {
+		retryData = map[string]any{"checkpoint": true}
 	}
 	if err := s.withTx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx, `
@@ -973,7 +1022,7 @@ func (s *TaskStore) RequeueForRetry(ctx context.Context, taskID, owner string) (
 		if n, _ := res.RowsAffected(); n == 0 {
 			return fmt.Errorf("%w: task %s owner=%s not in failed state", ErrConflict, taskID, owner)
 		}
-		if err := s.recordEventTx(ctx, tx, taskID, EvRetry, nil); err != nil {
+		if err := s.recordEventTx(ctx, tx, taskID, EvRetry, retryData); err != nil {
 			return err
 		}
 		return s.recordEventTx(ctx, tx, taskID, EvDelegate, map[string]any{"target": owner})
@@ -1664,17 +1713,18 @@ func (s *TaskStore) SetSessionID(ctx context.Context, taskID, sessionID string) 
 // resumes its agent session while a finished one never drags a dead handle
 // into a re-run.
 func (s *TaskStore) SetAgentSessionID(ctx context.Context, taskID, sessionID string) error {
-	return s.SetAgentSession(ctx, taskID, sessionID, "")
+	return s.SetAgentSession(ctx, taskID, sessionID, "", "")
 }
 
-// SetAgentSession writes the handle together with the node that minted it.
-// The executor passes its own id; a delegator learning a remote session from
-// a task_result passes the executor's — which is what lets a later
-// re-dispatch offer ResumeSessionID only to the node it belongs to.
-func (s *TaskStore) SetAgentSession(ctx context.Context, taskID, sessionID, node string) error {
+// SetAgentSession writes the handle together with the node and adapter that
+// minted it. The executor passes its own id and the adapter file that ran;
+// a delegator learning a remote session from a task_result passes through
+// the reported pair — which is what lets a later re-dispatch offer
+// ResumeSessionID only to a run that can actually consume it.
+func (s *TaskStore) SetAgentSession(ctx context.Context, taskID, sessionID, node, adapter string) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE tasks SET agent_session_id=?, agent_session_node=?, updated_at=? WHERE task_id=?`,
-		sessionID, node, s.now(), taskID)
+		`UPDATE tasks SET agent_session_id=?, agent_session_node=?, agent_session_adapter=?, updated_at=? WHERE task_id=?`,
+		sessionID, node, adapter, s.now(), taskID)
 	if err != nil {
 		return fmt.Errorf("set agent session: %w", err)
 	}
@@ -1921,6 +1971,99 @@ func (s *TaskStore) Recover(ctx context.Context) (int, error) {
 	return failed + requeued, nil
 }
 
+// RequeueStaleSubmitted is Recover's submitted branch narrowed to rows that
+// sat untouched past cutoff — the mid-life backstop for the startup pass. A
+// submitted row still moves while its submitter lives (create → route →
+// dispatch all write it); one whose process died between create and dispatch
+// stays visible to nobody until the next restart (observed: a panda ask
+// killed mid-route left a row parked for hours — scheduled=0, no plan, no
+// route event). Requeueing stamps scheduled=1 so ListReady picks the work up
+// exactly like a post-restart recovery, and the cutoff keeps a healthy
+// submit — whose routing prep is seconds, not minutes — out of the batch.
+// remote=0 is deliberate: an inbound delegate that died mid-admission must
+// not be slipped past the trust-zone review gate by a requeue — it is
+// cancelled instead (CancelStaleRemoteSubmits) and the delegator re-routes
+// on its own timeout.
+func (s *TaskStore) RequeueStaleSubmitted(ctx context.Context, cutoff int64) (int, error) {
+	var n int
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		n, err = s.recoverBatchTx(ctx, tx, []string{StateSubmitted}, StateQueued, "requeued",
+			`AND remote = 0 AND (plan_id IS NULL OR plan_id = '') AND updated_at < ?
+				AND NOT EXISTS (SELECT 1 FROM task_outbox o WHERE o.task_id = tasks.task_id)`, cutoff)
+		return err
+	})
+	return n, err
+}
+
+// CancelStaleRemoteSubmits terminalizes the remote half of the submitted
+// stranding class: an inbound delegate whose handler died between row
+// creation and its admission outcome (dispatch, forward, decline, or the
+// trust-zone review park) can never legitimately resume here — the delegator
+// is already timing the wait on its own copy and will re-route when it
+// expires. Requeueing instead would run work the admission gate never
+// admitted, so the verdict is cancelled: honest, terminal, and visible in
+// the audit chain.
+func (s *TaskStore) CancelStaleRemoteSubmits(ctx context.Context, cutoff int64) (int, error) {
+	var n int
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		n, err = s.recoverBatchTx(ctx, tx, []string{StateSubmitted}, StateCancelled, "cancelled",
+			`AND remote = 1 AND (plan_id IS NULL OR plan_id = '') AND updated_at < ?
+				AND NOT EXISTS (SELECT 1 FROM task_outbox o WHERE o.task_id = tasks.task_id)`, cutoff)
+		return err
+	})
+	return n, err
+}
+
+// RequeueStaleClaims requeues dispatched rows this node claimed for the
+// local queue scheduler and never accepted — the claim-orphan class. The
+// claim→run window is one goroutine (ClaimLocal → runScheduled → Accept),
+// so a row still dispatched, self-owned, lease-free and untouched past the
+// cutoff is a claim whose process died before the run began: ExpireTasks
+// never sees it (lease_expires_at IS NULL), ListReady never sees it (state
+// moved off queued), and Recover only runs at restart. Same guard set as
+// the submitted requeue plus the outbox custody exclusion — a parked
+// forward's delivery is owed by the flush, not the scheduler.
+func (s *TaskStore) RequeueStaleClaims(ctx context.Context, owner string, cutoff int64) (int, error) {
+	var n int
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		n, err = s.recoverBatchTx(ctx, tx, []string{StateDispatched}, StateQueued, "requeued",
+			`AND owner_node = ? AND lease_expires_at IS NULL
+				AND COALESCE(deadline_unix,0) = 0 AND updated_at < ?
+				AND NOT EXISTS (SELECT 1 FROM task_outbox o WHERE o.task_id = tasks.task_id)`,
+			owner, cutoff)
+		return err
+	})
+	return n, err
+}
+
+// FailStaleLeaseless fails running rows owned by this node that carry no
+// lease and no deadline — Recover's "interrupted" verdict applied mid-life.
+// renewLease stamps a lease the moment a run starts and keeps stamping it
+// (each stamp bumps updated_at), so a self-owned running row with a NULL
+// lease untouched this long is an execution whose supervisor died before
+// the first renewal — and the lease-expiry path that normally reaps runs
+// requires lease_expires_at > 0, so nothing else ever engages.
+// waiting_context stays out: a context pull can legitimately outlast the
+// window while the delegator pushes a large snapshot, and the wait's bound
+// is the delegation's own lease/outbox machinery, not this sweep. Lease-
+// exempt DTN runs carry deadline_unix and are excluded; remote-executed
+// copies are owned by their executor and never match owner.
+func (s *TaskStore) FailStaleLeaseless(ctx context.Context, owner string, cutoff int64) (int, error) {
+	var n int
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		n, err = s.recoverBatchTx(ctx, tx, []string{StateRunning}, StateFailed, "interrupted",
+			`AND owner_node = ? AND lease_expires_at IS NULL
+				AND COALESCE(deadline_unix,0) = 0 AND updated_at < ?`,
+			owner, cutoff)
+		return err
+	})
+	return n, err
+}
+
 // recoverBatchTx moves every task in one of from's states to to, clearing the
 // lease and appending an EvRecover event per task so the audit chain stays
 // complete. It leaves result_json untouched. extraWhere carries the batch's
@@ -1931,13 +2074,14 @@ func (s *TaskStore) Recover(ctx context.Context) (int, error) {
 // in a queue no scheduler ever reads — the stranded "went away but nobody
 // did it" class. The failed batch keeps scheduled untouched (a dead row has
 // no claim to a queue slot until a human or a retry re-arms it).
-func (s *TaskStore) recoverBatchTx(ctx context.Context, tx *sql.Tx, from []string, to, disposition, extraWhere string) (int, error) {
+func (s *TaskStore) recoverBatchTx(ctx context.Context, tx *sql.Tx, from []string, to, disposition, extraWhere string, extraArgs ...any) (int, error) {
 	ph := make([]string, len(from))
 	args := make([]any, 0, len(from))
 	for i, st := range from {
 		ph[i] = "?"
 		args = append(args, st)
 	}
+	args = append(args, extraArgs...)
 	query := `SELECT task_id, state FROM tasks WHERE state IN (` + strings.Join(ph, ",") + `)`
 	if extraWhere != "" {
 		query += " " + extraWhere
@@ -2825,7 +2969,7 @@ const taskColumns = `task_id, parent_id, project, title, state, owner_node, atte
 	priority, seq, session_id, resource_keys_json, work_dir, exec_work_dir, scheduled,
 	plan_id, stage_id, needs_json, input_artifacts_json, output_artifact,
 	transport, deadline_unix, delegation_budget, token_budget, agent_session_id, agent_session_node,
-	auth_sig, auth_pub, auth_ts, remote, screen_output`
+	agent_session_adapter, auth_sig, auth_pub, auth_ts, remote, screen_output`
 
 func (s *TaskStore) scanTasks(rows *sql.Rows) ([]Task, error) {
 	var out []Task

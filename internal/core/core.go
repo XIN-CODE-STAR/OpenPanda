@@ -117,6 +117,11 @@ type Core struct {
 	// loop pauses a task that keeps failing instead of retrying it forever
 	// (design §14.2 signal C, P2-18).
 	loop *defense.LoopDetector
+	// checkpointLoop is loop's sibling for resumable interruptions: a run
+	// killed on its wall-clock bound with a live session attached is a
+	// checkpoint the retry resumes, so it draws the larger checkpoint
+	// budget (maxCheckpointRetries) rather than the hard-failure one.
+	checkpointLoop *defense.LoopDetector
 	// sleep is the retry backoff sleeper, injectable for tests. retryBackoff is
 	// the base delay between task retries, doubling each retry.
 	sleep        func(time.Duration)
@@ -404,6 +409,12 @@ type Core struct {
 	// agent timeout overrides (seconds). A kind not present falls back to the
 	// global agent timeout. Set by SetTimeouts from config.timeouts.agent_by_kind.
 	agentByKind map[string]int
+	// taskTokenBudget is the §6.1 quota stamped on top-level tasks created
+	// locally when nothing upstream set one: >0 stamps that amount, 0 leaves
+	// new tasks unbounded (config task_token_budget < 0 maps here via
+	// SetTimeouts). Delegated children keep inheriting the parent's budget.
+	// Guarded by mu.
+	taskTokenBudget int64
 
 	// queueSched is the node-local task queue scheduler (panel queue
 	// redesign): it adopts queued-and-scheduled tasks when resources allow.
@@ -525,28 +536,29 @@ func NewCore(db *sql.DB, nodeID string, card ledger.Card, tier int, logger *slog
 		logger = slog.Default()
 	}
 	c := &Core{
-		db:            db,
-		nodeID:        nodeID,
-		card:          card,
-		tier:          tier,
-		logger:        logger,
-		store:         NewTaskStore(db, logger),
-		ctx:           ctxstore.New(db, ctxstore.MaxEntriesForResourceClass(card.ResourceClass)),
-		node:          NewNode(db, nodeID, card, tier, logger),
-		peers:         make(map[string]*Peer),
-		autoDialCands: make(map[string]autoDialCand),
-		greetedConns:  make(map[*bus.Conn]bool),
-		evictedConns:  make(map[*bus.Conn]struct{}),
-		orphanSeen:    make(map[string]time.Time),
-		peerBlocked:   make(map[string][]string),
-		helloSeen:     make(map[string]time.Time),
-		msgSeen:       make(map[msgSeenKey]time.Time),
-		breaker:       defense.NewCircuitBreaker(0, 0),
-		loop:          defense.NewLoopDetector(2),
-		auditLog:      security.NewAudit(db),
-		workDir:       ".",
-		model:         model,
-		ownsNodeRow:   true,
+		db:             db,
+		nodeID:         nodeID,
+		card:           card,
+		tier:           tier,
+		logger:         logger,
+		store:          NewTaskStore(db, logger),
+		ctx:            ctxstore.New(db, ctxstore.MaxEntriesForResourceClass(card.ResourceClass)),
+		node:           NewNode(db, nodeID, card, tier, logger),
+		peers:          make(map[string]*Peer),
+		autoDialCands:  make(map[string]autoDialCand),
+		greetedConns:   make(map[*bus.Conn]bool),
+		evictedConns:   make(map[*bus.Conn]struct{}),
+		orphanSeen:     make(map[string]time.Time),
+		peerBlocked:    make(map[string][]string),
+		helloSeen:      make(map[string]time.Time),
+		msgSeen:        make(map[msgSeenKey]time.Time),
+		breaker:        defense.NewCircuitBreaker(0, 0),
+		loop:           defense.NewLoopDetector(2),
+		checkpointLoop: defense.NewLoopDetector(maxCheckpointRetries),
+		auditLog:       security.NewAudit(db),
+		workDir:        ".",
+		model:          model,
+		ownsNodeRow:    true,
 
 		superviseRounds: defaultSuperviseRounds,
 		leaseTimeout:    defaultDelegateTimeout,
@@ -1305,6 +1317,11 @@ func (c *Core) taskSweeps(ctx context.Context) {
 	// waiter, nothing else touches them. Re-route them or fail them out
 	// after the grace window so the upstream chain learns the outcome.
 	c.rescueOrphanedForwards(ctx)
+	// The same class mid-life: a process that died between create and
+	// dispatch — or between claim and run — leaves rows no path back to the
+	// queue (or to a verdict) touches. Requeue the submits/claims, fail the
+	// leaseless executions, all past the grace window.
+	c.sweepStrandedWork(ctx)
 	// §8.3: a parked push-waiter's inputs can also land via the pull
 	// path or a fat-bundle import — neither calls the wake directly —
 	// and a staging dir whose sender died needs periodic reclamation.

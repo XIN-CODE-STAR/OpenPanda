@@ -46,12 +46,20 @@ def main():
     # and must not be re-logged), the result row the bounded output.
     harness.emit_event("tool_use", id="agy", name="agy",
                        input={"argc": len(cmd) - 1})
+    if req.resume:
+        # A resumed run's conversation id is known up front; announce it so
+        # a mid-run kill still reports the checkpoint the Go side latched.
+        # (First runs only learn conversation_id from the final envelope.)
+        harness.emit_event("session", id=req.resume)
     try:
         returncode, out, err = harness.run_plain(cmd, cwd=cwd, timeout=timeout)
     except subprocess.TimeoutExpired:
         harness.emit_event("tool_result", tool_use_id="agy", is_error=True,
                            content="agy timed out")
-        harness.emit(False, "agy timed out", 124)
+        # A resumed run already knows its conversation id: report it so the
+        # retry re-enters the same conversation instead of cold-starting.
+        harness.emit(False, "agy timed out", 124,
+                     session_id=req.resume or None)
         return
     except FileNotFoundError:
         harness.emit_event("tool_result", tool_use_id="agy", is_error=True,

@@ -103,8 +103,12 @@ def main():
     def on_line(line):
         lines.append(line)
         sid = _session_id(line)
-        if sid:
+        if sid and sid != state["session_id"]:
             state["session_id"] = sid
+            # Announce the handle early: a run killed before its result
+            # envelope still leaves a resumable checkpoint the Go side
+            # latched.
+            harness.emit_event("session", id=sid)
         note = _note(line)
         if note:
             harness.progress(note)
@@ -112,29 +116,42 @@ def main():
 
         # Fast provider failure detection: if the turn failed with 402/quota/server error,
         # raise ProviderFailure so PANDA's dynamic model injection can rescue immediately.
+        # The minted session rides the exception: the run may be resumable even
+        # though this attempt failed.
         obj = harness.parse_json_line(line)
         if obj:
             if obj.get("type") == "turn.failed":
                 err_dict = obj.get("error") if isinstance(obj.get("error"), dict) else {}
                 err_msg = err_dict.get("message", "")
-                raise ProviderFailure(err_msg or "turn failed")
+                exc = ProviderFailure(err_msg or "turn failed")
+                exc.session_id = state["session_id"]
+                raise exc
             if obj.get("type") == "error":
                 msg = str(obj.get("message") or "")
                 low = msg.lower()
                 if "402" in low or "quota" in low or "payment required" in low or "rate limit" in low:
-                    raise ProviderFailure(msg)
+                    exc = ProviderFailure(msg)
+                    exc.session_id = state["session_id"]
+                    raise exc
 
     try:
         returncode, err, timed_out = harness.run_stream(
             cmd, cwd=cwd, timeout=timeout, on_line=on_line)
     except ProviderFailure as e:
-        harness.emit(False, f"provider failure: {e}", 1)
+        harness.emit(False, f"provider failure: {e}", 1,
+                     session_id=getattr(e, "session_id", "") or None)
         return
     except FileNotFoundError:
         harness.emit(False, "codex binary not found", 127)
         return
     if timed_out:
-        harness.emit(False, "codex timed out", 124)
+        # Report the checkpoint: the session and the tokens already spent
+        # survive the kill, so the retry resumes the run in place and the
+        # task's token budget is charged honestly.
+        text, usage = _reduce("".join(lines))
+        tokens = usage["input_tokens"] + usage["output_tokens"] or None
+        harness.emit(False, "codex timed out", 124, tokens=tokens,
+                     usage=usage, session_id=state["session_id"])
         return
 
     text, usage = _reduce("".join(lines))

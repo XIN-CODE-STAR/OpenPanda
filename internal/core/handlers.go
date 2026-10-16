@@ -139,7 +139,7 @@ func (c *Core) handleDelegate(ctx context.Context, env bus.Envelope) {
 	// the conversation back up. A wrong hint costs one cold start, nothing
 	// more; it names no capability and grants no privilege.
 	if p.ResumeSessionID != "" {
-		if err := c.store.SetAgentSession(ctx, t.TaskID, p.ResumeSessionID, c.nodeID); err != nil {
+		if err := c.store.SetAgentSession(ctx, t.TaskID, p.ResumeSessionID, c.nodeID, p.ResumeSessionAdapter); err != nil {
 			c.logger.Warn("adopt resume session", "task", t.TaskID, "err", err)
 		}
 	}
