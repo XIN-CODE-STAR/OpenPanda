@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Xustalis/OpenPanda/internal/bus"
 	"github.com/Xustalis/OpenPanda/internal/core"
 	"github.com/Xustalis/OpenPanda/internal/ledger"
 )
@@ -226,6 +227,186 @@ func TestQueueModeKeepsImmediateReceipt(t *testing.T) {
 	}
 }
 
+// TestQueuedAskAwaitsOutcome is the queue-and-await contract the interactive
+// surfaces run on: the task lands through Enqueue (resource keys, scheduled
+// row, survives this process), but the round still follows it to the settled
+// verdict and reports the outcome — the turn looks like an inline run while
+// the scheduler owns the execution.
+func TestQueuedAskAwaitsOutcome(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	var followUp string
+	e, _ := newBoundaryTestEngine(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		calls++
+		n := calls
+		if n > 1 {
+			followUp = string(body)
+		}
+		mu.Unlock()
+		w.Header().Set("content-type", "application/json")
+		resp := anthropicText(pinnedTaskJSON)
+		if n > 1 {
+			resp = anthropicText("Mac 已完成：页面在 ~/self-intro/index.html，服务已起在 8000 端口。")
+		}
+		b, _ := json.Marshal(resp)
+		_, _ = w.Write(b)
+	})
+	e.queueTasks = true
+	e.awaitQueued = true // interactive surface: enqueue, then follow to settle
+	registerLeafPeer(t, e)
+
+	awaitQueuedTask(t, e, func(ctx context.Context, store *core.TaskStore, id string) {
+		time.Sleep(1200 * time.Millisecond) // let the wait begin
+		if err := store.Dispatch(ctx, id, "test-node", "leaf-inst"); err != nil {
+			t.Errorf("dispatch: %v", err)
+			return
+		}
+		time.Sleep(1200 * time.Millisecond) // a poll tick must observe the claim
+		if err := store.CompleteFromRemote(ctx, id, "test-node", map[string]any{
+			"ok": true, "exit_code": 0, "stdout": "service up on :8000\n",
+			"agent": "codex", "executor": "leaf-inst",
+		}); err != nil {
+			t.Errorf("complete: %v", err)
+		}
+	})
+
+	started := time.Now()
+	res, err := e.AskTurns(context.Background(), nil, "调度一下mac，写一个自我介绍网页，并且在这台设备上运行", "", false, StreamCallbacks{})
+	if err != nil {
+		t.Fatalf("ask: %v", err)
+	}
+	if res.Kind != "task" || res.TaskID == "" {
+		t.Fatalf("res = %+v, want a task", res)
+	}
+	if res.TaskState != core.StateDone || !res.OK {
+		t.Fatalf("res state = %q ok=%v, want done/true — the round ended before the outcome", res.TaskState, res.OK)
+	}
+	if !strings.Contains(res.Stdout, "service up on :8000") {
+		t.Fatalf("stdout = %q, want the executor's output", res.Stdout)
+	}
+	if d := time.Since(started); d < 1500*time.Millisecond {
+		t.Errorf("ask returned after %s; queue-and-await must follow the task to settle", d)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("model calls = %d, want 2 (dispatch + report)", calls)
+	}
+	if !strings.Contains(followUp, "service up on :8000") || !strings.Contains(followUp, core.StateDone) {
+		t.Fatalf("follow-up call did not carry the settled observation: %s", followUp)
+	}
+	if res.Answer != "Mac 已完成：页面在 ~/self-intro/index.html，服务已起在 8000 端口。" {
+		t.Fatalf("answer = %q, want the model's report", res.Answer)
+	}
+	// The enqueued row carries the queue metadata — scheduled, so a real
+	// consumer (or the sweep's requeue) can always find it again.
+	row, err := core.NewTaskStore(e.db, nil).Get(context.Background(), res.TaskID)
+	if err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if !row.Scheduled {
+		t.Fatalf("enqueued row scheduled=%v, want scheduled for ListReady", row.Scheduled)
+	}
+}
+
+// TestQueuedAskReleasedWaitKeepsWork pins the detach half of the contract:
+// releasing the front end (Esc / Ctrl-C) stops the watch, never the work —
+// the queued row keeps its place and no cancel is propagated.
+func TestQueuedAskReleasedWaitKeepsWork(t *testing.T) {
+	e, _ := newBoundaryTestEngine(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		b, _ := json.Marshal(anthropicText(pinnedTaskJSON))
+		_, _ = w.Write(b)
+	})
+	e.queueTasks = true
+	e.awaitQueued = true
+	registerLeafPeer(t, e)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	awaitQueuedTask(t, e, func(_ context.Context, _ *core.TaskStore, _ string) {
+		time.Sleep(1200 * time.Millisecond) // let the wait begin
+		cancel()
+	})
+
+	res, err := e.AskTurns(ctx, nil, "调度一下mac，写一个自我介绍网页，并且在这台设备上运行", "", false, StreamCallbacks{})
+	if err != nil {
+		t.Fatalf("ask: %v", err)
+	}
+	if res.TaskID == "" || res.TaskState != core.StateQueued {
+		t.Fatalf("res = %+v, want the last observed queued task", res)
+	}
+	row, err := core.NewTaskStore(e.db, nil).Get(context.Background(), res.TaskID)
+	if err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if row.State != core.StateQueued {
+		t.Fatalf("task state = %q after a released wait, want queued (the work keeps running)", row.State)
+	}
+}
+
+// TestAwaitDispatchedSettlesAll covers the tool-round fan-out: several
+// task_submit calls in one model round enqueue their rows in parallel, and
+// the await must return every settled outcome — in dispatch order — not just
+// the first receipt.
+func TestAwaitDispatchedSettlesAll(t *testing.T) {
+	e, _ := newBoundaryTestEngine(t, func(w http.ResponseWriter, r *http.Request) {})
+	store := core.NewTaskStore(e.db, nil)
+	ctx := context.Background()
+	t1, err := store.Create(ctx, "", "proj-a", "audit panda", "test-node", nil)
+	if err != nil {
+		t.Fatalf("create t1: %v", err)
+	}
+	t2, err := store.Create(ctx, "", "proj-b", "audit health", "test-node", nil)
+	if err != nil {
+		t.Fatalf("create t2: %v", err)
+	}
+	if err := store.Queue(ctx, t1.TaskID, "test-node"); err != nil {
+		t.Fatalf("queue t1: %v", err)
+	}
+	if err := store.Queue(ctx, t2.TaskID, "test-node"); err != nil {
+		t.Fatalf("queue t2: %v", err)
+	}
+
+	// The consumer's side: claim and finish both, with t2 — the later
+	// dispatch — finishing first so the result order proves it is dispatch
+	// order, not completion order.
+	go func() {
+		time.Sleep(1100 * time.Millisecond)
+		_ = store.Dispatch(ctx, t2.TaskID, "test-node", "agent-b")
+		_ = store.CompleteFromRemote(ctx, t2.TaskID, "test-node", map[string]any{
+			"ok": true, "exit_code": 0, "stdout": "health ok", "agent": "codex",
+		})
+		time.Sleep(1100 * time.Millisecond)
+		_ = store.Dispatch(ctx, t1.TaskID, "test-node", "agent-a")
+		_ = store.CompleteFromRemote(ctx, t1.TaskID, "test-node", map[string]any{
+			"ok": true, "exit_code": 0, "stdout": "panda ok", "agent": "codex",
+		})
+	}()
+
+	dispatched := []*Result{
+		{Kind: "task", TaskID: t1.TaskID, TaskTitle: t1.Title, TaskState: core.StateQueued},
+		{Kind: "task", TaskID: t2.TaskID, TaskTitle: t2.Title, TaskState: core.StateQueued},
+	}
+	out := e.awaitDispatched(ctx, e.sched.Load(), dispatched, StreamCallbacks{})
+	if len(out) != 2 {
+		t.Fatalf("outcomes = %d, want 2", len(out))
+	}
+	if out[0].TaskID != t1.TaskID || out[1].TaskID != t2.TaskID {
+		t.Fatalf("outcome order = %s,%s; want dispatch order %s,%s", out[0].TaskID, out[1].TaskID, t1.TaskID, t2.TaskID)
+	}
+	for i, want := range []string{"panda ok", "health ok"} {
+		if out[i].TaskState != core.StateDone || !out[i].OK {
+			t.Fatalf("outcome %d state=%s ok=%v, want done/true", i, out[i].TaskState, out[i].OK)
+		}
+		if !strings.Contains(out[i].Stdout, want) {
+			t.Fatalf("outcome %d stdout = %q, want %q", i, out[i].Stdout, want)
+		}
+	}
+}
+
 func containsStr(list []string, want string) bool {
 	for _, s := range list {
 		if s == want {
@@ -380,5 +561,37 @@ func TestAwaitPlanStageFailureIsTheVerdict(t *testing.T) {
 	}
 	if !strings.Contains(res.Stderr, "stage blew up") {
 		t.Fatalf("verdict lost the stage's reason: %q", res.Stderr)
+	}
+}
+
+// TestAwaitSettledRowDeleted covers the mid-wait delete: a queued row is
+// Deletable, so `task rm` or a board clear can remove it while a round is
+// following it — the watch must settle (cancelled) instead of polling the
+// empty store forever.
+func TestAwaitSettledRowDeleted(t *testing.T) {
+	e, _ := newBoundaryTestEngine(t, func(w http.ResponseWriter, r *http.Request) {})
+	store := core.NewTaskStore(e.db, nil)
+	ctx := context.Background()
+	task, err := store.Create(ctx, "", "proj", "doomed task", "test-node", nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := store.Queue(ctx, task.TaskID, "test-node"); err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	go func() {
+		time.Sleep(1500 * time.Millisecond)
+		if _, err := store.Delete(ctx, task.TaskID); err != nil {
+			t.Errorf("delete: %v", err)
+		}
+	}()
+	started := time.Now()
+	cur, res := e.awaitSettled(ctx, e.sched.Load(), task,
+		bus.TaskResultPayload{TaskID: task.TaskID, State: task.State}, StreamCallbacks{})
+	if d := time.Since(started); d > 8*time.Second {
+		t.Fatalf("watch ran %s after the row vanished — it must settle", d)
+	}
+	if cur.State != core.StateCancelled || res.State != core.StateCancelled {
+		t.Fatalf("states = %s/%s, want cancelled/cancelled", cur.State, res.State)
 	}
 }

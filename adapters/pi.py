@@ -239,7 +239,12 @@ def main():
         try:
             out = _run_events(cmd, cwd, timeout)
         except ProviderFailure as e:
-            harness.emit(False, f"provider failure: {e}", 1)
+            st = getattr(e, "state", None) or {}
+            usage = st.get("usage") if isinstance(st.get("usage"), dict) else {}
+            harness.emit(False, f"provider failure: {e}", 1,
+                         tokens=(usage.get("input_tokens", 0) + usage.get("output_tokens", 0)) or None,
+                         cost=st.get("cost") or None, usage=usage or None,
+                         session_id=st.get("session_id") or None)
             return
         except Unsupported:
             # Older pi without --mode json: one-shot print-mode run. The
@@ -309,12 +314,26 @@ def _run_events(cmd, cwd, timeout):
     def on_stderr(chunk):
         low = chunk.lower()
         if "rate limit" in low or "econnrefused" in low or "invalid api key" in low:
-            raise ProviderFailure(chunk.strip())
+            exc = ProviderFailure(chunk.strip())
+            exc.state = state
+            raise exc
 
     returncode, err, timed_out = harness.run_stream(
         cmd, cwd=cwd, timeout=timeout, on_line=on_line, on_stderr=on_stderr)
     if timed_out:
-        raise subprocess.TimeoutExpired(cmd, timeout)
+        # Checkpoint, not corpse: the minted session lets the retry resume
+        # in place, and the accumulated usage still bills the task budget.
+        usage = state["usage"]
+        tokens = (usage["input_tokens"] + usage["output_tokens"]) or None
+        return {
+            "ok": False,
+            "result": "pi timed out",
+            "exit_code": 124,
+            "tokens": tokens,
+            "cost": state["cost"] or None,
+            "usage": usage,
+            "session_id": state["session_id"],
+        }
 
     if not state["saw_event"]:
         low = err.lower()
@@ -365,8 +384,12 @@ def _fold(ev, state):
 
     if et == "session":
         sid = ev.get("id")
-        if isinstance(sid, str) and sid:
+        if isinstance(sid, str) and sid and sid != state["session_id"]:
             state["session_id"] = sid
+            # Announce the handle early: a run killed before its result
+            # envelope still leaves a resumable checkpoint the Go side
+            # latched.
+            harness.emit_event("session", id=sid)
         return
 
     if et == "message_update":

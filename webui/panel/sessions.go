@@ -661,6 +661,16 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 		// meaningless noise when the next ask replays the history to the
 		// model.
 		turn.Text = "已派发任务：" + out.TaskTitle + "（" + out.TaskID + "）"
+		if out.TaskID == "" {
+			// Submission failed before a row existed — the id/title are
+			// empty and the bare template above renders as "已派发任务：（）",
+			// hiding the actual reason. Surface the failure instead.
+			turn.Kind = "error"
+			turn.Text = "⚠ " + out.Stderr
+			if turn.Text == "⚠ " {
+				turn.Text = "⚠ 任务提交失败"
+			}
+		}
 		if out.Answer != "" {
 			turn.Text = out.Answer
 		}

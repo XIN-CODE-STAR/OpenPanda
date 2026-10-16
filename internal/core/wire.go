@@ -292,6 +292,7 @@ func (c *Core) rerouteDeclined(ctx context.Context, taskID string) bool {
 	// use it, so it rides the wire only when the route leads back there.
 	if t.AgentSessionID != "" && t.AgentSessionNode == decision.Target {
 		payload.ResumeSessionID = t.AgentSessionID
+		payload.ResumeSessionAdapter = t.AgentSessionAdapter
 	}
 	// A re-routed project task needs its context as much as the first attempt did.
 	c.attachProject(ctx, &payload, t.Project)
@@ -529,7 +530,7 @@ func (c *Core) handleResult(ctx context.Context, env bus.Envelope) {
 	// is why it is keyed by env.From — a later re-dispatch offers it back as
 	// ResumeSessionID only when the target is that same node.
 	if p.AgentSessionID != "" {
-		if err := c.store.SetAgentSession(ctx, p.TaskID, p.AgentSessionID, env.From); err != nil {
+		if err := c.store.SetAgentSession(ctx, p.TaskID, p.AgentSessionID, env.From, p.AgentSessionAdapter); err != nil {
 			c.logger.Warn("record agent session", "task", p.TaskID, "err", err)
 		}
 	}

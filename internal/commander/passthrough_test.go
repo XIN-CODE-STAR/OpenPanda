@@ -280,7 +280,7 @@ print(json.dumps({"ok": True, "result": json.dumps(seen), "exit_code": 0,
 	plan := tier1Plan(t, r)
 
 	cwd := t.TempDir()
-	ctx := WithResume(context.Background(), "sess-prev")
+	ctx := WithResume(context.Background(), "sess-prev", "")
 	res := r.Execute(ctx, plan, "do it", cwd, true)
 	if !res.OK {
 		t.Fatalf("exec failed: %+v", res)

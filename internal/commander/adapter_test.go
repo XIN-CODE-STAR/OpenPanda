@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -436,4 +437,138 @@ func sameAbs(a, b string) bool {
 		return a == b
 	}
 	return filepath.Clean(aa) == filepath.Clean(bb)
+}
+
+// loopingAdapter streams tool_use events forever — the non-converging model
+// the Go-side tool-call fuse exists for. Without a kill, the run would hang
+// until the hard timeout.
+const loopingAdapter = `#!/usr/bin/env python3
+import json, sys, time
+req = json.loads(sys.stdin.read())
+i = 0
+while True:
+    sys.stderr.write(json.dumps({"type": "event", "ev": "tool_use", "name": "loop", "id": "c%d" % i}) + "\n")
+    sys.stderr.flush()
+    i += 1
+    time.sleep(0.01)
+`
+
+// TestAdapterToolCallCapKillsRunaway: an adapter emitting tool calls past the
+// fuse gets killed — the wall-clock timeout is a corpse bound, not a loop
+// bound, and adapters that ignore max_turns otherwise burn tokens until it.
+func TestAdapterToolCallCapKillsRunaway(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "loop.py"), []byte(loopingAdapter), 0o755); err != nil {
+		t.Fatalf("write adapter: %v", err)
+	}
+	oldDir := adapterDir
+	adapterDir = dir
+	defer func() { adapterDir = oldDir }()
+	oldCap := adapterToolCallCap
+	adapterToolCallCap = 8
+	defer func() { adapterToolCallCap = oldCap }()
+
+	var seen atomic.Int64
+	ctx := WithAgentEvents(context.Background(), func(ev AgentEvent) { seen.Add(1) })
+	start := time.Now()
+	res := runAdapterProcess(ctx, "loop.py", "p", "", nil)
+	if res.OK {
+		t.Fatal("runaway adapter must not report ok")
+	}
+	if res.ExitCode != 124 || !strings.Contains(res.Result, "tool-call budget") {
+		t.Fatalf("capped result = code %d %q, want 124 + budget reason", res.ExitCode, res.Result)
+	}
+	if time.Since(start) > 30*time.Second {
+		t.Fatalf("fuse did not kill promptly: %v", time.Since(start))
+	}
+	if seen.Load() > 8 {
+		t.Fatalf("events past the cap still forwarded: %d", seen.Load())
+	}
+}
+
+// sessionAnnouncingAdapter announces its minted session as an event (the
+// adapter-side contract for checkpointing a killed run) and then hangs — so
+// only the Go-side kill can end it, and the envelope never gets written.
+const sessionAnnouncingAdapter = `#!/usr/bin/env python3
+import json, sys, time
+req = json.loads(sys.stdin.read())
+sys.stderr.write(json.dumps({"type": "event", "ev": "session", "id": "ses_ann123"}) + "\n")
+sys.stderr.flush()
+time.sleep(3600)
+print(json.dumps({"ok": True, "result": "done", "exit_code": 0}))
+`
+
+// TestAdapterKillPathsKeepAnnouncedSession: a run killed before its result
+// envelope — silence watchdog here — must still report the session the
+// adapter announced mid-stream. Without the latch the checkpoint was dropped
+// and the orchestrator's retry cold-started, re-burning the whole run.
+func TestAdapterKillPathsKeepAnnouncedSession(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "ann.py"), []byte(sessionAnnouncingAdapter), 0o755); err != nil {
+		t.Fatalf("write adapter: %v", err)
+	}
+	oldDir := adapterDir
+	adapterDir = dir
+	defer func() { adapterDir = oldDir }()
+	oldSilence := silenceTimeout
+	silenceTimeout = 200 * time.Millisecond
+	defer func() { silenceTimeout = oldSilence }()
+
+	res := runAdapterProcess(context.Background(), "ann.py", "p", "", nil)
+	if res.OK || res.ExitCode != 124 {
+		t.Fatalf("killed run = %+v, want failed 124", res)
+	}
+	if res.SessionID != "ses_ann123" {
+		t.Fatalf("session = %q, want the announced ses_ann123", res.SessionID)
+	}
+}
+
+// TestAdapterSessionEventWithoutSinkIsLatched: the checkpoint latch must not
+// depend on a transcript consumer — a run with no WithAgentEvents sink still
+// reports its announced session when killed.
+func TestAdapterSessionEventWithoutSinkIsLatched(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "ann.py"), []byte(sessionAnnouncingAdapter), 0o755); err != nil {
+		t.Fatalf("write adapter: %v", err)
+	}
+	oldDir := adapterDir
+	adapterDir = dir
+	defer func() { adapterDir = oldDir }()
+	oldTimeout := adapterHardTimeout
+	adapterHardTimeout = 300 * time.Millisecond
+	defer func() { adapterHardTimeout = oldTimeout }()
+	oldAdvertised := adapterTimeoutS
+	adapterTimeoutS = 1
+	defer func() { adapterTimeoutS = oldAdvertised }()
+	oldGrace := hardTimeoutGrace
+	hardTimeoutGrace = 100 * time.Millisecond
+	defer func() { hardTimeoutGrace = oldGrace }()
+
+	// No WithAgentEvents — the latch lives on the writer, not the sink.
+	res := runAdapterProcess(context.Background(), "ann.py", "p", "", nil)
+	if res.ExitCode != 124 || res.SessionID != "ses_ann123" {
+		t.Fatalf("hard-killed run = code %d session %q, want 124 + ses_ann123", res.ExitCode, res.SessionID)
+	}
+}
+
+// TestResumeAdapterAffinity: buildAdapterRequest only sends the resume handle
+// to the adapter that minted it — a fallback onto a different adapter must
+// drop the foreign id instead of feeding it a session it cannot parse.
+func TestResumeAdapterAffinity(t *testing.T) {
+	ctx := WithResume(context.Background(), "sess-9", "opencode.py")
+
+	req, _, refusal := buildAdapterRequest(ctx, "opencode.py", "p", "")
+	if refusal != nil || req.Resume != "sess-9" {
+		t.Fatalf("same-adapter resume = %q refusal %v, want sess-9", req.Resume, refusal)
+	}
+	req, _, refusal = buildAdapterRequest(ctx, "claude_code.py", "p", "")
+	if refusal != nil || req.Resume != "" {
+		t.Fatalf("foreign-adapter resume = %q refusal %v, want dropped", req.Resume, refusal)
+	}
+	// Unknown producer (legacy row): the offer stands — dropping it would
+	// strand every session checkpoint written before the column existed.
+	req, _, refusal = buildAdapterRequest(WithResume(context.Background(), "sess-old", ""), "claude_code.py", "p", "")
+	if refusal != nil || req.Resume != "sess-old" {
+		t.Fatalf("legacy resume = %q refusal %v, want sess-old", req.Resume, refusal)
+	}
 }

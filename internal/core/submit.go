@@ -31,6 +31,17 @@ const defaultConsentHops = 3
 // between retries. The persisted EvRetry count closes that hole.
 const maxPersistedRetries = 5
 
+// maxCheckpointRetries bounds resume retries — failures that are timeouts or
+// watchdog kills (exit 124) with a live session still attached. Those are
+// checkpoints of in-flight work, not failures the hard budget exists to
+// stop: resuming the minted conversation continues where the run stopped,
+// so the checkpoint budget bounds how many wall-clock slices one task may
+// stitch together. 12 × the agent timeout is already hours of real agent
+// work; the token budget and per-run fuses bound what each slice may spend.
+// The persisted count resets across review (CheckpointRetries), because a
+// human sending the task back means "keep going", which needs fresh rounds.
+const maxCheckpointRetries = 12
+
 // TaskInput is the local-entry form of a task: the structured task the entry
 // model emitted, translated into the fields the core persists and executes. It
 // mirrors the wire TaskDelegatePayload but originates locally rather than over
@@ -494,6 +505,23 @@ func (c *Core) createTask(ctx context.Context, in TaskInput) (Task, string, stri
 	if err := c.store.SetDetail(ctx, t.TaskID, d); err != nil {
 		return Task{}, "", "", fmt.Errorf("set detail: %w", err)
 	}
+	// §6.1 safety floor: a top-level task created here gets the node's default
+	// metered-token quota so a retry/resume loop cannot burn without bound.
+	// Children are skipped — plan.go overwrites them with the parent's budget;
+	// and an inbound delegate's wire budget (handlers) lands after creation,
+	// still overwriting this default. A non-positive taskTokenBudget (config
+	// task_token_budget < 0) leaves the row at its unbounded default.
+	if in.ParentID == "" {
+		c.mu.RLock()
+		budget := c.taskTokenBudget
+		c.mu.RUnlock()
+		if budget > 0 {
+			if err := c.store.SetTokenBudget(ctx, t.TaskID, budget); err != nil {
+				return Task{}, "", "", fmt.Errorf("set token budget: %w", err)
+			}
+			t.TokenBudget = budget
+		}
+	}
 	// — Trace: the entry model's classification, fired at task creation —
 	// before Submit's routing decision, before the queue scheduler claims an
 	// enqueued task, before anything runs. The orbit's Step-1 (意图分类) must
@@ -764,6 +792,7 @@ func (c *Core) retryLoop(ctx context.Context, taskID, intent string, required []
 			// daemon's lifetime and charge a future execution of this id for
 			// attempts that have already been resolved.
 			c.loop.Reset(taskID)
+			c.checkpointLoop.Reset(taskID)
 			return final, result, nil
 		}
 		// A tier-2 authorization refusal is deterministic policy, not a
@@ -784,7 +813,20 @@ func (c *Core) retryLoop(ctx context.Context, taskID, intent string, required []
 			}
 			return final, result, nil
 		}
-		if !c.loop.Allow(taskID) || c.retriesExhausted(ctx, taskID) {
+		// A timeout/watchdog kill (exit 124) that still carries a live agent
+		// session is a checkpoint of the same run, not a fresh failure: the
+		// retry resumes the minted conversation where it stopped. It draws on
+		// the checkpoint budget — much larger than the failure budget, since
+		// a long task legitimately spans several wall-clock slices — while a
+		// hard failure keeps the original tight bounds.
+		checkpoint := result.ExitCode == 124 && result.AgentSessionID != ""
+		var allow bool
+		if checkpoint {
+			allow = c.checkpointLoop.Allow(taskID) && !c.checkpointsExhausted(ctx, taskID)
+		} else {
+			allow = c.loop.Allow(taskID) && !c.retriesExhausted(ctx, taskID)
+		}
+		if !allow {
 			if rerr := c.store.Review(ctx, taskID, c.nodeID, result.Stderr); rerr != nil {
 				c.logger.Error("failed to transition task to review", "task", taskID, "err", rerr)
 			}
@@ -797,12 +839,23 @@ func (c *Core) retryLoop(ctx context.Context, taskID, intent string, required []
 			return final, result, nil
 		}
 		// Exponential backoff between retries so a deterministically-failing
-		// task does not hammer the agent/LLM in a tight loop. The loop detector
-		// still bounds the total retry count.
+		// task does not hammer the agent/LLM in a tight loop. The shift is
+		// capped at 1<<5 (32× the base): uncapped doubling would sleep for
+		// hours by the late retries of a checkpoint sequence. Checkpoints
+		// pace at the base delay outright — nothing is "recovering" between
+		// resumes, the next run simply continues the session.
 		if c.sleep != nil {
-			c.sleep(c.retryBackoff << uint(retries))
+			delay := c.retryBackoff
+			if !checkpoint {
+				if shift := retries; shift > 5 {
+					delay <<= 5
+				} else {
+					delay <<= uint(shift)
+				}
+			}
+			c.sleep(delay)
 		}
-		if rerr := c.retryOnce(ctx, taskID); rerr != nil {
+		if rerr := c.retryOnce(ctx, taskID, checkpoint); rerr != nil {
 			c.logger.Warn("retry task", "task", taskID, "err", rerr)
 			return final, result, rerr
 		}
@@ -823,15 +876,34 @@ func (c *Core) retryLoop(ctx context.Context, taskID, intent string, required []
 // retriesExhausted reports whether the persisted retry budget (EvRetry events
 // on the audit trail) is spent for this task. A storage error fails open —
 // warn and allow the retry — so a flaky database cannot deadlock a task that
-// would otherwise be retried.
+// would otherwise be retried. Only hard retries count: a checkpoint retry
+// resumes a live session rather than re-attempting a failure, so it draws
+// the checkpoint budget instead.
 func (c *Core) retriesExhausted(ctx context.Context, taskID string) bool {
-	n, err := c.store.RetryCount(ctx, taskID)
+	n, err := c.store.HardRetries(ctx, taskID)
 	if err != nil {
 		c.logger.Warn("retry budget: count failed, allowing retry", "task", taskID, "err", err)
 		return false
 	}
 	if n >= maxPersistedRetries {
 		c.logger.Info("persistent retry budget exhausted", "task", taskID, "retries", n)
+		return true
+	}
+	return false
+}
+
+// checkpointsExhausted reports whether the task's resumable-checkpoint
+// budget (EvRetry events flagged checkpoint since the last review) is
+// spent. A storage error fails open — warn and allow the retry — matching
+// retriesExhausted: a flaky database cannot deadlock a resumable task.
+func (c *Core) checkpointsExhausted(ctx context.Context, taskID string) bool {
+	n, err := c.store.CheckpointRetries(ctx, taskID)
+	if err != nil {
+		c.logger.Warn("checkpoint budget: count failed, allowing retry", "task", taskID, "err", err)
+		return false
+	}
+	if n >= maxCheckpointRetries {
+		c.logger.Info("checkpoint retry budget exhausted", "task", taskID, "retries", n)
 		return true
 	}
 	return false
@@ -845,14 +917,17 @@ func (c *Core) retriesExhausted(ctx context.Context, taskID string) bool {
 // itself again on its first failure — the review round-trip accomplishes nothing.
 // The in-loop counter is what bounds an automatic retry storm, and it keeps
 // accumulating for as long as the loop actually runs.
-func (c *Core) reviewReset(taskID string) { c.loop.Reset(taskID) }
+func (c *Core) reviewReset(taskID string) {
+	c.loop.Reset(taskID)
+	c.checkpointLoop.Reset(taskID)
+}
 
 // retryOnce returns a failed task to this node for re-execution: a fresh
 // attempt_id plus the failed -> dispatched move and both audit events land in
 // one transaction (RequeueForRetry), so a crash or owner-guard conflict mid-way
 // cannot leave a half-rotated row the audit trail misreads.
-func (c *Core) retryOnce(ctx context.Context, taskID string) error {
-	_, err := c.store.RequeueForRetry(ctx, taskID, c.nodeID)
+func (c *Core) retryOnce(ctx context.Context, taskID string, checkpoint bool) error {
+	_, err := c.store.RequeueForRetry(ctx, taskID, c.nodeID, checkpoint)
 	return err
 }
 

@@ -58,8 +58,21 @@ type Options struct {
 	// QueueTasks routes classified tasks through the async queue (core.Enqueue)
 	// instead of blocking inline submission: the task lands in queued and the
 	// queue scheduler starts it when resources allow — the panel's mode, where
-	// progress streams into the session. The CLI keeps inline (blocking) mode.
+	// progress streams into the session. The CLI keeps inline (blocking) mode
+	// unless AwaitQueued is also set.
 	QueueTasks bool
+	// AwaitQueued turns queue-mode submission back into a synchronous-looking
+	// round: after Enqueue the ask follows the row through awaitSettled until
+	// it settles, bridging the consumer's persisted timeline into the turn's
+	// progress. Execution then belongs to the queue scheduler — resource-keyed
+	// (project:<name> serializes same-worktree tasks, disjoint projects run in
+	// parallel up to max_concurrent_tasks) and process-death-safe (the row is
+	// scheduled, so a dead submitter strands nothing). Interactive surfaces
+	// (REPL/TUI, panda ask) set it alongside QueueTasks; the panel leaves it
+	// off for receipt semantics. ctx ending mid-wait detaches the watch only —
+	// the task keeps running and the front end's task watcher announces the
+	// outcome, the same detach the inline wait's parked-task path has.
+	AwaitQueued bool
 	// ReplyASCII makes the entry model answer in English/ASCII. Set it when
 	// the client runs on a bare Linux console whose font has no CJK glyphs
 	// (Chinese replies would otherwise render as diamonds).
@@ -175,6 +188,8 @@ type Engine struct {
 	projectDir string
 	// queueTasks mirrors Options.QueueTasks.
 	queueTasks bool
+	// awaitQueued mirrors Options.AwaitQueued.
+	awaitQueued bool
 	// asyncPeers mirrors Options.AsyncPeers.
 	asyncPeers bool
 	// meshNode mirrors Options.MeshNode.
@@ -754,6 +769,7 @@ func New(ctx context.Context, cfg *config.Config, opts Options) (*Engine, error)
 		skills:         skillStore,
 		logger:         logger,
 		queueTasks:     opts.QueueTasks,
+		awaitQueued:    opts.AwaitQueued,
 		asyncPeers:     opts.AsyncPeers,
 		meshNode:       opts.MeshNode,
 		replyASCII:     opts.ReplyASCII,
@@ -1624,12 +1640,15 @@ rounds:
 				return nil, fmt.Errorf("task output requires a capability card (scheduler initialization failed)")
 			}
 			cb.progress(Progress{Kind: ProgressTask, Name: out.Task.Title})
-			res := e.submitTask(ctx, out.Task, prompt, authorize, scope, accumulatedReasoning.String(), cb, effectiveLocale)
-			if e.queueTasks {
-				// Async mode: the board product. The queued pointer is the
+			res := e.submitTask(ctx, out.Task, prompt, authorize, scope, accumulatedReasoning.String(), cb, e.awaitQueued, effectiveLocale)
+			if e.queueTasks && !e.awaitQueued {
+				// Receipt mode: the board product. The queued pointer is the
 				// result — the session streams the task's progress and the
 				// finalizer folds its summary, so there is no observation to
-				// feed back and nothing to report in this turn.
+				// feed back and nothing to report in this turn. Await mode
+				// (awaitQueued) already followed the row to settle inside
+				// submitTask, so its res falls through to the ordinary
+				// observation loop like an inline outcome.
 				return res, nil
 			}
 			if res.NeedsApproval {
@@ -1696,11 +1715,40 @@ rounds:
 			}
 			turns = appendToolCalls(turns, calls, out.Note, results, effectiveLocale)
 
-			for _, d := range dispatched {
-				if e.queueTasks || d.NeedsApproval || d.TaskID == "" {
-					return d, nil
+			if e.queueTasks && e.awaitQueued {
+				// Foreground multi-task: the tool already enqueued every
+				// dispatch in parallel above. Follow each row to settle —
+				// concurrently — and feed all outcomes back so the next round
+				// reports real results instead of a bare "queued".
+				for _, d := range e.awaitDispatched(ctx, e.sched.Load(), dispatched, cb) {
+					if d == nil {
+						continue
+					}
+					if d.NeedsApproval {
+						return d, nil
+					}
+					lastTask = d
+					turns = append(turns, entry.Turn{Role: "user", Content: taskObservation(d, effectiveLocale)})
 				}
-				lastTask = d
+				break
+			}
+			var queuedReceipt *Result
+			for _, d := range dispatched {
+				switch {
+				case e.queueTasks && d.TaskID != "" && !d.NeedsApproval:
+					// Dispatch receipts accumulate: a round that fans out
+					// several task_submit calls (multi-project work) has
+					// enqueued them all in parallel — report the last receipt
+					// below rather than dropping the rest.
+					queuedReceipt = d
+				case e.queueTasks || d.NeedsApproval || d.TaskID == "":
+					return d, nil
+				default:
+					lastTask = d
+				}
+			}
+			if queuedReceipt != nil {
+				return queuedReceipt, nil
 			}
 		default:
 			return &Result{Kind: "answer", Answer: out.Answer}, nil
@@ -1771,8 +1819,8 @@ rounds:
 			return finalizeLastTask(lastTask), nil
 		}
 		cb.progress(Progress{Kind: ProgressTask, Name: final.Task.Title})
-		res := e.submitTask(ctx, final.Task, prompt, authorize, scope, accumulatedReasoning.String(), cb)
-		if !res.NeedsApproval && !e.queueTasks {
+		res := e.submitTask(ctx, final.Task, prompt, authorize, scope, accumulatedReasoning.String(), cb, e.awaitQueued)
+		if !res.NeedsApproval && (!e.queueTasks || e.awaitQueued) {
 			// No rounds left to converge through, so produce the report in
 			// one shot rather than returning raw output.
 			if report, rerr := e.reportTaskOutcome(ctx, client, turns, devices, conversationMemory, classifyOpts, final.Task, res); rerr == nil {
@@ -1958,10 +2006,11 @@ func (e *Engine) startClassifiedPlan(ctx context.Context, spec *entry.PlanSpec, 
 	// "Plan started" is a receipt, not an outcome. Like a queued task the
 	// pipeline is followed until every stage settles (or one parks for a
 	// human): the round keeps streaming stage progress and closes on the real
-	// verdict instead of going quiet at dispatch. Queue-mode surfaces are
-	// async by design and keep the immediate receipt; with no consumer
-	// anywhere the wait could never move, so the warning above stands alone.
-	if !e.queueTasks && consumer {
+	// verdict instead of going quiet at dispatch. Receipt-mode surfaces (the
+	// panel) keep the immediate receipt; an awaitQueued turn follows exactly
+	// like an inline one. With no consumer anywhere the wait could never
+	// move, so the warning above stands alone.
+	if (!e.queueTasks || e.awaitQueued) && consumer {
 		if board := e.awaitPlanSettled(ctx, sched, planID, cb); len(board) > 0 {
 			res.PlanStages = board
 			e.planBoardVerdict(ctx, sched.TaskStore(), res, board)
@@ -2006,7 +2055,7 @@ func gateAuthorized(mode string, sessionAuthorized bool) bool {
 // it when resources allow and the session streams its progress. In inline
 // mode a per-task WorkDir is persisted before routing and execution, avoiding
 // process-wide scheduler directory swaps between concurrent asks.
-func (e *Engine) submitTask(ctx context.Context, spec *entry.TaskSpec, prompt string, authorized bool, scope AskScope, reasoning string, cb StreamCallbacks, loc ...i18n.Locale) *Result {
+func (e *Engine) submitTask(ctx context.Context, spec *entry.TaskSpec, prompt string, authorized bool, scope AskScope, reasoning string, cb StreamCallbacks, awaitQueued bool, loc ...i18n.Locale) *Result {
 	targetLoc, explicit := e.localeNow()
 	if len(loc) > 0 && loc[0] != "" {
 		targetLoc = loc[0]
@@ -2088,49 +2137,66 @@ func (e *Engine) submitTask(ctx context.Context, spec *entry.TaskSpec, prompt st
 	if sched == nil {
 		return &Result{Kind: "task", TaskState: "failed", Stderr: "task submission requires a capability card (scheduler initialization failed)", ExitCode: 1}
 	}
+	var task core.Task
+	var result bus.TaskResultPayload
 	if e.queueTasks {
 		q := core.DefaultQueueSpec()
-		q.WorkDir = workDir // travels per task; "" falls back to the core's work dir
-		task, err := sched.Enqueue(ctx, in, q)
+		q.WorkDir = workDir           // travels per task; "" falls back to the core's work dir
+		q.SessionID = scope.SessionID // links the row to its conversation for followup
+		var err error
+		task, err = sched.Enqueue(ctx, in, q)
 		if err != nil {
 			return &Result{Kind: "task", TaskState: "failed", Stderr: err.Error(), ExitCode: 1}
 		}
-		if reasoning != "" {
-			sched.EvTrace(ctx, task.TaskID, core.EvReasoning, map[string]any{"thought": reasoning})
-		}
-		if consentSrc != "" {
-			sched.EvTrace(ctx, task.TaskID, "approval_auto", map[string]any{"scope": consentSrc})
-		}
-		return &Result{Kind: "task", TaskID: task.TaskID, TaskTitle: task.Title, TaskState: task.State, Thought: reasoning, ConsentSource: consentSrc}
-	}
-	// Bridge the core's lifecycle trace events to the caller's progress feed for
-	// the duration of this synchronous run, so a blocking agent execution shows
-	// routing → executing → judging instead of a frozen spinner. AddOnEvent
-	// allows concurrent subagent runs without serializing submissions.
-	// A caller with no progress sink installs nothing.
-	if cb.OnProgress != nil || cb.OnStatus != nil {
-		store := sched.TaskStore()
-		unsub := store.AddOnEvent(func(_, typ string, data any) {
-			if p, ok := progressForEvent(typ, data); ok {
-				cb.progress(p)
+		if !awaitQueued {
+			// Receipt mode (the panel's board): the queued pointer IS the
+			// result — the session streams the row's progress and the
+			// finalizer folds its verdict, so nothing here waits on settle.
+			if reasoning != "" {
+				sched.EvTrace(ctx, task.TaskID, core.EvReasoning, map[string]any{"thought": reasoning})
 			}
-		})
-		defer unsub()
-	}
-	task, result, err := sched.Submit(ctx, in)
-	if err != nil {
-		return &Result{Kind: "task", TaskState: "failed", Stderr: err.Error(), ExitCode: 1}
-	}
-	// A parked task is not an outcome. When the queue holds the task — the
-	// pinned target's link is not live yet — Submit returns the receipt
-	// immediately, and converging the round on "queued" would end the session
-	// while the work has not started. Follow the row instead: the queue
-	// consumer claims it when the link comes up, and this round reports the
-	// outcome it actually reached. Queue-mode surfaces are async by design
-	// (the panel's finalizer folds the result into the session turn), so they
-	// keep the immediate receipt.
-	if !e.queueTasks && !settledState(task.State) {
+			if consentSrc != "" {
+				sched.EvTrace(ctx, task.TaskID, "approval_auto", map[string]any{"scope": consentSrc})
+			}
+			return &Result{Kind: "task", TaskID: task.TaskID, TaskTitle: task.Title, TaskState: task.State, Thought: reasoning, ConsentSource: consentSrc}
+		}
+		// Await mode: the queue (not this turn) owns execution — a scheduler
+		// in the daemon or this own process claims the row when its resource
+		// keys are free. Follow the row to settle and bridge the consumer's
+		// persisted timeline into progress, so the turn looks exactly like an
+		// inline run while the work survives this process dying.
+		result = bus.TaskResultPayload{TaskID: task.TaskID, AttemptID: task.AttemptID, State: task.State}
 		task, result = e.awaitSettled(ctx, sched, task, result, cb)
+	} else {
+		// Bridge the core's lifecycle trace events to the caller's progress
+		// feed for the duration of this synchronous run, so a blocking agent
+		// execution shows routing → executing → judging instead of a frozen
+		// spinner. AddOnEvent allows concurrent subagent runs without
+		// serializing submissions. A caller with no progress sink installs
+		// nothing.
+		if cb.OnProgress != nil || cb.OnStatus != nil {
+			store := sched.TaskStore()
+			unsub := store.AddOnEvent(func(_, typ string, data any) {
+				if p, ok := progressForEvent(typ, data); ok {
+					cb.progress(p)
+				}
+			})
+			defer unsub()
+		}
+		var err error
+		task, result, err = sched.Submit(ctx, in)
+		if err != nil {
+			return &Result{Kind: "task", TaskState: "failed", Stderr: err.Error(), ExitCode: 1}
+		}
+		// A parked task is not an outcome. When the queue holds the task — the
+		// pinned target's link is not live yet — Submit returns the receipt
+		// immediately, and converging the round on "queued" would end the session
+		// while the work has not started. Follow the row instead: the queue
+		// consumer claims it when the link comes up, and this round reports the
+		// outcome it actually reached.
+		if !settledState(task.State) {
+			task, result = e.awaitSettled(ctx, sched, task, result, cb)
+		}
 	}
 	if reasoning != "" {
 		sched.EvTrace(ctx, task.TaskID, core.EvReasoning, map[string]any{"thought": reasoning})

@@ -82,6 +82,12 @@ func runVoice(args []string) {
 		// Voice is a long-lived listening loop: same reasoning as the REPL —
 		// peers dial in the background, the mic opens without dead air.
 		AsyncPeers: true,
+		// Same queue-and-await contract as the REPL: scheduled execution
+		// with per-project parallelism, the spoken turn still ends with the
+		// outcome. Releasing the loop (SIGINT) detaches the watch, never the
+		// work.
+		QueueTasks:  true,
+		AwaitQueued: true,
 	})
 	if err != nil {
 		fatal("ask engine", err)

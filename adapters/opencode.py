@@ -20,18 +20,32 @@ usage, the cost and the session id a follow-up round resumes with
 conversation instead of cold-starting). CLIs too old for --format json
 degrade to the plain text mode. This adapter never prints secrets.
 
-OpenCode is model-agnostic. The stream path runs `--auto` (opencode picks its
-own model, which needs no API key or provider configuration); the plain-mode
-degrade path passes the built-in free model instead. Set OPENCODE_MODEL (or
+OpenCode is model-agnostic, and the free-tier roster rotates constantly —
+between builds models are renamed, retired and replaced. So on every run the
+adapter re-reads the install's live roster (`opencode models`, the same view
+the TUI's /model shows) and, when nothing pins a model, picks the most
+capable entry itself: `opencode api model.list` (v2 builds) exposes each
+model's real metadata — context/output limits, tool support, modalities,
+reasoning variants, cost — which drives a capability score; on builds whose
+catalog probe fails the score falls back to slug heuristics (family, size and
+stability markers). A paid entry only wins when it clearly outscores the free
+ones — opencode is the low-cost tier in the mesh — and a simple task (the
+request's low complexity score, or a light effort level) drops paid entries
+to last resort: any qualified free model beats every paid one there. Set
+OPENCODE_MODEL (or
 ANTHROPIC_MODEL) to a provider/model id (e.g. deepseek/deepseek-chat) to pin
-a custom provider on both paths. tools_policy is noted but not enforced:
-opencode gates tools through its own permission config, not a CLI whitelist,
-so both policies run with the agent's configured tool face.
+a custom model on both paths; a pinned id the roster no longer carries is
+substituted with the closest served model (a progress note names the swap) or
+refused with the roster in the diagnosis, because a stale id makes every run
+die in seconds with an opaque resolution error. tools_policy is noted but not
+enforced: opencode gates tools through its own permission config, not a CLI
+whitelist, so both policies run with the agent's configured tool face.
 
 The wire contract, watchdog timeout, process-tree cleanup and stderr
 diagnostics live in _harness.py; this file is only the opencode difference:
-model resolution, the command line and the event reduction.
+model resolution/selection, the command line and the event reduction.
 """
+import json
 import os
 import re
 import subprocess
@@ -40,10 +54,15 @@ import _harness as harness
 
 # opencode resolves --model as provider/model; a bare model name is not a valid
 # provider and fails resolution. The built-in free model needs no key or config,
-# so it is the default when no provider/model id is given.
+# so it is the default when no provider/model id is given. The list of models
+# an install actually serves drifts (free tiers are renamed/retired), so this
+# constant is only a starting point: _resolve_model re-anchors it against the
+# live `opencode models` output before anything is passed on the command line.
 DEFAULT_MODEL = "opencode/deepseek-v4-flash-free"
 
 _FLAG_PROBE = None
+_MODEL_LIST = None
+_MODEL_CATALOG = None
 
 
 def _cli_flags():
@@ -85,6 +104,281 @@ class Unsupported(Exception):
     """The CLI rejected --format json — degrade to plain text mode."""
 
 
+_MODEL_LINE_RE = re.compile(r"^[\w.@+-]+/[\w.@+-]+$")
+
+
+def _available_models():
+    """The models this opencode install actually serves (`opencode models`),
+    probed once per process.
+
+    The CLI's free-tier roster drifts between builds — a hard-coded default
+    like opencode/deepseek-v4-flash-free stops resolving the day the tier is
+    renamed (deepseek-v4.1-…), and the run then dies in seconds with a yargs
+    "model not found" that reads like a task failure. An empty list means the
+    probe failed (old build without the subcommand, service down): callers
+    keep their pre-probe behaviour rather than guessing."""
+    global _MODEL_LIST
+    if _MODEL_LIST is not None:
+        return _MODEL_LIST
+    models = []
+    try:
+        argv = harness.resolve_argv(["opencode", "models"])
+        proc = subprocess.run(argv, capture_output=True, timeout=15)
+        if proc.returncode == 0:
+            for line in harness.decode_cli(proc.stdout or b"").splitlines():
+                line = line.strip()
+                if _MODEL_LINE_RE.match(line):
+                    models.append(line)
+    except Exception:
+        models = []
+    _MODEL_LIST = models
+    return models
+
+
+def _model_catalog():
+    """Model metadata map from `opencode api model.list` (v2 builds), probed
+    once per process.
+
+    The catalog carries what the bare roster cannot: each served model's
+    context/output limits, tool support, input modalities, reasoning
+    variants, release time and cost — the fields the capability pick in
+    _pick_model scores. An empty dict means the probe failed (pre-v2 build
+    without the api subcommand, server unreachable, foreign output): callers
+    then score on slug heuristics alone."""
+    global _MODEL_CATALOG
+    if _MODEL_CATALOG is not None:
+        return _MODEL_CATALOG
+    catalog = {}
+    try:
+        argv = harness.resolve_argv(["opencode", "api", "model.list"])
+        proc = subprocess.run(argv, capture_output=True, timeout=15)
+        if proc.returncode == 0:
+            doc = json.loads(harness.decode_cli(proc.stdout or b""))
+            for entry in doc.get("data") or []:
+                if not isinstance(entry, dict):
+                    continue
+                key = "%s/%s" % (entry.get("providerID"), entry.get("id"))
+                if "/" not in key.strip("/"):
+                    continue
+                catalog[key] = entry
+    except Exception:
+        catalog = {}
+    _MODEL_CATALOG = catalog
+    return catalog
+
+
+# Slug heuristics for the capability pick — the fallback when the catalog
+# probe fails, and the family/stability component of the score when it does
+# not. Coding-proven families outrank general ones (best first); _SIZE_UP /
+# _SIZE_DOWN name the tier markers vendors put in the slug; _UNSTABLE marks
+# previews and alphas a production run should only take when nothing stable
+# is served.
+_FAMILIES = (
+    "claude", "gpt", "codex", "grok", "kimi", "qwen", "deepseek", "glm",
+    "nemotron", "minimax", "longcat", "gemini", "llama", "mistral",
+)
+_SIZE_UP = ("ultra", "super", "max", "pro", "opus", "large")
+_SIZE_DOWN = ("nano", "mini", "lite", "lightning", "flash", "spark",
+              "small", "tiny", "mimo", "haiku")
+_UNSTABLE = ("alpha", "beta", "preview", "experimental", "contributor")
+
+# Cost handling in the pick. A paid entry always carries a penalty — opencode
+# sits in the mesh's low-cost tier — but a strong one may still win on a
+# heavy task. On a simple task (low complexity score / light effort) the
+# penalty becomes absolute: any qualified free model outranks every paid one.
+_PAID_PENALTY = 10
+_PAID_PENALTY_SIMPLE = 1e6
+# Complexity (0–1, the entry classifier's score) below which a task counts
+# as simple for the free-first pick. 0 means "never scored" and does not
+# trigger the preference.
+_SIMPLE_COMPLEXITY = 0.4
+# Light effort levels mean the same thing.
+_LIGHT_EFFORTS = ("low", "minimal", "none")
+
+
+def _slug_score(model):
+    """Capability heuristic from the model id alone: family rank, size tier,
+    stability markers and a small recency-of-version nudge."""
+    slug = model.split("/")[-1].lower()
+    tokens = re.split(r"[-_.]+", slug)
+    score = 0.0
+    for i, fam in enumerate(_FAMILIES):
+        if any(fam in t for t in tokens):
+            score += (len(_FAMILIES) - i) * 2
+            break
+    if any(t in _SIZE_UP for t in tokens):
+        score += 8
+    if any(t in _SIZE_DOWN for t in tokens):
+        score -= 8
+    if any(t in _UNSTABLE for t in tokens):
+        score -= 12
+    versions = []
+    for t in tokens:
+        digits = t[1:] if t.startswith("v") else t
+        if digits.isdigit():
+            versions.append(int(digits))
+    if versions:
+        score += min(max(versions), 10) * 0.1
+    return score
+
+
+def _is_paid(model, catalog):
+    """Whether serving this model bills per token.
+
+    The catalog's cost entries answer directly when they exist. With no
+    catalog coverage the provider id is the tell: opencode's own provider is
+    the built-in free tier; anything else is a user-configured provider that
+    may bill — assuming paid is the safe error direction for a free-first
+    pick (a misjudged local provider still wins when no free model
+    qualifies)."""
+    entry = catalog.get(model)
+    if entry is not None:
+        return any(c.get("input") or c.get("output")
+                   for c in entry.get("cost") or [] if isinstance(c, dict))
+    return model.split("/")[0] != "opencode"
+
+
+def _score_model(model, catalog):
+    """Score one roster entry for agent work. Returns (score, variant_ids).
+
+    A catalog entry can disqualify the model outright (disabled, retired, or
+    no tool calling — an agent run without tools cannot act), otherwise its
+    real limits and features refine the slug heuristic. Paid models take a
+    penalty: opencode sits in the mesh's low-cost tier, so a paid entry must
+    clearly outscore the free ones before the adapter spends on it."""
+    score = _slug_score(model)
+    entry = catalog.get(model)
+    if entry is None:
+        if _is_paid(model, catalog):
+            score -= _PAID_PENALTY
+        return score, []
+    if entry.get("enabled") is False:
+        return -1e9, []
+    status = entry.get("status")
+    if status is not None and status != "active":
+        return -1e9, []
+    caps = entry.get("capabilities") if isinstance(entry.get("capabilities"), dict) else {}
+    if caps.get("tools") is False:
+        return -1e9, []
+    limit = entry.get("limit") if isinstance(entry.get("limit"), dict) else {}
+    try:
+        ctx = int(limit.get("context") or 0)
+        out = int(limit.get("output") or 0)
+    except (TypeError, ValueError):
+        ctx = out = 0
+    score += min(max(ctx, 0), 1_000_000) / 100_000
+    score += min(max(out, 0), 500_000) / 100_000
+    variants = [v.get("id") for v in entry.get("variants") or []
+                if isinstance(v, dict) and isinstance(v.get("id"), str)]
+    if any(v not in ("none", "minimal") for v in variants):
+        score += 4
+    if "image" in (caps.get("input") or []):
+        score += 2
+    if _is_paid(model, catalog):
+        score -= _PAID_PENALTY
+    return score, variants
+
+
+def _pick_model(available, prefer_free=False):
+    """The most capable model on the live roster. Returns (model, variants)
+    — ("", []) when the roster is empty or every entry is disqualified.
+
+    prefer_free is the simple-task mode: a paid model is no longer a
+    contender but a last resort, so it only wins when nothing free
+    qualifies."""
+    catalog = _model_catalog()
+    best, best_score, best_variants = "", -1e18, []
+    for model in available:
+        score, variants = _score_model(model, catalog)
+        if prefer_free and _is_paid(model, catalog):
+            score -= _PAID_PENALTY_SIMPLE
+        if score > best_score:
+            best, best_score, best_variants = model, score, variants
+    if best_score <= -1e9:
+        return "", []
+    return best, best_variants
+
+
+# What a rejected --model looks like on the wire: v2 answers a stale id with
+# a provider.no-route error event ("Model unavailable: provider/id"), older
+# builds with yargs resolution text. Matched against the failure text only —
+# it must not catch an upstream overload that merely names the model.
+_MODEL_FAILURE_RE = re.compile(
+    r"model[ ._-]?(unavailable|not[ _]?found|unknown|invalid|unsupported|"
+    r"does[ _]not[ _]exist|resolution)|"
+    r"provider[._ ]?no[._-]?route|providermodelnotfound|no[ _]such[ _]model",
+    re.I)
+
+
+def _looks_like_model_failure(text):
+    return bool(_MODEL_FAILURE_RE.search(text or ""))
+
+
+def _fresh_pick(excluded, prefer_free):
+    """Drop the probe caches, re-identify the served models and pick the
+    best entry not in `excluded`. Returns _pick_model's (model, variants)."""
+    global _MODEL_LIST, _MODEL_CATALOG
+    _MODEL_LIST = None
+    _MODEL_CATALOG = None
+    available = [m for m in (_available_models() or sorted(_model_catalog()))
+                 if m not in excluded]
+    return _pick_model(available, prefer_free)
+
+
+def _retry_pick(model, tried, prefer_free, effort, err_text):
+    """A run rejected its model: the served set rotated between this
+    dispatch's probe and the run itself (free tiers retire mid-flight).
+    Re-identify the roster and return a fresh pick with the effort variant
+    re-applied — "" when the failure is not a model-resolution error or
+    nothing new qualifies. Bounded: gives up after a few rotations."""
+    if not _looks_like_model_failure(err_text) or len(tried) >= 4:
+        return ""
+    tried.add(model.split("#")[0] if model else "")
+    pick, variants = _fresh_pick(tried, prefer_free)
+    if not pick:
+        return ""
+    if effort and effort in variants:
+        pick += "#" + effort
+    harness.progress("model %s rejected; re-probed roster, retrying on %s"
+                     % (model or "default", pick))
+    return pick
+
+
+def _resolve_model(requested):
+    """Anchor `requested` against the live model list.
+
+    Returns (model, note, err):
+      model — the provider/model id to pass; "" means pass no --model flag
+      note  — a progress line when the request was substituted
+      err   — a fatal diagnosis when nothing available can honour the request
+
+    A failed probe or an empty request is a no-op (old behaviour). An exact
+    match passes through. Otherwise the requested slug's tokens are matched
+    against the live slugs (equal or prefix — "v4" matches "v4.1"); a full
+    match is used with a progress note, and no match fails fast with the
+    available roster instead of letting the CLI reject the model opaquely."""
+    available = _available_models()
+    if not available or not requested:
+        return requested, "", ""
+    if requested in available:
+        return requested, "", ""
+    want = [t for t in requested.split("/")[-1].split("-") if t]
+
+    def matches(model):
+        slug = [s for s in model.split("/")[-1].split("-") if s]
+        return all(
+            any(t == s or (len(t) >= 2 and len(s) >= 2 and (s.startswith(t) or t.startswith(s))) for s in slug)
+            for t in want
+        )
+
+    full = [m for m in available if matches(m)]
+    if full:
+        provider = requested.split("/")[0]
+        pick = next((m for m in full if m.split("/")[0] == provider), full[0])
+        return pick, f"model {requested} is not available; using {pick}", ""
+    return "", "", "opencode has no model matching " + requested + "; available models: " + ", ".join(available)
+
+
 def main():
     req = harness.read_request()
     prompt, timeout, cwd = req
@@ -95,62 +389,157 @@ def main():
     # Always pass the build's permission flag so non-interactive runs
     # auto-approve tool permissions. Keep print-logs=false to avoid polluting
     # stdout with internal runtime diagnostics.
-    cmd = ["opencode", "run", "--print-logs=true"] + auto
+    base = ["opencode", "run", "--print-logs=true"] + auto
     if flags["format"]:
-        cmd += ["--format", "json"]
+        base += ["--format", "json"]
     model = ""
     if os.environ.get("OPENPANDA_INJECTED_MODEL") == "1":
         model = os.environ.get("OPENCODE_MODEL") or os.environ.get("OPENAI_MODEL", "")
-        if model:
-            if "/" in model:
-                cmd += ["--model", model]
-            else:
-                cmd += ["--model", f"openai/{model}"]
+        if model and "/" not in model:
+            model = f"openai/{model}"
     else:
         model = os.environ.get("OPENCODE_MODEL") or os.environ.get("ANTHROPIC_MODEL", "")
-        if model and "/" in model:
-            cmd += ["--model", model]
+        # A bare name was never passed on this path (it cannot resolve as a
+        # provider); keep that, and let the plain path's default cover it.
+        if model and "/" not in model:
+            model = ""
 
-    # A follow-up round resumes the agent's own session: its reasoning trail
-    # survives instead of cold-starting on the bare follow-up instruction.
-    if req.resume:
-        cmd += ["--session", req.resume]
-    cmd.append(prompt)
+    # A simple task (low complexity score, or a light effort request)
+    # prefers the provider's free tier: paid models only fill in when no
+    # free entry qualifies.
+    prefer_free = (0 < req.complexity < _SIMPLE_COMPLEXITY
+                   or req.effort in _LIGHT_EFFORTS)
+
+    # Identify the served model set on every dispatch, before --model is
+    # passed: the free tier rotates between builds, so nothing about it is
+    # carried over from the last run. `opencode models` gives the id list —
+    # the same view the TUI's /model shows — and `opencode api model.list`
+    # (v2) adds the capability metadata whose keys double as the roster
+    # when the bare list fails.
+    if model:
+        available = _available_models()
+    else:
+        available = _available_models() or sorted(_model_catalog())
+    if available:
+        harness.progress("identified served models: %s" % ", ".join(available))
+
+    if model:
+        # A request the roster does not carry is substituted with the
+        # closest available id (progress-noted) or fails fast with the
+        # roster, instead of an opaque seconds-long death.
+        model, note, err = _resolve_model(model)
+        if err:
+            harness.emit(False, err, 1)
+            return
+        if note:
+            harness.progress(note)
+    else:
+        # Nothing pinned a model: pick the most capable entry off the live
+        # roster instead of taking whatever default the build happens to
+        # ship. An all-failed probe keeps the old behaviour: no --model,
+        # the install's configured default.
+        pick, variants = _pick_model(available, prefer_free)
+        if pick:
+            # A requested reasoning effort rides the model's own declared
+            # variant (provider/model#variant); an undeclared or absent
+            # request leaves the provider default.
+            if req.effort and req.effort in variants:
+                pick = pick + "#" + req.effort
+            harness.progress(
+                "auto-selected model %s (of %d served%s)" % (
+                    pick, len(available), "; simple task prefers free" if prefer_free else ""))
+            model = pick
+
+    def run_cmd(m):
+        c = list(base)
+        if m:
+            c += ["--model", m]
+        # A follow-up round resumes the agent's own session: its reasoning
+        # trail survives instead of cold-starting on the bare instruction.
+        # `resumed` (not req.resume) is read here so an in-adapter retry —
+        # the roster rotated mid-dispatch — continues the session this run
+        # already minted rather than re-entering at the outer handle.
+        if resumed:
+            c += ["--session", resumed]
+        c.append(prompt)
+        return c
 
     if not flags["format"]:
         # A build too old for --format json goes straight to the plain text
         # mode — the stream attempt could only fail with a usage line.
-        return _run_plain(prompt, cwd, timeout, req.resume, model, auto)
+        return _run_plain(prompt, cwd, timeout, req.resume, model, auto,
+                          prefer_free)
 
-    try:
-        out = _run_events(cmd, cwd, timeout)
-    except ProviderFailure as e:
-        harness.emit(False, f"provider failure: {e}", 1)
-        return
-    except Unsupported:
-        # The help listed --format but the run rejected it: one-shot plain
-        # text run. The plain command is rebuilt from scratch (never
-        # token-filtered out of cmd — the prompt itself could match a
-        # filtered token) and carries the build's own permission flag and a
-        # resolvable model: the stream path may have omitted --model in
-        # favor of --auto — which an old CLI just rejected — so a bare
-        # "--model ''" would fail resolution outright.
-        return _run_plain(prompt, cwd, timeout, req.resume, model, auto)
-    except subprocess.TimeoutExpired:
-        harness.emit(False, "opencode timed out", 124)
-        return
-    except FileNotFoundError:
-        harness.emit(False, "opencode binary not found", 127)
-        return
+    tried = set()
+    resumed = req.resume
+    while True:
+        try:
+            out = _run_events(run_cmd(model), cwd, timeout)
+        except ProviderFailure as e:
+            # A rejected --model means the roster rotated between this
+            # run's probe and the run itself: re-identify and retry once
+            # on the fresh pick before reporting the failure.
+            retry = _retry_pick(model, tried, prefer_free, req.effort, str(e))
+            st = getattr(e, "state", None) or {}
+            if retry:
+                model = retry
+                if st.get("session_id"):
+                    resumed = st["session_id"]
+                continue
+            usage = st.get("usage") if isinstance(st.get("usage"), dict) else {}
+            harness.emit(False, f"provider failure: {e}", 1,
+                         tokens=(usage.get("input_tokens", 0) + usage.get("output_tokens", 0)) or None,
+                         cost=st.get("cost"), usage=usage or None,
+                         session_id=st.get("session_id") or None)
+            return
+        except Unsupported:
+            # The help listed --format but the run rejected it: one-shot
+            # plain text run. The plain command is rebuilt from scratch
+            # (never token-filtered out of the run argv — the prompt itself
+            # could match a filtered token) and carries the build's own
+            # permission flag and a resolvable model.
+            return _run_plain(prompt, cwd, timeout, resumed, model, auto,
+                              prefer_free, tried)
+        except subprocess.TimeoutExpired:
+            harness.emit(False, "opencode timed out", 124)
+            return
+        except FileNotFoundError:
+            harness.emit(False, "opencode binary not found", 127)
+            return
+        if not out["ok"] and _looks_like_model_failure(out["result"]):
+            retry = _retry_pick(model, tried, prefer_free, req.effort,
+                                out["result"])
+            if retry:
+                model = retry
+                if out.get("session_id"):
+                    resumed = out["session_id"]
+                continue
+        break
 
     harness.emit(out["ok"], out["result"], out["exit_code"],
                  tokens=out.get("tokens"), cost=out.get("cost"),
                  usage=out.get("usage"), session_id=out.get("session_id"))
 
 
-def _run_plain(prompt, cwd, timeout, resume, model, auto):
+def _run_plain(prompt, cwd, timeout, resume, model, auto,
+               prefer_free=False, tried=None):
     """One-shot plain text mode for builds without --format json."""
-    plain = ["opencode", "run", "--print-logs=false"] + auto + ["--model", model or DEFAULT_MODEL]
+    if not model:
+        # The built-in default rots as the free roster drifts; re-anchor it
+        # against the live list too (probe failure keeps the constant).
+        resolved, note, err = _resolve_model(DEFAULT_MODEL)
+        if resolved:
+            model = resolved
+        elif err:
+            # Nothing matches the built-in default either: any served model
+            # beats a guaranteed resolution failure on the one-shot path.
+            available = _available_models()
+            if available:
+                model = available[0]
+                note = f"model {DEFAULT_MODEL} is not available; using {model}"
+        if note:
+            harness.progress(note)
+    plain = ["opencode", "run", "--print-logs=false"] + auto + ["--model", model]
     if resume:
         plain += ["--session", resume]
     plain.append(prompt)
@@ -162,6 +551,18 @@ def _run_plain(prompt, cwd, timeout, resume, model, auto):
     except FileNotFoundError:
         harness.emit(False, "opencode binary not found", 127)
         return
+    if returncode != 0 and _looks_like_model_failure("%s\n%s" % (err, text)):
+        # Same roster-rotation retry as the stream path.
+        tried = tried if tried is not None else set()
+        if model:
+            tried.add(model.split("#")[0])
+        if len(tried) < 4:
+            pick, _ = _fresh_pick(tried, prefer_free)
+            if pick:
+                harness.progress("model %s rejected; re-probed roster, "
+                                 "retrying on %s" % (model, pick))
+                return _run_plain(prompt, cwd, timeout, resume, pick, auto,
+                                  prefer_free, tried)
     harness.emit(returncode == 0, text.strip() or err.strip(), returncode)
 
 
@@ -200,18 +601,41 @@ def _run_events(cmd, cwd, timeout):
             if not err_msg:
                 err_msg = str(err_obj.get("message") or "")
             state["error"] = err_msg or "opencode error"
-            raise ProviderFailure(state["error"])
+            exc = ProviderFailure(state["error"])
+            # The partial run state rides the exception so the terminal emit
+            # can report the session/usage this failure leaves behind — the
+            # orchestrator's retry resumes the session instead of
+            # cold-starting and re-burning the whole run.
+            exc.state = state
+            raise exc
         _fold(ev, state)
 
     def on_stderr(chunk):
         low = chunk.lower()
         if "rate limit exceeded" in low or "ai_retryerror" in low or "ai_apicallerror" in low or "stream error" in low:
-            raise ProviderFailure(chunk.strip())
+            exc = ProviderFailure(chunk.strip())
+            exc.state = state
+            raise exc
 
     returncode, err, timed_out = harness.run_stream(
         cmd, cwd=cwd, timeout=timeout, on_line=on_line, on_stderr=on_stderr)
     if timed_out:
-        raise subprocess.TimeoutExpired(cmd, timeout)
+        # The watchdog killed the process tree mid-run. What matters to the
+        # orchestrator is not the corpse but the checkpoint: the session the
+        # run already minted (a retry resumes it rather than re-exploring
+        # from zero) and the tokens it already spent (the task's budget is
+        # charged for them either way — hiding them would leak spend).
+        usage = state["usage"]
+        tokens = usage["input_tokens"] + usage["output_tokens"] or None
+        return {
+            "ok": False,
+            "result": "opencode timed out",
+            "exit_code": 124,
+            "tokens": tokens,
+            "cost": state["cost"],
+            "usage": usage,
+            "session_id": state["session_id"],
+        }
 
     if not state["saw_event"]:
         # Nothing parsed came out: either the CLI rejects --format json
@@ -256,6 +680,17 @@ def _run_events(cmd, cwd, timeout):
     }
 
 
+def _session_id(v):
+    """Accept a candidate session id only in opencode's own `ses…` shape.
+
+    Session handles minted by another adapter (e.g. claude_code's UUIDs) or
+    copied off an event envelope's `id` field are poison: passing one back via
+    --session makes the CLI answer 400 and the run cold-starts, burning the
+    full exploration again on every retry."""
+    s = str(v or "")
+    return s if s.startswith("ses") else ""
+
+
 def _fold(ev, state):
     """Fold one opencode event into the running state (defensively: the
     event schema drifts between versions, so every access is shape-checked
@@ -271,15 +706,24 @@ def _fold(ev, state):
 
     # Session id: carried as sessionID on the envelope (current builds) or on
     # the part; a session.created envelope may nest it under info/id instead.
+    # Only ses_-prefixed values are real session handles — opencode rejects
+    # anything else server-side ("Expected a string starting with ses"), so a
+    # blind adoption of the event envelope's own `id` (a UUID) used to mint a
+    # poisoned handle: every later resume attempt then died on a 400 and
+    # cold-started, re-burning the whole run.
     part = props.get("part") if isinstance(props.get("part"), dict) else None
-    sid = props.get("sessionID") or props.get("session_id") or ""
+    sid = _session_id(props.get("sessionID") or props.get("session_id"))
     if not sid and part is not None:
-        sid = part.get("sessionID") or part.get("session_id") or ""
+        sid = _session_id(part.get("sessionID") or part.get("session_id"))
     if not sid:
         info = props.get("info") if isinstance(props.get("info"), dict) else {}
-        sid = info.get("id") or props.get("id") or ""
+        sid = _session_id(info.get("id") or props.get("id"))
     if sid and not state["session_id"]:
-        state["session_id"] = str(sid)
+        state["session_id"] = sid
+        # Announce the minted handle early, before the result envelope
+        # exists: a run killed mid-stream (watchdog, stall, host hard
+        # limit) still leaves a resumable checkpoint the Go side latched.
+        harness.emit_event("session", id=sid)
 
     if part is not None:
         pid = str(part.get("id") or len(state["order"]))

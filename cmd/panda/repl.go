@@ -364,6 +364,13 @@ func runRepl(args []string) {
 			// background instead of gating the banner (an offline peer's dial
 			// timeout is routine, not 10s of dead air before the first prompt).
 			AsyncPeers: true,
+			// Interactive tasks ride the scheduler queue, then the ask follows
+			// them to settle: resource keys keep same-worktree runs serialized
+			// while independent projects execute in parallel, the daemon (or
+			// this process when it owns the node) does the executing, and the
+			// turn still ends with the outcome like an inline run.
+			QueueTasks:  true,
+			AwaitQueued: true,
 		})
 		if err != nil {
 			fatal("ask engine", err)

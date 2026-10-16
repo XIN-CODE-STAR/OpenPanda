@@ -165,6 +165,56 @@ func TestExecAgentActiveFailoverOnExecutionError(t *testing.T) {
 	}
 }
 
+// TestExecAgentTimeoutWithSessionSkipsFailover: a watchdog timeout (exit 124)
+// whose run already minted an agent session is a checkpoint, not a dead end —
+// the retry loop resumes that session, so execAgent must return it instead of
+// cold-starting an alternate (which would overwrite the persisted handle with
+// the alternate's fresh session). A timeout with no session minted — and any
+// non-124 failure — keeps the normal failover.
+func TestExecAgentTimeoutWithSessionSkipsFailover(t *testing.T) {
+	card := scoreCard()
+	card.Agents["cheap"] = ledger.Agent{Adapter: "opencode.py", Capabilities: []string{"code:modify"}, CostTier: "low", Tier: 1}
+	card.Agents["expensive"] = ledger.Agent{Adapter: "claude_code.py", Capabilities: []string{"code:modify"}, CostTier: "high", Tier: 1}
+	r := NewRouter(card, NewExecutor(), config.ModelConfig{}, config.InjectionConfig{}, config.RoutingConfig{})
+	r.SetAgentProber(func(string, ledger.Agent) bool { return true })
+
+	var ran []string
+	r.SetAdapterRunner(func(_ context.Context, adapter, _, _ string) AgentResult {
+		ran = append(ran, adapter)
+		return AgentResult{OK: false, Result: "opencode timed out",
+			ExitCode: 124, SessionID: "ses_timedout"}
+	})
+	plan, err := r.Route([]string{"code:modify"})
+	if err != nil {
+		t.Fatalf("route: %v", err)
+	}
+	res := r.Execute(context.Background(), plan, "big task", "", false)
+	if res.OK || res.ExitCode != 124 {
+		t.Fatalf("timeout result = %+v, want exit 124 failure", res)
+	}
+	if res.SessionID != "ses_timedout" {
+		t.Fatalf("SessionID = %q, want the resumable handle", res.SessionID)
+	}
+	if len(ran) != 1 || ran[0] != "opencode.py" {
+		t.Fatalf("ran = %v, want only opencode.py (no cold-start failover)", ran)
+	}
+
+	// Same timeout but no session minted: nothing resumable exists, so the
+	// failover chain still rescues the task.
+	ran = nil
+	r.SetAdapterRunner(func(_ context.Context, adapter, _, _ string) AgentResult {
+		ran = append(ran, adapter)
+		if adapter == "opencode.py" {
+			return AgentResult{OK: false, Result: "opencode timed out", ExitCode: 124}
+		}
+		return AgentResult{OK: true, Result: "done via alternate", ExitCode: 0}
+	})
+	res = r.Execute(context.Background(), plan, "big task", "", false)
+	if !res.OK || res.Agent != "expensive" {
+		t.Fatalf("sessionless timeout result = %+v, want failover success", res)
+	}
+}
+
 // TestExecAgentActiveFailoverOnLongErrorOutput ensures an agent that fails with a long
 // error or crash log (>= 300 bytes) does not falsely masquerade as OK, and instead
 // triggers active failover to the next available agent.

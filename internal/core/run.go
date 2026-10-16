@@ -265,7 +265,8 @@ func (c *Core) run(ctx context.Context, taskID, intent string, required []string
 		return outcome.payload, nil
 	}
 	return c.finalizeRun(ctx, taskID, task, work.plan, required, attemptID, prep.workDir,
-		outcome.res, outcome.lastChanged, outcome.filesTruncated, outcome.verdict, outcome.sessionID)
+		outcome.res, outcome.lastChanged, outcome.filesTruncated, outcome.verdict,
+		outcome.sessionID, outcome.sessionAdapter)
 }
 
 // resolveRunPlan turns a task's requires into an executable plan: route
@@ -805,6 +806,10 @@ func (c *Core) decorateExecCtx(execCtx, ctx context.Context, taskID string, task
 		if mt := taskMaxTurns(task.SpecJSON); mt > 0 {
 			execCtx = commander.WithMaxTurns(execCtx, mt)
 		}
+		// The entry classifier's 0–1 score rides to model-selecting adapters
+		// (opencode): a simple task prefers the provider's free tier instead
+		// of the capability-first pick.
+		execCtx = commander.WithComplexity(execCtx, task.Complexity)
 	}
 	return execCtx, cleanup
 }
@@ -822,6 +827,7 @@ type roundOutcome struct {
 	filesTruncated bool
 	verdict        entry.SuperviseVerdict
 	sessionID      string
+	sessionAdapter string
 }
 
 // runWork bundles the mutable state run()'s phases share, so each phase stays
@@ -905,9 +911,15 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 	// adapters without session support leave the field empty and behave
 	// exactly as before.
 	sessionID := task.AgentSessionID
+	// sessionAdapter records which adapter file minted the handle. The resume
+	// offer is adapter-affine: a round whose plan (or in-flight fallback)
+	// lands on a different adapter must not see the foreign id — opencode
+	// rejects a claude-shaped UUID with "Expected a string starting with
+	// ses", and a bounded retry then re-burns a whole cold-start run.
+	sessionAdapter := task.AgentSessionAdapter
 	if sessionID != "" {
 		c.EvTrace(execCtx, taskID, "adapter_session_resume", map[string]any{
-			"session": sessionID, "agent": plan.Agent,
+			"session": sessionID, "agent": plan.Agent, "adapter": sessionAdapter,
 		})
 	}
 	var lastAgent, lastOutput, lastStderr string
@@ -1077,8 +1089,16 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 		})
 
 		runCtx := execCtx
-		if sessionID != "" {
-			runCtx = commander.WithResume(execCtx, sessionID)
+		// Attach the resume hint only when this round's planned adapter is the
+		// one that minted the handle (or the mint is unknown — a legacy row).
+		// buildAdapterRequest re-checks against the adapter that ACTUALLY
+		// executes, so a router-internal fallback is covered either way.
+		if sessionID != "" && (sessionAdapter == "" || sessionAdapter == plan.Adapter) {
+			runCtx = commander.WithResume(execCtx, sessionID, sessionAdapter)
+		} else if sessionID != "" {
+			c.EvTrace(execCtx, taskID, "adapter_session_skip", map[string]any{
+				"session": sessionID, "minted_by": sessionAdapter, "plan_adapter": plan.Adapter,
+			})
 		}
 		// A task stamped remote at intake carries off-node intent: commander
 		// holds its agent run to the restricted tool face unless the origin's
@@ -1116,11 +1136,12 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 		}
 		if res.SessionID != "" && res.SessionID != sessionID {
 			sessionID = res.SessionID
+			sessionAdapter = res.Adapter
 			// Persist immediately — not at the loop's end — because the
 			// interruption this exists for (a yield cancel, a crash) does
 			// not wait for a tidy exit. WithoutCancel rides past the very
 			// cancellation that makes the row worth writing.
-			if err := c.store.SetAgentSession(context.WithoutCancel(execCtx), taskID, sessionID, c.nodeID); err != nil {
+			if err := c.store.SetAgentSession(context.WithoutCancel(execCtx), taskID, sessionID, c.nodeID, res.Adapter); err != nil {
 				c.logger.Warn("persist agent session", "task", taskID, "err", err)
 			}
 		}
@@ -1221,7 +1242,7 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 				if beforeOK {
 					if after, serr := defense.SnapshotDir(workDir); serr == nil {
 						filesTruncated = after.Truncated()
-						lastChanged = c.filterHostDrift(workDir, before.Changed(after))
+						lastChanged = c.filterHostDrift(workDir, defense.DropVCSBookkeeping(before.Changed(after)))
 					}
 				}
 				park := map[string]any{
@@ -1401,6 +1422,13 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 				// someone else's timeout (M18).
 				c.logger.Debug("breaker: failure attributed to context, not agent",
 					"agent", breakerKey, "task", taskID)
+			} else if res.ExitCode == 124 && res.SessionID != "" {
+				// A timeout/watchdog kill carrying a live session is interrupted
+				// progress — the retry resumes the checkpoint — not evidence the
+				// agent is broken. Charging the breaker here is what tripped a
+				// healthy agent's circuit after three timeouts on a long task.
+				c.logger.Debug("breaker: timeout checkpoint is progress, not a failure",
+					"agent", breakerKey, "task", taskID)
 			} else if c.breaker.RecordFailure(breakerKey) {
 				c.audit(ctx, taskID, "circuit:open", plan.Agent, "failed", "agent failure threshold reached")
 			}
@@ -1432,7 +1460,7 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 					c.logger.Info("workdir snapshot partial", "task", taskID,
 						"truncated", after.Truncated(), "skipped", after.Skipped())
 				}
-				lastChanged = c.filterHostDrift(workDir, before.Changed(after))
+				lastChanged = c.filterHostDrift(workDir, defense.DropVCSBookkeeping(before.Changed(after)))
 			}
 		}
 
@@ -1570,7 +1598,7 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 			return roundOutcome{done: true, payload: bus.TaskResultPayload{
 				TaskID: taskID, AttemptID: attemptID, State: StateFailed, OK: false, ExitCode: res.ExitCode, Stderr: res.Stderr,
 				Tokens: res.Tokens, Cost: res.Cost, Agent: res.Agent, Model: res.Model, Injected: res.Injected,
-				AgentSessionID: sessionID,
+				AgentSessionID: sessionID, AgentSessionAdapter: sessionAdapter,
 			}}, nil
 		}
 
@@ -1673,10 +1701,11 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 						newAlts = append(newAlts, plan.Alternates[i+1:]...)
 						plan.Alternates = newAlts
 						sessionID = ""
+						sessionAdapter = ""
 						// A different agent owns no handle to the old one's
 						// conversation; leaving it persisted would resume the
 						// wrong adapter's session on the next interruption.
-						_ = c.store.SetAgentSession(context.WithoutCancel(execCtx), taskID, "", "")
+						_ = c.store.SetAgentSession(context.WithoutCancel(execCtx), taskID, "", "", "")
 						promoted = true
 						break
 					}
@@ -1713,7 +1742,7 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 		}
 	}
 	return roundOutcome{res: res, lastChanged: lastChanged, filesTruncated: filesTruncated,
-		verdict: verdict, sessionID: sessionID}, nil
+		verdict: verdict, sessionID: sessionID, sessionAdapter: sessionAdapter}, nil
 }
 
 // annotateAgentSubstitution prefixes the result with a note whenever the
@@ -1742,7 +1771,8 @@ func annotateAgentSubstitution(plan commander.Plan, res commander.Result) comman
 // Tier-2) or done. Every return is already the wire payload run reports.
 func (c *Core) finalizeRun(ctx context.Context, taskID string, task Task, plan commander.Plan,
 	required []string, attemptID, workDir string, res commander.Result,
-	lastChanged []string, filesTruncated bool, verdict entry.SuperviseVerdict, sessionID string) (bus.TaskResultPayload, error) {
+	lastChanged []string, filesTruncated bool, verdict entry.SuperviseVerdict,
+	sessionID, sessionAdapter string) (bus.TaskResultPayload, error) {
 	// A stage hands its work-dir to its successors as a content-addressed
 	// artifact. It is packed before the terminal branches below, not inside one of
 	// them, because a stage that parks in review still produced a tree and the
@@ -1835,7 +1865,7 @@ func (c *Core) finalizeRun(ctx context.Context, taskID string, task Task, plan c
 			ApprovalDisposition: string(ApprovalAcceptWork),
 			OK:                  true, ExitCode: res.ExitCode, Stdout: res.Stdout,
 			Tokens: res.Tokens, Cost: res.Cost, OutputArtifact: outputArtifact, ScreenOutput: screenOut, FilesChanged: filesChanged, FilesTruncated: filesTruncated, Agent: res.Agent, Model: res.Model, Injected: res.Injected,
-			AgentSessionID: sessionID,
+			AgentSessionID: sessionID, AgentSessionAdapter: sessionAdapter,
 		}, nil
 	}
 
@@ -1877,7 +1907,7 @@ func (c *Core) finalizeRun(ctx context.Context, taskID string, task Task, plan c
 				ApprovalDisposition: string(ApprovalAcceptWork),
 				OK:                  true, ExitCode: res.ExitCode, Stdout: res.Stdout,
 				Tokens: res.Tokens, Cost: res.Cost, OutputArtifact: outputArtifact, ScreenOutput: screenOut, FilesChanged: filesChanged, FilesTruncated: filesTruncated, Agent: res.Agent, Model: res.Model, Injected: res.Injected,
-				AgentSessionID: sessionID,
+				AgentSessionID: sessionID, AgentSessionAdapter: sessionAdapter,
 			}, nil
 		}
 		// Consent already on record: audit the auto-acceptance the way an
@@ -1906,7 +1936,7 @@ func (c *Core) finalizeRun(ctx context.Context, taskID string, task Task, plan c
 		Tokens: res.Tokens, Cost: res.Cost, OutputArtifact: outputArtifact, ScreenOutput: screenOut, FilesChanged: filesChanged, FilesTruncated: filesTruncated, Agent: res.Agent, Model: res.Model, Injected: res.Injected,
 		// Reported even though the local row cleared it: the delegator keeps
 		// the handle so a re-dispatch back here can offer ResumeSessionID.
-		AgentSessionID: sessionID,
+		AgentSessionID: sessionID, AgentSessionAdapter: sessionAdapter,
 	}, nil
 }
 

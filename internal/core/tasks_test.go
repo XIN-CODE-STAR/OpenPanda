@@ -586,7 +586,7 @@ func TestRequeueForRetryAtomic(t *testing.T) {
 	must(s.Fail(ctx, tk.TaskID, "root", "boom"))
 
 	// Wrong owner: conflict, and the row stays failed with its old attempt.
-	if _, err := s.RequeueForRetry(ctx, tk.TaskID, "intruder"); !errors.Is(err, ErrConflict) {
+	if _, err := s.RequeueForRetry(ctx, tk.TaskID, "intruder", false); !errors.Is(err, ErrConflict) {
 		t.Fatalf("expected ErrConflict for non-owner, got %v", err)
 	}
 	cur, err := s.Get(ctx, tk.TaskID)
@@ -597,7 +597,7 @@ func TestRequeueForRetryAtomic(t *testing.T) {
 		t.Fatalf("conflict wrote state=%s attempt=%s", cur.State, cur.AttemptID)
 	}
 
-	aid, err := s.RequeueForRetry(ctx, tk.TaskID, "root")
+	aid, err := s.RequeueForRetry(ctx, tk.TaskID, "root", false)
 	if err != nil {
 		t.Fatalf("requeue for retry: %v", err)
 	}
@@ -618,6 +618,70 @@ func TestRequeueForRetryAtomic(t *testing.T) {
 	}
 	if n, err := s.RetryCount(ctx, tk.TaskID); err != nil || n != 1 {
 		t.Fatalf("retry count = %d err=%v, want 1", n, err)
+	}
+	// An unflagged retry is a hard failure: the checkpoint counter stays zero.
+	if n, err := s.CheckpointRetries(ctx, tk.TaskID); err != nil || n != 0 {
+		t.Fatalf("checkpoint count = %d err=%v, want 0", n, err)
+	}
+}
+
+// TestCheckpointRetriesCountsSinceReview verifies the split retry accounting:
+// a checkpoint-flagged EvRetry counts on the checkpoint budget only, the
+// all-time hard RetryCount still sees it, and a review park resets the
+// checkpoint count while leaving hard retries untouched (a human sending the
+// task back grants fresh continuation rounds, not fresh failure budget).
+func TestCheckpointRetriesCountsSinceReview(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	tk := createTask(t, s, "", "t", "root")
+
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+	}
+	// One fail→retry cycle: RequeueForRetry moves failed -> dispatched, the
+	// run accepts it and fails again, leaving the row ready for the next.
+	requeue := func(checkpoint bool) {
+		t.Helper()
+		_, err := s.RequeueForRetry(ctx, tk.TaskID, "root", checkpoint)
+		must(err)
+		must(s.Accept(ctx, tk.TaskID, "root"))
+		must(s.Fail(ctx, tk.TaskID, "root", "boom again"))
+	}
+
+	must(s.Queue(ctx, tk.TaskID, "root"))
+	must(s.Dispatch(ctx, tk.TaskID, "root", "root"))
+	must(s.Accept(ctx, tk.TaskID, "root"))
+	must(s.Fail(ctx, tk.TaskID, "root", "boom"))
+
+	requeue(true)  // checkpoint 1
+	requeue(false) // hard retry 1
+	requeue(true)  // checkpoint 2
+
+	if n, err := s.RetryCount(ctx, tk.TaskID); err != nil || n != 3 {
+		t.Fatalf("retry count = %d err=%v, want 3 (all retries audit)", n, err)
+	}
+	if n, err := s.CheckpointRetries(ctx, tk.TaskID); err != nil || n != 2 {
+		t.Fatalf("checkpoint count = %d err=%v, want 2", n, err)
+	}
+
+	// The review park splits the checkpoint epoch: retries after it count
+	// fresh, retries before it are already accounted to the parked episode.
+	// Reject stands in for "send it back": review -> failed so the next
+	// checkpoint retry can land.
+	must(s.Review(ctx, tk.TaskID, "root", "looked"))
+	if n, err := s.CheckpointRetries(ctx, tk.TaskID); err != nil || n != 0 {
+		t.Fatalf("post-review checkpoint count = %d err=%v, want 0", n, err)
+	}
+	if n, err := s.RetryCount(ctx, tk.TaskID); err != nil || n != 3 {
+		t.Fatalf("post-review hard count = %d err=%v, want 3 (audit keeps history)", n, err)
+	}
+	must(s.Reject(ctx, tk.TaskID, "keep going"))
+	requeue(true)
+	if n, err := s.CheckpointRetries(ctx, tk.TaskID); err != nil || n != 1 {
+		t.Fatalf("post-review checkpoint count = %d err=%v, want 1", n, err)
 	}
 }
 
@@ -1467,5 +1531,217 @@ func TestRecoverRequeueSchedulableAndParked(t *testing.T) {
 	}
 	if g2.State != StateDispatched {
 		t.Fatalf("parked task state = %s, want %s (outbox custody survives restart)", g2.State, StateDispatched)
+	}
+}
+
+// TestRequeueStaleSubmitted covers the mid-life backstop for Recover's
+// submitted branch: a row whose submitter died between create and dispatch
+// (scheduled=0, no plan, no route event) would sit invisible to ListReady
+// until the next restart. The sweep requeues only rows untouched past the
+// cutoff — a submit still being routed was written seconds ago, and an
+// unreleased plan stage must stay held back for its dependency graph.
+func TestRequeueStaleSubmitted(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	stale := createTask(t, s, "", "stranded ask", "owner")
+	fresh := createTask(t, s, "", "live submit", "owner")
+	remote := createTask(t, s, "", "inbound delegate", "owner")
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE tasks SET remote=1 WHERE task_id=?`, remote.TaskID); err != nil {
+		t.Fatalf("mark remote: %v", err)
+	}
+	stage := createTask(t, s, "", "held stage", "owner")
+	if err := s.SetStage(ctx, stage.TaskID, "plan-stale-1", "st-1", []string{"st-0"}); err != nil {
+		t.Fatalf("set stage: %v", err)
+	}
+	old := time.Now().Add(-10 * time.Minute).Unix()
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE tasks SET updated_at=? WHERE task_id IN (?,?,?)`, old, stale.TaskID, remote.TaskID, stage.TaskID); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+
+	cutoff := time.Now().Add(-2 * time.Minute).Unix()
+	n, err := s.RequeueStaleSubmitted(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("requeue stale: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("requeued %d rows, want 1 (only the stale non-plan submit)", n)
+	}
+	g, err := s.Get(ctx, stale.TaskID)
+	if err != nil {
+		t.Fatalf("get stale: %v", err)
+	}
+	if g.State != StateQueued || !g.Scheduled {
+		t.Fatalf("stale submit = state:%s scheduled:%v, want queued+scheduled", g.State, g.Scheduled)
+	}
+	g, err = s.Get(ctx, fresh.TaskID)
+	if err != nil {
+		t.Fatalf("get fresh: %v", err)
+	}
+	if g.State != StateSubmitted || g.Scheduled {
+		t.Fatalf("fresh submit = state:%s scheduled:%v, want untouched submitted", g.State, g.Scheduled)
+	}
+	g, err = s.Get(ctx, remote.TaskID)
+	if err != nil {
+		t.Fatalf("get remote: %v", err)
+	}
+	if g.State != StateSubmitted {
+		t.Fatalf("remote submit = state:%s, want untouched (it is cancelled, never requeued)", g.State)
+	}
+	if n, err := s.CancelStaleRemoteSubmits(ctx, cutoff); err != nil {
+		t.Fatalf("cancel remote: %v", err)
+	} else if n != 1 {
+		t.Fatalf("cancelled %d remote submits, want 1", n)
+	}
+	g, err = s.Get(ctx, remote.TaskID)
+	if err != nil {
+		t.Fatalf("get remote post-cancel: %v", err)
+	}
+	if g.State != StateCancelled {
+		t.Fatalf("remote submit post-sweep = state:%s, want cancelled", g.State)
+	}
+	g, err = s.Get(ctx, stage.TaskID)
+	if err != nil {
+		t.Fatalf("get stage: %v", err)
+	}
+	if g.State != StateSubmitted {
+		t.Fatalf("plan stage = state:%s, want submitted (dependency graph holds it)", g.State)
+	}
+}
+
+// TestRequeueStaleClaims covers the claim-orphan class: a queue scheduler
+// claimed the row (dispatched, owner=self) and its process died before the
+// run's first lease renewal — ExpireTasks never sees it (lease NULL) and
+// ListReady never sees it (not queued). The sweep requeues only self-owned,
+// lease-free, outbox-free rows past the cutoff; a live claim or a parked
+// forward is left alone.
+func TestRequeueStaleClaims(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	orphan := createTask(t, s, "", "dead claim", "owner")
+	leased := createTask(t, s, "", "live claim", "owner")
+	parked := createTask(t, s, "", "parked forward", "owner")
+	for _, tk := range []Task{orphan, leased, parked} {
+		if err := s.Queue(ctx, tk.TaskID, "owner"); err != nil {
+			t.Fatalf("queue %s: %v", tk.Title, err)
+		}
+		if err := s.ClaimLocal(ctx, tk.TaskID, "self-node"); err != nil {
+			t.Fatalf("claim %s: %v", tk.Title, err)
+		}
+	}
+	// leased is still dispatched but its executor stamped a lease — the
+	// monitor's own path will reap it if the renewal stops.
+	if err := s.SetLease(ctx, leased.TaskID, int64(time.Hour/time.Millisecond)); err != nil {
+		t.Fatalf("lease: %v", err)
+	}
+	// parked holds custody in task_outbox — the flush owes its delivery.
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO task_outbox (peer, task_id, payload_json, payload_blob, transport_type, ttl, created_at)
+		 VALUES ('peer-x', ?, '', '', '', 0, ?)`, parked.TaskID, time.Now().Unix()); err != nil {
+		t.Fatalf("outbox: %v", err)
+	}
+	old := time.Now().Add(-10 * time.Minute).Unix()
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE tasks SET updated_at=? WHERE task_id IN (?,?,?)`, old, orphan.TaskID, leased.TaskID, parked.TaskID); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+
+	cutoff := time.Now().Add(-2 * time.Minute).Unix()
+	n, err := s.RequeueStaleClaims(ctx, "self-node", cutoff)
+	if err != nil {
+		t.Fatalf("requeue claims: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("requeued %d rows, want 1 (only the lease-free claim)", n)
+	}
+	g, err := s.Get(ctx, orphan.TaskID)
+	if err != nil {
+		t.Fatalf("get orphan: %v", err)
+	}
+	if g.State != StateQueued || !g.Scheduled {
+		t.Fatalf("orphan = state:%s scheduled:%v, want queued+scheduled", g.State, g.Scheduled)
+	}
+	g, err = s.Get(ctx, leased.TaskID)
+	if err != nil {
+		t.Fatalf("get leased: %v", err)
+	}
+	if g.State != StateDispatched {
+		t.Fatalf("leased claim = %s, want dispatched (the lease owns its timeout)", g.State)
+	}
+	g, err = s.Get(ctx, parked.TaskID)
+	if err != nil {
+		t.Fatalf("get parked: %v", err)
+	}
+	if g.State != StateDispatched {
+		t.Fatalf("parked forward = %s, want dispatched (outbox custody)", g.State)
+	}
+}
+
+// TestFailStaleLeaseless covers the dead-supervisor class: a running row
+// whose process died before renewLease's first stamp has lease_expires_at
+// NULL — invisible to ExpireTasks (which requires a lease to expire). The
+// sweep fails only self-owned, lease-free, deadline-free stale rows.
+func TestFailStaleLeaseless(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	dead := createTask(t, s, "", "dead run", "owner")
+	alive := createTask(t, s, "", "renewed run", "owner")
+	dtn := createTask(t, s, "", "dtn run", "owner")
+	for _, tk := range []Task{dead, alive, dtn} {
+		if err := s.Queue(ctx, tk.TaskID, "owner"); err != nil {
+			t.Fatalf("queue %s: %v", tk.Title, err)
+		}
+		if err := s.ClaimLocal(ctx, tk.TaskID, "self-node"); err != nil {
+			t.Fatalf("claim %s: %v", tk.Title, err)
+		}
+		if err := s.Accept(ctx, tk.TaskID, "self-node"); err != nil {
+			t.Fatalf("accept %s: %v", tk.Title, err)
+		}
+	}
+	if err := s.SetLease(ctx, alive.TaskID, int64(time.Hour/time.Millisecond)); err != nil {
+		t.Fatalf("lease alive: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE tasks SET deadline_unix=? WHERE task_id=?`, time.Now().Add(time.Hour).Unix(), dtn.TaskID); err != nil {
+		t.Fatalf("deadline: %v", err)
+	}
+	old := time.Now().Add(-10 * time.Minute).Unix()
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE tasks SET updated_at=? WHERE task_id IN (?,?,?)`, old, dead.TaskID, alive.TaskID, dtn.TaskID); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+
+	cutoff := time.Now().Add(-2 * time.Minute).Unix()
+	n, err := s.FailStaleLeaseless(ctx, "self-node", cutoff)
+	if err != nil {
+		t.Fatalf("fail leaseless: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("failed %d rows, want 1 (only the dead lease-free run)", n)
+	}
+	g, err := s.Get(ctx, dead.TaskID)
+	if err != nil {
+		t.Fatalf("get dead: %v", err)
+	}
+	if g.State != StateFailed {
+		t.Fatalf("dead run = %s, want failed", g.State)
+	}
+	g, err = s.Get(ctx, alive.TaskID)
+	if err != nil {
+		t.Fatalf("get alive: %v", err)
+	}
+	if g.State != StateRunning {
+		t.Fatalf("renewed run = %s, want running", g.State)
+	}
+	g, err = s.Get(ctx, dtn.TaskID)
+	if err != nil {
+		t.Fatalf("get dtn: %v", err)
+	}
+	if g.State != StateRunning {
+		t.Fatalf("dtn run = %s, want running (deadline-bound, not lease-bound)", g.State)
 	}
 }

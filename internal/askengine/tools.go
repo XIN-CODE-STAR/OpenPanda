@@ -452,7 +452,12 @@ func (e *Engine) dispatchTaskTool(prompt string, scope AskScope, authorize bool,
 				return "", fmt.Errorf("未加载能力卡片，无法派发任务")
 			}
 			cb.progress(Progress{Kind: ProgressTask, Name: spec.Title})
-			res := e.submitTask(ctx, spec, prompt, authorize, scope, "", cb)
+			// The tool is a dispatch, not the turn's outcome: in queue mode it
+			// returns the queued receipt (awaitQueued=false) so several calls
+			// in one round — e.g. tasks for different projects — all land in
+			// the scheduler at once and run in parallel instead of serializing
+			// inside the tool loop.
+			res := e.submitTask(ctx, spec, prompt, authorize, scope, "", cb, false)
 			capture.add(res)
 			switch {
 			case res.NeedsApproval:

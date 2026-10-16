@@ -127,12 +127,21 @@ func runAsk(args []string) {
 		os.Exit(2)
 	}
 
+	// With a live queue consumer (the daemon, or the console) tasks enqueue
+	// and the ask follows them to settle — the run survives this process
+	// exiting, and same-worktree serialization is enforced by resource keys
+	// rather than by this one-off process. Without a consumer the ask owns
+	// the whole turn anyway, so it submits inline: a queued task with nobody
+	// to claim it would just sit.
+	queueLive := queueConsumerAlive(cfg)
 	engine, err := askengine.New(context.Background(), cfg, askengine.Options{
-		CardPath:   *cardPath,
-		MCPCommand: *mcpCmd,
-		ReplyASCII: isLinuxConsole(),
-		Locale:     loc,
-		ConfigPath: *configPath,
+		CardPath:    *cardPath,
+		MCPCommand:  *mcpCmd,
+		ReplyASCII:  isLinuxConsole(),
+		Locale:      loc,
+		ConfigPath:  *configPath,
+		QueueTasks:  queueLive,
+		AwaitQueued: queueLive,
 	})
 	if err != nil {
 		fatal("ask engine", err)
