@@ -989,6 +989,7 @@ const de: Messages = {
   'models.fetch': 'Modelle abrufen',
   'models.fetchFail': 'Abruf fehlgeschlagen',
   'models.fetched': '{n} Modelle verfügbar — oben auswählen.',
+  'models.pickFromList': 'Aus der geladenen Liste wählen…',
   'models.keySaved': 'Key gespeichert',
   'models.keyReuseHint': 'gespeicherter Key wird wiederverwendet',
   'models.keyReuseHelp': 'Für diesen Anbieter existiert bereits ein Key — leer lassen, um ihn wiederzuverwenden.',

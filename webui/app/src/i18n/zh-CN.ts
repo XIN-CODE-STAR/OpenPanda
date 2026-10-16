@@ -981,6 +981,7 @@ const zhCN: Messages = {
   'models.fetch': '拉取模型列表',
   'models.fetchFail': '拉取失败',
   'models.fetched': '共 {n} 个可用模型 —— 在上方选择。',
+  'models.pickFromList': '从拉取到的列表中选择…',
   'models.keySaved': '已存密钥',
   'models.keyReuseHint': '将复用已存密钥',
   'models.keyReuseHelp': '该供应商已有密钥 —— 留空即可复用。',

@@ -975,6 +975,7 @@ const ja: Messages = {
   'models.fetch': 'モデル一覧を取得',
   'models.fetchFail': '取得に失敗しました',
   'models.fetched': '{n} 件のモデルが利用可能 —— 上で選択してください。',
+  'models.pickFromList': '取得した一覧から選択…',
   'models.keySaved': 'キー保存済み',
   'models.keyReuseHint': '保存済みキーを再利用',
   'models.keyReuseHelp': 'このプロバイダーのキーは既に保存済みです —— 空欄で再利用します。',

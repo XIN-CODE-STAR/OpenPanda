@@ -40,6 +40,10 @@ OpenPanda (**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **A
 
 ## [Unreleased]
 
+### Corregido
+
+- **Consola web: el selector de modelo de «añadir modelo» ya se abre** —— el campo usaba `<input list="…">`, y el navegador filtra las sugerencias del datalist por el valor que el campo ya contiene: el modelo predeterminado del catálogo (p. ej. `glm-4-plus`) venía rellenado, así que el caret abría una lista con ese único id — el desplegable parecía muerto. Ahora el propio campo lleva su selector: el caret dentro del campo abre todos los id devueltos por el proveedor, la elección se escribe de vuelta en el campo y el nombre del modelo no se repite en un segundo control.
+
 ## [0.0.11] - 2026-10-15 — "Rendezvous"
 
 La v0.0.11 estable — nombre en clave **Rendezvous**, el encuentro orbital. Este corte pliega la línea de vista previa — AEAD por sesión negociado dentro del hello firmado, emparejamiento estilo Bluetooth, balizas de descubrimiento firmadas e identidades `k:<pub>` estables, fijación estricta de nodos a través de rutas multisalto, el plano de datos de malla parcial, el tablero de mensajes entre tareas y la reversión git del trabajo de agentes — junto con las adiciones del ciclo: los nodos de escritorio ganan ojos y manos de computer-use (captura de pantalla y entrada sintetizada como actuadores de primera clase, tanto en POSIX como en Windows de serie), la salida de tareas se vuelve recuperable como artifacts empaquetados desde la CLI y la consola, y el contenido de pantalla viaja bajo su propia regla de confianza mesh-only de extremo a extremo — a través de delegaciones, pushes, pulls y de la salida de una etapa de pantalla consumida como entrada de la siguiente.

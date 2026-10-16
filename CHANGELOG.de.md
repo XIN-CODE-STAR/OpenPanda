@@ -40,6 +40,10 @@ OpenPanda (**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **A
 
 ## [Unreleased]
 
+### Behoben
+
+- **Web-Konsole: Die Modellauswahl beim Hinzufügen eines Modells öffnet sich wieder** —— das Feld nutzte `<input list="…">`, und der Browser filtert Datalist-Vorschläge nach dem bereits eingegebenen Wert: Der Katalog-Standard (z. B. `glm-4-plus`) war vorbelegt, sodass das Aufklappen nur diese eine ID zeigte — das Dropdown wirkte tot. Jetzt trägt das Feld seine eigene Auswahl: Ein Caret im Feld öffnet alle vom Anbieter zurückgegebenen IDs, die Auswahl wird direkt ins Feld geschrieben, und der Modellname erscheint nicht mehr in einem zweiten Steuerelement.
+
 ## [0.0.11] - 2026-10-15 — "Rendezvous"
 
 Das stabile v0.0.11 — Codename **Rendezvous**, das orbitale Treffen. Dieser Schnitt faltet die Vorschau-Linie — per-Session-AEAD im signierten Hello, Bluetooth-artiges Pairing, signierte Discovery-Beacons und stabile `k:<pub>`-Identitäten, harte Knoten-Pins über Multi-Hop-Routen, die Partial-Mesh-Datenebene, das Task-Nachrichtenbrett und das Git-Rollback für Agentenarbeit — zusammen mit den Neuerungen dieses Zyklus: Desktop-Knoten bekommen Computer-Use-Augen und -Hände (Bildschirmaufnahme und synthetisierte Eingaben als erstklassige Aktuatoren, unter POSIX wie auf einem Standard-Windows), Task-Ausgaben werden als gepackte Artifacts aus CLI und Konsole abrufbar, und Bildschirminhalte reisen durchgehend unter ihrer eigenen mesh-only-Vertrauensregel — über Delegation, Pushes, Pulls und eine Bildschirmstufen-Ausgabe, die als Eingabe der nächsten Stufe konsumiert wird.
