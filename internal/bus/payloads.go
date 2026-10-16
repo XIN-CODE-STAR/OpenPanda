@@ -189,6 +189,13 @@ type TaskDelegatePayload struct {
 	Risk            string   `json:"risk,omitempty"`
 	AttemptID       string   `json:"attempt_id,omitempty"`
 	ResumeSessionID string   `json:"resume_session_id,omitempty"`
+	// ResumeSessionAdapter names the adapter file that minted
+	// ResumeSessionID; the executor drops the hint when the run lands on a
+	// different adapter rather than feeding it a foreign handle. It stays
+	// OUT of ConsentDigest: it is routing provenance, not consent — and
+	// keeping it unbound lets a mixed-version mesh verify a delegate frame
+	// whose sender did not yet emit the field.
+	ResumeSessionAdapter string `json:"resume_session_adapter,omitempty"`
 	// ResourceJSON is the task's declared hardware requirement (a marshalled
 	// entry.ResourceProfile). It travels with the delegation because the
 	// requirement is a property of the work, not of the node that first saw it:
@@ -553,6 +560,10 @@ type TaskResultPayload struct {
 	DurationMS     int64  `json:"duration_ms,omitempty"`
 	SessionID      string `json:"session_id,omitempty"`
 	AgentSessionID string `json:"agent_session_id,omitempty"`
+	// AgentSessionAdapter names the adapter file that minted
+	// AgentSessionID; the delegator stores it so a later re-dispatch only
+	// offers the handle back to a run that can consume it.
+	AgentSessionAdapter string `json:"agent_session_adapter,omitempty"`
 }
 
 // maxWireText bounds one text field an executor fills from a child process's

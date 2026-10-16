@@ -703,6 +703,14 @@ const (
 	// dies early retries into a working one instead of burning the whole
 	// agent budget on a corpse.
 	DefaultSilenceS = 240
+	// DefaultTaskTokenBudget is the per-task metered-token quota stamped at
+	// creation when nothing upstream set one (§6.1). Telemetry puts a heavy
+	// single-agent audit at ~0.3M input+output tokens per round; 2M covers
+	// roughly ten such rounds — generous for real work, lethal to a retry or
+	// resume loop re-running full explorations. It bounds only the adapter's
+	// reported input+output spend (cache reads ride free), and an exhausted
+	// task parks in review for a top-up rather than dying.
+	DefaultTaskTokenBudget = 2_000_000
 )
 
 // MessagesConfig bounds the inter-task sibling board (the message layer
@@ -744,6 +752,12 @@ type TimeoutsConfig struct {
 	// five minutes, and before this knob existed such a task was killed at the
 	// default with "command timed out" and no way to extend it.
 	NativeS int `yaml:"native_s"`
+	// TaskTokenBudget is the per-task metered-token quota stamped on newly
+	// created local tasks (§6.1): agent rounds and judge calls draw it down,
+	// and an exhausted task parks in review instead of burning on. 0 uses
+	// DefaultTaskTokenBudget; a negative value leaves new tasks unbounded —
+	// the pre-budget legacy behaviour.
+	TaskTokenBudget int64 `yaml:"task_token_budget"`
 }
 
 // SilenceTimeout returns the configured progress silence limit: DefaultSilenceS
@@ -792,6 +806,20 @@ func (t TimeoutsConfig) Rounds() int {
 		return t.SuperviseRounds
 	}
 	return DefaultSuperviseRoundsCf
+}
+
+// TokenBudget resolves the per-task metered-token quota stamped at creation:
+// DefaultTaskTokenBudget when unset, the configured value when positive, and
+// -1 when explicitly disabled — the caller leaves such tasks unbounded.
+func (t TimeoutsConfig) TokenBudget() int64 {
+	switch {
+	case t.TaskTokenBudget < 0:
+		return -1
+	case t.TaskTokenBudget == 0:
+		return DefaultTaskTokenBudget
+	default:
+		return t.TaskTokenBudget
+	}
 }
 
 // API type wire values: which request/response dialect the provider speaks.
@@ -1395,6 +1423,7 @@ func Default() *Config {
 			TaskLeaseS:      DefaultTaskLeaseS,
 			AgentS:          DefaultAgentTimeoutS,
 			SuperviseRounds: DefaultSuperviseRoundsCf,
+			TaskTokenBudget: DefaultTaskTokenBudget,
 		},
 	}
 }

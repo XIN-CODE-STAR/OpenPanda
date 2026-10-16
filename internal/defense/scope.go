@@ -166,6 +166,25 @@ func vcsBookkeeping(rel string) bool {
 	return true
 }
 
+// DropVCSBookkeeping removes .git-internal bookkeeping paths from a
+// changed-file list. The list an agent "changed" should carry real files —
+// objects, refs, the index and HEAD churn on every run (panda's own
+// baseline snapshots write refs there too), so reporting them as task
+// output is noise that also misleads the supervisor into flagging
+// orchestrator artifacts as agent edits. What stays is what drift already
+// treats as meaningful: hooks and config remain listed, and so does
+// everything outside .git.
+func DropVCSBookkeeping(changed []string) []string {
+	out := make([]string, 0, len(changed))
+	for _, p := range changed {
+		if vcsBookkeeping(filepath.ToSlash(filepath.Clean(p))) {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
 // DriftUnder is Drift with the roots re-anchored to workDir first. The entry
 // model declares scope as the user phrases it, which is not always relative to
 // the task's working directory: a spec written from the project root can say

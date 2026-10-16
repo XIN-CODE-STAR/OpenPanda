@@ -51,21 +51,36 @@ type progressKey struct{}
 // resumes the agent's own conversation instead of cold-starting.
 type resumeKey struct{}
 
+// resumeRef pairs the session handle with the adapter that minted it, so the
+// request builder can drop the resume hint when the run lands on a different
+// adapter (empty Adapter = unknown producer, offer allowed).
+type resumeRef struct {
+	ID      string
+	Adapter string
+}
+
 // WithResume attaches an agent session id to the execution context;
 // runAdapterProcess copies it into AdapterRequest.Resume. Empty is a no-op.
-func WithResume(ctx context.Context, sessionID string) context.Context {
+// adapter names the producer's adapter file ("opencode.py"): a session handle
+// is only meaningful to the adapter that minted it, so a supervision round
+// whose plan (or fallback chain) lands on a different adapter must not be
+// offered the foreign handle — opencode answering "Expected a string
+// starting with ses" to a claude UUID, then cold-starting and re-burning the
+// whole run on every retry, is exactly the failure this prevents. An empty
+// adapter means the producer is unknown (a legacy row); the offer stands.
+func WithResume(ctx context.Context, sessionID, adapter string) context.Context {
 	if sessionID == "" {
 		return ctx
 	}
-	return context.WithValue(ctx, resumeKey{}, sessionID)
+	return context.WithValue(ctx, resumeKey{}, resumeRef{ID: sessionID, Adapter: adapter})
 }
 
 // ResumeID reads the session id WithResume attached — "" when none. The
 // adapter runner and tests use it to observe what the supervision loop
 // threaded through.
 func ResumeID(ctx context.Context) string {
-	if v, ok := ctx.Value(resumeKey{}).(string); ok {
-		return v
+	if v, ok := ctx.Value(resumeKey{}).(resumeRef); ok {
+		return v.ID
 	}
 	return ""
 }
@@ -290,6 +305,22 @@ func WithEffort(ctx context.Context, effort string) context.Context {
 	return context.WithValue(ctx, effortKey{}, effort)
 }
 
+// complexityKey carries the task's 0–1 complexity score down to the adapter
+// request without widening the runAdapter seam's signature.
+type complexityKey struct{}
+
+// WithComplexity attaches the entry classifier's complexity score to the
+// execution context; runAdapterProcess copies it into
+// AdapterRequest.Complexity. Adapters that pick among several models
+// (opencode's free/paid roster) read it to prefer their free tier on simple
+// tasks. Non-positive is a no-op — 0 means the task was never scored.
+func WithComplexity(ctx context.Context, c float64) context.Context {
+	if c <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, complexityKey{}, c)
+}
+
 // sessionKey requests the adapter's interactive session mode.
 type sessionKey struct{}
 
@@ -399,6 +430,12 @@ type progressWriter struct {
 	// Write calls; buffering here keeps a split line from being misread as a
 	// complete line (which would drop a progress note or corrupt diagnostics).
 	partial []byte
+	// lastSession is the agent-session handle the adapter announced in a
+	// {"type":"event","ev":"session","id":…} line. It is latched here —
+	// independent of the transcript sink — so a run killed before its result
+	// envelope could be emitted (silence watchdog, tool-call fuse, hard
+	// limit) still returns the resumable checkpoint instead of losing it.
+	lastSession string
 }
 
 // maxProgressLine bounds partial: an event line carries bounded-but-real
@@ -493,9 +530,6 @@ const maxAgentEventInput = 8 * 1024
 // structured sink, after redaction and the hard bounds. Malformed events
 // are dropped, not diagnosed: the CLI's own transcript stays authoritative.
 func (w *progressWriter) event(b []byte) {
-	if w.evSink == nil {
-		return
-	}
 	var ev struct {
 		Ev        string          `json:"ev"`
 		ID        string          `json:"id"`
@@ -509,6 +543,20 @@ func (w *progressWriter) event(b []byte) {
 		IsError   bool            `json:"is_error"`
 	}
 	if err := json.Unmarshal(b, &ev); err != nil || ev.Ev == "" {
+		return
+	}
+	// "session" is the adapter announcing the conversation id it minted (or
+	// is resuming under). Latch it regardless of whether a transcript sink
+	// is attached: the kill paths below read it to turn a dead run into a
+	// resumable checkpoint. It is control-plane metadata, not agent output —
+	// it never reaches the transcript.
+	if ev.Ev == "session" {
+		if ev.ID != "" {
+			w.lastSession = ev.ID
+		}
+		return
+	}
+	if w.evSink == nil {
 		return
 	}
 	clamp := func(s string) string {
@@ -543,6 +591,16 @@ func (w *progressWriter) event(b []byte) {
 		}
 	}
 	w.evSink(out)
+}
+
+// session returns the session handle the adapter announced in a "session"
+// event ("" when none arrived). Read after the process exits; Write's copier
+// goroutines have drained by then, and the mutex still guards the read for
+// the watchdog paths that race the final lines.
+func (w *progressWriter) session() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.lastSession
 }
 
 // String returns the non-progress stderr retained for diagnostics, flushing
@@ -728,6 +786,11 @@ type AdapterRequest struct {
 	MaxBudgetUSD float64 `json:"max_budget_usd,omitempty"`
 	// Effort names the CLI's reasoning-effort level (claude --effort).
 	Effort string `json:"effort,omitempty"`
+	// Complexity is the task's 0–1 difficulty score from the entry
+	// classifier (§7.3). Adapters that pick among several served models
+	// (opencode) read it to prefer their free tier on simple tasks.
+	// 0 = unset — unclassified work gets the adapter's default ordering.
+	Complexity float64 `json:"complexity,omitempty"`
 	// Session asks the adapter to keep the agent process alive across
 	// turns: the request is followed by line-framed {"type":"user","text"}
 	// turn inputs and each turn produces one result envelope (Phase 6).
@@ -867,6 +930,25 @@ var (
 	silenceHeartbeat = 45 * time.Second
 )
 
+const (
+	// defaultAdapterToolCallCap bounds the tool calls one adapter run may
+	// stream. Adapters that honour req.MaxTurns enforce their own turn limit
+	// CLI-side; this Go-side fuse covers the ones that ignore it (opencode,
+	// dsh-style harnesses), where a non-converging model otherwise grinds
+	// until the wall-clock timeout. 400 is ≈2× the heaviest legitimate run
+	// observed in telemetry (~180 calls for a full-repo audit); a typical
+	// task stays under 100.
+	defaultAdapterToolCallCap = 400
+	// adapterToolCallsPerTurn translates an explicit spec max_turns into
+	// tool-call slack: a turn can fan out several parallel tool calls, so
+	// the fuse sits well above the declared turn count.
+	adapterToolCallsPerTurn = 8
+)
+
+// adapterToolCallCap is the package-level fuse; a var so tests can retune it
+// without waiting through 400 streamed events.
+var adapterToolCallCap = defaultAdapterToolCallCap
+
 // SetAgentTimeout retunes the agent-adapter execution budget. A deep-learning
 // stage legitimately runs far longer than a code edit, so the limit has to be
 // operator-tunable rather than a compile-time constant. Values under a minute
@@ -910,8 +992,8 @@ func buildAdapterRequest(ctx context.Context, name, prompt, cwd string) (Adapter
 		timeout = int(d / time.Second)
 	}
 	req := AdapterRequest{Prompt: prompt, TimeoutS: timeout, CWD: cwd}
-	if rid, ok := ctx.Value(resumeKey{}).(string); ok {
-		req.Resume = rid
+	if ref, ok := ctx.Value(resumeKey{}).(resumeRef); ok && (ref.Adapter == "" || ref.Adapter == name) {
+		req.Resume = ref.ID
 	}
 	if policy, ok := ctx.Value(toolsPolicyKey{}).(string); ok {
 		req.ToolsPolicy = policy
@@ -946,6 +1028,9 @@ func buildAdapterRequest(ctx context.Context, name, prompt, cwd string) (Adapter
 	}
 	if ef, ok := ctx.Value(effortKey{}).(string); ok {
 		req.Effort = ef
+	}
+	if cx, ok := ctx.Value(complexityKey{}).(float64); ok && cx > 0 {
+		req.Complexity = cx
 	}
 	if tid := TaskID(ctx); tid != "" {
 		req.TaskID = tid
@@ -1046,6 +1131,7 @@ func runAdapterProcess(ctx context.Context, name string, prompt string, cwd stri
 		actMu        sync.Mutex
 		lastActivity = time.Now()
 		stalled      bool
+		cappedCalls  bool
 	)
 	touch := func() {
 		actMu.Lock()
@@ -1126,6 +1212,28 @@ func runAdapterProcess(ctx context.Context, name string, prompt string, cwd stri
 	stderr.onActivity = touch
 	stderr.sink = progressSink
 	stderr.evSink = AgentEvents(ctx)
+	// Tool-call fuse (P0): adapters that ignore req.MaxTurns have no other
+	// turn bound — a model that never converges would otherwise loop tool
+	// calls until the wall-clock timeout, spending tokens the whole time.
+	// Count tool_use events at the Go boundary and kill the run past the
+	// budget; an explicit spec max_turns widens the fuse proportionally.
+	if evSink := stderr.evSink; evSink != nil {
+		callBudget := adapterToolCallCap
+		if req.MaxTurns > 0 && req.MaxTurns*adapterToolCallsPerTurn > callBudget {
+			callBudget = req.MaxTurns * adapterToolCallsPerTurn
+		}
+		var calls atomic.Int64
+		stderr.evSink = func(ev AgentEvent) {
+			if ev.Ev == "tool_use" && callBudget > 0 && calls.Add(1) > int64(callBudget) {
+				actMu.Lock()
+				cappedCalls = true
+				actMu.Unlock()
+				cancel()
+				return
+			}
+			evSink(ev)
+		}
+	}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	// Custom writers spawn copy goroutines Wait blocks on; a detached
@@ -1144,12 +1252,21 @@ func runAdapterProcess(ctx context.Context, name string, prompt string, cwd stri
 	if err := cmd.Run(); err != nil {
 		actMu.Lock()
 		wasStalled := stalled
+		wasCapped := cappedCalls
 		actMu.Unlock()
+		// The process died before its result envelope — any session it
+		// announced mid-run is the only checkpoint left. Reporting it lets
+		// the kill paths below (silence, fuse, hard limit) read as resumable
+		// interruptions rather than dead ends.
+		checkpoint := stderr.session()
 		if wasStalled {
-			return AgentResult{OK: false, Result: fmt.Sprintf("adapter stalled: no progress or output received for %v (silence timeout)", silenceLimit), ExitCode: 124}
+			return AgentResult{OK: false, Result: fmt.Sprintf("adapter stalled: no progress or output received for %v (silence timeout)", silenceLimit), ExitCode: 124, SessionID: checkpoint}
+		}
+		if wasCapped {
+			return AgentResult{OK: false, Result: "agent tool-call budget exhausted: the run kept calling tools past its fuse and was killed before it could loop indefinitely", ExitCode: 124, SessionID: checkpoint}
 		}
 		if ctx.Err() == context.DeadlineExceeded {
-			return AgentResult{OK: false, Result: "adapter timed out (hard limit)", ExitCode: 124}
+			return AgentResult{OK: false, Result: "adapter timed out (hard limit)", ExitCode: 124, SessionID: checkpoint}
 		}
 		code := 1
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -1159,18 +1276,23 @@ func runAdapterProcess(ctx context.Context, name string, prompt string, cwd stri
 		if msg == "" {
 			msg = err.Error()
 		}
-		return AgentResult{OK: false, Result: security.Redact(msg), ExitCode: code}
+		return AgentResult{OK: false, Result: security.Redact(msg), ExitCode: code, SessionID: checkpoint}
 	}
 
 	var out AgentResult
 	out.ExitCode = 0
 	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
-		return AgentResult{OK: false, Result: security.Redact(fmt.Sprintf("adapter output not JSON: %s", stdout.String())), ExitCode: 1}
+		return AgentResult{OK: false, Result: security.Redact(fmt.Sprintf("adapter output not JSON: %s", stdout.String())), ExitCode: 1, SessionID: stderr.session()}
 	}
 	// A well-behaved adapter returns JSON; scrub anything secret-shaped it may
 	// have echoed into the result before it enters the task/log pipeline.
 	out.Result = security.Redact(out.Result)
 	out.Stderr = security.Redact(stderr.String())
+	if out.SessionID == "" {
+		// The stream announced a session the final envelope forgot: keep
+		// the announced handle so a follow-up round can still resume it.
+		out.SessionID = stderr.session()
+	}
 	return out
 }
 

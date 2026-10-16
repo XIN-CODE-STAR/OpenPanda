@@ -939,6 +939,12 @@ func (m tuiModel) finalizeWizard() (tuiModel, tea.Cmd) {
 				Locale:     loc,
 				ConfigPath: m.r.configPath,
 				AsyncPeers: true,
+				// Tasks go through the scheduler queue and the ask follows
+				// them to settle: same-worktree work stays serialized,
+				// independent projects run in parallel, and the turn still
+				// reports the outcome like an inline execution.
+				QueueTasks:  true,
+				AwaitQueued: true,
 			})
 			if err == nil {
 				eng = built

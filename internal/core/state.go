@@ -211,6 +211,13 @@ type Task struct {
 	// wire) but must never adopt it for its own adapter or hand it onward.
 	AgentSessionID   string
 	AgentSessionNode string
+	// AgentSessionAdapter is the adapter file that minted AgentSessionID
+	// ("opencode.py") — the handle's second affinity axis alongside the node.
+	// A retry or fallback that lands on a different adapter must not resume
+	// the foreign handle: the adapter cannot parse it (opencode rejects
+	// non-"ses" ids outright), the attempt dies on a provider error, and a
+	// bounded retry loop re-burns a whole cold-start run per round.
+	AgentSessionAdapter string
 
 	// Plan-plane metadata (v0.0.6). A stage of a plan is an ordinary task, so
 	// these are the only things it carries beyond one: PlanID/StageID name its

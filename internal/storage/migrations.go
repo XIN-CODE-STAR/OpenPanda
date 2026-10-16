@@ -70,6 +70,7 @@ var migrations = []Migration{
 	{Version: 43, Name: "add_employee_trust", Apply: migrateV43},
 	{Version: 44, Name: "add_task_messages", Apply: migrateV44},
 	{Version: 45, Name: "add_tasks_screen_output", Apply: migrateV45},
+	{Version: 46, Name: "add_task_agent_session_adapter", Apply: migrateV46},
 }
 
 // migrateV44 adds task_messages: the per-scope message board sibling tasks
@@ -1136,4 +1137,18 @@ func migrateV45(tx MigrationExec) error {
 		return err
 	}
 	return addColumnIfMissingTx(tx, "tasks", "screen_output", "INTEGER NOT NULL DEFAULT 0")
+}
+
+// migrateV46 adds tasks.agent_session_adapter: which adapter file minted the
+// session handle in agent_session_id. V23 already pins the handle to its node;
+// the adapter column is the second half of that affinity — an agent fallback
+// or a retry that lands on a different adapter must not resume a foreign
+// handle (opencode rejects non-"ses" ids with a 400, so a claude_uuid-shaped
+// handle burned a whole cold-start run on every retry before the task died).
+func migrateV46(tx MigrationExec) error {
+	exists, err := tableExistsTx(tx, "tasks")
+	if err != nil || !exists {
+		return err
+	}
+	return addColumnIfMissingTx(tx, "tasks", "agent_session_adapter", "TEXT NOT NULL DEFAULT ''")
 }

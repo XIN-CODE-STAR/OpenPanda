@@ -364,6 +364,12 @@ injection:
 #   native_s: 1800
 #   # Cap on the execute → judge → re-dispatch loop per task. Default 5.
 #   supervise_rounds: 5
+#   # Per-task metered-token quota (§6.1) stamped on newly created local
+#   # tasks: every agent round and judge call draws it down, and an exhausted
+#   # task parks in review instead of burning on. Default 2000000 (input +
+#   # output tokens; cache reads are not counted). Set -1 to leave new tasks
+#   # unbounded (the pre-budget behaviour).
+#   task_token_budget: 2000000
 
 # Sibling-message board (inter-task notes within one plan or one parent's
 # child set). The board meters rather than forbids: a sender past its budget

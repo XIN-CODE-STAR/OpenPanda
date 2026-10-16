@@ -648,6 +648,7 @@ func (r *Router) execAgent(ctx context.Context, plan Plan, prompt string, cwd st
 			Tokens:        ar.Tokens,
 			Cost:          ar.Cost,
 			Agent:         name,
+			Adapter:       ag.Adapter,
 			Usage:         ar.Usage,
 			SessionID:     ar.SessionID,
 			Model:         ar.Model,
@@ -659,6 +660,16 @@ func (r *Router) execAgent(ctx context.Context, plan Plan, prompt string, cwd st
 
 		// If execution succeeded, or if user explicitly cancelled, return immediately.
 		if ar.OK || ctx.Err() != nil {
+			return res
+		}
+
+		// A timeout (or stall/budget kill — all exit 124) whose run already
+		// minted a session is a checkpoint, not a dead end: the orchestrator's
+		// retry resumes that conversation where it stopped. Failing over to an
+		// alternate here would cold-start a different CLI at minute zero and
+		// overwrite the persisted handle with the alternate's fresh session,
+		// discarding everything the timed-out run accumulated.
+		if ar.ExitCode == 124 && ar.SessionID != "" {
 			return res
 		}
 
@@ -693,6 +704,10 @@ type Result struct {
 	// primary when the fallback chain kicked in). Empty for non-agent plans
 	// and when no candidate was usable at all.
 	Agent string
+	// Adapter is the adapter file that ran ("opencode.py") — the owner of
+	// SessionID's wire shape. Persisted alongside the session handle so a
+	// later round offers resume only to the adapter that minted it.
+	Adapter string
 	// Usage is the structured token breakdown the adapter reported (nil when
 	// the adapter is a plain-text one); SessionID is the agent session a
 	// follow-up round can resume (empty when the adapter has none).

@@ -72,7 +72,7 @@ func runBareFinalize(t *testing.T, c *Core, files map[string]string) (Task, stri
 	res, err := c.finalizeRun(ctx, taskID, task,
 		commander.Plan{Kind: "native", Tier: 1}, nil, "attempt-1", workDir,
 		commander.Result{ExitCode: 0, Stdout: "ok"}, nil, false,
-		entry.SuperviseVerdict{}, "")
+		entry.SuperviseVerdict{}, "", "")
 	if err != nil {
 		t.Fatalf("finalizeRun: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestFinalizeRunSkipsPinnedWorkDir(t *testing.T) {
 	}
 	res, err := c.finalizeRun(ctx, taskID, task,
 		commander.Plan{Kind: "native", Tier: 1}, nil, "attempt-1", pinned,
-		commander.Result{ExitCode: 0}, nil, false, entry.SuperviseVerdict{}, "")
+		commander.Result{ExitCode: 0}, nil, false, entry.SuperviseVerdict{}, "", "")
 	if err != nil {
 		t.Fatalf("finalizeRun: %v", err)
 	}

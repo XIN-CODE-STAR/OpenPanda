@@ -20,8 +20,11 @@ package askengine
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Xustalis/OpenPanda/internal/bus"
@@ -69,6 +72,8 @@ func (e *Engine) awaitSettled(ctx context.Context, sched *core.Core, cur core.Ta
 	cb.progress(Progress{Kind: ProgressWait, Name: last})
 	tick := time.NewTicker(awaitPollInterval)
 	defer tick.Stop()
+	queuedSince := time.Now()
+	consumerChecked := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -76,6 +81,17 @@ func (e *Engine) awaitSettled(ctx context.Context, sched *core.Core, cur core.Ta
 		case <-tick.C:
 		}
 		t, err := store.Get(ctx, cur.TaskID)
+		if errors.Is(err, sql.ErrNoRows) {
+			// The row vanished under the watch — queued and submitted rows are
+			// Deletable, so a board clear or `task rm` can remove one mid-wait.
+			// Without this branch the poll outlives the task forever.
+			cur.State = core.StateCancelled
+			res.State = core.StateCancelled
+			if res.Stderr == "" {
+				res.Stderr = "task deleted"
+			}
+			return cur, res
+		}
 		if err != nil {
 			continue // a row we cannot read is not proof of death
 		}
@@ -87,6 +103,19 @@ func (e *Engine) awaitSettled(ctx context.Context, sched *core.Core, cur core.Ta
 			if !settledState(t.State) {
 				cb.progress(Progress{Kind: ProgressWait, Name: last})
 			}
+			if t.State == core.StateQueued || t.State == core.StateSubmitted {
+				queuedSince = time.Now()
+			}
+		}
+		// A row parked in the queue with no live consumer waits forever —
+		// the borrowed-engine/mixed-version edge. One probe after the grace
+		// window, logged once: the wait itself keeps polling (the work is
+		// still recoverable the moment a consumer comes up).
+		if !consumerChecked && (t.State == core.StateQueued || t.State == core.StateSubmitted) &&
+			time.Since(queuedSince) > 20*awaitPollInterval && !core.QueueConsumerAlive(e.cfg) {
+			consumerChecked = true
+			e.logger.Warn("askengine: queued task unclaimed and no queue consumer is alive; it waits until one starts",
+				"task", cur.TaskID)
 		}
 		// Bridge the timeline the consumer wrote since the last pass — before
 		// the settle check, so the notes recorded just ahead of the result
@@ -96,6 +125,67 @@ func (e *Engine) awaitSettled(ctx context.Context, sched *core.Core, cur core.Ta
 			return t, settledPayload(t)
 		}
 	}
+}
+
+// awaitDispatched follows every task a tool round dispatched until each
+// settles — in parallel, since the queue already runs them concurrently —
+// returning the settled results in dispatch order. It is the queued
+// counterpart of the loop's inline task rounds: a batch like "audit both
+// projects" still ends the turn with real outcomes instead of bare "queued"
+// receipts. A dispatch that never produced a row keeps its result
+// untouched — the failure is the outcome for that slot.
+func (e *Engine) awaitDispatched(ctx context.Context, sched *core.Core, dispatched []*Result, cb StreamCallbacks) []*Result {
+	out := make([]*Result, len(dispatched))
+	var wg sync.WaitGroup
+	for i, d := range dispatched {
+		out[i] = d
+		if d == nil || d.TaskID == "" || settledState(d.TaskState) {
+			continue
+		}
+		wg.Add(1)
+		go func(i int, d *Result) {
+			defer wg.Done()
+			t, pay := e.awaitSettled(ctx, sched,
+				core.Task{TaskID: d.TaskID, Title: d.TaskTitle, State: d.TaskState},
+				bus.TaskResultPayload{TaskID: d.TaskID, State: d.TaskState}, cb)
+			out[i] = settleResult(d, t, pay)
+		}(i, d)
+	}
+	wg.Wait()
+	return out
+}
+
+// settleResult folds the row and payload a settle watch ended on back over
+// the dispatch receipt — the outcome shape the caller would have seen had
+// the task run inline. A task parked in review surfaces the human gate
+// itself: without the NeedsApproval flag the observation would read as a
+// finished step and the front end would never raise the approval card.
+func settleResult(res *Result, task core.Task, payload bus.TaskResultPayload) *Result {
+	out := *res
+	out.TaskState = task.State
+	out.OK = payload.OK
+	out.Stdout = payload.Stdout
+	out.Stderr = payload.Stderr
+	out.ExitCode = payload.ExitCode
+	out.Agent = payload.Agent
+	out.Model = payload.Model
+	out.Injected = payload.Injected
+	out.Executor = payload.Executor
+	out.WorkDir = payload.WorkDir
+	out.Question = payload.Question
+	out.FilesChanged = payload.FilesChanged
+	if task.State == core.StateReview {
+		reason := payload.Stderr
+		if reason == "" {
+			reason = payload.Question
+		}
+		out.NeedsApproval = true
+		out.Approval = &ApprovalRequest{
+			TaskID: task.TaskID, Title: task.Title, Reason: reason,
+			Project: task.Project, Scope: "once",
+		}
+	}
+	return &out
 }
 
 // bridgeNewEvents delivers the timeline events recorded since cursor as

@@ -21,6 +21,49 @@ import (
 // accepted trade-off for keeping the rescue state-free in the database.
 const orphanedForwardGrace = 2 * time.Minute
 
+// staleRowAfter is how long a lifecycle row may sit untouched before the
+// sweep treats it as stranded. Every live path rewrites its row constantly —
+// submits route within seconds, claims accept in the same goroutine, running
+// work renews its lease (which bumps updated_at) every lease period — so a
+// row this old belongs to a process that died mid-flight. Two minutes
+// matches the orphaned-forward grace: far beyond every live window, far
+// short of the "parked forever" failures it exists to clear.
+const staleRowAfter = 2 * time.Minute
+
+// sweepStrandedWork is the running-process counterpart of Recover: rows whose
+// owner died mid-flight strand in states no other pass touches — submitted
+// (scheduled=0 hides them from ListReady), self-claimed dispatched rows that
+// never accepted (no lease for ExpireTasks to reap), and self-owned
+// running/waiting_context rows whose lease is NULL (a dead supervisor renews
+// nothing). The age cutoff is the guard that keeps live work out: state-
+// guarded writes then arbitrate against a healthy concurrent transition, so
+// any process sharing the store may run the sweep.
+func (c *Core) sweepStrandedWork(ctx context.Context) {
+	cutoff := time.Now().Add(-staleRowAfter).Unix()
+	if n, err := c.store.RequeueStaleSubmitted(ctx, cutoff); err != nil {
+		c.logger.Warn("stranded submit sweep", "err", err)
+	} else if n > 0 {
+		c.logger.Info("stranded submits requeued", "count", n)
+	}
+	// Remote submits get the terminal verdict instead: requeueing an
+	// un-admitted delegate would slip it past the trust-zone review gate.
+	if n, err := c.store.CancelStaleRemoteSubmits(ctx, cutoff); err != nil {
+		c.logger.Warn("stranded remote submit sweep", "err", err)
+	} else if n > 0 {
+		c.logger.Info("stranded remote submits cancelled", "count", n)
+	}
+	if n, err := c.store.RequeueStaleClaims(ctx, c.nodeID, cutoff); err != nil {
+		c.logger.Warn("stranded claim sweep", "err", err)
+	} else if n > 0 {
+		c.logger.Info("orphaned claims requeued", "count", n)
+	}
+	if n, err := c.store.FailStaleLeaseless(ctx, c.nodeID, cutoff); err != nil {
+		c.logger.Warn("leaseless execution sweep", "err", err)
+	} else if n > 0 {
+		c.logger.Info("leaseless executions failed", "count", n)
+	}
+}
+
 // stalePeerAfter is how long a directory row may go unseen before the stale
 // sweep marks it offline (S1-4). Without it a node that died silently — no
 // clean disconnect, no heartbeat — keeps an online row forever and routing

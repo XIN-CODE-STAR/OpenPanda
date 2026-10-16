@@ -669,6 +669,10 @@ func runSessionAsk(args []string) {
 		// An interactive session over a chat thread: peers dial in the
 		// background rather than gating the first prompt (same as the REPL).
 		AsyncPeers: true,
+		// Same queue-and-await contract as the REPL: scheduled execution
+		// with per-project parallelism, foreground-following turns.
+		QueueTasks:  true,
+		AwaitQueued: true,
 	})
 	if err != nil {
 		fatal("ask engine", err)
