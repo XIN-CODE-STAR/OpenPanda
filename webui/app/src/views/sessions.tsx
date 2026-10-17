@@ -1831,8 +1831,9 @@ function TaskQuickSend({ taskId }: { taskId: string }) {
     try {
       const r = await api.sendTaskMessage(taskId, body, inject)
       toast(
-        r.status === 'interrupted' ? t('detail.msgInjectedToast') : t('detail.msgQueuedToast'),
-        'success',
+        r.warning ||
+          (r.status === 'interrupted' ? t('detail.msgInjectedToast') : t('detail.msgQueuedToast')),
+        r.warning ? 'info' : 'success',
       )
       setText('')
       setOpen(false)

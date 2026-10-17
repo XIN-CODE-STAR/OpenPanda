@@ -57,22 +57,13 @@ func (c *Core) InjectUserMessage(ctx context.Context, taskID, text string) (stri
 	return "queued", nil
 }
 
-// userMessage is the shared body: guard the task state, land the durable
-// board note, and trace the event.
+// userMessage is the shared body: land the durable board note (the store
+// applies the state and owner guards) and trace the event.
 func (c *Core) userMessage(ctx context.Context, taskID, text, grade, mode string) error {
 	if c == nil || c.store == nil {
 		return fmt.Errorf("task messages require a task store")
 	}
-	// A task dispatched to another node reads ITS store's board, not ours: a
-	// note landed here would never reach the agent. Refuse honestly instead
-	// of accepting a message nobody will read. The comparison is runtime
-	// identity, not literal equality: a CLI engine's ephemeral id and the
-	// daemon's base id resolve to the same store-owning node.
-	if t, err := c.store.Get(ctx, taskID); err == nil && t.OwnerNode != "" &&
-		!scheduler.SameRuntimeIdentity(t.OwnerNode, c.nodeID) {
-		return fmt.Errorf("task %s runs on %s — messages deliver to the executor's own store", taskID, t.OwnerNode)
-	}
-	if err := c.store.PostUserMessage(ctx, taskID, text, grade); err != nil {
+	if err := c.store.PostUserMessage(ctx, taskID, text, grade, c.nodeID); err != nil {
 		return err
 	}
 	c.EvTrace(ctx, taskID, EvUserMsg, map[string]any{"mode": mode, "text": text})
@@ -84,7 +75,16 @@ func (c *Core) userMessage(ctx context.Context, taskID, text, grade, mode string
 // newest message, so a user who sends twice carries the second one — the
 // same semantics as every other board sender. This is the scheduler-less
 // delivery path too: a note needs the store, not the execution core.
-func (s *TaskStore) PostUserMessage(ctx context.Context, taskID, text, grade string) error {
+//
+// localNodeID is the runtime identity of the node this store belongs to; it
+// backs the owner guard — a task dispatched to another node reads ITS
+// store's board, not ours, so a note landed here would never reach the
+// agent. The guard refuses honestly instead of accepting a message nobody
+// will read. The comparison is runtime identity, not literal equality: a
+// CLI engine's ephemeral id and the daemon's base id resolve to the same
+// store-owning node. An empty localNodeID skips the check (callers that
+// cannot name the store's owner degrade to the state guard alone).
+func (s *TaskStore) PostUserMessage(ctx context.Context, taskID, text, grade, localNodeID string) error {
 	if s == nil {
 		return fmt.Errorf("task messages require a task store")
 	}
@@ -98,6 +98,10 @@ func (s *TaskStore) PostUserMessage(ctx context.Context, taskID, text, grade str
 	}
 	if terminalState(t.State) {
 		return fmt.Errorf("task %s is %s — messages reach running or queued work only", taskID, t.State)
+	}
+	if localNodeID != "" && t.OwnerNode != "" &&
+		!scheduler.SameRuntimeIdentity(t.OwnerNode, localNodeID) {
+		return fmt.Errorf("task %s runs on %s — messages deliver to the executor's own store", taskID, t.OwnerNode)
 	}
 	// The board's slot key is (scope, sender, rcpt) with newest-wins per
 	// slot — right for status notes, wrong for user messages, where every

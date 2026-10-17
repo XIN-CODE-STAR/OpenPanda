@@ -124,3 +124,34 @@ func TestUserMessageEmptyAndMissing(t *testing.T) {
 		t.Fatal("empty inject must be refused")
 	}
 }
+
+// TestPostUserMessageOwnerGuard pins the store-level owner check every
+// delivery path now shares — including the scheduler-less fallbacks (panel
+// without engine, REPL without engine, scheduler-less ask engine). A task
+// owned by another node reads that node's board: a note landed here would
+// silently never deliver, so the store refuses it.
+func TestPostUserMessageOwnerGuard(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	mine := createTask(t, s, "", "local work", "local-node")
+	remote := createTask(t, s, "", "remote work", "local-node")
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE tasks SET owner_node=? WHERE task_id=?`, "peer-node", remote.TaskID); err != nil {
+		t.Fatalf("reassign owner: %v", err)
+	}
+	if err := s.PostUserMessage(ctx, remote.TaskID, "hi", MsgGradeStatus, "local-node"); err == nil ||
+		!strings.Contains(err.Error(), "runs on peer-node") {
+		t.Fatalf("remote-owned task must refuse with executor hint, got %v", err)
+	}
+	if err := s.PostUserMessage(ctx, mine.TaskID, "hi", MsgGradeStatus, "local-node"); err != nil {
+		t.Fatalf("local task must accept: %v", err)
+	}
+	// An ephemeral sibling of the owning node is the same runtime identity.
+	if err := s.PostUserMessage(ctx, mine.TaskID, "hi", MsgGradeStatus, "local-node-1a2b3c4d"); err != nil {
+		t.Fatalf("ephemeral sibling must accept: %v", err)
+	}
+	// A caller that cannot name the store owner degrades to no owner check.
+	if err := s.PostUserMessage(ctx, remote.TaskID, "hi", MsgGradeStatus, ""); err != nil {
+		t.Fatalf("empty local id skips the guard: %v", err)
+	}
+}

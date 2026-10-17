@@ -1372,7 +1372,7 @@ func runTaskSend(args []string) {
 	}
 	defer engine.Close()
 	id := resolveTaskRef(engine.TaskStore(), ref)
-	status, err := engine.SendTaskMessage(context.Background(), id, text, *inject)
+	status, warn, err := engine.SendTaskMessage(context.Background(), id, text, *inject)
 	if err != nil {
 		fatal("send task message", err)
 	}
@@ -1381,10 +1381,13 @@ func runTaskSend(args []string) {
 		key = "cli.task.send.interrupted"
 	}
 	if jsonOutput {
-		emitJSON(map[string]string{"task_id": id, "status": status})
+		emitJSON(map[string]string{"task_id": id, "status": status, "warning": warn})
 		return
 	}
 	fmt.Println(i18n.Tf(loc, key, "id", id))
+	if warn != "" {
+		fmt.Fprintln(os.Stderr, "⚠ "+warn)
+	}
 }
 
 // runTaskContinue implements `panda task continue <id> [-m NOTE]` — requeue a

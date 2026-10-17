@@ -13,6 +13,7 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/config"
 	"github.com/Xustalis/OpenPanda/internal/core"
 	"github.com/Xustalis/OpenPanda/internal/defense"
+	"github.com/Xustalis/OpenPanda/internal/i18n"
 	"github.com/Xustalis/OpenPanda/internal/sessions"
 )
 
@@ -148,25 +149,39 @@ func (h *handler) sendTaskMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status := "queued"
+	warning := ""
 	if eng := h.currentEngine(); eng != nil {
-		st, err := eng.SendTaskMessage(r.Context(), id, req.Text, req.Inject)
+		st, warn, err := eng.SendTaskMessage(r.Context(), id, req.Text, req.Inject)
 		if err != nil {
 			writeTaskMessageErr(w, err)
 			return
 		}
-		status = st
+		status, warning = st, warn
 	} else {
 		if req.Inject {
 			writeErr(w, http.StatusServiceUnavailable, errors.New("inject requires the ask engine (set model.base_url to enable)"))
 			return
 		}
 		grade := core.MsgGradeStatus
-		if err := h.store.PostUserMessage(r.Context(), id, req.Text, grade); err != nil {
+		nodeID := ""
+		if h.cfg != nil {
+			nodeID = core.RuntimeNodeID(h.cfg.Node.Name, h.cfg.Node.Kind, h.cfg.Node.EffectiveIdentity())
+		}
+		if err := h.store.PostUserMessage(r.Context(), id, req.Text, grade, nodeID); err != nil {
 			writeTaskMessageErr(w, err)
 			return
 		}
+		// No engine means this console is not draining the queue either —
+		// its own panel port would fool QueueConsumerAlive, so the row's
+		// heartbeat stamp is the honest probe instead.
+		if nodeID != "" && h.db != nil {
+			if t, terr := h.store.Get(r.Context(), id); terr == nil &&
+				t.State == core.StateQueued && !core.StoreRowHeartbeating(r.Context(), h.db, nodeID) {
+				warning = i18n.T(i18n.Parse(h.cfg.UI.Locale), "cli.queue.noConsumer")
+			}
+		}
 	}
-	writeJSON(w, map[string]string{"task_id": id, "status": status})
+	writeJSON(w, map[string]string{"task_id": id, "status": status, "warning": warning})
 }
 
 // writeTaskMessageErr maps a message-delivery failure onto the right status:

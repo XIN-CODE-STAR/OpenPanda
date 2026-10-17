@@ -99,6 +99,16 @@ func NodeRowLastSeen(ctx context.Context, db *sql.DB, nodeID string) int64 {
 	return lastSeen
 }
 
+// StoreRowHeartbeating reports whether nodeID's row in db carries a live
+// heartbeat — the plain-freshness half of StoreConsumerFresh for callers
+// that never wrote the row themselves (e.g. a scheduler-less panel checking
+// whether ANY consumer beats the store it serves). The writer case needs
+// StoreConsumerFresh's lastForeign/selfWriteAt split instead.
+func StoreRowHeartbeating(ctx context.Context, db *sql.DB, nodeID string) bool {
+	cur := NodeRowLastSeen(ctx, db, nodeID)
+	return cur > 0 && time.Since(time.Unix(cur, 0)) < storeConsumerMaxAge
+}
+
 // StoreConsumerFresh reports whether an owner heartbeats nodeID's row in db.
 // QueueConsumerAlive answers "is a consumer process running on this machine"
 // — the identity lock and the panel port cannot see which database that

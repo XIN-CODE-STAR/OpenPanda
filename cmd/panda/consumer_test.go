@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Xustalis/OpenPanda/internal/config"
 	"github.com/Xustalis/OpenPanda/internal/i18n"
@@ -25,8 +26,36 @@ func listenOn(t *testing.T) (net.Listener, string) {
 	return l, port
 }
 
+// listenOnFreeSpan grabs a listener whose whole +5 probe span is also free.
+// The probe falls forward when the configured port is taken, so a "dead
+// panel" assertion flakes whenever an unrelated process happens to hold any
+// port inside the window — on a busy dev machine that is a real collision.
+// Skip rather than fail when no clean span exists.
+func listenOnFreeSpan(t *testing.T) (net.Listener, string) {
+	t.Helper()
+	for try := 0; try < 40; try++ {
+		l, port := listenOn(t)
+		p, _ := strconv.Atoi(port)
+		free := true
+		for i := 1; i <= 5; i++ {
+			c, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(p+i)), 80*time.Millisecond)
+			if err == nil {
+				c.Close()
+				free = false
+				break
+			}
+		}
+		if free {
+			return l, port
+		}
+		l.Close()
+	}
+	t.Skip("no port with a free +5 probe span available")
+	return nil, ""
+}
+
 func TestPanelReachableLiveAndDead(t *testing.T) {
-	l, port := listenOn(t)
+	l, port := listenOnFreeSpan(t)
 	// Accept in the background so the probe's TCP dial completes.
 	go func() {
 		for {
@@ -89,7 +118,7 @@ func TestPanelReachableSpan(t *testing.T) {
 }
 
 func TestQueueConsumerAlivePanelOnly(t *testing.T) {
-	l, port := listenOn(t)
+	l, port := listenOnFreeSpan(t)
 	go func() {
 		for {
 			c, err := l.Accept()

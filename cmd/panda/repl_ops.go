@@ -1036,20 +1036,25 @@ func (r *repl) cmdTaskSend(fields []string) {
 		return
 	}
 	status := "queued"
+	warn := ""
 	if eng := r.engine.Load(); eng != nil {
-		st, err := eng.SendTaskMessage(ctx, id, text, inject)
+		st, w, err := eng.SendTaskMessage(ctx, id, text, inject)
 		if err != nil {
 			r.storeErr(err)
 			return
 		}
-		status = st
+		status, warn = st, w
 	} else {
 		if inject {
 			r.outln(i18n.T(r.loc, "repl.approval.noEngine"))
 			return
 		}
 		grade := core.MsgGradeStatus
-		if err := r.store.PostUserMessage(ctx, id, text, grade); err != nil {
+		nodeID := ""
+		if r.cfg != nil {
+			nodeID = core.RuntimeNodeID(r.cfg.Node.Name, r.cfg.Node.Kind, r.cfg.Node.EffectiveIdentity())
+		}
+		if err := r.store.PostUserMessage(ctx, id, text, grade, nodeID); err != nil {
 			r.storeErr(err)
 			return
 		}
@@ -1059,6 +1064,9 @@ func (r *repl) cmdTaskSend(fields []string) {
 		key = "cli.task.send.interrupted"
 	}
 	r.outln(i18n.Tf(r.loc, key, "id", id))
+	if warn != "" {
+		r.outln("⚠ " + warn)
+	}
 }
 
 // cmdTaskContinue implements `/task continue <id> [note]` — requeue a task the
