@@ -15,6 +15,45 @@ import (
 // (answer / tool_call / task).
 const classificationCacheNS = "classify"
 
+// ToolNameTaskSubmit is the wire name of the native task-dispatch bridge
+// tool — the call an entry model emits when a turn should become a task. It
+// lives here rather than in askengine (which imports this package and builds
+// the tool spec) so classification code can recognize the call without a
+// package cycle, and so a rename has one edit point.
+const ToolNameTaskSubmit = "task_submit"
+
+// classificationCacheVersion tags every cache row with the semantics that
+// produced it. Bump it whenever the key coverage or the cacheability rules
+// change, so rows written under the previous semantics can never be served
+// (they expire by TTL).
+const classificationCacheVersion = "v2"
+
+// classificationCacheable reports whether a classified Output may be replayed
+// from the disk cache. Kinds that materialize durable work — a task row, or a
+// plan and its stage rows — must never be replayed: the identical sentence
+// would silently create the work twice. task_submit is the same hazard behind
+// a tool call (it is the native bridge that creates a task), so calls naming
+// it are stored live only as well.
+func classificationCacheable(out Output) bool {
+	switch out.Kind {
+	case KindPlan, KindTask:
+		return false
+	case KindToolCall:
+		// A text-parsed tool call carries only Tool; the native path fills
+		// both Tool and Tools.
+		tools := out.Tools
+		if len(tools) == 0 && out.Tool != nil {
+			tools = []*ToolCall{out.Tool}
+		}
+		for _, t := range tools {
+			if t != nil && t.Tool == ToolNameTaskSubmit {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // Classify runs the unified entry model once with no tools and returns the
 // parsed Output. It is the answer/fallback entry point; the tool path is
 // ClassifyTurnsWithTools.
@@ -28,12 +67,32 @@ func ClassifyTurns(ctx context.Context, c *Client, devices []ledger.Node, memory
 }
 
 // classifyCacheKey builds the disk-cache key for one classification: k1 hashes
-// the prompt side — conversation turns, the memory summary, and the tool
-// roster (the available tools shape the routing decision) — and k2 hashes the
-// device snapshot. Any input change lands on a different key and misses.
-func classifyCacheKey(turns []Turn, memory string, devices []ledger.Node, registry *Registry) (k1, k2 string) {
+// the prompt side — model, request mode, locale, conversation turns, the
+// memory summary, and the tool roster (the available tools shape the routing
+// decision) — and k2 hashes the rendered device summary. Any input change
+// lands on a different key and misses.
+//
+// The model name is part of the decision: a client switch (manual or failover
+// fallback) must never serve the previous model's verdict. RequestMode/locale/
+// ASCIIOnly shape the system prompt, so a /plan turn must not hit a row
+// written by a plain turn (apply the ClassifyOptions before building the key).
+// k2 hashes the device summary text the model actually sees rather than the
+// raw node rows: LastSeen heartbeats and other unrendered live metrics churn
+// the row every beat and would keep the cache a permanent miss.
+func classifyCacheKey(po PromptOptions, model string, registry *Registry) (k1, k2 string) {
 	var b strings.Builder
-	for _, t := range turns {
+	b.WriteString(classificationCacheVersion)
+	b.WriteString("\nmodel:")
+	b.WriteString(model)
+	b.WriteString("\nmode:")
+	b.WriteString(po.RequestMode)
+	b.WriteString("\nlocale:")
+	b.WriteString(string(promptLocale(po)))
+	if po.ASCIIOnly {
+		b.WriteString("\nascii")
+	}
+	b.WriteByte('\n')
+	for _, t := range po.History {
 		b.WriteString(t.Role)
 		b.WriteByte('\n')
 		b.WriteString(t.Content)
@@ -45,26 +104,31 @@ func classifyCacheKey(turns []Turn, memory string, devices []ledger.Node, regist
 		b.WriteByte('\n')
 	}
 	b.WriteString("memory:\n")
-	b.WriteString(memory)
+	b.WriteString(po.Memory)
 	if registry != nil {
 		for _, s := range registry.Specs() {
 			b.WriteString("\ntool:")
 			b.WriteString(s.Name)
 		}
 	}
-	return hashString(b.String()), deviceSnapshotKey(devices)
+	return hashString(b.String()), hashString(summarizeDevicesCached(po.Devices, promptLocale(po)))
 }
 
 // cachedClassification returns a previously stored classification for these
 // exact inputs, if the client carries a disk cache and one exists.
-func cachedClassification(ctx context.Context, c *Client, turns []Turn, memory string, devices []ledger.Node, registry *Registry) (Output, bool) {
+func cachedClassification(ctx context.Context, c *Client, po PromptOptions, registry *Registry) (Output, bool) {
 	dc := c.diskCache()
 	if dc == nil {
 		return Output{}, false
 	}
-	k1, k2 := classifyCacheKey(turns, memory, devices, registry)
+	k1, k2 := classifyCacheKey(po, c.ModelName(), registry)
 	var out Output
 	if !dc.Get(ctx, classificationCacheNS, k1, k2, &out) {
+		return Output{}, false
+	}
+	// Defense in depth against rows written before a cacheability rule
+	// tightened: a side-effectful verdict is treated as a miss.
+	if !classificationCacheable(out) {
 		return Output{}, false
 	}
 	// Never serve a cached answer that carries DSML tool-call markup: such rows
@@ -78,12 +142,15 @@ func cachedClassification(ctx context.Context, c *Client, turns []Turn, memory s
 
 // storeClassification saves a successful classification for reuse. Best-effort:
 // a failed write only costs a future miss.
-func storeClassification(ctx context.Context, c *Client, turns []Turn, memory string, devices []ledger.Node, registry *Registry, out Output) {
+func storeClassification(ctx context.Context, c *Client, po PromptOptions, registry *Registry, out Output) {
 	dc := c.diskCache()
 	if dc == nil {
 		return
 	}
-	k1, k2 := classifyCacheKey(turns, memory, devices, registry)
+	if !classificationCacheable(out) {
+		return
+	}
+	k1, k2 := classifyCacheKey(po, c.ModelName(), registry)
 	dc.Put(ctx, classificationCacheNS, k1, k2, out)
 }
 
@@ -93,12 +160,12 @@ func storeClassification(ctx context.Context, c *Client, turns []Turn, memory st
 // Identical inputs (turns, memory, devices, tool roster) are served from the
 // disk cache without an LLM call.
 func ClassifyTurnsWithTools(ctx context.Context, c *Client, devices []ledger.Node, memory string, turns []Turn, registry *Registry, opts ...ClassifyOption) (Output, error) {
-	if out, ok := cachedClassification(ctx, c, turns, memory, devices, registry); ok {
-		return out, nil
-	}
 	po := PromptOptions{Devices: devices, Memory: memory, History: turns}
 	for _, o := range opts {
 		o(&po)
+	}
+	if out, ok := cachedClassification(ctx, c, po, registry); ok {
+		return out, nil
 	}
 	system := BuildPrompt(po)
 	var specs []ToolSpec
@@ -116,7 +183,7 @@ func ClassifyTurnsWithTools(ctx context.Context, c *Client, devices []ledger.Nod
 	if err != nil {
 		return Output{}, err
 	}
-	storeClassification(ctx, c, turns, memory, devices, registry, out)
+	storeClassification(ctx, c, po, registry, out)
 	return out, nil
 }
 
@@ -128,15 +195,15 @@ func ClassifyTurnsWithTools(ctx context.Context, c *Client, devices []ledger.Nod
 // stored answer as one delta; structured outputs (task/tool_call) never stream,
 // same as the live path.
 func ClassifyStreamWithTools(ctx context.Context, c *Client, devices []ledger.Node, memory string, turns []Turn, registry *Registry, onDelta func(string), onReasoning func(string), opts ...ClassifyOption) (Output, error) {
-	if out, ok := cachedClassification(ctx, c, turns, memory, devices, registry); ok {
+	po := PromptOptions{Devices: devices, Memory: memory, History: turns}
+	for _, o := range opts {
+		o(&po)
+	}
+	if out, ok := cachedClassification(ctx, c, po, registry); ok {
 		if out.Kind == KindAnswer && onDelta != nil && out.Answer != "" {
 			onDelta(out.Answer)
 		}
 		return out, nil
-	}
-	po := PromptOptions{Devices: devices, Memory: memory, History: turns}
-	for _, o := range opts {
-		o(&po)
 	}
 	system := BuildPrompt(po)
 	var specs []ToolSpec
@@ -156,7 +223,7 @@ func ClassifyStreamWithTools(ctx context.Context, c *Client, devices []ledger.No
 	if err != nil {
 		return Output{}, err
 	}
-	storeClassification(ctx, c, turns, memory, devices, registry, out)
+	storeClassification(ctx, c, po, registry, out)
 	return out, nil
 }
 

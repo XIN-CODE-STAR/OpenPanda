@@ -309,21 +309,29 @@ var requestModeSections = map[string]string{
 		"question. Do not delegate execution.",
 }
 
+// promptLocale resolves the locale the system prompt renders in: an explicit
+// option wins, ASCII-only output forces English, and otherwise the process
+// locale. classifyCacheKey resolves the same way — the cache key must track
+// the prompt that is actually sent, or a detected locale would key rows to a
+// rendering the model never saw (and, with the single-entry device memo, make
+// the two callers thrash each other's summary on every ask).
+func promptLocale(opts PromptOptions) i18n.Locale {
+	if opts.UserLocale != "" {
+		return opts.UserLocale
+	}
+	if opts.ASCIIOnly {
+		return i18n.English
+	}
+	return i18n.Detect()
+}
+
 // BuildPrompt assembles the layered system prompt: the resident routing core,
 // the optional layers ChooseLayers picks from the history, then the device
 // capability summary (stable prefix end) and the user-memory wall (volatile
 // tail).
 func BuildPrompt(opts PromptOptions) string {
 	layers := ChooseLayers(opts.History)
-	loc := opts.UserLocale
-	if loc == "" {
-		if opts.ASCIIOnly {
-			loc = i18n.English
-		} else {
-			loc = i18n.Detect()
-		}
-	}
-	devices := summarizeDevicesCached(opts.Devices, loc)
+	devices := summarizeDevicesCached(opts.Devices, promptLocale(opts))
 	memory := opts.Memory
 	if memory == "" {
 		memory = "(None)"
@@ -364,13 +372,25 @@ var deviceSummaryCache struct {
 }
 
 // deviceSnapshotKey hashes the device snapshot; an identical snapshot (same
-// nodes, same abilities) yields an identical key.
+// nodes, same abilities) yields an identical key. Volatile bookkeeping that
+// the rendered summary never shows — LastSeen heartbeats and the live/load
+// half of Capacity — is zeroed before hashing: it changes every beat and
+// would otherwise force a rebuild of an unchanged summary (and, through the
+// classify cache key, a full re-classification on every ask).
 func deviceSnapshotKey(nodes []ledger.Node) string {
-	blob, err := json.Marshal(nodes)
+	stable := make([]ledger.Node, len(nodes))
+	copy(stable, nodes)
+	for i := range stable {
+		stable[i].LastSeen = 0
+		stable[i].Capacity.CurrentTasks = 0
+		stable[i].Capacity.QueuedTasks = 0
+		stable[i].Capacity.Live = nil
+	}
+	blob, err := json.Marshal(stable)
 	if err != nil {
 		// Unmarshalable nodes (never in practice): fall back to a stable
 		// textual form so the key stays a pure function of the content.
-		return hashString(fmt.Sprint(nodes))
+		return hashString(fmt.Sprint(stable))
 	}
 	return hashString(string(blob))
 }

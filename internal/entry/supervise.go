@@ -25,6 +25,11 @@ type SuperviseVerdict struct {
 // superviseCacheNS is the DiskCache namespace for supervise verdicts.
 const superviseCacheNS = "supervise"
 
+// supervisePromptVersion tags superviseSystemPrompt; bump it whenever the
+// judging instructions change so verdicts produced under the old instructions
+// are no longer served.
+const supervisePromptVersion = "v1"
+
 // superviseSystemPrompt instructs the entry model to act as the reviewing
 // superior ("上级"): it judges an agent's result against the task's success
 // criteria and emits a strict JSON verdict.
@@ -63,7 +68,10 @@ const (
 // re-run under a healthy supervisor judges from scratch.
 func Supervise(ctx context.Context, c *Client, intent, result string) (SuperviseVerdict, error) {
 	dc := c.diskCache()
-	k1, k2 := hashString(intent), hashString(result)
+	// The verdict is a function of (prompt version, judge model, intent,
+	// result): a model switch — manual or failover — must not serve the
+	// previous judge's done verdict for up to the cache TTL.
+	k1, k2 := hashString(supervisePromptVersion+"\x00"+c.ModelName()+"\x00"+intent), hashString(result)
 	if dc != nil {
 		var v SuperviseVerdict
 		if dc.Get(ctx, superviseCacheNS, k1, k2, &v) {

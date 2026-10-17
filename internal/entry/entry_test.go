@@ -1508,3 +1508,24 @@ func TestOAIAccumulatorStreamReasoning(t *testing.T) {
 		t.Fatalf("callbacks delta=%v, reasoning=%v", deliveredDelta, deliveredReasoning)
 	}
 }
+
+// TestPromptLocaleResolution pins the one resolution both the prompt builder
+// and the classification cache key go through: an explicit locale wins,
+// ASCII-only output forces English, and an unset locale falls back to the
+// process locale. A drift between the two callers keyed verdicts to a
+// rendering the model never saw — and, with the single-entry device memo,
+// made them rebuild each other's summary on every ask.
+func TestPromptLocaleResolution(t *testing.T) {
+	if got := promptLocale(PromptOptions{UserLocale: i18n.Japanese}); got != i18n.Japanese {
+		t.Fatalf("explicit locale = %q, want ja", got)
+	}
+	if got := promptLocale(PromptOptions{UserLocale: i18n.Japanese, ASCIIOnly: true}); got != i18n.Japanese {
+		t.Fatalf("explicit locale must win over ASCII-only, got %q", got)
+	}
+	if got := promptLocale(PromptOptions{ASCIIOnly: true}); got != i18n.English {
+		t.Fatalf("ASCII-only locale = %q, want en", got)
+	}
+	if got := promptLocale(PromptOptions{}); got != i18n.Detect() {
+		t.Fatalf("unset locale = %q, want the process locale %q", got, i18n.Detect())
+	}
+}

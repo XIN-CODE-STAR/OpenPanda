@@ -98,6 +98,13 @@ func TestDiskCacheNilIsNoOp(t *testing.T) {
 // answers with the same prose and counts requests.
 func startCountingAnswerServer(t *testing.T) (*Client, *int32, *sync.Mutex) {
 	t.Helper()
+	return startCountingTextServer(t, "今天天气不错，晴。")
+}
+
+// startCountingTextServer spins up a fake Anthropic endpoint that always
+// answers with the given text and counts requests.
+func startCountingTextServer(t *testing.T, text string) (*Client, *int32, *sync.Mutex) {
+	t.Helper()
 	var mu sync.Mutex
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -105,7 +112,7 @@ func startCountingAnswerServer(t *testing.T) (*Client, *int32, *sync.Mutex) {
 		calls++
 		mu.Unlock()
 		w.Header().Set("content-type", "application/json")
-		resp := map[string]any{"content": []map[string]string{{"type": "text", "text": "今天天气不错，晴。"}}}
+		resp := map[string]any{"content": []map[string]string{{"type": "text", "text": text}}}
 		b, _ := json.Marshal(resp)
 		_, _ = w.Write(b)
 	}))
@@ -199,6 +206,100 @@ func TestClassifyDiskCacheToolRosterChangesKey(t *testing.T) {
 	}
 	if got := serverCalls(calls, mu); got != 2 {
 		t.Fatalf("llm calls = %d, want 2 (changed tool roster must miss)", got)
+	}
+}
+
+// TestClassifyDiskCacheIgnoresVolatileFields guards the cache-effectiveness
+// fix: LastSeen heartbeat stamps and live/load capacity samples change every
+// beat but are never rendered into the device summary, so they must not bust
+// the classification key (previously every ask was a guaranteed miss).
+func TestClassifyDiskCacheIgnoresVolatileFields(t *testing.T) {
+	c, calls, mu := startCountingAnswerServer(t)
+	c.SetDiskCache(NewDiskCache(newCacheDB(t)))
+	ctx := context.Background()
+
+	devs := []ledger.Node{{ID: "n1", Name: "macbook", Chip: "M1", LastSeen: 100,
+		Capacity: ledger.Capacity{CPUCores: 8, CurrentTasks: 2, QueuedTasks: 1,
+			Live: &ledger.LiveMetrics{MemFreeGB: 3.5}}}}
+	if _, err := Classify(ctx, c, devs, "", "状态如何"); err != nil {
+		t.Fatalf("classify 1: %v", err)
+	}
+	devs2 := []ledger.Node{{ID: "n1", Name: "macbook", Chip: "M1", LastSeen: 900,
+		Capacity: ledger.Capacity{CPUCores: 8, CurrentTasks: 5, QueuedTasks: 4,
+			Live: &ledger.LiveMetrics{MemFreeGB: 1.25}}}}
+	if _, err := Classify(ctx, c, devs2, "", "状态如何"); err != nil {
+		t.Fatalf("classify 2: %v", err)
+	}
+	if got := serverCalls(calls, mu); got != 1 {
+		t.Fatalf("llm calls = %d, want 1 (volatile bookkeeping must not bust the key)", got)
+	}
+}
+
+// TestClassifyDiskCacheModelSwitchMisses guards the key fix: the model is part
+// of the classification, so switching models (manually or via failover) must
+// never serve the previous model's cached verdict.
+func TestClassifyDiskCacheModelSwitchMisses(t *testing.T) {
+	c, calls, mu := startCountingAnswerServer(t)
+	c.SetDiskCache(NewDiskCache(newCacheDB(t)))
+	ctx := context.Background()
+
+	if _, err := Classify(ctx, c, nil, "", "今天天气怎么样"); err != nil {
+		t.Fatalf("classify 1: %v", err)
+	}
+	c.model = "m2"
+	if _, err := Classify(ctx, c, nil, "", "今天天气怎么样"); err != nil {
+		t.Fatalf("classify 2 (new model): %v", err)
+	}
+	if got := serverCalls(calls, mu); got != 2 {
+		t.Fatalf("llm calls = %d, want 2 (a model switch must miss the cache)", got)
+	}
+}
+
+// TestClassifyDiskCacheNeverStoresPlan guards the cacheability fix: replaying
+// a cached plan verdict would create the plan (and its stage rows) a second
+// time, so plan/task verdicts are never served from the cache.
+func TestClassifyDiskCacheNeverStoresPlan(t *testing.T) {
+	planJSON := `{"kind":"plan","plan":{"goal":"跨机器部署","stages":[{"id":"s1","title":"build","intent":"write the script","requires":["agent:codex"]}]}}`
+	c, calls, mu := startCountingTextServer(t, planJSON)
+	c.SetDiskCache(NewDiskCache(newCacheDB(t)))
+	ctx := context.Background()
+
+	out, err := Classify(ctx, c, nil, "", "跨机器部署")
+	if err != nil {
+		t.Fatalf("classify 1: %v", err)
+	}
+	if out.Kind != KindPlan {
+		t.Fatalf("kind = %s, want plan", out.Kind)
+	}
+	if _, err := Classify(ctx, c, nil, "", "跨机器部署"); err != nil {
+		t.Fatalf("classify 2: %v", err)
+	}
+	if got := serverCalls(calls, mu); got != 2 {
+		t.Fatalf("llm calls = %d, want 2 (a plan verdict must never replay from cache)", got)
+	}
+}
+
+// TestClassifyDiskCacheNeverStoresTaskSubmit guards the same rule behind a
+// tool call: the task_submit bridge creates durable work, so a cached copy
+// must not re-run it.
+func TestClassifyDiskCacheNeverStoresTaskSubmit(t *testing.T) {
+	callJSON := `{"kind":"tool_call","tool":{"tool":"task_submit","arguments":{"title":"deploy","target":"worker","abilities":["agent:codex"]}}}`
+	c, calls, mu := startCountingTextServer(t, callJSON)
+	c.SetDiskCache(NewDiskCache(newCacheDB(t)))
+	ctx := context.Background()
+
+	out, err := Classify(ctx, c, nil, "", "派一个部署任务")
+	if err != nil {
+		t.Fatalf("classify 1: %v", err)
+	}
+	if out.Kind != KindToolCall {
+		t.Fatalf("kind = %s, want tool_call", out.Kind)
+	}
+	if _, err := Classify(ctx, c, nil, "", "派一个部署任务"); err != nil {
+		t.Fatalf("classify 2: %v", err)
+	}
+	if got := serverCalls(calls, mu); got != 2 {
+		t.Fatalf("llm calls = %d, want 2 (task_submit must never replay from cache)", got)
 	}
 }
 

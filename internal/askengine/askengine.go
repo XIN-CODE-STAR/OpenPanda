@@ -1772,7 +1772,7 @@ rounds:
 			var dispatched []*Result
 			for i, call := range calls {
 				cb.progress(Progress{Kind: ProgressTool, Name: call.Tool})
-				if call.Tool == "task_submit" && taskRounds >= maxTasks {
+				if call.Tool == entry.ToolNameTaskSubmit && taskRounds >= maxTasks {
 					// task_submit is a real delegation hidden behind the native
 					// tool protocol. Refuse it before executeTool for the same
 					// hard execution budget as a classified task directive.
