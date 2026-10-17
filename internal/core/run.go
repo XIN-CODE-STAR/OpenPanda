@@ -20,6 +20,7 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/entry"
 	"github.com/Xustalis/OpenPanda/internal/i18n"
 	"github.com/Xustalis/OpenPanda/internal/providers"
+	"github.com/Xustalis/OpenPanda/internal/scheduler/queue"
 	"github.com/Xustalis/OpenPanda/internal/skills"
 )
 
@@ -141,7 +142,9 @@ func (c *Core) run(ctx context.Context, taskID, intent string, required []string
 			wCtx, cancel := c.storeWriteCtx(ctx)
 			defer cancel()
 			if t, err := c.store.Get(wCtx, taskID); err == nil && t.State == StateRunning {
-				_ = c.store.Fail(wCtx, taskID, c.nodeID, rerr.Error())
+				if ferr := c.store.Fail(wCtx, taskID, c.nodeID, rerr.Error()); ferr != nil {
+					c.logger.Error("fail stranded run", "task", taskID, "err", ferr)
+				}
 			}
 		}
 	}()
@@ -382,6 +385,32 @@ func (c *Core) claimForRun(ctx context.Context, taskID, intent string, plan *com
 		return Task{}, nil, fmt.Errorf("route actuator: action_spec targets %q but the resolved plan (%s %q) is not an actuator — requires %v matched no hardware:* capability",
 			spec.TargetActuator, plan.Kind, plan.Ability, task.Requires)
 	}
+	// Cross-process execution lease (execlock.go): the keys this run occupies
+	// in the shared exec_locks table, taken before the row transitions, so a
+	// same-project (or same-actuator) task arriving by ANY path or core
+	// process waits in dispatched behind this run instead of writing the same
+	// worktree or driving the same device beside it. dance is the worktree
+	// subset the delegate wait releases and re-takes, mirroring the queue
+	// registry's dance exactly; the actuator row stays held through a fan-out.
+	// The wait holds the delegated capacity reservation (releaseSlot defers
+	// in run): a blocked sibling counts against MaxConcurrent for the whole
+	// wait, the same accounting the context-fetch wait already used — excess
+	// delegations decline and route elsewhere rather than queuing here.
+	keys := execLockKeys(task, plan.ActuatorID)
+	dance := queue.DefaultKeys(task.ResourceKeys, task.Project)
+	// The run nonce stamped on this acquisition's exec_locks rows — releases
+	// predicate on it so a late unlock can only drop this run's own rows,
+	// never the fresh rows of a re-execution (see execlock.go).
+	runID, err := newUUID()
+	if err != nil {
+		unlock()
+		return Task{}, nil, fmt.Errorf("exec lock run id: %w", err)
+	}
+	if err := c.execLockAcquire(ctx, taskID, runID, keys, dance, true); err != nil {
+		unlock()
+		return Task{}, nil, err
+	}
+	unlock = func() { c.execLockUnlock(taskID) }
 	if plan.ActuatorID != "" {
 		if err := commander.SubstituteActionSpec(plan, spec, intent); err != nil {
 			unlock()
@@ -403,7 +432,12 @@ func (c *Core) claimForRun(ctx context.Context, taskID, intent string, plan *com
 		// what its driver may overlap with. Blocking here, before Accept,
 		// keeps the row in dispatched while a sibling finishes on the same
 		// device rather than running two drivers on one pin concurrently.
-		unlock = c.lockActuator(plan.ActuatorID)
+		// The in-process mutex is the fast path; the actuator id also rides
+		// the exec lease above, which extends the same exclusion to other
+		// core processes on this database.
+		unlockActuator := c.lockActuator(plan.ActuatorID)
+		unlockExec := unlock
+		unlock = func() { unlockActuator(); unlockExec() }
 	}
 	switch task.State {
 	case StateDispatched:
@@ -994,7 +1028,13 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 		// persisted row because the task snapshot predates any spend, and it
 		// parks for every plan kind: a human tops up the quota or closes the
 		// task out, the way a scope-drift pause already works.
-		if left, serr := c.store.SpendTokens(ctx, taskID, 0); serr == nil && left < 0 {
+		if left, serr := c.store.SpendTokens(ctx, taskID, 0); serr != nil {
+			// Fail open, but not silently: a broken read must not look like a
+			// healthy budget. The round proceeds — refusing work on a transient
+			// database error would strand tasks that a retry drains normally —
+			// and the log names the reason the cap was not enforced.
+			c.logger.Warn("token budget check failed, allowing round", "task", taskID, "err", serr)
+		} else if left < 0 {
 			msg := "token budget exhausted"
 			if err := c.store.Pause(ctx, taskID, c.nodeID, msg); err != nil {
 				if errors.Is(err, ErrConflict) || errors.Is(err, ErrIllegal) {

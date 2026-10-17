@@ -211,7 +211,7 @@ race:
 # goroutine-free packages buy no detections. CGO is forced on because -race
 # requires it and some runners leave it disabled.
 race-focused:
-	CGO_ENABLED=1 $(GO) test -race ./internal/core/... ./internal/commander/... ./internal/bus/... ./internal/storage/...
+	CGO_ENABLED=1 $(GO) test -race ./internal/core/... ./internal/commander/... ./internal/bus/... ./internal/storage/... ./internal/askengine/... ./internal/scheduler/... ./webui/panel/...
 
 # ============================================================================
 # CI Gate 清单化 (§稳定性 P1)

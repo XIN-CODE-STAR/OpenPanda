@@ -173,10 +173,13 @@ func (h *handler) sendTaskMessage(w http.ResponseWriter, r *http.Request) {
 		}
 		// No engine means this console is not draining the queue either —
 		// its own panel port would fool QueueConsumerAlive, so the row's
-		// heartbeat stamp is the honest probe instead.
-		if nodeID != "" && h.db != nil {
+		// heartbeat stamp is the honest probe instead. Probe through the
+		// store rather than a separately wired DB handle: embedders may pass
+		// only the task store, and the row lives in the same database the
+		// note was just posted to.
+		if nodeID != "" && h.store != nil {
 			if t, terr := h.store.Get(r.Context(), id); terr == nil &&
-				t.State == core.StateQueued && !core.StoreRowHeartbeating(r.Context(), h.db, nodeID) {
+				t.State == core.StateQueued && !h.store.StoreRowHeartbeating(r.Context(), nodeID) {
 				warning = i18n.T(i18n.Parse(h.cfg.UI.Locale), "cli.queue.noConsumer")
 			}
 		}

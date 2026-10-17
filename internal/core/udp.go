@@ -75,10 +75,11 @@ const (
 // socket would accept nothing anyway. The listener and its keepalive loop
 // stop with ctx.
 func (c *Core) ListenUDP(ctx context.Context, addr string, stunServers []string) error {
-	if c.sharedSecret == "" {
+	secret := c.sharedSecretValue()
+	if secret == "" {
 		return nil // no secret: datagrams could never authenticate — off, not broken
 	}
-	u, err := bus.ListenUDP(addr, c.sharedSecret, c.logger)
+	u, err := bus.ListenUDP(addr, secret, c.logger)
 	if err != nil {
 		return err
 	}
@@ -477,7 +478,7 @@ func (c *Core) punchSpray(nonce string, sess *punchSession) {
 		ts := time.Now().Unix()
 		f := bus.PunchFrame{
 			Nonce: nonce, From: c.nodeID, TS: ts,
-			Sig: bus.PunchSig(c.sharedSecret, nonce, c.nodeID, ts),
+			Sig: bus.PunchSig(c.sharedSecretValue(), nonce, c.nodeID, ts),
 		}
 		c.punchMu.Lock()
 		addrs := sess.addrs
@@ -612,7 +613,7 @@ func (c *Core) handlePunchFrame(f bus.PunchFrame, src *net.UDPAddr, isAck bool) 
 			ts := time.Now().Unix()
 			ack := bus.PunchFrame{
 				Nonce: f.Nonce, From: c.nodeID, TS: ts,
-				Sig: bus.PunchSig(c.sharedSecret, f.Nonce, c.nodeID, ts),
+				Sig: bus.PunchSig(c.sharedSecretValue(), f.Nonce, c.nodeID, ts),
 			}
 			_ = u.SendPunch(ack, src, true)
 		}
@@ -631,7 +632,7 @@ func (c *Core) handlePunchFrame(f bus.PunchFrame, src *net.UDPAddr, isAck bool) 
 		ts := time.Now().Unix()
 		ack := bus.PunchFrame{
 			Nonce: f.Nonce, From: c.nodeID, TS: ts,
-			Sig: bus.PunchSig(c.sharedSecret, f.Nonce, c.nodeID, ts),
+			Sig: bus.PunchSig(c.sharedSecretValue(), f.Nonce, c.nodeID, ts),
 		}
 		_ = u.SendPunch(ack, src, true)
 	}

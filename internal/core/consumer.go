@@ -109,6 +109,18 @@ func StoreRowHeartbeating(ctx context.Context, db *sql.DB, nodeID string) bool {
 	return cur > 0 && time.Since(time.Unix(cur, 0)) < storeConsumerMaxAge
 }
 
+// StoreRowHeartbeating reports whether nodeID's row in this store carries a
+// live heartbeat, for callers that hold only a TaskStore — the engine-less
+// panel and REPL send paths probe the store they actually post to, not a
+// separately wired DB handle that an embedder may have left nil. The predicate
+// is the package-level StoreRowHeartbeating.
+func (s *TaskStore) StoreRowHeartbeating(ctx context.Context, nodeID string) bool {
+	if s == nil {
+		return false
+	}
+	return StoreRowHeartbeating(ctx, s.db, nodeID)
+}
+
 // StoreConsumerFresh reports whether an owner heartbeats nodeID's row in db.
 // QueueConsumerAlive answers "is a consumer process running on this machine"
 // — the identity lock and the panel port cannot see which database that

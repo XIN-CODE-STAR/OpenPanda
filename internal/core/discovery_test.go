@@ -259,7 +259,7 @@ func TestDiscoverySocketEndToEnd(t *testing.T) {
 	defer cancel()
 
 	c := newCore(t, "self", "127.0.0.1:0")
-	c.sharedSecret = "x" // announcer eligibility; loopback advertise suppresses the send anyway
+	c.SetSharedSecret("x") // announcer eligibility; loopback advertise suppresses the send anyway
 
 	// Bind an ephemeral discovery port.
 	probe, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
@@ -455,7 +455,7 @@ func TestAutoDialWrongSecret(t *testing.T) {
 
 	a := newCore(t, "node-a", "127.0.0.1:17973")
 	b := newCore(t, "node-b", "127.0.0.1:17974")
-	b.sharedSecret = "different-secret"
+	b.SetSharedSecret("different-secret")
 	if err := b.Register(ctx); err != nil {
 		t.Fatalf("register: %v", err)
 	}

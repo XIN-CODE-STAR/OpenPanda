@@ -1058,6 +1058,16 @@ func (r *repl) cmdTaskSend(fields []string) {
 			r.storeErr(err)
 			return
 		}
+		// This seat has no engine, so it cannot drain the queue itself. A
+		// still-queued row with no foreign heartbeat will never reach a
+		// round: the note is durable but unread, exactly the advisory the
+		// engine path returns.
+		if nodeID != "" && r.store != nil {
+			if t, terr := r.store.Get(ctx, id); terr == nil &&
+				t.State == core.StateQueued && !r.store.StoreRowHeartbeating(ctx, nodeID) {
+				warn = i18n.T(r.loc, "cli.queue.noConsumer")
+			}
+		}
 	}
 	key := "cli.task.send.queued"
 	if status == "interrupted" {

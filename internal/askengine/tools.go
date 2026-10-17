@@ -377,7 +377,7 @@ func (e *Engine) dispatchTaskTool(prompt string, scope AskScope, authorize bool,
 		}
 	}
 	return entry.Tool{
-		Name:        "task_submit",
+		Name:        entry.ToolNameTaskSubmit,
 		Description: desc,
 		Tier:        defense.TierReversible,
 		Schema: map[string]any{

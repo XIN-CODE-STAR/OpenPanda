@@ -248,8 +248,9 @@ func (c *Core) RunDiscovery(ctx context.Context, bindAddr, advertiseAddr string,
 	// pointless: a loopback-only node cannot be reached anyway, and a node
 	// without a shared secret cannot pair — its beacon would advertise a
 	// join that can only fail.
-	announce := c.sharedSecret != "" && !advertiseIsLoopback(advertiseAddr)
-	if c.sharedSecret == "" {
+	secret := c.sharedSecretValue()
+	announce := secret != "" && !advertiseIsLoopback(advertiseAddr)
+	if secret == "" {
 		c.logger.Info("discovery: no shared_secret — listening only (cannot pair, so not announcing)")
 	} else if !announce {
 		c.logger.Info("discovery: listen_addr is loopback — listening only (nothing could reach the advertised address)")
@@ -261,7 +262,7 @@ func (c *Core) RunDiscovery(ctx context.Context, bindAddr, advertiseAddr string,
 	// Auto-dial needs the same secret the hello will be checked against:
 	// without one every handshake fails closed, so the dial pass would be
 	// pure churn. The pending list still fills either way.
-	if autoDial && c.sharedSecret != "" {
+	if autoDial && secret != "" {
 		c.autoDialOn.Store(true)
 		c.goGuarded("discovery auto-dial", func() { c.autoDialLoop(ctx) })
 	} else if autoDial {

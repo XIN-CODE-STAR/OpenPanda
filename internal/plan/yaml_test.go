@@ -66,6 +66,8 @@ func TestParseValidates(t *testing.T) {
 		{"dangling need", "goal: g\nstages:\n  - id: a\n    intent: i\n    needs: [b]\n", "not in the plan"},
 		{"cycle", "goal: g\nstages:\n  - id: a\n    intent: i\n    needs: [b]\n  - id: b\n    intent: i\n    needs: [a]\n", "cycle"},
 		{"no intent", "goal: g\nstages:\n  - id: a\n", "no intent"},
+		{"negative cpu", "goal: g\nstages:\n  - id: a\n    intent: i\n    resources:\n      cpu: -2\n", "negative resources"},
+		{"negative vram", "goal: g\nstages:\n  - id: a\n    intent: i\n    resources:\n      gpu_vram_gb: -1\n", "negative resources"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := Parse([]byte(tc.yaml))
@@ -73,6 +75,26 @@ func TestParseValidates(t *testing.T) {
 				t.Fatalf("err = %v, want one mentioning %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestParseRejectsMultipleDocuments: a plan file is exactly one document — two
+// concatenated plans (a missing "---" away) must be refused, not silently cut
+// down to the first one.
+func TestParseRejectsMultipleDocuments(t *testing.T) {
+	_, err := Parse([]byte("goal: one\nstages:\n  - id: a\n    intent: i\n---\ngoal: two\nstages:\n  - id: b\n    intent: i\n"))
+	if err == nil || !strings.Contains(err.Error(), "multiple YAML documents") {
+		t.Fatalf("err = %v, want the multi-document rejection", err)
+	}
+}
+
+// TestParseRejectsMalformedTail: a truncated or half-typed second document is
+// not "no second document" — a file whose tail cannot decode is an error to
+// surface, not a suffix to drop.
+func TestParseRejectsMalformedTail(t *testing.T) {
+	_, err := Parse([]byte("goal: one\nstages:\n  - id: a\n    intent: i\n---\n  - [unclosed\n"))
+	if err == nil {
+		t.Fatal("a malformed trailing document was silently dropped")
 	}
 }
 

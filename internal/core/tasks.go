@@ -1477,6 +1477,22 @@ func (s *TaskStore) ClearLease(ctx context.Context, taskID string) error {
 	return nil
 }
 
+// SetDeadlineIfUnset stamps an absolute deadline on a task that has none. The
+// store-and-forward paths use it: a DTN/parked copy holds no lease, so this
+// deadline is its only bound (§8.2) — and it doubles as the marker that tells
+// RequeueStaleClaims a dispatched, lease-less row is legitimate in-flight
+// custody, not a claim whose process died before the run began. An explicit
+// task deadline is never overwritten.
+func (s *TaskStore) SetDeadlineIfUnset(ctx context.Context, taskID string, unix int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE tasks SET deadline_unix=?, updated_at=? WHERE task_id=? AND COALESCE(deadline_unix,0)=0`,
+		unix, s.now(), taskID)
+	if err != nil {
+		return fmt.Errorf("set deadline: %w", err)
+	}
+	return nil
+}
+
 // SetAuthorized persists whether the task's tier-2 (irreversible) commands were
 // consented to by the user. It is server-side state (design §16 / P0-1): only
 // the local entry path sets it, and a delegated task cannot forge authorization

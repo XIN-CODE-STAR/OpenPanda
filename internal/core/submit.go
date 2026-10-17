@@ -373,6 +373,9 @@ func (c *Core) Submit(ctx context.Context, in TaskInput) (Task, bus.TaskResultPa
 		defer c.waiters.Delete(t.TaskID)
 
 		if err := c.forwardDelegated(ctx, t.TaskID, decision.Target, payload, chain); err != nil {
+			// The delegate never left (or was never acked): settle the row so
+			// it does not linger in dispatched waiting for a monitor sweep.
+			c.failLocal(ctx, t.TaskID, fmt.Errorf("forward: %w", err))
 			return t, bus.TaskResultPayload{}, fmt.Errorf("forward: %w", err)
 		}
 		return c.waitRemoteResult(ctx, t, ch, "delegation")
@@ -384,7 +387,17 @@ func (c *Core) Submit(ctx context.Context, in TaskInput) (Task, bus.TaskResultPa
 			c.failLocal(ctx, t.TaskID, fmt.Errorf("%s", decision.Reason))
 			return t, bus.TaskResultPayload{}, errors.New(decision.Reason)
 		}
-		return t, bus.TaskResultPayload{}, fmt.Errorf("no capability: %s", decision.Reason)
+		// No route found: settle the row instead of leaving it in submitted.
+		// The caller already sees the failure, so an abandoned row would be
+		// re-queued by RequeueStaleSubmitted later and executed behind the
+		// user's back — a routing failure silently becomes a delayed run.
+		reason := decision.Reason
+		if reason == "" {
+			reason = "no capable node"
+		}
+		err := fmt.Errorf("no capability: %s", reason)
+		c.failLocal(ctx, t.TaskID, err)
+		return t, bus.TaskResultPayload{}, err
 	}
 }
 
@@ -476,6 +489,13 @@ func (c *Core) createTask(ctx context.Context, in TaskInput) (Task, string, stri
 	if err != nil {
 		return Task{}, "", "", err
 	}
+	// fail settles a partially-configured row before returning its error: an
+	// abandoned submitted row would be re-queued by RequeueStaleSubmitted and
+	// executed without the detail/authorization that failed to persist.
+	fail := func(err error) (Task, string, string, error) {
+		c.failLocal(ctx, t.TaskID, err)
+		return Task{}, "", "", err
+	}
 	// Task creation is project activity: bump the row so `panda project list`
 	// orders by recently-worked-on, not recently-edited.
 	if c.projects != nil && in.Project != "" {
@@ -486,24 +506,24 @@ func (c *Core) createTask(ctx context.Context, in TaskInput) (Task, string, stri
 	// Persist the user's tier-2 consent as server-side state (design §16 / P0-1).
 	// execute/run read it from the DB, so the wire payload never needs to carry it.
 	if err := c.store.SetAuthorized(ctx, t.TaskID, in.Authorized); err != nil {
-		return Task{}, "", "", fmt.Errorf("set authorized: %w", err)
+		return fail(fmt.Errorf("set authorized: %w", err))
 	}
 	if in.WorkDir != "" {
 		if err := c.store.SetWorkDir(ctx, t.TaskID, in.WorkDir); err != nil {
-			return Task{}, "", "", fmt.Errorf("set work dir: %w", err)
+			return fail(fmt.Errorf("set work dir: %w", err))
 		}
 		t.WorkDir = in.WorkDir
 	}
 	hash, level, err := c.packContext(ctx, in)
 	if err != nil {
-		return Task{}, "", "", fmt.Errorf("pack context: %w", err)
+		return fail(fmt.Errorf("pack context: %w", err))
 	}
 	d := in.detail()
 	d.ContextHash = hash
 	t.UserLocale = string(in.UserLocale)
 	t.SpecJSON = d.SpecJSON
 	if err := c.store.SetDetail(ctx, t.TaskID, d); err != nil {
-		return Task{}, "", "", fmt.Errorf("set detail: %w", err)
+		return fail(fmt.Errorf("set detail: %w", err))
 	}
 	// §6.1 safety floor: a top-level task created here gets the node's default
 	// metered-token quota so a retry/resume loop cannot burn without bound.
@@ -517,7 +537,7 @@ func (c *Core) createTask(ctx context.Context, in TaskInput) (Task, string, stri
 		c.mu.RUnlock()
 		if budget > 0 {
 			if err := c.store.SetTokenBudget(ctx, t.TaskID, budget); err != nil {
-				return Task{}, "", "", fmt.Errorf("set token budget: %w", err)
+				return fail(fmt.Errorf("set token budget: %w", err))
 			}
 			t.TokenBudget = budget
 		}
@@ -910,16 +930,19 @@ func (c *Core) retryLoop(ctx context.Context, taskID, intent string, required []
 		// hours by the late retries of a checkpoint sequence. Checkpoints
 		// pace at the base delay outright — nothing is "recovering" between
 		// resumes, the next run simply continues the session.
-		if c.sleep != nil {
-			delay := c.retryBackoff
-			if !checkpoint {
-				if shift := retries; shift > 5 {
-					delay <<= 5
-				} else {
-					delay <<= uint(shift)
-				}
+		delay := c.retryBackoff
+		if !checkpoint {
+			if shift := retries; shift > 5 {
+				delay <<= 5
+			} else {
+				delay <<= uint(shift)
 			}
-			c.sleep(delay)
+		}
+		if !c.waitBackoff(ctx, taskID, delay) {
+			// The wait was cut short — the context ended or the row left the
+			// failed state (cancel, approval, a human transition). Re-read the
+			// row at the top of the loop instead of sleeping out a stale delay.
+			continue
 		}
 		if rerr := c.retryOnce(ctx, taskID, checkpoint); rerr != nil {
 			c.logger.Warn("retry task", "task", taskID, "err", rerr)
@@ -995,6 +1018,47 @@ func (c *Core) reviewReset(taskID string) {
 func (c *Core) retryOnce(ctx context.Context, taskID string, checkpoint bool) error {
 	_, err := c.store.RequeueForRetry(ctx, taskID, c.nodeID, checkpoint)
 	return err
+}
+
+// waitBackoff waits out a retry backoff delay. A plain sleep would hold a task
+// that was cancelled (or resolved by a human) hostage for the whole delay —
+// up to 1<<5 × base = 32s at the defaults — before the loop re-read the row.
+// This wait wakes early when the context ends or the row leaves the failed
+// state, so the loop's next read settles the task promptly; it returns false
+// to tell the caller to re-read instead of retrying. Tests inject c.sleep,
+// which is called for the full delay as before.
+func (c *Core) waitBackoff(ctx context.Context, taskID string, d time.Duration) bool {
+	if c.sleep != nil {
+		c.sleep(d)
+		return true
+	}
+	const slice = 250 * time.Millisecond
+	remaining := d
+	for remaining > 0 {
+		step := slice
+		if remaining < step {
+			step = remaining
+		}
+		timer := time.NewTimer(step)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+		remaining -= step
+		if remaining <= 0 {
+			return true
+		}
+		// A failed row is otherwise untouched by the monitor sweeps, so the
+		// only thing that can happen mid-backoff is a direct transition
+		// (cancel, approve, requeue) — check it without burning the delay.
+		row, err := c.store.Get(ctx, taskID)
+		if err != nil || row.State != StateFailed {
+			return false
+		}
+	}
+	return true
 }
 
 // failLocal force-fails a task left in a non-terminal state by a routing or

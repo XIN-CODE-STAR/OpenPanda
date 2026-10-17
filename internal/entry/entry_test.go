@@ -244,15 +244,12 @@ func TestParseOutputAnswerEnvelope(t *testing.T) {
 	}
 }
 
-// TestParseOutputEmptyAnswerEnvelope verifies a contentless answer envelope
-// falls back to prose handling instead of rendering a hollow "{...}".
+// TestParseOutputEmptyAnswerEnvelope verifies a contentless answer envelope is
+// surfaced as a model error instead of degrading to prose handling, which
+// printed the hollow "{...}" verbatim as the user's answer.
 func TestParseOutputEmptyAnswerEnvelope(t *testing.T) {
-	out, err := ParseOutput(`{"kind":"answer","answer":""}`)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if out.Kind != KindAnswer {
-		t.Fatalf("empty answer envelope should degrade to KindAnswer, got %s", out.Kind)
+	if _, err := ParseOutput(`{"kind":"answer","answer":""}`); err == nil {
+		t.Fatal("empty answer envelope must surface a validation error, not leak the raw JSON as the answer")
 	}
 }
 
@@ -1506,5 +1503,26 @@ func TestOAIAccumulatorStreamReasoning(t *testing.T) {
 	}
 	if len(deliveredDelta) != 2 || len(deliveredReasoning) != 2 {
 		t.Fatalf("callbacks delta=%v, reasoning=%v", deliveredDelta, deliveredReasoning)
+	}
+}
+
+// TestPromptLocaleResolution pins the one resolution both the prompt builder
+// and the classification cache key go through: an explicit locale wins,
+// ASCII-only output forces English, and an unset locale falls back to the
+// process locale. A drift between the two callers keyed verdicts to a
+// rendering the model never saw — and, with the single-entry device memo,
+// made them rebuild each other's summary on every ask.
+func TestPromptLocaleResolution(t *testing.T) {
+	if got := promptLocale(PromptOptions{UserLocale: i18n.Japanese}); got != i18n.Japanese {
+		t.Fatalf("explicit locale = %q, want ja", got)
+	}
+	if got := promptLocale(PromptOptions{UserLocale: i18n.Japanese, ASCIIOnly: true}); got != i18n.Japanese {
+		t.Fatalf("explicit locale must win over ASCII-only, got %q", got)
+	}
+	if got := promptLocale(PromptOptions{ASCIIOnly: true}); got != i18n.English {
+		t.Fatalf("ASCII-only locale = %q, want en", got)
+	}
+	if got := promptLocale(PromptOptions{}); got != i18n.Detect() {
+		t.Fatalf("unset locale = %q, want the process locale %q", got, i18n.Detect())
 	}
 }

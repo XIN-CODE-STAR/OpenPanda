@@ -312,9 +312,7 @@ func (c *Core) waitPairConfirm(ctx context.Context, sess *pairSession, dh []byte
 // shared secret under the DH key, send it, then run the join hook so this
 // node also learns the initiator as a peer.
 func (c *Core) pairAccept(ctx context.Context, sess *pairSession, dh []byte) error {
-	c.mu.RLock()
-	secret := c.sharedSecret
-	c.mu.RUnlock()
+	secret := c.sharedSecretValue()
 	if secret == "" {
 		return errors.New("no shared secret to share")
 	}

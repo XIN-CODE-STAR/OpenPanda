@@ -326,6 +326,11 @@ func (c *Core) outboxFlush(ctx context.Context, peer string) {
 			taskEntries = append(taskEntries, e)
 		}
 		trows.Close()
+		if err := trows.Err(); err != nil {
+			c.logger.Warn("outbox: task rows", "peer", peer, "err", err)
+			fail()
+			return
+		}
 	}
 
 	// Parked approvals (resume_outbox) ride the same custody contract as
@@ -348,6 +353,11 @@ func (c *Core) outboxFlush(ctx context.Context, peer string) {
 			resumes = append(resumes, e)
 		}
 		rrows.Close()
+		if err := rrows.Err(); err != nil {
+			c.logger.Warn("outbox: resume rows", "peer", peer, "err", err)
+			fail()
+			return
+		}
 	}
 
 	// Deferred artifact pushes are custody too: a peer whose only pending
@@ -426,7 +436,7 @@ func (c *Core) outboxFlush(ctx context.Context, peer string) {
 					c.taskOutboxDropKey(flushCtx, e.peer, e.taskID)
 					continue
 				}
-				if verr := bnd.Verify([]byte(c.sharedSecret), time.Now().Unix()); verr != nil {
+				if verr := bnd.Verify([]byte(c.sharedSecretValue()), time.Now().Unix()); verr != nil {
 					c.logger.Warn("outbox: bundle verify failed, dropping", "task", e.taskID, "peer", e.peer, "err", verr)
 					c.taskOutboxDropKey(flushCtx, e.peer, e.taskID)
 					if err := c.store.MarkExpired(flushCtx, e.taskID, "bundle verify failed"); err != nil {
@@ -802,10 +812,16 @@ func (c *Core) taskOutboxPersist(ctx context.Context, peer string, p bus.TaskDel
 		if lifetimeSec < 1 {
 			lifetimeSec = 1
 		}
+		// A parked copy holds no lease: the bundle TTL is the row's absolute
+		// bound (§8.2), and the stamp also keeps RequeueStaleClaims from
+		// treating in-flight custody as an orphaned claim.
+		if derr := c.store.SetDeadlineIfUnset(ctx, p.TaskID, ttl); derr != nil {
+			c.logger.Warn("task_outbox: stamp dtn deadline", "task", p.TaskID, "err", derr)
+		}
 	}
 	var blob []byte
 	if b, berr := bus.NewBundle(p.TaskID, bus.EID(c.nodeID), bus.EID(peer),
-		bus.MsgTaskDelegate, lifetimeSec, raw, []byte(c.sharedSecret)); berr == nil {
+		bus.MsgTaskDelegate, lifetimeSec, raw, []byte(c.sharedSecretValue())); berr == nil {
 		blob = b.Marshal()
 	} else {
 		c.logger.Warn("task_outbox: bundle wrap", "task", p.TaskID, "err", berr)
@@ -1069,7 +1085,7 @@ func (c *Core) relayParked(ctx context.Context, onlyHop string) {
 			c.taskOutboxDrop(ctx, e.peer, e.taskID)
 			continue
 		}
-		if verr := bnd.Verify([]byte(c.sharedSecret), now); verr != nil {
+		if verr := bnd.Verify([]byte(c.sharedSecretValue()), now); verr != nil {
 			c.logger.Warn("outbox: parked bundle verify failed, dropping", "task", e.taskID, "peer", e.peer, "err", verr)
 			c.taskOutboxDrop(ctx, e.peer, e.taskID)
 			if err := c.store.MarkExpired(ctx, e.taskID, "bundle verify failed"); err != nil {
