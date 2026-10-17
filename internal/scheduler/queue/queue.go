@@ -6,7 +6,10 @@
 // is deliberately decoupled from internal/core: it only sees the Store and
 // Runner interfaces below, so a future multi-node deployment can swap in a
 // distributed lock table and a cluster-wide store without touching the
-// ordering policy.
+// ordering policy. (The execution-time half of that lock table already
+// exists in core's exec_locks — see execlock.go — so paths this registry
+// never sees, delegates, inline submits and other core processes on the same
+// database, share the same key exclusion.)
 //
 // Scheduling semantics (deterministic rules, no learning — personal-scale
 // system decision):
@@ -96,6 +99,11 @@ func sortReady(ts []ReadyTask) {
 // ResourceRegistry is the resource lock table. A task may hold several keys
 // atomically (all-or-nothing) so a task needing two resources never deadlocks
 // half-acquired against another task wanting them in reverse order.
+//
+// It orders STARTS in this process. The same keys are taken again at execution
+// time in the shared exec_locks table (core/execlock.go), which is what makes
+// the exclusion hold for paths this registry never sees — inbound delegates,
+// inline submits, and other core processes on the same database.
 type ResourceRegistry struct {
 	mu     sync.Mutex
 	holder map[string]string   // resource key -> holding task id

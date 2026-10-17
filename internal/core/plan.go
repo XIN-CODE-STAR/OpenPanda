@@ -1331,11 +1331,20 @@ func (c *Core) delegateChildren(ctx context.Context, parent Task, drs []delegate
 	// never start — the pair deadlocks until the wait window expires. Release
 	// for the duration of the fan-out and re-acquire before the round
 	// resumes (the parent is not touching the worktree while it waits).
+	// The cross-process exec lease (execlock.go) mirrors the same dance: a
+	// child that must take the parent's project key in exec_locks would
+	// otherwise wait on the parent that waits on it.
 	keys := queue.DefaultKeys(parent.ResourceKeys, parent.Project)
 	held := c.queueReleaseFor(parent.TaskID)
+	dbKeys, dbHeld := c.execReleaseFor(parent.TaskID)
 	defer func() {
 		if held {
 			c.queueAcquireFor(ctx, parent.TaskID, keys)
+		}
+		if dbHeld {
+			if err := c.execAcquireFor(ctx, parent.TaskID, dbKeys); err != nil {
+				c.logger.Warn("re-acquire exec locks after delegate wait", "task", parent.TaskID, "err", err)
+			}
 		}
 	}()
 

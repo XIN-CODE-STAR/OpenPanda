@@ -300,8 +300,26 @@ type Core struct {
 	// lock is the single choke point every actuator driver passes. Two
 	// driver processes on one GPIO pin is a fault, not parallelism.
 	// Per-process, like MaxConcurrent: a daemon and an embedded REPL core
-	// on one host do not share it.
+	// on one host do not share it — the cross-process half of actuator
+	// exclusivity is the exec_locks lease taken in claimForRun (see
+	// execLockKeys), which carries the same actuator id as a key.
 	actuatorLocks sync.Map // string(actuator id) -> *sync.Mutex
+
+	// execHold tracks the exec_locks rows a run currently holds on this
+	// node: task id -> execHoldEntry{keys, runID}. It is the in-process half
+	// of the cross-process execution lease (the store's exec_locks table is
+	// the other half): a duplicate invocation of a task whose run is in
+	// flight here yields ErrAlreadyRunning instead of stealing the live
+	// run's rows, the delegate wait (plan.delegateChildren) uses the
+	// recorded keys to release and re-acquire around a fan-out — exactly
+	// like the queue registry it mirrors — and the run nonce predicates
+	// every release on this run's own rows. See execlock.go.
+	execHold sync.Map // string -> execHoldEntry
+
+	// execAcquireMu serializes the check-then-take window in execLockAcquire
+	// so two same-task invocations landing together cannot both pass the
+	// execHold pre-check and then take rows for one another.
+	execAcquireMu sync.Mutex
 
 	// orphanSeen records when a forwarded task was first sighted orphaned in
 	// queued after a restart, so the rescue sweep gives it a grace window to

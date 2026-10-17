@@ -71,6 +71,9 @@ var migrations = []Migration{
 	{Version: 44, Name: "add_task_messages", Apply: migrateV44},
 	{Version: 45, Name: "add_tasks_screen_output", Apply: migrateV45},
 	{Version: 46, Name: "add_task_agent_session_adapter", Apply: migrateV46},
+	{Version: 47, Name: "add_exec_locks", Apply: migrateV47},
+	{Version: 48, Name: "add_exec_locks_gc", Apply: migrateV48},
+	{Version: 49, Name: "add_exec_locks_run_id", Apply: migrateV49},
 }
 
 // migrateV44 adds task_messages: the per-scope message board sibling tasks
@@ -1151,4 +1154,78 @@ func migrateV46(tx MigrationExec) error {
 		return err
 	}
 	return addColumnIfMissingTx(tx, "tasks", "agent_session_adapter", "TEXT NOT NULL DEFAULT ''")
+}
+
+// migrateV47 adds exec_locks: the cross-process execution lock table. The
+// queue's resource registry orders starts inside ONE process; every execution
+// path — queued runs, inbound delegates, inline submits, resumes — converges
+// on claimForRun, and that is where this table is taken, inside the same
+// BEGIN IMMEDIATE transaction every writer uses. That is what makes "same
+// project worktree admits one writer" and "one driver per physical actuator"
+// hold across every core process sharing the database (a daemon plus an
+// embedded REPL/panel core on one host), not just inside one. Rows are held
+// while a task runs and deleted on completion; a crashed holder's rows are
+// recognized as stale (its task terminal, in review, or its lease lapsed) and
+// stolen by the next acquirer, so a dead process can never wedge a resource.
+func migrateV47(tx MigrationExec) error {
+	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS exec_locks (
+		key TEXT PRIMARY KEY,
+		task_id TEXT NOT NULL,
+		node_id TEXT NOT NULL DEFAULT '',
+		acquired_at INTEGER NOT NULL
+	)`); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_exec_locks_task ON exec_locks(task_id)`)
+	return err
+}
+
+// migrateV48 adds the exec_locks garbage-collection trigger: whenever a task
+// row leaves the executing states, its exec_locks rows die in the same
+// transaction, on EVERY transition path — guarded transitions, bulk recovery
+// sweeps, requeues, cancels — because they all run through UPDATE OF state.
+// Without it, a lock row can outlive its run (a failed execLockUnlock write,
+// or a crash in the acquire→accept window) and sit under a dispatched row
+// that reads "live" to the next acquirer: a retried task would then wait on
+// its own leftovers until a sweep cycled the row to queued. With the trigger
+// the leftover dies atomically with the transition itself. The live set
+// mirrors liveExecHolder: dispatched/running/waiting_context keep their rows;
+// anything else releases them. UPDATE OF state fires on column assignment,
+// not on value change: a same-value write to a live state fails the WHEN and
+// deletes nothing; one to a non-live state deletes rows that were deletable
+// anyway.
+func migrateV48(tx MigrationExec) error {
+	exists, err := tableExistsTx(tx, "tasks")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil // event/audit-only legacy DBs have no state column to fire on
+	}
+	_, err = tx.Exec(`CREATE TRIGGER IF NOT EXISTS exec_locks_gc
+		AFTER UPDATE OF state ON tasks
+		WHEN NEW.state NOT IN ('dispatched', 'running', 'waiting_context')
+		BEGIN
+			DELETE FROM exec_locks WHERE task_id = NEW.task_id;
+		END`)
+	return err
+}
+
+// migrateV49 adds exec_locks.run_id: the per-run nonce every acquisition
+// stamps on its rows. Releases predicate on it, so a stale release write —
+// the deferred unlock of a run whose terminal transition already fired the
+// gc trigger — can only delete rows its own acquisition stamped, never the
+// fresh rows a re-execution of the same task just took under a new nonce.
+// Rows written before this migration carry an empty run_id and are only
+// ever stale leftovers (their holder predates the upgrade), so the steal
+// path reclaims them and the keyed release simply never matches.
+func migrateV49(tx MigrationExec) error {
+	exists, err := tableExistsTx(tx, "exec_locks")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil // pre-47 DBs have nothing to alter
+	}
+	return addColumnIfMissingTx(tx, "exec_locks", "run_id", "TEXT NOT NULL DEFAULT ''")
 }
