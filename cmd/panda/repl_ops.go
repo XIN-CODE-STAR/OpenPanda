@@ -1173,7 +1173,7 @@ func (r *repl) cmdTaskAdd(fields []string) {
 	}
 	q := core.DefaultQueueSpec()
 	q.Priority = prio
-	task, err := r.engine.Load().EnqueueTask(ctx, in, q)
+	task, warn, err := r.engine.Load().EnqueueTask(ctx, in, q)
 	if err != nil {
 		r.storeErr(err)
 		return
@@ -1187,11 +1187,11 @@ func (r *repl) cmdTaskAdd(fields []string) {
 		}
 	}
 	r.outln(i18n.Tf(r.loc, "cli.task.add.done", "id", task.TaskID, "state", task.State, "priority", priorityName(prio)))
+	if warn != "" {
+		r.outln("⚠ " + warn)
+	}
 	if sessionID != "" {
 		r.outln(i18n.Tf(r.loc, "cli.task.add.session", "id", sessionID))
-	}
-	if !queueConsumerAlive(r.cfg) {
-		warnNoConsumerTo(r.commandOutput(), r.loc)
 	}
 	if wait {
 		// Same watch-only contract as `panda task add --wait`: the command

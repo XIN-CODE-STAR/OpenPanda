@@ -849,7 +849,7 @@ func runTaskAdd(args []string) {
 		return
 	}
 
-	task, err := engine.EnqueueTask(context.Background(), in, q)
+	task, warn, err := engine.EnqueueTask(context.Background(), in, q)
 	if err != nil {
 		fatal("enqueue task", err)
 	}
@@ -860,9 +860,11 @@ func runTaskAdd(args []string) {
 
 	// The advisory precedes the output split: --json keeps stdout clean but a
 	// stderr line is still the cheapest way to keep a silently-stalled queue
-	// from looking like a successful enqueue.
-	if !queueConsumerAlive(cfg) {
-		warnNoConsumerStderr(loc)
+	// from looking like a successful enqueue. The engine's warning is
+	// store-aware: it also fires when a running daemon/web console drains a
+	// different db_path, which the process probes alone cannot see.
+	if warn != "" {
+		fmt.Fprintln(os.Stderr, "⚠ "+warn)
 	}
 	if *wait {
 		waitForTaskAdd(loc, cfg, task.TaskID, *waitTimeout)
@@ -997,11 +999,12 @@ func runTaskAddNodes(loc i18n.Locale, engine *askengine.Engine, cfg *config.Conf
 	}
 	results := make([]fanResult, 0, len(nodes))
 	failed := 0
+	consumerWarn := ""
 	for _, node := range nodes {
 		per := in
 		per.TargetNode = node
 		r := fanResult{Node: node}
-		task, err := engine.EnqueueTask(context.Background(), per, q)
+		task, warn, err := engine.EnqueueTask(context.Background(), per, q)
 		if err != nil {
 			r.Error = err.Error()
 			failed++
@@ -1009,11 +1012,14 @@ func runTaskAddNodes(loc i18n.Locale, engine *askengine.Engine, cfg *config.Conf
 			r.TaskID = task.TaskID
 			r.State = task.State
 			r.SessionID = linkTaskSession(cfg, task.TaskID, in.Title, in.Intent)
+			if consumerWarn == "" {
+				consumerWarn = warn
+			}
 		}
 		results = append(results, r)
 	}
-	if failed < len(nodes) && !queueConsumerAlive(cfg) {
-		warnNoConsumerStderr(loc)
+	if consumerWarn != "" {
+		fmt.Fprintln(os.Stderr, "⚠ "+consumerWarn)
 	}
 	if jsonOutput {
 		emitJSON(map[string]any{"fanout": len(nodes), "tasks": results})

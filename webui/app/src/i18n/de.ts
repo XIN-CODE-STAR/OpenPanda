@@ -37,13 +37,15 @@ const de: Messages = {
 
   // Token gate
   'token.title': 'Mit deinem Knoten verbinden',
-  'token.description':
-    'Gib das Panel-Token aus der Konfiguration dieses Knotens ein (network.panel_token in config.yaml).',
+  'token.description': 'Gib das Panel-Token dieses Knotens ein.',
   'token.label': 'Panel-Token',
   'token.submit': 'Verbinden',
   'token.invalid': 'Token abgelehnt — prüfen und erneut versuchen.',
   'token.unreachable': 'Panel nicht erreichbar — bitte prüfen, ob es läuft, und erneut versuchen.',
   'token.logout': 'Trennen',
+  'token.hint':
+    'Tipp: `panda web` auf diesem Knoten gibt einen Einmal-Link aus, der automatisch verbindet. ' +
+    'Ein dauerhaftes Token lässt sich über network.panel_token in config.yaml setzen.',
 
   // Common
   'common.loading': 'Lädt…',
@@ -273,6 +275,7 @@ const de: Messages = {
   'sessions.stop': 'Stopp',
   'sessions.stopped': 'Von dir gestoppt.',
   'sessions.syncing': 'Hintergrundausführung wird synchronisiert…',
+  'sessions.fixModel': 'Modelleinstellungen öffnen',
   'sessions.nodeAuto': 'Automatisch (bester Knoten)',
   'sessions.nodePickTip': 'Klassifizierte Aufgaben laufen auf diesem Knoten — Antworten bleiben lokal',
   'sessions.folderPick': 'Lokalen Ordner wählen',
@@ -982,6 +985,7 @@ const de: Messages = {
   'models.confirmRemove': 'Entfernen bestätigen',
   'models.testOk': 'OK — {reply}',
   'models.testFail': 'Fehlgeschlagen:',
+  'models.fixKey': 'API-Schlüssel aktualisieren',
   'models.addTitle': 'Modell hinzufügen',
   'models.pickProvider': 'Anbieter wählen — der Katalog enthält Endpunkte, Standardmodelle und Kontextfenster.',
   'models.region.global': 'Global',
@@ -1041,6 +1045,21 @@ const de: Messages = {
   'doctor.python3.no': 'Python 3 fehlt',
   'doctor.adapters.ok': 'Agent-Adapter',
   'doctor.adapters.no': 'Adapter fehlen',
+  'doctor.db.growth.ok': 'Aufgabenwachstum',
+  'doctor.db.growth.no': 'Erledigte Tasks werden nie bereinigt',
+  'doctor.modelendpoint.ok': 'Modell-Endpunkt',
+  'doctor.modelendpoint.no': 'Modell-Endpunkt nicht erreichbar',
+  'doctor.network.ok': 'Mesh-Listener',
+  'doctor.network.nosecret': 'shared_secret leer — Peers abgelehnt',
+  'doctor.udp.ok': 'Datagramm-Ebene',
+  'doctor.udp.off': 'Datagramm-Ebene aus',
+  'doctor.mesh.peer.enc': 'Peer verbunden (verschlüsselt)',
+  'doctor.mesh.peer.plain': 'Peer verbunden (Klartext)',
+  'doctor.mesh.peer.no': 'Peer nicht erreichbar',
+  'doctor.mesh.peer.punch': 'Peer verbindet per NAT-Punch',
+  'doctor.sandbox.ok': 'Subprozess-Sandbox',
+  'doctor.sandbox.off': 'Sandbox aus — nur Env-Filter',
+  'doctor.sandbox.nobackend': 'Sandbox konfiguriert, aber ohne Backend',
   'doctor.agent.ok': 'Agent-CLI',
   'doctor.agent.no': 'Agent-CLI fehlt',
   'doctor.agent.none': 'Keine Agent-CLIs gefunden',

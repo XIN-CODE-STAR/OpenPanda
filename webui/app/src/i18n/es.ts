@@ -37,13 +37,15 @@ const es: Messages = {
 
   // Token gate
   'token.title': 'Conecta con tu nodo',
-  'token.description':
-    'Introduce el token del panel de la configuración de este nodo (network.panel_token en config.yaml).',
+  'token.description': 'Introduce el token del panel de este nodo.',
   'token.label': 'Token del panel',
   'token.submit': 'Conectar',
   'token.invalid': 'Token rechazado — compruébalo e inténtalo de nuevo.',
   'token.unreachable': 'No se pudo conectar con el panel — comprueba que esté en ejecución e inténtalo de nuevo.',
   'token.logout': 'Desconectar',
+  'token.hint':
+    'Consejo: ejecutar `panda web` en este nodo imprime un enlace de un solo uso que conecta automáticamente. ' +
+    'Para un token permanente, define network.panel_token en config.yaml.',
 
   // Common
   'common.loading': 'Cargando…',
@@ -273,6 +275,7 @@ const es: Messages = {
   'sessions.stop': 'Detener',
   'sessions.stopped': 'Detenido por ti.',
   'sessions.syncing': 'Sincronizando ejecución en segundo plano…',
+  'sessions.fixModel': 'Abrir ajustes del modelo',
   'sessions.nodeAuto': 'Automático (mejor nodo)',
   'sessions.nodePickTip': 'Las tareas clasificadas se ejecutan en este nodo — las respuestas siguen siendo locales',
   'sessions.folderPick': 'Elegir una carpeta local',
@@ -982,6 +985,7 @@ const es: Messages = {
   'models.confirmRemove': 'Confirmar',
   'models.testOk': 'OK — {reply}',
   'models.testFail': 'Fallo:',
+  'models.fixKey': 'Actualizar clave de API',
   'models.addTitle': 'Añadir un modelo',
   'models.pickProvider': 'Elige un proveedor — el catálogo incluye endpoints, modelos por defecto y ventanas de contexto.',
   'models.region.global': 'Global',
@@ -1041,6 +1045,21 @@ const es: Messages = {
   'doctor.python3.no': 'Falta Python 3',
   'doctor.adapters.ok': 'Adaptadores de agente',
   'doctor.adapters.no': 'Adaptadores ausentes',
+  'doctor.db.growth.ok': 'Crecimiento de tareas',
+  'doctor.db.growth.no': 'Tareas cerradas sin purgar',
+  'doctor.modelendpoint.ok': 'Endpoint del modelo',
+  'doctor.modelendpoint.no': 'Endpoint del modelo inaccesible',
+  'doctor.network.ok': 'Listener mesh',
+  'doctor.network.nosecret': 'shared_secret vacío — pares rechazados',
+  'doctor.udp.ok': 'Plano de datagramas',
+  'doctor.udp.off': 'Plano de datagramas desactivado',
+  'doctor.mesh.peer.enc': 'Par conectado (cifrado)',
+  'doctor.mesh.peer.plain': 'Par conectado (en claro)',
+  'doctor.mesh.peer.no': 'Par inalcanzable',
+  'doctor.mesh.peer.punch': 'Par enlaza por NAT punch',
+  'doctor.sandbox.ok': 'Sandbox de subprocesos',
+  'doctor.sandbox.off': 'Sandbox desactivado — solo filtro de entorno',
+  'doctor.sandbox.nobackend': 'Sandbox configurado pero sin backend',
   'doctor.agent.ok': 'CLI de agente',
   'doctor.agent.no': 'CLI de agente ausente',
   'doctor.agent.none': 'Sin CLIs de agente',

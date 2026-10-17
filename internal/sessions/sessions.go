@@ -44,6 +44,10 @@ type Turn struct {
 	// task id in Ref so the UI can deep-link.
 	Kind string `json:"kind,omitempty"`
 	Ref  string `json:"ref,omitempty"`
+	// Code carries the machine reason of an "error"-kind turn (e.g.
+	// "model_config"), so a reloaded transcript can still offer the matching
+	// fix-it affordance the live stream's error event carried.
+	Code string `json:"code,omitempty"`
 }
 
 // Session is one chat thread. Worktree/Branch are empty when the work path is

@@ -685,7 +685,7 @@ export function SessionsView({
             }
             return { ...m, result: r, status: undefined, text }
           }),
-          onError: (message) => patch((m) => ({ ...m, status: undefined, kind: 'error', text: m.text || message })),
+          onError: (message, code) => patch((m) => ({ ...m, status: undefined, kind: 'error', text: m.text || message, code })),
         },
         ctrl.signal,
         nodePref || undefined,
@@ -1613,6 +1613,16 @@ function ChatBubble(props: {
           {msg.streaming && msg.text && <span class="cursor" aria-hidden="true" />}
         </div>
 
+        {/* Fix-it affordance on a coded error: its own row, so the button
+              sizes to its label instead of stretching the chat lane. */}
+        {msg.kind === 'error' && msg.code === 'model_config' && (
+          <div class="bubble-slot-row slot-meta">
+            <a class="btn small" href="#/settings?tab=models">
+              {t('sessions.fixModel')}
+            </a>
+          </div>
+        )}
+
         {/* — slot-meta: task card (link + chain) stays below the copy, inside
               the meta lane so its chrome reads like context, not a separate
               card. */}
@@ -1674,6 +1684,11 @@ function ChatBubble(props: {
             <span class="dim approval-consent">
               {t(`approval.consent.${msg.result.consent_scope}`)}
             </span>
+          )}
+          {/* Engine advisory — e.g. the dispatch went to a queue nothing
+              drains. The string arrives server-localized. */}
+          {msg.result?.warning && (
+            <span class="badge yellow">{msg.result.warning}</span>
           )}
         </div>
       </div>

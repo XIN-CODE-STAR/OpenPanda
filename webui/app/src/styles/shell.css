@@ -314,9 +314,19 @@ a.sidebar-node:hover {
 .gate-card .ascii-mark {
   margin-bottom: var(--sp-2);
 }
+.gate-title {
+  margin: 0;
+  font-size: var(--text-xl);
+  font-weight: 600;
+}
 .gate-lede {
   color: var(--text-secondary);
   font-size: var(--text-md);
+}
+.gate-hint {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: 1.5;
 }
 .gate-card label {
   font-size: var(--text-sm);

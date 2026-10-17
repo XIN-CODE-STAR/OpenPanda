@@ -84,7 +84,10 @@ export function App() {
         <nav class="primary-nav" aria-label={t('nav.aria')}>
           {primaryNavGroups.map((g) => (
             <div class="nav-group" key={g.key}>
-              <div class="nav-group-head">{t(g.key)}</div>
+              {/* A one-item group whose label duplicates its item ("节点网络 >
+                节点网络") reads as a stutter, not a section — paint the label
+                only when the group actually groups. */}
+              {g.items.length > 1 && <div class="nav-group-head">{t(g.key)}</div>}
               {g.items.map(([v, key]) => (
                 <a
                   key={v}
@@ -342,6 +345,7 @@ function TokenGate(props: {
     <div class="gate">
       <form class="gate-card" onSubmit={submit}>
         <PandaAscii scale={9} />
+        <h1 class="gate-title">{t('token.title')}</h1>
         <p class="gate-lede">{t('token.description')}</p>
         <label for="token">{t('token.label')}</label>
         <input
@@ -356,6 +360,7 @@ function TokenGate(props: {
         <button class="btn primary" type="submit" disabled={busy || !token.trim()}>
           {t('token.submit')}
         </button>
+        <p class="gate-hint dim">{t('token.hint')}</p>
       </form>
     </div>
   )

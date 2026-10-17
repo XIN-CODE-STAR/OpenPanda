@@ -39,13 +39,15 @@ const en: Messages = {
 
   // Token gate
   'token.title': 'Connect to your node',
-  'token.description':
-    'Enter the panel token from this node\'s config (network.panel_token in config.yaml).',
+  'token.description': 'Enter the panel token for this node.',
   'token.label': 'Panel token',
   'token.submit': 'Connect',
   'token.invalid': 'Token rejected — check it and try again.',
   'token.unreachable': 'Could not reach the panel — check that it is running and try again.',
   'token.logout': 'Disconnect',
+  'token.hint':
+    'Tip: `panda web` on this node prints a one-time link that connects automatically. ' +
+    'For a permanent token, set network.panel_token in config.yaml.',
 
   // Common
   'common.loading': 'Loading…',
@@ -275,6 +277,7 @@ const en: Messages = {
   'sessions.stop': 'Stop',
   'sessions.stopped': 'Stopped by you.',
   'sessions.syncing': 'Syncing background execution…',
+  'sessions.fixModel': 'Open model settings',
   'sessions.nodeAuto': 'Auto (best node)',
   'sessions.nodePickTip': 'Classified tasks run on this node — chat answers stay local',
   'sessions.folderPick': 'Pick a local folder',
@@ -991,6 +994,7 @@ const en: Messages = {
   'models.confirmRemove': 'Confirm remove',
   'models.testOk': 'OK — {reply}',
   'models.testFail': 'Failed:',
+  'models.fixKey': 'Update API key',
   'models.addTitle': 'Add a model',
   'models.pickProvider': 'Pick a provider — the catalogue ships endpoints, default models, and context windows.',
   'models.region.global': 'Global',
@@ -1050,6 +1054,21 @@ const en: Messages = {
   'doctor.python3.no': 'Python 3 missing',
   'doctor.adapters.ok': 'Agent adapters',
   'doctor.adapters.no': 'Adapters missing',
+  'doctor.db.growth.ok': 'Task growth',
+  'doctor.db.growth.no': 'Settled tasks never pruned',
+  'doctor.modelendpoint.ok': 'Model endpoint',
+  'doctor.modelendpoint.no': 'Model endpoint unreachable',
+  'doctor.network.ok': 'Mesh listener',
+  'doctor.network.nosecret': 'shared_secret empty — peers refused',
+  'doctor.udp.ok': 'Datagram plane',
+  'doctor.udp.off': 'Datagram plane off',
+  'doctor.mesh.peer.enc': 'Peer linked (encrypted)',
+  'doctor.mesh.peer.plain': 'Peer linked (plaintext)',
+  'doctor.mesh.peer.no': 'Peer unreachable',
+  'doctor.mesh.peer.punch': 'Peer links via NAT punch',
+  'doctor.sandbox.ok': 'Subprocess sandbox',
+  'doctor.sandbox.off': 'Sandbox off — env filter only',
+  'doctor.sandbox.nobackend': 'Sandbox configured but no backend',
   'doctor.agent.ok': 'Agent CLI',
   'doctor.agent.no': 'Agent CLI missing',
   'doctor.agent.none': 'No agent CLIs found',

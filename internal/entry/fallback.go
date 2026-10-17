@@ -118,6 +118,33 @@ func providerDetail(body string) string {
 	return truncate(strings.TrimSpace(line), 200)
 }
 
+// IsModelConfigError reports whether err names a problem the user can fix in
+// the model settings — no key, a rejected key, a bad endpoint, a retired
+// model id — rather than a transient outage worth waiting out. Surfaces that
+// offer a "fix your model config" affordance (the web console's error bubble)
+// key on this so the CTA lands exactly where it helps; a ClassifyError
+// unwraps to the same verdict, so raw and user-facing errors classify alike.
+func IsModelConfigError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ce *ClassifyError
+	if errors.As(err, &ce) && ce.Err != nil {
+		err = ce.Err
+	}
+	if errors.Is(err, ErrNoKey) || errors.Is(err, ErrNoModel) {
+		return true
+	}
+	var se *statusError
+	if errors.As(err, &se) {
+		return se.status == http.StatusUnauthorized ||
+			se.status == http.StatusForbidden ||
+			se.status == http.StatusNotFound ||
+			se.status == http.StatusBadRequest
+	}
+	return false
+}
+
 // IsFatalModelError reports whether an error from the model client indicates
 // that the provider or endpoint failed in an unrecoverable manner (unauthorized 401,
 // forbidden/quota 403, not found 404, rate limited 429 after retries, 5xx server outage,

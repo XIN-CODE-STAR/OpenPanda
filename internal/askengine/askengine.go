@@ -143,6 +143,15 @@ type Engine struct {
 	schedCtx    context.Context
 	schedCancel context.CancelFunc
 
+	// selfRowForeign/selfRowWriteAt bracket this engine's own Register writes:
+	// the newest last_seen stamp observed strictly above our last write (a
+	// beat nobody in this process wrote), and that write's unix time. The
+	// store-bound consumer probe (queueConsumerAlive) uses the pair to keep
+	// our own stamp from reading as a live foreign heartbeat — the split-db
+	// dead-letter case the identity lock cannot see.
+	selfRowForeign atomic.Int64
+	selfRowWriteAt atomic.Int64
+
 	// cardPath mirrors Options.CardPath: the capabilities.yaml the engine
 	// loaded its scheduler from, reported by the system_status tool. Lazy
 	// writes (checkCardPath, card reload) happen off the init path, so cardMu
@@ -900,9 +909,17 @@ func (e *Engine) initSchedulerLocked(cardPath string) error {
 	card.NodeKind = e.cfg.Node.Kind
 	card.NodeIdentity = e.cfg.Node.EffectiveIdentity()
 	stableID := core.RuntimeNodeID(e.cfg.Node.Name, e.cfg.Node.Kind, card.NodeIdentity)
+	// Snapshot the row's heartbeat stamp before Register overwrites it — but
+	// only a stamp strictly above our own last write counts as foreign: a row
+	// still carrying our stamp on a re-register (card reload) is not evidence
+	// a consumer beats this store, and must not re-arm freshness on its own.
+	if cur := core.NodeRowLastSeen(context.Background(), e.db, stableID); cur > e.selfRowWriteAt.Load() {
+		e.selfRowForeign.Store(cur)
+	}
 	if err := ledger.Register(e.db, card, stableID, schedulerTier(e.cfg.Node.ResourceClass)); err != nil {
 		e.logger.Warn("self-register failed", "node", stableID, "err", err)
 	}
+	e.selfRowWriteAt.Store(time.Now().Unix())
 	// The engine's scheduler uses stableID so tasks created, claimed and queued
 	// belong to this machine's stable identity rather than a fleeting hash
 	// that leaves tasks stranded when the process exits.
@@ -1047,6 +1064,17 @@ func (e *Engine) initSchedulerLocked(cardPath string) error {
 		} else if len(expired) > 0 {
 			e.logger.Info("expired stale tasks from previous run", "count", len(expired), "tasks", expired)
 		}
+	}
+
+	// Only the row owner heartbeats: a borrowed engine writing last_seen would
+	// fight the daemon's ownership of the row. But an owning engine (a `panda
+	// web` console standing alone, a QueueTasks REPL) must beat or its own row
+	// goes stale minutes after init — peers then mark the node offline and
+	// stop routing it work, and store-bound liveness probes (StoreConsumerFresh)
+	// would read its live queue consumer as dead. The wire half of the beat is
+	// a no-op when the engine has no peer conns.
+	if ownsRow && (e.meshNode || e.queueTasks) {
+		guard.Go(e.logger, "askengine: heartbeat", nil, func() { sched.RunHeartbeat(ownCtx) })
 	}
 
 	// Only queue-mode surfaces own a background consumer, and only the row
@@ -1892,10 +1920,55 @@ func (e *Engine) DialPeer(ctx context.Context, addr string) error {
 	return sched.DialPeer(ctx, addr)
 }
 
+// queueConsumerAlive reports whether the queue rows this engine's store
+// accumulates have any process that will drain them. Three cases:
+//
+//   - this engine owns the node row and runs the queue scheduler → it is the
+//     consumer itself.
+//   - a borrowed engine (daemon holds the identity lock) → a consumer exists
+//     only when the owner heartbeats into THIS store AND a consumer process is
+//     actually up. The process probes alone cannot tell a daemon sharing this
+//     db from one draining another db_path — the row heartbeat is the only
+//     store-bound signal.
+//   - no scheduler at all → the callers that get here require one, so fall
+//     back to the process-level probe.
+func (e *Engine) queueConsumerAlive(ctx context.Context) bool {
+	sched := e.sched.Load()
+	if sched == nil {
+		e.cfgMu.RLock()
+		cfg := e.cfg
+		e.cfgMu.RUnlock()
+		return core.QueueConsumerAlive(cfg)
+	}
+	if e.queueTasks && sched.OwnsNodeRow() {
+		return true // this engine is the consumer
+	}
+	// Every other engine — a borrowed queue surface or a one-shot `task
+	// add` — submits rows only, and only a process heartbeating THIS store
+	// can ever run them. The store probe sees through the "daemon is alive
+	// but drains another db_path" split the lock/port checks cannot;
+	// lastForeign/selfWriteAt keep this engine's own Register stamp from
+	// reading as that heartbeat.
+	fresh := core.StoreConsumerFresh(ctx, e.db, sched.NodeID(), e.selfRowForeign.Load(), e.selfRowWriteAt.Load())
+	e.logger.Debug("queue consumer probe", "node", sched.NodeID(), "fresh", fresh,
+		"lastForeign", e.selfRowForeign.Load(), "selfWriteAt", e.selfRowWriteAt.Load(),
+		"cur", core.NodeRowLastSeen(ctx, e.db, sched.NodeID()), "ownsRow", sched.OwnsNodeRow(), "queueTasks", e.queueTasks)
+	if !fresh {
+		return false
+	}
+	e.cfgMu.RLock()
+	cfg := e.cfg
+	e.cfgMu.RUnlock()
+	return core.QueueConsumerAlive(cfg)
+}
+
 // EnqueueTask routes a directly-created task (the panel's board "new task"
 // form, `panda task add`) through the async queue: it lands in queued and the
 // scheduler starts it when resources allow. Needs a capability card, like
-// task submission.
+// task submission. The warn result carries a localized advisory when the task
+// was accepted but this store has no live queue consumer — the row is durable
+// and runs once a consumer starts, but a silent "queued" that never moves is
+// the worst possible failure mode to surface as success.
 //
 // The same tier-2 verdict the ask loop resolves applies here: the task's own
 // project supplies the effective mode, a remembered project approve supplies
@@ -1903,18 +1976,29 @@ func (e *Engine) DialPeer(ctx context.Context, addr string) error {
 // "always" still parks every tier-2 task for a foreground decision. Session
 // remembers cannot apply — the linked session does not exist yet (the board
 // creates it after a successful enqueue).
-func (e *Engine) EnqueueTask(ctx context.Context, in core.TaskInput, q core.QueueSpec) (core.Task, error) {
+func (e *Engine) EnqueueTask(ctx context.Context, in core.TaskInput, q core.QueueSpec) (core.Task, string, error) {
 	sched := e.sched.Load()
 	if sched == nil {
-		return core.Task{}, fmt.Errorf("task creation requires a capability card (scheduler initialization failed)")
+		return core.Task{}, "", fmt.Errorf("task creation requires a capability card (scheduler initialization failed)")
 	}
 	verdict := e.approvalFor("", in.Project)
 	authorized, denied := verdict.gate(in.Authorized)
 	if denied {
-		return core.Task{}, fmt.Errorf("%w (scope: %s)", ErrApprovalDenied, verdict.decisionScope)
+		return core.Task{}, "", fmt.Errorf("%w (scope: %s)", ErrApprovalDenied, verdict.decisionScope)
 	}
 	in.Authorized = authorized
-	return sched.Enqueue(ctx, in, q)
+	task, err := sched.Enqueue(ctx, in, q)
+	if err != nil {
+		return task, "", err
+	}
+	// Dead-letter guard: a queued row only runs if some process drains THIS
+	// store. Borrowed engines never consume; when no owner heartbeats this
+	// store the task parks forever — return the row (durable, runs the moment
+	// a consumer comes up) plus an advisory instead of silent "queued".
+	if !e.queueConsumerAlive(ctx) {
+		return task, i18n.T(e.Locale(), "cli.queue.noConsumer"), nil
+	}
+	return task, "", nil
 }
 
 // StartPlan hands a multi-stage plan to the scheduler core, which creates one
@@ -1991,17 +2075,13 @@ func (e *Engine) startClassifiedPlan(ctx context.Context, spec *entry.PlanSpec, 
 	res := &Result{Kind: "plan", PlanID: planID, PlanGoal: p.Goal, PlanStages: stages, OK: true}
 	// A plan is queue work: with no consumer anywhere the stages park forever
 	// and the "plan started" receipt reads like a handoff that never happened.
-	// This engine consuming (queueTasks) counts; so do a live daemon or web
-	// console on this node.
-	consumer := e.queueTasks
+	// This engine consuming (queueTasks AND owning the node row) counts; so
+	// does a live daemon or web console heartbeating into THIS store — a
+	// process draining a different db_path would leave the stages parked and
+	// must not read as a consumer.
+	consumer := e.queueConsumerAlive(ctx)
 	if !consumer {
-		e.cfgMu.RLock()
-		cfg := e.cfg
-		e.cfgMu.RUnlock()
-		consumer = core.QueueConsumerAlive(cfg)
-		if !consumer {
-			res.Warning = i18n.T(e.Locale(), "cli.queue.noConsumer")
-		}
+		res.Warning = i18n.T(e.Locale(), "cli.queue.noConsumer")
 	}
 	// "Plan started" is a receipt, not an outcome. Like a queued task the
 	// pipeline is followed until every stage settles (or one parks for a
@@ -2152,13 +2232,21 @@ func (e *Engine) submitTask(ctx context.Context, spec *entry.TaskSpec, prompt st
 			// Receipt mode (the panel's board): the queued pointer IS the
 			// result — the session streams the row's progress and the
 			// finalizer folds its verdict, so nothing here waits on settle.
+			// Dead-letter guard: when this engine does not consume and no
+			// owner heartbeats this store, the receipt is permanent parked
+			// work, not dispatch — attach the advisory so the surface can say
+			// so instead of showing a confident "queued".
+			warn := ""
+			if !e.queueConsumerAlive(ctx) {
+				warn = i18n.T(targetLoc, "cli.queue.noConsumer")
+			}
 			if reasoning != "" {
 				sched.EvTrace(ctx, task.TaskID, core.EvReasoning, map[string]any{"thought": reasoning})
 			}
 			if consentSrc != "" {
 				sched.EvTrace(ctx, task.TaskID, "approval_auto", map[string]any{"scope": consentSrc})
 			}
-			return &Result{Kind: "task", TaskID: task.TaskID, TaskTitle: task.Title, TaskState: task.State, Thought: reasoning, ConsentSource: consentSrc}
+			return &Result{Kind: "task", TaskID: task.TaskID, TaskTitle: task.Title, TaskState: task.State, Thought: reasoning, ConsentSource: consentSrc, Warning: warn}
 		}
 		// Await mode: the queue (not this turn) owns execution — a scheduler
 		// in the daemon or this own process claims the row when its resource

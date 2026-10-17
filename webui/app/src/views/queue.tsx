@@ -212,13 +212,16 @@ function NewTaskForm({ projects, onCreated }: { projects: string[]; onCreated():
     setBusy(true)
     setError('')
     try {
-      await api.createTask({
+      const res = await api.createTask({
         title: title.trim(),
         prompt: prompt.trim() || undefined,
         priority,
         project: project || undefined,
         node: node || undefined,
       })
+      // A queued task nobody can drain must not read as dispatched — surface
+      // the engine's advisory before clearing the composer.
+      if (res.warning) toast(res.warning)
       setTitle('')
       setPrompt('')
       setPriority('normal')

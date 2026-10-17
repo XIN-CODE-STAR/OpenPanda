@@ -92,7 +92,7 @@ func (h *handler) createTask(w http.ResponseWriter, r *http.Request) {
 	// peer — a board task with `requires` pointing at another device's ability
 	// must be able to leave this node.
 
-	task, err := eng.EnqueueTask(r.Context(), in, q)
+	task, warn, err := eng.EnqueueTask(r.Context(), in, q)
 	if err != nil {
 		if errors.Is(err, askengine.ErrApprovalDenied) {
 			// A remembered deny answered before the row existed: report it as a
@@ -115,7 +115,10 @@ func (h *handler) createTask(w http.ResponseWriter, r *http.Request) {
 			_ = h.store.SetSessionID(r.Context(), task.TaskID, sess.ID)
 		}
 	}
-	writeJSON(w, map[string]string{"task_id": task.TaskID, "session_id": sessionID, "state": task.State})
+	// warn carries the dead-queue advisory ("no consumer will drain this
+	// store") — the board surfaces it as a toast so an accepted task that can
+	// never run never reads as a success.
+	writeJSON(w, map[string]string{"task_id": task.TaskID, "session_id": sessionID, "state": task.State, "warning": warn})
 }
 
 // patchTaskRequest is the body of PATCH /api/tasks/{id}.

@@ -11,6 +11,8 @@ package core
 // behavior.
 
 import (
+	"context"
+	"database/sql"
 	"net"
 	"strconv"
 	"time"
@@ -72,4 +74,57 @@ func PanelReachable(addr string) bool {
 		}
 	}
 	return false
+}
+
+// storeConsumerMaxAge bounds how fresh the node row's last_seen must be to
+// prove an owner is heartbeating THIS store: the self row rewrites at least
+// every selfRowRefresh (30s) and the stale-peer sweep ages a row out at 90s,
+// so a row inside the window is being written live.
+const storeConsumerMaxAge = 90 * time.Second
+
+// NodeRowLastSeen reads the directory row's heartbeat stamp — 0 when the row
+// is absent. Snapshot it BEFORE the engine's own Register: that upsert always
+// rewrites last_seen, so a post-register read cannot tell our write from a
+// real owner's heartbeat without the pre-register value to compare against.
+func NodeRowLastSeen(ctx context.Context, db *sql.DB, nodeID string) int64 {
+	if db == nil {
+		return 0
+	}
+	var lastSeen int64
+	if err := db.QueryRowContext(ctx,
+		`SELECT COALESCE(last_seen,0) FROM employee_cache WHERE id=?`, nodeID,
+	).Scan(&lastSeen); err != nil {
+		return 0
+	}
+	return lastSeen
+}
+
+// StoreConsumerFresh reports whether an owner heartbeats nodeID's row in db.
+// QueueConsumerAlive answers "is a consumer process running on this machine"
+// — the identity lock and the panel port cannot see which database that
+// process actually drains. This probe is store-bound: a daemon that holds the
+// lock but opened a different db_path never refreshes this store's row, so
+// enqueues here would dead-letter even though the process check reports a
+// consumer alive.
+//
+// lastForeign/selfWriteAt separate the caller's own Register writes from a
+// real consumer's beats: selfWriteAt is the unix time of our most recent
+// register (0 if the engine never wrote); lastForeign is the newest last_seen
+// observed strictly above it — i.e. a stamp nobody in this process wrote.
+// Alive means the row moved past our write, or the last foreign stamp is
+// still inside the heartbeat window. Our own stamp alone proves nothing, and
+// a re-register must not let it age into "fresh foreign evidence".
+func StoreConsumerFresh(ctx context.Context, db *sql.DB, nodeID string, lastForeign, selfWriteAt int64) bool {
+	cur := NodeRowLastSeen(ctx, db, nodeID)
+	if cur == 0 {
+		return false
+	}
+	if selfWriteAt == 0 {
+		// The caller never wrote the row — plain freshness applies.
+		return time.Since(time.Unix(cur, 0)) < storeConsumerMaxAge
+	}
+	if cur > selfWriteAt {
+		return true // a heartbeat after our last register — a live foreign owner
+	}
+	return lastForeign > 0 && time.Since(time.Unix(lastForeign, 0)) < storeConsumerMaxAge
 }

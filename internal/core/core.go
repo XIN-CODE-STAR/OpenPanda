@@ -609,6 +609,12 @@ func (c *Core) OwnsNodeRow() bool {
 	return c.ownsNodeRow
 }
 
+// NodeID returns this core's stable node identity — the employee_cache row
+// its heartbeat (when it owns the row) and queue claims are keyed on.
+func (c *Core) NodeID() string {
+	return c.nodeID
+}
+
 // SetEdgeAuthority marks whether this process holds the node identity lock
 // for its lifetime (the daemon entry point does; engines only probe-and-
 // release it at init, so they must leave this false). The claim rides every

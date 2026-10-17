@@ -321,6 +321,9 @@ export type CreateTaskResult = {
   task_id: string
   session_id: string
   state: string
+  /** Advisory when the task queued into a store no live consumer drains —
+   *  parked work, not dispatch. Server-localized; empty when fine. */
+  warning?: string
 }
 
 export interface ApprovalOperation {
@@ -365,6 +368,10 @@ export interface AskResult {
   approval?: AskApproval
   denied?: boolean
   consent_scope?: 'session' | 'project' | string
+  /** Non-fatal advisory from the engine — e.g. the work was queued but no
+   *  live consumer drains this store, so the receipt is parked work, not
+   *  dispatch. Rendered verbatim (server-localized). */
+  warning?: string
 }
 
 /** The parked tier-2 request inside an ask result — what it is, and the
@@ -1618,6 +1625,9 @@ export interface SessionTurn {
   text: string
   kind?: 'answer' | 'task' | 'error'
   ref?: string
+  /** Machine reason on an error-kind turn (e.g. "model_config") — the panel
+   *  stamps it so a replayed transcript keeps the matching fix-it CTA. */
+  code?: string
 }
 
 export interface SessionOperation {
@@ -1765,7 +1775,9 @@ export interface AskStreamHandlers {
   onStatus(text: string): void
   onOperation(operationID: string): void
   onResult(r: AskResult): void
-  onError(message: string): void
+  /** `code` carries the panel's machine reason when one exists —
+   *  "model_config" marks the fix-in-settings class of failure. */
+  onError(message: string, code?: string): void
 }
 
 /** POST /api/sessions/{id}/ask and consume its SSE stream. Resolves when the
@@ -1800,7 +1812,7 @@ export async function askSessionStream(
       else if (event === 'status') h.onStatus(payload.text ?? '')
       else if (event === 'operation') h.onOperation(payload.operation_id ?? '')
       else if (event === 'result') h.onResult(payload as AskResult)
-      else if (event === 'error') h.onError(payload.message ?? 'unknown error')
+      else if (event === 'error') h.onError(payload.message ?? 'unknown error', payload.code || undefined)
     },
   })
   // openSSE resolves on abort; the composer's stop button contract is an

@@ -627,11 +627,19 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 			msg = "任务已被用户取消"
 			status = core.StateCancelled
 		}
+		// A model-config failure (dead/absent key, bad endpoint, retired
+		// model id) is the one error class with a dedicated fix surface:
+		// tag it so the console renders a jump-to-settings affordance on
+		// the bubble, including on the persisted turn a reload replays.
+		code := ""
+		if entry.IsModelConfigError(err) {
+			code = "model_config"
+		}
 		_, _ = h.sessions.SetOperation(sess.ID, sessions.Operation{
 			ID: op.operationID, Status: status, Error: msg,
 		})
-		send("error", map[string]string{"message": msg})
-		_, _ = h.sessions.AppendTurn(sess.ID, sessions.Turn{Role: "assistant", Text: "⚠ " + msg, Kind: "error"})
+		send("error", map[string]string{"message": msg, "code": code})
+		_, _ = h.sessions.AppendTurn(sess.ID, sessions.Turn{Role: "assistant", Text: "⚠ " + msg, Kind: "error", Code: code})
 		return
 	}
 

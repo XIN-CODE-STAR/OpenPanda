@@ -45,7 +45,7 @@ func TestEngineWithoutModel(t *testing.T) {
 		t.Skip("no capability card available in this environment; skipping enqueue check")
 	}
 	ctx := context.Background()
-	task, err := e.EnqueueTask(ctx, core.TaskInput{
+	task, _, err := e.EnqueueTask(ctx, core.TaskInput{
 		Title:    "probe",
 		Intent:   "probe",
 		Requires: []string{"nonexistent-ability-xyz"},
