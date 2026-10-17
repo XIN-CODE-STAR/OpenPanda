@@ -331,6 +331,9 @@ export type TaskMessageResult = {
   /** "interrupted" — a live round was aborted and the text leads the next
    *  one; "queued" — the note waits for the next round (or the first run). */
   status: 'queued' | 'interrupted' | string
+  /** No consumer drains this store — the note is durable but nobody reads
+   *  it until a daemon or console picks the queue up. Server-localized. */
+  warning?: string
 }
 
 export interface ApprovalOperation {

@@ -477,6 +477,14 @@ func (e *Engine) TaskStore() *core.TaskStore {
 	return core.NewSigningTaskStore(e.db, e.logger)
 }
 
+// stableNodeID is the runtime identity this engine registers under — the
+// same value initSchedulerLocked computes for the scheduler core. Valid even
+// when the scheduler never came up (card init failure): the owner guard on
+// the scheduler-less message path needs it regardless.
+func (e *Engine) stableNodeID() string {
+	return core.RuntimeNodeID(e.cfg.Node.Name, e.cfg.Node.Kind, e.cfg.Node.EffectiveIdentity())
+}
+
 // SendTaskMessage delivers a user message into a task — the two send modes
 // (steer.go). Queue posts a durable advisory the agent reads at its next
 // supervision round; inject additionally aborts the in-flight round when one
@@ -484,26 +492,39 @@ func (e *Engine) TaskStore() *core.TaskStore {
 // token is "interrupted" (a running turn was aborted), "queued" (the message
 // waits for the next round — or the task's first run), and callers localize
 // it for their surface.
-func (e *Engine) SendTaskMessage(ctx context.Context, taskID, text string, inject bool) (string, error) {
+//
+// The warning mirrors EnqueueTask: a task still queued with no consumer on
+// this store never reaches a round, so a note delivered to it is durable but
+// unread — say so instead of reporting a silent success.
+func (e *Engine) SendTaskMessage(ctx context.Context, taskID, text string, inject bool) (status, warning string, err error) {
 	sched := e.sched.Load()
-	if sched == nil {
+	switch {
+	case sched == nil:
 		// A message needs the store's board only; a scheduler-less engine
-		// still delivers it to the row.
+		// still delivers it to the row — with the same owner guard, so a
+		// remote-executor task refuses instead of silently swallowing the note.
 		if inject {
-			return "", fmt.Errorf("inject requires the scheduler (capability card initialization failed)")
+			return "", "", fmt.Errorf("inject requires the scheduler (capability card initialization failed)")
 		}
-		if err := core.NewSigningTaskStore(e.db, e.logger).PostUserMessage(ctx, taskID, text, core.MsgGradeStatus); err != nil {
-			return "", err
+		if err = core.NewSigningTaskStore(e.db, e.logger).PostUserMessage(ctx, taskID, text, core.MsgGradeStatus, e.stableNodeID()); err != nil {
+			return "", "", err
 		}
-		return "queued", nil
+		status = "queued"
+	case inject:
+		if status, err = sched.InjectUserMessage(ctx, taskID, text); err != nil {
+			return "", "", err
+		}
+	default:
+		if err = sched.QueueUserMessage(ctx, taskID, text); err != nil {
+			return "", "", err
+		}
+		status = "queued"
 	}
-	if inject {
-		return sched.InjectUserMessage(ctx, taskID, text)
+	if t, terr := core.NewSigningTaskStore(e.db, e.logger).Get(ctx, taskID); terr == nil &&
+		t.State == core.StateQueued && !e.queueConsumerAlive(ctx) {
+		return status, i18n.T(e.Locale(), "cli.queue.noConsumer"), nil
 	}
-	if err := sched.QueueUserMessage(ctx, taskID, text); err != nil {
-		return "", err
-	}
-	return "queued", nil
+	return status, "", nil
 }
 
 // SetOnReview installs the callback fired when a task enters review — i.e. when

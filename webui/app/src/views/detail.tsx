@@ -90,8 +90,9 @@ export function DetailView({
     await act(async () => {
       const r = await api.sendTaskMessage(task!.id, text, inject)
       toast(
-        r.status === 'interrupted' ? t('detail.msgInjectedToast') : t('detail.msgQueuedToast'),
-        'success',
+        r.warning ||
+          (r.status === 'interrupted' ? t('detail.msgInjectedToast') : t('detail.msgQueuedToast')),
+        r.warning ? 'info' : 'success',
       )
       setMsgText('')
     })
