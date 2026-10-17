@@ -244,15 +244,12 @@ func TestParseOutputAnswerEnvelope(t *testing.T) {
 	}
 }
 
-// TestParseOutputEmptyAnswerEnvelope verifies a contentless answer envelope
-// falls back to prose handling instead of rendering a hollow "{...}".
+// TestParseOutputEmptyAnswerEnvelope verifies a contentless answer envelope is
+// surfaced as a model error instead of degrading to prose handling, which
+// printed the hollow "{...}" verbatim as the user's answer.
 func TestParseOutputEmptyAnswerEnvelope(t *testing.T) {
-	out, err := ParseOutput(`{"kind":"answer","answer":""}`)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if out.Kind != KindAnswer {
-		t.Fatalf("empty answer envelope should degrade to KindAnswer, got %s", out.Kind)
+	if _, err := ParseOutput(`{"kind":"answer","answer":""}`); err == nil {
+		t.Fatal("empty answer envelope must surface a validation error, not leak the raw JSON as the answer")
 	}
 }
 

@@ -138,11 +138,11 @@ func decodeEnvelope(raw string) (Output, bool, error) {
 	case KindAnswer:
 		// A model that wraps its reply as {"kind":"answer","answer":"…"} instead
 		// of emitting bare prose must be unwrapped, or the raw JSON envelope leaks
-		// to the user as the "answer". Only a non-empty answer field is a real
-		// directive; an empty one falls back to prose handling so we never render
-		// a contentless envelope.
+		// to the user as the "answer". A contentless envelope is a model error:
+		// falling back to prose handling would print the hollow "{...}" verbatim
+		// (the whole text is the envelope), so surface it for a retry instead.
 		if strings.TrimSpace(envelope.Answer) == "" {
-			return Output{}, false, nil
+			return Output{}, false, fmt.Errorf("entry: answer envelope carries no content")
 		}
 		return Output{Kind: KindAnswer, Answer: envelope.Answer}, true, nil
 
