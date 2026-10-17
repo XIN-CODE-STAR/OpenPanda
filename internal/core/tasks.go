@@ -1249,6 +1249,34 @@ func (s *TaskStore) ClaimApproved(ctx context.Context, taskID, expectedOwner, ne
 	})
 }
 
+// RequeueForContinue atomically returns a follow-up-parked review to the
+// schedulable queue — the same review→queued+scheduled=1 transition an
+// approved resume uses, gated on the accept_work disposition. The queue
+// scheduler (this process's or the daemon sharing the store) then claims and
+// runs it like any queued row, which is what makes continue work
+// cross-process: a CLI or console marks the row, the executor's scheduler
+// does the running. The caller is responsible for the needs_followup check
+// (it lives in the parked result, not the row).
+func (s *TaskStore) RequeueForContinue(ctx context.Context, taskID, expectedOwner string) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `
+			UPDATE tasks SET state=?, scheduled=1, state_version=state_version+1, updated_at=?
+			WHERE task_id=? AND state=? AND owner_node=?
+				AND approval_disposition=?`,
+			StateQueued, s.now(), taskID, StateReview, expectedOwner,
+			string(ApprovalAcceptWork))
+		if err != nil {
+			return fmt.Errorf("requeue for continue: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return fmt.Errorf("%w: task %s continue claimed concurrently", ErrConflict, taskID)
+		}
+		return s.recordEventTx(ctx, tx, taskID, EvReview, map[string]any{
+			"continued": true,
+		})
+	})
+}
+
 // reviewFromAuthorizationRefusal is the legacy-row compatibility path. Only a
 // review event that itself contains the explicit authorization-refusal sentinel
 // may resume. Generic failed events are not evidence that execution never began:

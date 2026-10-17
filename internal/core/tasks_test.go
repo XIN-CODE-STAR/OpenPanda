@@ -8,11 +8,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/Xustalis/OpenPanda/internal/bus"
+	"github.com/Xustalis/OpenPanda/internal/defense"
 	"github.com/Xustalis/OpenPanda/internal/storage"
 )
 
@@ -1784,5 +1786,153 @@ func TestProjectStateCounts(t *testing.T) {
 	}
 	if _, ok := counts[""]; ok {
 		t.Fatalf("unnamed bucket present: %v", counts[""])
+	}
+}
+
+// parkForFollowup flips a fresh task into the exact row the supervised
+// follow-up park leaves behind: review under accept_work with the
+// needs_followup flag inside the parked result.
+func parkForFollowup(t *testing.T, s *TaskStore, tk Task, owner string) {
+	t.Helper()
+	if _, err := s.db.ExecContext(context.Background(), `
+		UPDATE tasks SET state=?, owner_node=?, approval_disposition=?, result_json=?
+		WHERE task_id=?`,
+		StateReview, owner, string(ApprovalAcceptWork),
+		`{"ok":false,"needs_followup":true,"stderr":"round budget exhausted"}`,
+		tk.TaskID); err != nil {
+		t.Fatalf("park for followup: %v", err)
+	}
+}
+
+// TestNeedsFollowup pins the marker's semantics: only a review row whose
+// parked result carries needs_followup may be continued — every other
+// review is answered by approve or reject alone.
+func TestNeedsFollowup(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	tk := createTask(t, s, "", "followup", "node")
+	parkForFollowup(t, s, tk, "node")
+
+	cur, err := s.Get(ctx, tk.TaskID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !cur.NeedsFollowup() {
+		t.Fatal("parked followup row must report NeedsFollowup")
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE tasks SET result_json=? WHERE task_id=?`,
+		`{"ok":true}`, tk.TaskID); err != nil {
+		t.Fatalf("clear flag: %v", err)
+	}
+	cur, _ = s.Get(ctx, tk.TaskID)
+	if cur.NeedsFollowup() {
+		t.Fatal("review without the flag must not read as follow-up")
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE tasks SET state=?, result_json=? WHERE task_id=?`,
+		StateDone, `{"needs_followup":true}`, tk.TaskID); err != nil {
+		t.Fatalf("terminalize: %v", err)
+	}
+	cur, _ = s.Get(ctx, tk.TaskID)
+	if cur.NeedsFollowup() {
+		t.Fatal("non-review row must not read as follow-up even with the flag")
+	}
+}
+
+// TestRequeueForContinue pins the CAS: review+accept_work+expected owner
+// flips to queued with scheduled=1 (ListReady's exact selector — without it
+// the continuation would be invisible), and every other combination is a
+// conflict, so two callers can never double-claim the park.
+func TestRequeueForContinue(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	tk := createTask(t, s, "", "continue me", "node")
+	parkForFollowup(t, s, tk, "node")
+
+	if err := s.RequeueForContinue(ctx, tk.TaskID, "other-node"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("foreign owner must conflict, got %v", err)
+	}
+	if err := s.RequeueForContinue(ctx, tk.TaskID, "node"); err != nil {
+		t.Fatalf("requeue: %v", err)
+	}
+	cur, err := s.Get(ctx, tk.TaskID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if cur.State != StateQueued {
+		t.Fatalf("state = %s, want queued", cur.State)
+	}
+	var scheduled int
+	if err := s.db.QueryRowContext(ctx, `SELECT scheduled FROM tasks WHERE task_id=?`, tk.TaskID).Scan(&scheduled); err != nil {
+		t.Fatalf("read scheduled: %v", err)
+	}
+	if scheduled != 1 {
+		t.Fatal("requeue must stamp scheduled=1 for ListReady")
+	}
+	if err := s.RequeueForContinue(ctx, tk.TaskID, "node"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("second continue must conflict, got %v", err)
+	}
+	// A non-accept_work review (consent park) is not a follow-up continue.
+	tk2 := createTask(t, s, "", "consent park", "node")
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE tasks SET state=?, owner_node=?, approval_disposition=? WHERE task_id=?`,
+		StateReview, "node", string(ApprovalResumeExecution), tk2.TaskID); err != nil {
+		t.Fatalf("park consent: %v", err)
+	}
+	if err := s.RequeueForContinue(ctx, tk2.TaskID, "node"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("consent disposition must conflict, got %v", err)
+	}
+}
+
+// TestContinueReviewedRequeues covers the core path end to end at the store
+// level: the continue validates the park, lands the operator note as a
+// steer-grade board message (so the continued round leads with it), and
+// hands the row back to the schedulable queue.
+func TestContinueReviewedRequeues(t *testing.T) {
+	s := newTestStore(t)
+	c := &Core{store: s, nodeID: "node", logger: testLogger(),
+		loop: defense.NewLoopDetector(2), checkpointLoop: defense.NewLoopDetector(2)}
+	ctx := context.Background()
+	tk := createTask(t, s, "", "long work", "node")
+	parkForFollowup(t, s, tk, "node")
+
+	// A review without the follow-up flag refuses.
+	plain := createTask(t, s, "", "plain review", "node")
+	if _, err := s.db.ExecContext(ctx, `UPDATE tasks SET state=?, owner_node=? WHERE task_id=?`,
+		StateReview, "node", plain.TaskID); err != nil {
+		t.Fatalf("park plain: %v", err)
+	}
+	if _, err := c.ContinueReviewed(ctx, plain.TaskID, ""); !errors.Is(err, ErrConflict) {
+		t.Fatalf("non-followup review must conflict, got %v", err)
+	}
+
+	final, err := c.ContinueReviewed(ctx, tk.TaskID, "finish the second half")
+	if err != nil {
+		t.Fatalf("continue: %v", err)
+	}
+	if final.State != StateQueued {
+		t.Fatalf("state = %s, want queued", final.State)
+	}
+	msgs, err := s.TaskMessages(ctx, "task:"+tk.TaskID)
+	if err != nil {
+		t.Fatalf("board read: %v", err)
+	}
+	var steer *TaskMessage
+	for i := range msgs {
+		if isUserSender(msgs[i].Sender) && msgs[i].Grade == MsgGradeSteer {
+			steer = &msgs[i]
+		}
+	}
+	if steer == nil || !strings.Contains(steer.Body, "finish the second half") {
+		t.Fatalf("note must land as a steer message, got %+v", msgs)
+	}
+
+	// Foreign dispatch target: the continuation belongs to the executor.
+	remote := createTask(t, s, "", "remote-run", "node")
+	parkForFollowup(t, s, remote, "node")
+	if err := s.RecordEvent(ctx, remote.TaskID, EvDelegate, map[string]any{"target": "peer-1"}); err != nil {
+		t.Fatalf("record delegate: %v", err)
+	}
+	if _, err := c.ContinueReviewed(ctx, remote.TaskID, ""); err == nil {
+		t.Fatal("remote-dispatched task must refuse local continue")
 	}
 }

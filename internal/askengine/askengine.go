@@ -2579,6 +2579,37 @@ func (e *Engine) resumeLocked(ctx context.Context, taskID, answer string) *Resul
 	return resultFromTask(task, result, routeFallbackPeer(ctx, sched.TaskStore(), taskID))
 }
 
+// ContinueReviewed requeues a follow-up-parked task: the supervised round
+// budget ran out mid-work (needs_followup) and the operator chose "keep
+// going" over accept-half or throw-away. The call only marks the row — the
+// store's queue scheduler runs the continuation, which is what lets a CLI or
+// console continue work a daemon owns. The optional note travels as a
+// steer-grade board note that leads the continued round's intent.
+func (e *Engine) ContinueReviewed(ctx context.Context, taskID, note string, cb StreamCallbacks) *Result {
+	if e == nil || e.db == nil {
+		return &Result{Kind: "task", TaskID: taskID, TaskState: core.StateFailed, Stderr: "task continuation requires an initialized engine", ExitCode: 1}
+	}
+	sched := e.sched.Load()
+	if sched == nil {
+		return &Result{Kind: "task", TaskID: taskID, TaskState: core.StateReview, Stderr: "task execution requires a capability card", ExitCode: 1}
+	}
+	task, err := sched.ContinueReviewed(ctx, taskID, note)
+	if err != nil {
+		state := core.StateReview
+		if current, getErr := sched.TaskStore().Get(context.WithoutCancel(ctx), taskID); getErr == nil {
+			state = current.State
+		}
+		return &Result{Kind: "task", TaskID: taskID, TaskTitle: task.Title, TaskState: state, Stderr: err.Error(), ExitCode: 1}
+	}
+	res := &Result{Kind: "task", TaskID: task.TaskID, TaskTitle: task.Title, TaskState: task.State, OK: true}
+	// A requeue with no live consumer is the same dead-letter the enqueue
+	// path warns about — surface it identically.
+	if !e.queueConsumerAlive(ctx) {
+		res.Warning = i18n.T(e.Locale(), "cli.queue.noConsumer")
+	}
+	return res
+}
+
 // ResumeApproved accepts or re-runs a reviewed task under the caller's context.
 // workDir optionally overrides the persisted task directory for an active
 // originating session; progress is bridged from the same core event stream as

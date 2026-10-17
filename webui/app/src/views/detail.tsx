@@ -117,6 +117,11 @@ export function DetailView({
   if (!task) return <p class="dim">{t('common.loading')}</p>
 
   const cancellable = !['done', 'failed', 'cancelled', 'expired'].includes(task.state)
+  // The third answer to a supervised "more work remains" park: approve would
+  // accept the half-finished work, reject would throw it away — continue
+  // spends a fresh round budget on finishing it, in the same agent session.
+  const needsFollowup =
+    task.state === 'review' && parseResult(task.result ?? '')?.needs_followup === true
 
   return (
     <section>
@@ -144,6 +149,21 @@ export function DetailView({
           )}
           {task.state === 'review' && !rejecting && (
             <>
+              {needsFollowup && (
+                <button
+                  class="btn"
+                  disabled={busy}
+                  title={t('detail.continueHint')}
+                  onClick={() =>
+                    act(async () => {
+                      const out = await api.continueTask(task.id)
+                      toast(out.warning || t('detail.continuedToast'), out.warning ? 'info' : 'success')
+                    })
+                  }
+                >
+                  {t('detail.continue')}
+                </button>
+              )}
               <ScopeSelect value={scope} onChange={setScope} disabled={busy} />
               <button
                 class="btn primary"

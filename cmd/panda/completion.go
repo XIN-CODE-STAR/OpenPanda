@@ -25,7 +25,7 @@ import (
 // queue, init) complete flags and files instead.
 var completionVerbs = map[string][]string{
 	"nodes":    {"add", "disconnect", "invite", "remove", "prune", "verify", "admit", "drain", "trust"},
-	"task":     {"add", "priority", "move", "approve", "reject", "cancel", "delete", "revert", "followup", "board", "artifact", "logs", "show"},
+	"task":     {"add", "priority", "move", "approve", "reject", "cancel", "delete", "revert", "followup", "continue", "send", "board", "artifact", "logs", "show"},
 	"plan":     {"run", "show", "example"},
 	"session":  {"list", "new", "show", "mv", "rm", "fork", "tree", "ask", "diff", "merge", "revert"},
 	"skill":    {"list", "approve", "reject", "reset", "find", "import", "hub", "install"},

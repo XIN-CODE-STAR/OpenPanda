@@ -781,6 +781,18 @@ export const api = {
     return request('GET', `/api/tasks/${encodeURIComponent(id)}/operations/${encodeURIComponent(operationID)}`)
   },
 
+  /** Requeue a follow-up-parked task: the supervisor said more work remains
+   *  and the operator's answer is "keep going" — the queue scheduler runs
+   *  the continuation under a fresh round budget, keeping the agent session
+   *  and work dir. An optional note leads the continued round's intent. */
+  continueTask(id: string, note?: string): Promise<{ id: string; state: string; warning: string }> {
+    return request(
+      'POST',
+      `/api/tasks/${encodeURIComponent(id)}/continue`,
+      note ? { note } : undefined,
+    )
+  },
+
   reject(id: string, reason?: string, scope?: ApprovalScope): Promise<void> {
     const body: Record<string, string> = {}
     if (reason) body.reason = reason

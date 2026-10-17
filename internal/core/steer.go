@@ -28,6 +28,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/Xustalis/OpenPanda/internal/scheduler"
 )
 
 // QueueUserMessage posts a durable advisory note to the task's own board
@@ -63,8 +65,11 @@ func (c *Core) userMessage(ctx context.Context, taskID, text, grade, mode string
 	}
 	// A task dispatched to another node reads ITS store's board, not ours: a
 	// note landed here would never reach the agent. Refuse honestly instead
-	// of accepting a message nobody will read.
-	if t, err := c.store.Get(ctx, taskID); err == nil && t.OwnerNode != "" && t.OwnerNode != c.nodeID {
+	// of accepting a message nobody will read. The comparison is runtime
+	// identity, not literal equality: a CLI engine's ephemeral id and the
+	// daemon's base id resolve to the same store-owning node.
+	if t, err := c.store.Get(ctx, taskID); err == nil && t.OwnerNode != "" &&
+		!scheduler.SameRuntimeIdentity(t.OwnerNode, c.nodeID) {
 		return fmt.Errorf("task %s runs on %s — messages deliver to the executor's own store", taskID, t.OwnerNode)
 	}
 	if err := c.store.PostUserMessage(ctx, taskID, text, grade); err != nil {

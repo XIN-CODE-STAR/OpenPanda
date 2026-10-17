@@ -64,6 +64,9 @@ func runTask(args []string) {
 		case "send", "msg", "message":
 			runTaskSend(args[1:])
 			return
+		case "continue":
+			runTaskContinue(args[1:])
+			return
 		case "board":
 			runTaskBoard(args[1:])
 			return
@@ -97,6 +100,7 @@ func taskUsage() {
 	fmt.Fprintln(os.Stderr, "  revert <id>                             roll the run's git checkout back to its pre-task baseline")
 	fmt.Fprintln(os.Stderr, "  followup <id>                           hand the task's recorded result to the model and continue")
 	fmt.Fprintln(os.Stderr, "  send [--inject] <id> <text>             message a running/queued task: queue (next-round context) or inject (leads the next round)")
+	fmt.Fprintln(os.Stderr, "  continue <id> [-m NOTE]                 requeue a follow-up-parked task so it keeps working")
 	fmt.Fprintln(os.Stderr, "  board <id>                              show the sibling-message boards a task reads")
 	fmt.Fprintln(os.Stderr, "  artifact <id> [--list|--file P|--out D]  fetch the task's output artifact (list, preview, or extract)")
 	fmt.Fprintln(os.Stderr, "  approve|reject|cancel|logs <id>         same as the bare commands")
@@ -1381,6 +1385,50 @@ func runTaskSend(args []string) {
 		return
 	}
 	fmt.Println(i18n.Tf(loc, key, "id", id))
+}
+
+// runTaskContinue implements `panda task continue <id> [-m NOTE]` — requeue a
+// task the supervisor parked with needs_followup so the queue scheduler runs
+// it under a fresh round budget (same session, same work dir). The note, when
+// given, leads the continued round as a steer-grade directive.
+func runTaskContinue(args []string) {
+	fs := flag.NewFlagSet("task continue", flag.ExitOnError)
+	configPath := fs.String("config", cliConfigPath, "path to config.yaml")
+	cardPath := fs.String("card", "", "path to capabilities.yaml")
+	note := fs.String("m", "", "operator note leading the continued round")
+	fs.StringVar(note, "note", "", "operator note leading the continued round")
+	fs.Parse(reorderFlags(args, map[string]bool{"config": true, "card": true, "m": true, "note": true}))
+	loc := i18n.Detect()
+	id := strings.TrimSpace(strings.Join(fs.Args(), " "))
+	if id == "" {
+		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.task.continue.usage"))
+		os.Exit(2)
+	}
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		fatal("load config", err)
+	}
+	engine, err := askengine.New(context.Background(), cfg, askengine.Options{
+		CardPath:   *cardPath,
+		ConfigPath: *configPath,
+	})
+	if err != nil {
+		fatal("ask engine", err)
+	}
+	defer engine.Close()
+	id = resolveTaskRef(engine.TaskStore(), id)
+	out := engine.ContinueReviewed(context.Background(), id, strings.TrimSpace(*note), askengine.StreamCallbacks{})
+	if !out.OK {
+		fatal("continue", errors.New(out.Stderr))
+	}
+	if jsonOutput {
+		emitJSON(map[string]string{"task_id": out.TaskID, "state": out.TaskState, "warning": out.Warning})
+		return
+	}
+	fmt.Println(i18n.Tf(loc, "cli.task.continue.done", "id", out.TaskID))
+	if out.Warning != "" {
+		fmt.Fprintln(os.Stderr, "⚠ "+out.Warning)
+	}
 }
 
 func pluralS(n int) string {

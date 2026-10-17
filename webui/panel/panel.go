@@ -132,6 +132,7 @@ func New(d Deps) http.Handler {
 	mux.HandleFunc("POST /api/tasks/reorder", h.reorderTasks)
 	mux.HandleFunc("POST /api/tasks/{id}/approve", h.approveTask)
 	mux.HandleFunc("POST /api/tasks/{id}/reject", h.rejectTask)
+	mux.HandleFunc("POST /api/tasks/{id}/continue", h.continueTask)
 	mux.HandleFunc("POST /api/tasks/{id}/cancel", h.cancelTask)
 	mux.HandleFunc("POST /api/tasks/{id}/revert", h.revertTask)
 	mux.HandleFunc("POST /api/tasks/{id}/messages", h.sendTaskMessage)
@@ -1090,6 +1091,61 @@ func (h *handler) runApprovalOperation(ctx context.Context, eng *askengine.Engin
 	defer op.cancel()
 	out := eng.ResumeApproved(ctx, op.TaskID, "", askengine.StreamCallbacks{})
 	status, message := approvalResultState(out)
+	h.finishApprovalOperation(ctx, op, status, message)
+}
+
+// continueTask requeues a follow-up-parked task — the supervised "more work
+// remains" review an approve would accept as half-done and a reject would
+// throw away. An optional {note} travels as the operator directive that
+// leads the continued round's intent.
+func (h *handler) continueTask(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var body struct {
+		Note string `json:"note"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+	}
+	// Gate before touching the engine: only a review row whose parked result
+	// carries needs_followup may continue — anything else is a conflict,
+	// reported honestly instead of a silent requeue.
+	cur, err := h.store.Get(r.Context(), id)
+	if err != nil || !cur.NeedsFollowup() {
+		writeErr(w, http.StatusConflict, errors.New("task is not parked for follow-up"))
+		return
+	}
+	eng := h.currentEngine()
+	if eng == nil {
+		writeErr(w, http.StatusServiceUnavailable, errors.New("task execution engine is unavailable"))
+		return
+	}
+	// Continue is a requeue, not an execution: it only marks the row and
+	// returns, so no detached operation is needed — the queue scheduler does
+	// the running and the task row tracks its own progress.
+	out := eng.ContinueReviewed(r.Context(), id, strings.TrimSpace(body.Note), askengine.StreamCallbacks{})
+	if out == nil {
+		writeErr(w, http.StatusInternalServerError, errors.New("continue failed"))
+		return
+	}
+	if !out.OK {
+		switch out.TaskState {
+		case core.StateReview, core.StateQueued, core.StateRunning, core.StateDispatched:
+			// Still parked or already requeued by a concurrent continue —
+			// either way the caller's intent conflicts with current state.
+			writeErr(w, http.StatusConflict, errors.New(out.Stderr))
+		default:
+			writeErr(w, http.StatusInternalServerError, errors.New(out.Stderr))
+		}
+		return
+	}
+	writeJSON(w, map[string]string{
+		"id": out.TaskID, "state": out.TaskState, "warning": out.Warning,
+	})
+}
+
+// finishApprovalOperation records a detached operation's terminal status and
+// updates the in-memory handle the /operations poll reads.
+func (h *handler) finishApprovalOperation(ctx context.Context, op approvalOperation, status, message string) {
 	completed := approvalOperation{ID: op.ID, TaskID: op.TaskID, Status: status, Error: message}
 	_ = h.store.RecordEvent(context.WithoutCancel(ctx), op.TaskID, "approval_operation", map[string]string{
 		"operation_id": op.ID, "status": status, "error": message,

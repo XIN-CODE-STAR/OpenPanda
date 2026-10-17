@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Xustalis/OpenPanda/internal/askengine"
 	"github.com/Xustalis/OpenPanda/internal/config"
 	"github.com/Xustalis/OpenPanda/internal/core"
 	"github.com/Xustalis/OpenPanda/internal/defense"
@@ -1058,6 +1059,37 @@ func (r *repl) cmdTaskSend(fields []string) {
 		key = "cli.task.send.interrupted"
 	}
 	r.outln(i18n.Tf(r.loc, key, "id", id))
+}
+
+// cmdTaskContinue implements `/task continue <id> [note]` — requeue a task the
+// supervisor parked with needs_followup so it keeps working under a fresh
+// round budget (same session, same work dir); the optional note leads the
+// continued round. Needs the engine — the continue validates ownership
+// through the scheduler core's runtime identity.
+func (r *repl) cmdTaskContinue(fields []string) {
+	if r.engine.Load() == nil {
+		r.outln(i18n.T(r.loc, "repl.approval.noEngine"))
+		return
+	}
+	if len(fields) == 0 || strings.TrimSpace(fields[0]) == "" {
+		r.outln(i18n.T(r.loc, "cli.task.continue.usage"))
+		return
+	}
+	ref := strings.TrimSpace(fields[0])
+	note := strings.TrimSpace(strings.Join(fields[1:], " "))
+	id, ok := r.resolveRef(ref)
+	if !ok {
+		return
+	}
+	out := r.engine.Load().ContinueReviewed(r.commandContext(), id, note, askengine.StreamCallbacks{})
+	if !out.OK {
+		r.outln(out.Stderr)
+		return
+	}
+	r.outln(i18n.Tf(r.loc, "cli.task.continue.done", "id", out.TaskID))
+	if out.Warning != "" {
+		r.outln(out.Warning)
+	}
 }
 
 // cmdTaskAdd implements `/task add <title>` with the optional flags the CLI
