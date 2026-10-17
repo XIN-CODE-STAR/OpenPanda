@@ -166,6 +166,143 @@ func TestTaskMessageTravelsTheWire(t *testing.T) {
 	}
 }
 
+// TestTaskMessageTravelsMultiHop drives a scope stretched over a delegation
+// chain: leafA is two hops from the scope owner through a relay that holds
+// only the member's row copy. The member→owner leg must be re-minted at the
+// relay (a carried From would trip the bound-peer spoof check), and the
+// owner's fan-out copy must be re-addressed hop by hop down the member's
+// dispatch path until it lands on the executor's replica.
+func TestTaskMessageTravelsMultiHop(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+
+	origin := newCore(t, "msg-origin", "127.0.0.1:18330")
+	relay := newCore(t, "msg-relay", "127.0.0.1:18331")
+	leafA := newCore(t, "msg-leaf-a", "127.0.0.1:18332")
+	leafB := newCore(t, "msg-leaf-b", "127.0.0.1:18333")
+	for _, c := range []*Core{origin, relay, leafA, leafB} {
+		if err := c.Register(ctx); err != nil {
+			t.Fatalf("register %s: %v", c.nodeID, err)
+		}
+	}
+	go func() { _ = origin.Listen(ctx, "127.0.0.1:18330") }()
+	go func() { _ = relay.Listen(ctx, "127.0.0.1:18331") }()
+	go func() { _ = leafA.Listen(ctx, "127.0.0.1:18332") }()
+	go func() { _ = leafB.Listen(ctx, "127.0.0.1:18333") }()
+	time.Sleep(150 * time.Millisecond)
+	// Chain topology: origin ↔ relay ↔ leafA, with leafB a direct leaf of
+	// origin. leafA and origin are NOT peers — every board post crossing
+	// between them must be relayed.
+	if err := relay.DialPeer(ctx, "127.0.0.1:18330"); err != nil {
+		t.Fatalf("relay dial origin: %v", err)
+	}
+	if err := leafA.DialPeer(ctx, "127.0.0.1:18331"); err != nil {
+		t.Fatalf("leaf a dial relay: %v", err)
+	}
+	if err := origin.DialPeer(ctx, "127.0.0.1:18333"); err != nil {
+		t.Fatalf("dial leaf b: %v", err)
+	}
+	waitPeer(t, relay, "msg-origin")
+	waitPeer(t, leafA, "msg-relay")
+	waitPeer(t, origin, "msg-relay")
+	waitPeer(t, origin, "msg-leaf-b")
+	waitPeer(t, relay, "msg-leaf-a")
+	waitPeer(t, leafB, "msg-origin")
+
+	// The parent runs on the origin; childA's delegation walked origin →
+	// relay → leafA, so each hop's own copy carries the chain up to itself
+	// and the owner/relay rows record where the task went next.
+	parent := createTask(t, origin.store, "", "parent", origin.nodeID)
+	childA := createTask(t, origin.store, parent.TaskID, "child", origin.nodeID)
+	peerB := createTask(t, origin.store, parent.TaskID, "peer", origin.nodeID)
+	if err := origin.store.RecordEvent(ctx, childA.TaskID, EvDelegate, map[string]any{"target": relay.nodeID}); err != nil {
+		t.Fatalf("record child dispatch: %v", err)
+	}
+	if err := origin.store.RecordEvent(ctx, peerB.TaskID, EvDelegate, map[string]any{"target": leafB.nodeID}); err != nil {
+		t.Fatalf("record peer dispatch: %v", err)
+	}
+	// The relay's copy of childA: it took custody mid-chain and re-dispatched
+	// to leafA — the row and the next-hop record a chain node holds.
+	if _, err := relay.store.CreateWithID(ctx, childA.TaskID, parent.TaskID, "proj", "child",
+		origin.nodeID, []string{origin.nodeID, relay.nodeID}, true); err != nil {
+		t.Fatalf("create relay row: %v", err)
+	}
+	if err := relay.store.RecordEvent(ctx, childA.TaskID, EvDelegate, map[string]any{"target": leafA.nodeID}); err != nil {
+		t.Fatalf("record relay re-dispatch: %v", err)
+	}
+	// The executor's own copy ends the chain.
+	if _, err := leafA.store.CreateWithID(ctx, childA.TaskID, parent.TaskID, "proj", "child",
+		origin.nodeID, []string{origin.nodeID, relay.nodeID, leafA.nodeID}, true); err != nil {
+		t.Fatalf("create leaf row: %v", err)
+	}
+	if _, err := leafB.store.CreateWithID(ctx, peerB.TaskID, parent.TaskID, "proj", "peer",
+		origin.nodeID, []string{origin.nodeID, leafB.nodeID}, true); err != nil {
+		t.Fatalf("create peer row: %v", err)
+	}
+	remoteChild, err := leafA.store.Get(ctx, childA.TaskID)
+	if err != nil {
+		t.Fatalf("load child row: %v", err)
+	}
+
+	// Broadcast from leafA — two hops to the owner through the relay.
+	if err := leafA.deliverTaskMessage(ctx, remoteChild, msgRequest{To: "siblings", Grade: MsgGradeStatus, Body: "across the chain"}); err != nil {
+		t.Fatalf("deliver broadcast: %v", err)
+	}
+
+	scope := "task:" + parent.TaskID
+	deadline := time.Now().Add(8 * time.Second)
+	// The owner's board must hold the post — proof the relayed member→owner
+	// leg arrived (a verbatim From would have been killed as spoofed).
+	for {
+		msgs, _ := origin.store.TaskMessages(ctx, scope)
+		if len(msgs) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("owner board never received the relayed post: %+v", msgs)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	// The fan-out leg back down the chain: leafA's replica receives the
+	// owner-labelled copy — through the relay's re-addressing.
+	for {
+		msgs, _ := leafA.store.TaskMessages(ctx, scope)
+		fanout := false
+		for _, m := range msgs {
+			if m.Rcpt == "" && strings.Contains(m.Body, "across the chain") && m.SenderLabel == "child" {
+				fanout = true
+			}
+		}
+		if fanout {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("leafA replica never received the relayed fan-out: %+v", msgs)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	// And the direct member leafB got its copy through the single hop.
+	for {
+		msgs, _ := leafB.store.TaskMessages(ctx, scope)
+		if len(msgs) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("leafB replica never received the fan-out: %+v", msgs)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	// The relay only forwards — it executes no member, so its own board for
+	// the scope stays empty.
+	if msgs, _ := relay.store.TaskMessages(ctx, scope); len(msgs) != 0 {
+		t.Fatalf("relay stored a slot it should have forwarded: %+v", msgs)
+	}
+	lines := leafB.drainTaskMessages(ctx, mustGet(t, leafB.store, peerB.TaskID), msgSeen{})
+	if len(lines) != 1 || !strings.Contains(lines[0], "across the chain") {
+		t.Fatalf("peer board = %q", lines)
+	}
+}
+
 // mustGet loads a row or fails — the board tests read rows the test itself
 // just created, so a miss is a broken fixture, not a scenario.
 func mustGet(t *testing.T, s *TaskStore, id string) Task {

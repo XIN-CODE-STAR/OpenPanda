@@ -220,8 +220,9 @@ func TestResolveMsgRcpt(t *testing.T) {
 }
 
 // TestMsgBoardOwner: plan boards belong to the chain root; children boards
-// belong to the parent's executor — the local spawner for a local row, the
-// dispatching hop for a row that arrived over the wire.
+// belong to the parent's executor — also the chain root, NOT the immediate
+// delegator: a sub-scheduler relay mid-chain holds no roster it could
+// resolve members against.
 func TestMsgBoardOwner(t *testing.T) {
 	c := &Core{nodeID: "node-c", logger: testLogger()}
 	cases := []struct {
@@ -233,8 +234,12 @@ func TestMsgBoardOwner(t *testing.T) {
 		{name: "plan origin", scope: "plan:p1", task: Task{Chain: []string{"node-a", "node-c"}}, want: "node-a"},
 		{name: "plan local", scope: "plan:p1", task: Task{Chain: []string{"node-c"}}, want: "node-c"},
 		{name: "own children board", scope: "task:t1", task: Task{TaskID: "t1"}, want: "node-c"},
-		{name: "remote child", scope: "task:p9", task: Task{TaskID: "t2", ParentID: "p9", Remote: true, Chain: []string{"node-a", "node-b", "node-c"}}, want: "node-b"},
-		{name: "local child", scope: "task:p9", task: Task{TaskID: "t2", ParentID: "p9", Chain: []string{"node-a", "node-c"}}, want: "node-c"},
+		// The parent spawned this child on node-a; node-b is only a
+		// sub-scheduler relay. The children board lives with the roster —
+		// on the chain root, not the previous hop.
+		{name: "remote child deep chain", scope: "task:p9", task: Task{TaskID: "t2", ParentID: "p9", Remote: true, Chain: []string{"node-a", "node-b", "node-c"}}, want: "node-a"},
+		{name: "relay view of member row", scope: "task:p9", task: Task{TaskID: "t2", ParentID: "p9", Remote: true, Chain: []string{"node-a", "node-c"}}, want: "node-a"},
+		{name: "local child", scope: "task:p9", task: Task{TaskID: "t2", ParentID: "p9", Chain: []string{"node-c"}}, want: "node-c"},
 		{name: "root chain fallback", scope: "task:p9", task: Task{TaskID: "t2", ParentID: "p9", Remote: true, Chain: []string{"node-c"}}, want: "node-c"},
 	}
 	for _, tc := range cases {
@@ -358,22 +363,30 @@ func TestSendAgentMessagesBudget(t *testing.T) {
 }
 
 // TestHandleTaskMessageFanout stores an owner-resolved copy for a local
-// member, and drops copies that name a task this node cannot vouch for.
+// member, and drops copies that name a task this node cannot vouch for or
+// that claim an origin other than the scope's owner.
 func TestHandleTaskMessageFanout(t *testing.T) {
 	c := msgCore(t)
 	ctx := context.Background()
 	parent := createTask(t, c.store, "", "parent", c.nodeID)
-	child := createTask(t, c.store, parent.TaskID, "child", c.nodeID)
+	// The member executes here but its delegation chain is rooted at the
+	// owner node-b — the row's chain[0] is what the src check binds.
+	if _, err := c.store.CreateWithID(ctx, "child-remote", parent.TaskID, "proj", "child",
+		"node-b", []string{"node-b", c.nodeID}, true); err != nil {
+		t.Fatalf("create member row: %v", err)
+	}
 
 	env := func(p bus.TaskMessagePayload) bus.Envelope {
 		e, err := bus.NewEnvelope(bus.MsgTaskMessage, "node-b", "m1", p)
 		if err != nil {
 			t.Fatalf("envelope: %v", err)
 		}
+		e.To = c.nodeID
 		return e
 	}
 	base := bus.TaskMessagePayload{
-		Scope: "task:" + parent.TaskID, Sender: "remote-task", Member: child.TaskID,
+		Scope: "task:" + parent.TaskID, Sender: "remote-task", Member: "child-remote",
+		Src:   "node-b",
 		Grade: MsgGradeStatus, Body: "from the wire", Seq: 1,
 		SentAt: time.Now().Unix(), Fanout: true,
 	}
@@ -390,24 +403,53 @@ func TestHandleTaskMessageFanout(t *testing.T) {
 	if msgs, _ := c.store.TaskMessages(ctx, "task:"+parent.TaskID); len(msgs) != 1 {
 		t.Fatalf("forged fanout stored: %+v", msgs)
 	}
+
+	// A copy claiming a different owner — the replica's chain root says
+	// node-b — is a forged slot, Src field or not.
+	wrongOwner := base
+	wrongOwner.Src, wrongOwner.Seq = "node-evil", 7
+	wrongOwner.Body = "owner impersonation"
+	c.handleTaskMessage(ctx, env(wrongOwner))
+	if msgs, _ := c.store.TaskMessages(ctx, "task:"+parent.TaskID); len(msgs) != 1 {
+		t.Fatalf("non-owner fanout stored: %+v", msgs)
+	}
+	// A relayed copy keeps Src=owner while env.From is the last hop — both
+	// spellings authenticate the same owner. Same slot as the first post:
+	// the newer seq wins and replaces it.
+	relayed := base
+	relayed.Seq, relayed.Body = 8, "via a relay"
+	relayEnv := env(relayed)
+	relayEnv.From = "node-relay"
+	c.handleTaskMessage(ctx, relayEnv)
+	if msgs, _ := c.store.TaskMessages(ctx, "task:"+parent.TaskID); len(msgs) != 1 || msgs[0].Body != "via a relay" {
+		t.Fatalf("relayed fanout not stored: %+v", msgs)
+	}
 }
 
 // TestHandleTaskMessageForgedSender: a member→owner post naming a sender that
 // is not on the scope's roster must not land — the wire authenticates the
 // sending node, not the task id it claims, so without the membership check a
 // reachable node could write slots under any task the owner happens to hold.
+// The same door closes on a post that arrives off the member's dispatch
+// path: env.From must be the member's own first dispatch hop.
 func TestHandleTaskMessageForgedSender(t *testing.T) {
 	c := msgCore(t)
 	ctx := context.Background()
 	parent := createTask(t, c.store, "", "parent", c.nodeID)
 	child := createTask(t, c.store, parent.TaskID, "child", c.nodeID)
 	stranger := createTask(t, c.store, "", "stranger", c.nodeID)
+	// The member executes behind node-b — its dispatch path is what env.From
+	// must match.
+	if err := c.store.RecordEvent(ctx, child.TaskID, EvDelegate, map[string]any{"target": "node-b"}); err != nil {
+		t.Fatalf("record dispatch: %v", err)
+	}
 
 	env := func(p bus.TaskMessagePayload) bus.Envelope {
 		e, err := bus.NewEnvelope(bus.MsgTaskMessage, "node-b", "m1", p)
 		if err != nil {
 			t.Fatalf("envelope: %v", err)
 		}
+		e.To = c.nodeID
 		return e
 	}
 	// A member's post lands and fans out onto the owner's board.
@@ -427,6 +469,17 @@ func TestHandleTaskMessageForgedSender(t *testing.T) {
 	msgs, _ := c.store.TaskMessages(ctx, "task:"+parent.TaskID)
 	if len(msgs) != 1 || msgs[0].Sender != child.TaskID {
 		t.Fatalf("forged sender stored: %+v", msgs)
+	}
+	// The same member id arriving from a node its dispatch never went through
+	// is refused — the roster check alone could not tell sender from spoofer.
+	offPath := ok
+	offPath.Seq = 10
+	offPathEnv := env(offPath)
+	offPathEnv.From = "node-evil"
+	c.handleTaskMessage(ctx, offPathEnv)
+	msgs, _ = c.store.TaskMessages(ctx, "task:"+parent.TaskID)
+	if len(msgs) != 1 || msgs[0].SenderSeq != 1 {
+		t.Fatalf("off-path post stored: %+v", msgs)
 	}
 	// And a member claiming a scope it does not belong to is refused the same way.
 	offBoard := ok

@@ -4,6 +4,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -64,7 +65,28 @@ const (
 	// use. Board lines render a sender's id shortened; the floor keeps an
 	// accidental one- or two-character address from resolving by luck.
 	minMsgRefPrefix = 8
+	// maxMsgRelayTTL bounds the re-envelope hops one wire copy may take —
+	// the same bound the delegation chain itself enforces, since a board
+	// post never legitimately travels further than the chain that spawned
+	// its scope.
+	maxMsgRelayTTL = scheduler.MaxChainDepth
 )
+
+// clipRunes bounds s to n runes — a plain byte slice can split a multi-byte
+// rune mid-sequence, which renders as mojibake inside a prompt line.
+func clipRunes(s string, n int) string {
+	if len(s) <= n {
+		return s // byte len ≤ n already bounds the rune count
+	}
+	count := 0
+	for i := range s {
+		if count == n {
+			return s[:i]
+		}
+		count++
+	}
+	return s
+}
 
 // TaskMessage is one board slot: a sender's latest note toward one recipient
 // (Rcpt=="" = broadcast to the scope) within a scope.
@@ -89,10 +111,7 @@ func msgLabel(t Task) string {
 	if label == "" {
 		label = t.Title
 	}
-	if len(label) > 40 {
-		label = label[:40]
-	}
-	return label
+	return clipRunes(label, 40)
 }
 
 // msgRequest is the parsed form of one send intent from an agent — the
@@ -142,6 +161,10 @@ func (s *TaskStore) PutTaskMessage(ctx context.Context, m TaskMessage) error {
 	if recv == 0 {
 		recv = now
 	}
+	expires := m.ExpiresAt
+	if expires == 0 {
+		expires = now + int64(msgBoardTTL/time.Second)
+	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO task_messages
 		(scope, sender, rcpt, sender_seq, sender_label, grade, body, sent_at, recv_at, expires_at)
 		VALUES (?,?,?,?,?,?,?,?,?,?)
@@ -151,7 +174,7 @@ func (s *TaskStore) PutTaskMessage(ctx context.Context, m TaskMessage) error {
 			recv_at=excluded.recv_at, expires_at=excluded.expires_at
 		WHERE excluded.sender_seq > task_messages.sender_seq`,
 		m.Scope, m.Sender, m.Rcpt, m.SenderSeq, m.SenderLabel, m.Grade, m.Body,
-		m.SentAt, recv, now+int64(msgBoardTTL/time.Second))
+		m.SentAt, recv, expires)
 	return err
 }
 
@@ -253,32 +276,24 @@ func (c *Core) formatBoardLine(ctx context.Context, m TaskMessage) string {
 	}
 	age := time.Since(time.Unix(m.SentAt, 0)).Round(time.Second)
 	line := fmt.Sprintf("from=%s grade=%s ago=%s: %s", from, m.Grade, age, m.Body)
-	if len(line) > 600 {
-		line = line[:600]
-	}
-	return line
+	return clipRunes(line, 600)
 }
 
 // msgBoardOwner resolves the scope-owner node for a post on a given board.
 //
-// A plan board belongs to the plan origin — the root of every stage's chain,
-// which ran StartPlan and holds all stage rows. A children board belongs to
-// the parent's executor: a row that arrived over the wire came from the hop
-// before it (Predecessor, the same rule result relay uses), while a locally
-// created row was spawned by this node itself. And a task addressing its own
-// children board is trivially its own host.
+// The owner is the root of the member's delegation chain: the plan origin
+// for a plan board (the node that ran StartPlan and holds every stage row),
+// the parent's executor for a children board (the node that minted the
+// member's task_delegate — also its chain root). NOT the immediate
+// delegator: a sub-scheduler relay mid-chain holds no roster and could not
+// resolve member addresses anyway. A task addressing its own children board
+// is trivially its own host.
 func (c *Core) msgBoardOwner(scope string, t Task) string {
 	switch {
-	case strings.HasPrefix(scope, "plan:"):
-		if len(t.Chain) > 0 {
-			return t.Chain[0]
-		}
 	case scope == "task:"+t.TaskID:
 		return c.nodeID
-	case t.Remote:
-		if prev := scheduler.Predecessor(t.Chain, c.nodeID); prev != "" {
-			return prev
-		}
+	case len(t.Chain) > 0:
+		return t.Chain[0]
 	}
 	return c.nodeID
 }
@@ -325,13 +340,9 @@ func (c *Core) deliverTaskMessage(ctx context.Context, sender Task, req msgReque
 	body := strings.TrimSpace(req.Body)
 	switch grade {
 	case MsgGradeStatus:
-		if len(body) > maxMsgStatusBody {
-			body = body[:maxMsgStatusBody]
-		}
+		body = clipRunes(body, maxMsgStatusBody)
 	case MsgGradeReport, MsgGradeArtifactRef:
-		if len(body) > maxMsgReportBody {
-			body = body[:maxMsgReportBody]
-		}
+		body = clipRunes(body, maxMsgReportBody)
 	default:
 		return fmt.Errorf("unknown message grade %q", grade)
 	}
@@ -368,11 +379,13 @@ func (c *Core) deliverTaskMessage(ctx context.Context, sender Task, req msgReque
 		Scope:       m.Scope,
 		Sender:      m.Sender,
 		To:          req.To,
+		Src:         c.nodeID,
 		SenderLabel: m.SenderLabel,
 		Grade:       m.Grade,
 		Body:        m.Body,
 		Seq:         m.SenderSeq,
 		SentAt:      m.SentAt,
+		TTL:         maxMsgRelayTTL,
 	}
 	msgID, err := newUUID()
 	if err != nil {
@@ -384,6 +397,14 @@ func (c *Core) deliverTaskMessage(ctx context.Context, sender Task, req msgReque
 	}
 	env.To = owner
 	if err := c.sendTo(owner, env); err != nil {
+		// The owner is off-link: prefer the chain walk home — the delegation
+		// predecessor both holds the row and is the arrival direction the
+		// owner's executor check expects — before the cheapest-path fallback.
+		if hop := scheduler.Predecessor(sender.Chain, c.nodeID); hop != "" && hop != owner {
+			if herr := c.sendTo(hop, env); herr == nil {
+				return nil
+			}
+		}
 		if rerr := c.routeTo(ctx, owner, env); rerr != nil {
 			return fmt.Errorf("message undeliverable to scope owner %s: %w", owner, rerr)
 		}
@@ -471,8 +492,9 @@ func (c *Core) fanoutTaskMessage(ctx context.Context, m TaskMessage, to string, 
 	for node, memberID := range nodes {
 		p := bus.TaskMessagePayload{
 			Scope: m.Scope, Sender: m.Sender, Rcpt: m.Rcpt, Member: memberID,
-			SenderLabel: m.SenderLabel, Grade: m.Grade, Body: m.Body,
+			Src: c.nodeID, SenderLabel: m.SenderLabel, Grade: m.Grade, Body: m.Body,
 			Seq: m.SenderSeq, SentAt: m.SentAt, Fanout: true,
+			TTL: maxMsgRelayTTL,
 		}
 		msgID, err := newUUID()
 		if err != nil {
@@ -625,15 +647,44 @@ func (c *Core) sendAgentMessages(ctx context.Context, task Task, reqs []msgReque
 
 // handleTaskMessage is the wire side (bus.MsgTaskMessage). A fanout=false
 // envelope is a member addressing its scope owner; fanout=true is the owner's
-// resolved copy for this node's replica — in both cases the receiver stores
-// the slot it was handed, after confirming the named sender actually belongs
-// to the scope the message claims (a node may only speak for boards whose
-// roster it can see; a member replica trusts the owner's fan-out to have
-// checked first).
+// resolved copy for a member replica. Both legs relay hop-by-hop: an envelope
+// addressed past this node forwards toward env.To — re-minted as ours (the
+// bound-peer conn check kills a carried From), TTL spent one hop — so a scope
+// stretched over a delegation chain works where every node sees only its own
+// edge. Neither leg trusts the transport for identity: the owner admits a
+// member post only when it arrived via that member's own dispatch path, and
+// a replica admits a fan-out copy only when its Src names the scope owner
+// the member row's chain root records.
 func (c *Core) handleTaskMessage(ctx context.Context, env bus.Envelope) {
 	var p bus.TaskMessagePayload
 	if err := env.PayloadInto(&p); err != nil {
 		c.logger.Warn("task_message: bad payload", "from", env.From, "err", err)
+		return
+	}
+	// Transit first, for both legs: an envelope whose destination is another
+	// node forwards without needing the row — a shortcut relay may hold none.
+	// The row, when held, only picks the better next hop: chain predecessor
+	// on the way up to the owner, next dispatch target on the way down to a
+	// member.
+	if env.To != "" && env.To != c.nodeID {
+		hop := ""
+		rowID := p.Sender
+		if p.Fanout {
+			rowID = p.Member
+			if rowID == "" {
+				rowID = p.Rcpt
+			}
+		}
+		if rowID != "" {
+			if t, err := c.store.Get(ctx, rowID); err == nil {
+				if p.Fanout {
+					hop, _ = c.store.DispatchTarget(ctx, rowID)
+				} else {
+					hop = scheduler.Predecessor(t.Chain, c.nodeID)
+				}
+			}
+		}
+		c.forwardTaskMessage(ctx, env, p, hop)
 		return
 	}
 	if p.Fanout {
@@ -653,6 +704,24 @@ func (c *Core) handleTaskMessage(ctx context.Context, env bus.Envelope) {
 			c.logger.Warn("task_message fanout for non-member", "member", memberID, "scope", p.Scope, "from", env.From)
 			return
 		}
+		// The member executes further down the chain, not here: re-address
+		// the copy to the next dispatch hop and relay it onward.
+		if tgt, _ := c.store.DispatchTarget(ctx, memberID); tgt != "" && !scheduler.SameRuntimeIdentity(tgt, c.nodeID) {
+			env.To = tgt
+			c.forwardTaskMessage(ctx, env, p, tgt)
+			return
+		}
+		// The copy's claimed origin must be the scope's owner — the chain
+		// root the member row itself records — or it is a forged slot from a
+		// node that never resolved the roster. Src carries the origin across
+		// re-minted hops; a pre-Src peer's direct send still authenticates
+		// through env.From.
+		expected := c.msgBoardOwner(p.Scope, t)
+		if src := msgSenderNode(p, env); expected == c.nodeID || !scheduler.SameRuntimeIdentity(expected, src) {
+			c.logger.Warn("task_message fanout from non-owner", "member", memberID,
+				"scope", p.Scope, "src", src, "from", env.From)
+			return
+		}
 		m := TaskMessage{Scope: p.Scope, Sender: p.Sender, Rcpt: p.Rcpt,
 			SenderSeq: p.Seq, SenderLabel: p.SenderLabel,
 			Grade: p.Grade, Body: p.Body,
@@ -663,24 +732,26 @@ func (c *Core) handleTaskMessage(ctx context.Context, env bus.Envelope) {
 		}
 		return
 	}
-	// Member → owner leg. Only resolvable on the node holding the roster: if
-	// this node is not the owner, forward along the delegation path toward it.
+	// Member → owner leg. Resolve on the node holding the roster: if this
+	// node is not the owner, relay along the delegation path toward it.
 	sender, err := c.store.Get(ctx, p.Sender)
 	if err != nil {
 		c.logger.Warn("task_message from unknown sender", "sender", p.Sender, "from", env.From)
 		return
 	}
-	owner := c.msgBoardOwner(p.Scope, sender)
-	if owner != c.nodeID {
-		if owner == "" {
-			return
-		}
+	if owner := c.msgBoardOwner(p.Scope, sender); owner != c.nodeID {
 		env.To = owner
-		if err := c.sendTo(owner, env); err != nil {
-			if rerr := c.routeTo(ctx, owner, env); rerr != nil {
-				c.logger.Debug("task_message forward unroutable", "to", owner, "err", rerr)
-			}
-		}
+		c.forwardTaskMessage(ctx, env, p, scheduler.Predecessor(sender.Chain, c.nodeID))
+		return
+	}
+	// A member post must arrive along its own dispatch path: env.From is the
+	// authenticated last hop, and the member's first dispatch hop is the only
+	// direction its subtree can speak through. Without the binding, any
+	// reachable node could write slots — and squat the sender's seq — under a
+	// member of a scope it merely knows.
+	if !c.msgOnDispatchPath(ctx, p.Sender, env.From) {
+		c.logger.Warn("task_message off-path member post", "sender", p.Sender,
+			"from", env.From, "scope", p.Scope)
 		return
 	}
 	m := TaskMessage{Scope: p.Scope, Sender: p.Sender,
@@ -689,4 +760,59 @@ func (c *Core) handleTaskMessage(ctx context.Context, env bus.Envelope) {
 	if err := c.fanoutTaskMessage(ctx, m, p.To, sender); err != nil {
 		c.logger.Warn("task_message fanout", "scope", p.Scope, "from", env.From, "err", err)
 	}
+}
+
+// forwardTaskMessage relays a board envelope one hop toward its destination.
+// The punch-relay rules apply verbatim (udp.go): the conn authenticates
+// envelopes by their bound peer id, so the copy leaving here is re-minted as
+// ours (the origin node survives in payload Src); TTL spends down per hop;
+// the shared msg_id lets receiver dedup kill a residual loop. hop is the
+// preferred next hop when the caller's rows can name one — a chain
+// predecessor or a dispatch target — else the cheapest advertised path wins.
+func (c *Core) forwardTaskMessage(ctx context.Context, env bus.Envelope, p bus.TaskMessagePayload, hop string) {
+	if p.TTL == 0 {
+		p.TTL = maxMsgRelayTTL // pre-TTL peer: grant the budget a fresh mint carries
+	}
+	if p.TTL <= 1 {
+		c.logger.Debug("task_message ttl spent", "to", env.To, "scope", p.Scope)
+		return
+	}
+	p.TTL--
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return
+	}
+	env.Payload = raw
+	env.From = c.nodeID
+	if hop != "" && hop != c.nodeID {
+		if err := c.sendTo(hop, env); err == nil {
+			return
+		}
+	}
+	if err := c.routeTo(ctx, env.To, env); err != nil {
+		c.logger.Debug("task_message relay unroutable", "to", env.To, "err", err)
+	}
+}
+
+// msgSenderNode is the node a board post claims to originate from: payload
+// Src across re-minted relays, the envelope sender on a direct send — the
+// only spelling a pre-Src peer produces.
+func msgSenderNode(p bus.TaskMessagePayload, env bus.Envelope) string {
+	if p.Src != "" {
+		return p.Src
+	}
+	return env.From
+}
+
+// msgOnDispatchPath reports whether the node a member→owner frame physically
+// arrived from is the node's own first dispatch hop for that member — the
+// subtree the member's execution lives behind. "" target means the member
+// never left this node, so a wire post under it is inconsistent outright
+// (an owner-local member reaches the board through the in-process fanout).
+func (c *Core) msgOnDispatchPath(ctx context.Context, senderTaskID, from string) bool {
+	tgt, err := c.store.DispatchTarget(ctx, senderTaskID)
+	if err != nil || tgt == "" {
+		return false
+	}
+	return scheduler.SameRuntimeIdentity(tgt, from)
 }
