@@ -703,6 +703,7 @@ func (e *Engine) cardShow(ctx context.Context, name string) (string, error) {
 		return "", fmt.Errorf("查询设备网络：%w", err)
 	}
 	var target ledger.Node
+	var reloadErr error
 	if name == "" {
 		selfID := e.selfNodeID()
 		for _, n := range nodes {
@@ -713,7 +714,7 @@ func (e *Engine) cardShow(ctx context.Context, name string) (string, error) {
 		}
 		if target.ID == "" {
 			if path, err := e.checkCardPath(); err == nil {
-				_ = e.ReloadCard(path)
+				reloadErr = e.ReloadCard(path)
 				if reloadedNodes, rErr := ledger.Query(e.db, "", ""); rErr == nil {
 					for _, n := range reloadedNodes {
 						if n.ID == selfID {
@@ -725,6 +726,12 @@ func (e *Engine) cardShow(ctx context.Context, name string) (string, error) {
 			}
 		}
 		if target.ID == "" {
+			if reloadErr != nil {
+				// The card file exists but the scheduler refused it: a bare
+				// "not registered" would send the user hunting for a missing
+				// card when the real fault is the one named here.
+				return "", fmt.Errorf("本机能力卡未注册（热重载失败：%v）", reloadErr)
+			}
 			return "", fmt.Errorf("本机能力卡未注册（未加载能力卡或守护进程未运行）")
 		}
 	} else {
@@ -1411,6 +1418,19 @@ func (e *Engine) checkCardPath() (string, error) {
 	return "", fmt.Errorf("当前会话未加载能力卡文件且无法推导默认路径")
 }
 
+// reloadCardNote hot-reloads the schedule card after a mutation and returns
+// the status clause the tool result should carry. The write already succeeded,
+// so a reload failure is not an error return — the change is on disk and will
+// apply on the next reload or restart — but claiming "已热重载生效" while the
+// scheduler still runs the old card is a lie the next routing decision would
+// expose, so the failure is named in the result instead.
+func (e *Engine) reloadCardNote(path string) string {
+	if err := e.ReloadCard(path); err != nil {
+		return fmt.Sprintf("但热重载失败：%v（改动已写盘，重启或 /card reload 后生效）", err)
+	}
+	return "已热重载生效"
+}
+
 func (e *Engine) cardNativeAdd(ctx context.Context, ab ledger.NativeAbility) (string, error) {
 	path, err := e.checkCardPath()
 	if err != nil {
@@ -1424,13 +1444,11 @@ func (e *Engine) cardNativeAdd(ctx context.Context, ab ledger.NativeAbility) (st
 	}
 	if err := cardmut.NativeAdd(path, ab); err != nil {
 		if strings.Contains(err.Error(), "already exists") {
-			_ = e.ReloadCard(path)
-			return fmt.Sprintf("原生能力 %s 已存在并生效", ab.ID), nil
+			return fmt.Sprintf("原生能力 %s 已存在，%s", ab.ID, e.reloadCardNote(path)), nil
 		}
 		return "", fmt.Errorf("添加原生能力：%w", err)
 	}
-	_ = e.ReloadCard(path)
-	return fmt.Sprintf("原生能力 %s 已成功添加并热重载生效", ab.ID), nil
+	return fmt.Sprintf("原生能力 %s 已成功添加，%s", ab.ID, e.reloadCardNote(path)), nil
 }
 
 func (e *Engine) cardNativeRemove(ctx context.Context, id string) (string, error) {
@@ -1444,8 +1462,7 @@ func (e *Engine) cardNativeRemove(ctx context.Context, id string) (string, error
 	if err := cardmut.NativeRemove(path, id); err != nil {
 		return "", fmt.Errorf("删除原生能力：%w", err)
 	}
-	_ = e.ReloadCard(path)
-	return fmt.Sprintf("原生能力 %s 已成功删除并热重载生效", id), nil
+	return fmt.Sprintf("原生能力 %s 已成功删除，%s", id, e.reloadCardNote(path)), nil
 }
 
 func (e *Engine) cardAgentAdd(ctx context.Context, name string, ag ledger.Agent) (string, error) {
@@ -1487,14 +1504,12 @@ func (e *Engine) cardAgentAdd(ctx context.Context, name string, ag ledger.Agent)
 				upd.Tier = &ag.Tier
 			}
 			if setErr := cardmut.AgentSet(path, name, upd); setErr == nil {
-				_ = e.ReloadCard(path)
-				return fmt.Sprintf("Agent %s 已存在，已更新配置并热重载生效", name), nil
+				return fmt.Sprintf("Agent %s 已存在，已更新配置，%s", name, e.reloadCardNote(path)), nil
 			}
 		}
 		return "", fmt.Errorf("注册 Agent：%w", err)
 	}
-	_ = e.ReloadCard(path)
-	return fmt.Sprintf("Agent %s 已成功注册并热重载生效", name), nil
+	return fmt.Sprintf("Agent %s 已成功注册，%s", name, e.reloadCardNote(path)), nil
 }
 
 // resolveAgentFromRegistry fills an agent entry from the built-in registry
@@ -1671,9 +1686,8 @@ func (e *Engine) cardRescan(ctx context.Context) (string, error) {
 		added = append(added, name)
 	}
 	if len(added) > 0 {
-		_ = e.ReloadCard(path)
-		return fmt.Sprintf("已检测本机安装的 Agent CLI 并注册：%s（共 %d 个，已热重载生效）",
-			strings.Join(added, ", "), len(added)), nil
+		return fmt.Sprintf("已检测本机安装的 Agent CLI 并注册：%s（共 %d 个），%s",
+			strings.Join(added, ", "), len(added), e.reloadCardNote(path)), nil
 	}
 	return fmt.Sprintf("本机已安装的 Agent CLI 都已在能力卡中（检测到 %d 个），没有新增。", len(detected)), nil
 }
@@ -1706,8 +1720,7 @@ func (e *Engine) cardAgentSet(ctx context.Context, name string, upd cardmut.Agen
 	if err := cardmut.AgentSet(path, name, upd); err != nil {
 		return "", fmt.Errorf("修改 Agent：%w", err)
 	}
-	_ = e.ReloadCard(path)
-	return fmt.Sprintf("Agent %s 已成功更新并热重载生效", name), nil
+	return fmt.Sprintf("Agent %s 已成功更新，%s", name, e.reloadCardNote(path)), nil
 }
 
 func (e *Engine) cardAgentRemove(ctx context.Context, name string) (string, error) {
@@ -1721,8 +1734,7 @@ func (e *Engine) cardAgentRemove(ctx context.Context, name string) (string, erro
 	if err := cardmut.AgentRemove(path, name); err != nil {
 		return "", fmt.Errorf("删除 Agent：%w", err)
 	}
-	_ = e.ReloadCard(path)
-	return fmt.Sprintf("Agent %s 已成功注销并热重载生效", name), nil
+	return fmt.Sprintf("Agent %s 已成功注销，%s", name, e.reloadCardNote(path)), nil
 }
 
 func (e *Engine) cardManualAdd(ctx context.Context, ab ledger.ManualAbility) (string, error) {
@@ -1735,13 +1747,11 @@ func (e *Engine) cardManualAdd(ctx context.Context, ab ledger.ManualAbility) (st
 	}
 	if err := cardmut.ManualAdd(path, ab); err != nil {
 		if strings.Contains(err.Error(), "already exists") {
-			_ = e.ReloadCard(path)
-			return fmt.Sprintf("人工能力 %s 已存在并生效", ab.ID), nil
+			return fmt.Sprintf("人工能力 %s 已存在，%s", ab.ID, e.reloadCardNote(path)), nil
 		}
 		return "", fmt.Errorf("添加人工能力：%w", err)
 	}
-	_ = e.ReloadCard(path)
-	return fmt.Sprintf("人工能力 %s 已成功添加并热重载生效", ab.ID), nil
+	return fmt.Sprintf("人工能力 %s 已成功添加，%s", ab.ID, e.reloadCardNote(path)), nil
 }
 
 func (e *Engine) cardManualRemove(ctx context.Context, id string) (string, error) {
@@ -1755,8 +1765,7 @@ func (e *Engine) cardManualRemove(ctx context.Context, id string) (string, error
 	if err := cardmut.ManualRemove(path, id); err != nil {
 		return "", fmt.Errorf("删除人工能力：%w", err)
 	}
-	_ = e.ReloadCard(path)
-	return fmt.Sprintf("人工能力 %s 已成功删除并热重载生效", id), nil
+	return fmt.Sprintf("人工能力 %s 已成功删除，%s", id, e.reloadCardNote(path)), nil
 }
 
 func (e *Engine) projectList(ctx context.Context) (string, error) {
