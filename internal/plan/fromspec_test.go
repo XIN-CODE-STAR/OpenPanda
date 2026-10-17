@@ -87,4 +87,14 @@ func TestFromSpecTitleTruncation(t *testing.T) {
 	if !strings.HasSuffix(p.Stages[0].Title, "…") {
 		t.Errorf("a truncated title does not say it was truncated: %q", p.Stages[0].Title)
 	}
+
+	// A title the model supplied itself goes through the same cap: it is
+	// untrusted input, and the title is what the task board renders.
+	p, err = FromSpec(entry.PlanSpec{Goal: "g", Stages: []entry.PlanStageSpec{{ID: "a", Title: long, Intent: "i"}}})
+	if err != nil {
+		t.Fatalf("from spec (provided title): %v", err)
+	}
+	if n := len([]rune(p.Stages[0].Title)); n > titleMax {
+		t.Errorf("provided title is %d runes, limit is %d", n, titleMax)
+	}
 }

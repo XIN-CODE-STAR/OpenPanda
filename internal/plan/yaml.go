@@ -14,7 +14,9 @@ package plan
 // out, no file access and no clock. The caller reads the file.
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -60,6 +62,18 @@ func Parse(data []byte) (Plan, error) {
 	dec.KnownFields(true)
 	var raw yamlPlan
 	if err := dec.Decode(&raw); err != nil {
+		return Plan{}, fmt.Errorf("parse plan: %w", err)
+	}
+	// A plan file is exactly one document. A second document (a stray "---"
+	// when appending, or two plans pasted together) would be silently
+	// dropped by a single Decode — and running the first of the two is the
+	// wrong half of the typo to execute. A malformed tail is likewise not
+	// ignored: io.EOF is the only acceptable second-Decode outcome.
+	var extra yaml.Node
+	switch err := dec.Decode(&extra); {
+	case err == nil && extra.Kind != 0:
+		return Plan{}, fmt.Errorf("parse plan: multiple YAML documents (a plan file contains exactly one)")
+	case err != nil && !errors.Is(err, io.EOF):
 		return Plan{}, fmt.Errorf("parse plan: %w", err)
 	}
 

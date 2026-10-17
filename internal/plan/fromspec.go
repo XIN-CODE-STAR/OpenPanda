@@ -30,7 +30,7 @@ func FromSpec(spec entry.PlanSpec) (Plan, error) {
 	}
 	for _, s := range spec.Stages {
 		intent := strings.TrimSpace(s.Intent)
-		title := strings.TrimSpace(s.Title)
+		title := truncateTitle(strings.TrimSpace(s.Title))
 		if title == "" {
 			title = firstLine(intent)
 		}
@@ -50,19 +50,25 @@ func FromSpec(spec entry.PlanSpec) (Plan, error) {
 	return p, nil
 }
 
-// titleMax bounds a borrowed title so a stage whose intent is one long paragraph
-// does not push a queue row off the terminal.
+// titleMax bounds a stage title so one long paragraph (borrowed from intent or
+// emitted by the model) does not push a queue row off the terminal.
 const titleMax = 60
+
+// truncateTitle caps a title to titleMax runes. Both title sources go through
+// the same cap: a model-provided title is untrusted input, and the title — not
+// the intent — is what the task board renders.
+func truncateTitle(s string) string {
+	r := []rune(s)
+	if len(r) > titleMax {
+		return string(r[:titleMax-1]) + "…"
+	}
+	return s
+}
 
 // firstLine returns the first line of s, truncated to titleMax runes.
 func firstLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]
 	}
-	s = strings.TrimSpace(s)
-	r := []rune(s)
-	if len(r) > titleMax {
-		return string(r[:titleMax-1]) + "…"
-	}
-	return s
+	return truncateTitle(strings.TrimSpace(s))
 }

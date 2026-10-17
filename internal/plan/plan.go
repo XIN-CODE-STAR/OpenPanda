@@ -123,6 +123,12 @@ func Validate(p Plan) error {
 		if strings.TrimSpace(s.Intent) == "" {
 			return fmt.Errorf("plan: stage %q has no intent", id)
 		}
+		if r := s.Resources; r.CPU < 0 || r.RAMGB < 0 || r.GPUVRAMGB < 0 {
+			// A negative request is never satisfiable; rejected here so it
+			// cannot become a routing comparison that silently matches the
+			// wrong (or no) node after the stages are already dispatched.
+			return fmt.Errorf("plan: stage %q requests negative resources", id)
+		}
 		index[id] = i
 	}
 
