@@ -4,6 +4,7 @@ package core
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/hex"
 	"testing"
 	"time"
@@ -48,14 +49,24 @@ func TestHelloRecordsPeerPubKey(t *testing.T) {
 	worker := newCore(t, "worker", "127.0.0.1:17971")
 	startPair(t, ctx, entry, worker, "127.0.0.1:17970", "127.0.0.1:17971")
 
-	workerPub, ok := entry.peerPubKey("worker")
-	if !ok {
-		t.Fatal("entry did not record worker's pubkey from the signed hello")
+	// The pubkey lands from the hello handler's goroutine, not synchronously
+	// with the dial: under the race detector's load the write can trail the
+	// connect by a beat, so poll a bounded window instead of racing it.
+	awaitPub := func(c *Core, id string) ed25519.PublicKey {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if pub, ok := c.peerPubKey(id); ok {
+				return pub
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s did not record %s's pubkey from the signed hello", c.nodeID, id)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
 	}
-	entryPub, ok := worker.peerPubKey("entry")
-	if !ok {
-		t.Fatal("worker did not record entry's pubkey from the hello reply")
-	}
+	workerPub := awaitPub(entry, "worker")
+	entryPub := awaitPub(worker, "entry")
 	// The recorded key must be the peer's real node key.
 	if wpub, _, ok := worker.nodeKeyPair(); !ok || !wpub.Equal(workerPub) {
 		t.Fatal("recorded worker pubkey differs from its node key")

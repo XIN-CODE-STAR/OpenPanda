@@ -74,6 +74,16 @@ export function SettingsView(props: {
 }) {
   useLocaleRerender()
   const [section, setSection] = useState<Section>(() => normalizeSection(props.initialSection))
+  // The single-model form lives behind a disclosure so the registry reads
+  // clean — which also buries the *fix* surface when the active model's key
+  // dies. ModelsSection can ask to open it (e.g. off a failed key test).
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+
+  function openAdvancedModel() {
+    setAdvancedOpen(true)
+    // Focus waits a frame so the freshly-opened details is laid out first.
+    requestAnimationFrame(() => document.getElementById('api-key')?.focus())
+  }
 
   useEffect(() => {
     if (props.initialSection) {
@@ -112,8 +122,12 @@ export function SettingsView(props: {
           {section === 'general' && <GeneralSection />}
           {section === 'models' && (
             <>
-              <ModelsSection />
-              <details class="raw-toggle settings-advanced">
+              <ModelsSection onOpenAdvanced={openAdvancedModel} />
+              <details
+                class="raw-toggle settings-advanced"
+                open={advancedOpen}
+                onToggle={(e) => setAdvancedOpen((e.target as HTMLDetailsElement).open)}
+              >
                 <summary>{t('settings.advancedModel')}</summary>
                 <ModelSection />
               </details>

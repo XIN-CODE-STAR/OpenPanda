@@ -16,7 +16,13 @@ import { DirPicker } from '../components/dir-picker'
 // entered one governs where the next ask's work lands, in this console and in the
 // CLI alike — so the view is a row per project with those three facts and the
 // verbs that change them.
-export function ProjectsView({ onOpenProject }: { onOpenProject(name: string): void }) {
+export function ProjectsView({
+  onOpenProject,
+  onOpenQueue,
+}: {
+  onOpenProject(name: string): void
+  onOpenQueue(project: string): void
+}) {
   useLocaleRerender()
   const [tick, setTick] = useState(0)
   const reload = () => setTick((v) => v + 1)
@@ -136,6 +142,7 @@ export function ProjectsView({ onOpenProject }: { onOpenProject(name: string): v
                 editing={editing === p.name}
                 onEdit={() => setEditing(editing === p.name ? null : p.name)}
                 onOpen={() => onOpenProject(p.name)}
+                onOpenQueue={() => onOpenQueue(p.name)}
                 onSave={(body) =>
                   run(async () => {
                     await api.patchProject(p.name, body)
@@ -167,12 +174,17 @@ export function ProjectsView({ onOpenProject }: { onOpenProject(name: string): v
   )
 }
 
+// Open-task states, minus review (which wants attention, not patience): a
+// project row counts these as "in flight".
+const OPEN_STATES = ['submitted', 'queued', 'dispatched', 'waiting_context', 'running']
+
 function ProjectRow({
   project,
   busy,
   editing,
   onEdit,
   onOpen,
+  onOpenQueue,
   onSave,
   onRemove,
   onForgetApproval,
@@ -182,6 +194,7 @@ function ProjectRow({
   editing: boolean
   onEdit(): void
   onOpen(): void
+  onOpenQueue(): void
   onSave(body: {
     name?: string
     work_dir?: string
@@ -273,6 +286,37 @@ function ProjectRow({
             {t('projects.sessionsCount', { count: String(project.sessions) })}
           </span>
         )}
+        {/* The work summary — what the project exists to group. Clicking lands
+            on the queue already filtered to this project, so the count and the
+            board can never disagree about which tasks belong. */}
+        {project.tasks &&
+          (() => {
+            const open = OPEN_STATES.reduce((n, s) => n + (project.tasks![s] ?? 0), 0)
+            const review = project.tasks['review'] ?? 0
+            const failed = project.tasks['failed'] ?? 0
+            const done = project.tasks['done'] ?? 0
+            if (open + review + failed + done === 0) return null
+            return (
+              <span>
+                {' · '}
+                <button
+                  type="button"
+                  class="link-btn"
+                  onClick={onOpenQueue}
+                  title={t('projects.viewTasks')}
+                >
+                  {[
+                    open > 0 && t('projects.tasksOpen', { n: String(open) }),
+                    review > 0 && t('projects.tasksReview', { n: String(review) }),
+                    failed > 0 && t('projects.tasksFailed', { n: String(failed) }),
+                    open + review + failed === 0 && done > 0 && t('projects.tasksDone', { n: String(done) }),
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')}
+                </button>
+              </span>
+            )
+          })()}
         {project.approval_mode && (
           <span>
             {' · '}

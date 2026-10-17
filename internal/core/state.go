@@ -265,6 +265,15 @@ type Task struct {
 	TokenBudget int64
 }
 
+// NeedsFollowup reports whether this row parked in review with the
+// supervisor's "more work remains" flag — the signal that makes "continue"
+// an honest third answer alongside approve and reject. The flag lives in the
+// stored result JSON, not a column, because it describes the result, not the
+// task's identity.
+func (t Task) NeedsFollowup() bool {
+	return t.State == StateReview && needsFollowupResult(t.ResultJSON)
+}
+
 // GetUserLocale returns the task's language preference as an i18n.Locale,
 // checking UserLocale first, then parsing SpecJSON, falling back to English.
 func (t Task) GetUserLocale() i18n.Locale {

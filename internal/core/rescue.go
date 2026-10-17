@@ -169,16 +169,34 @@ func (c *Core) failOrphanedForward(ctx context.Context, taskID string) {
 
 // sweepStalePeers marks directory rows that have gone silent offline (S1-4).
 // Connected peers are excluded: their row may lag a heartbeat tick behind,
-// and a live conn is the stronger liveness signal. The self row is restored
-// immediately if the sweep ever catches it (its heartbeat refreshes
-// last_seen, so this is belt-and-braces for a startup ordering race).
+// and a live conn is the stronger liveness signal.
+//
+// The self row is excluded too — and not just restored after the fact:
+// ExpireStale's flip goes through MarkOffline, which STAMPS last_seen, so a
+// swept self row gets its freshness refreshed by the very sweep that found
+// it stale. For an owner the heartbeat would overwrite it seconds later;
+// for a borrowed engine — a web console or CLI whose row no process
+// heartbeats — the 5s monitor tick turned that into a refresh loop that
+// kept the row perpetually "fresh", masking the dead queue from the
+// store-bound consumer probe (StoreConsumerFresh). The row's freshness is
+// the heartbeat's alone: no heartbeat, no freshness — which is exactly
+// what the probe must see.
 func (c *Core) sweepStalePeers(ctx context.Context) {
 	c.mu.RLock()
-	exclude := make([]string, 0, len(c.peers))
+	exclude := make([]string, 0, len(c.peers)+1)
 	for id := range c.peers {
 		exclude = append(exclude, id)
 	}
 	c.mu.RUnlock()
+	if c.nodeID != "" {
+		exclude = append(exclude, c.nodeID)
+		// An ephemeral node id's directory row is its stable base
+		// (refreshSelfNeighbors writes there): the same reasoning protects
+		// both spellings.
+		if base, ok := scheduler.EphemeralBase(c.nodeID); ok && base != c.nodeID {
+			exclude = append(exclude, base)
+		}
+	}
 
 	expired, err := ledger.ExpireStale(c.db, int64(stalePeerAfter.Seconds()), exclude)
 	if err != nil {

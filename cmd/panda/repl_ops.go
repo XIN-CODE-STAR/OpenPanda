@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Xustalis/OpenPanda/internal/askengine"
 	"github.com/Xustalis/OpenPanda/internal/config"
 	"github.com/Xustalis/OpenPanda/internal/core"
 	"github.com/Xustalis/OpenPanda/internal/defense"
@@ -1007,6 +1008,90 @@ func (r *repl) cmdNodesAdmit(arg string) {
 	r.outln(i18n.Tf(r.loc, "cli.nodes.admit.none", "id", id))
 }
 
+// cmdTaskSend implements `/task send [--inject] <task-id> <text>`: deliver a
+// user message into a running or queued task. Queue mode (the default) lands
+// board context the agent reads at its next supervision round; --inject makes
+// the text lead the next round and aborts the in-flight one when this REPL's
+// own engine runs the task (a QueueTasks seat). Falls back to the plain store
+// when the engine has no scheduler: the durable note still lands.
+func (r *repl) cmdTaskSend(fields []string) {
+	inject := false
+	var pos []string
+	for _, f := range fields {
+		if f == "--inject" || f == "-inject" {
+			inject = true
+			continue
+		}
+		pos = append(pos, f)
+	}
+	if len(pos) < 2 {
+		r.outln(i18n.T(r.loc, "cli.task.send.usage"))
+		return
+	}
+	ref := strings.TrimSpace(pos[0])
+	text := strings.TrimSpace(strings.Join(pos[1:], " "))
+	ctx := r.commandContext()
+	id, ok := r.resolveRef(ref)
+	if !ok {
+		return
+	}
+	status := "queued"
+	if eng := r.engine.Load(); eng != nil {
+		st, err := eng.SendTaskMessage(ctx, id, text, inject)
+		if err != nil {
+			r.storeErr(err)
+			return
+		}
+		status = st
+	} else {
+		if inject {
+			r.outln(i18n.T(r.loc, "repl.approval.noEngine"))
+			return
+		}
+		grade := core.MsgGradeStatus
+		if err := r.store.PostUserMessage(ctx, id, text, grade); err != nil {
+			r.storeErr(err)
+			return
+		}
+	}
+	key := "cli.task.send.queued"
+	if status == "interrupted" {
+		key = "cli.task.send.interrupted"
+	}
+	r.outln(i18n.Tf(r.loc, key, "id", id))
+}
+
+// cmdTaskContinue implements `/task continue <id> [note]` — requeue a task the
+// supervisor parked with needs_followup so it keeps working under a fresh
+// round budget (same session, same work dir); the optional note leads the
+// continued round. Needs the engine — the continue validates ownership
+// through the scheduler core's runtime identity.
+func (r *repl) cmdTaskContinue(fields []string) {
+	if r.engine.Load() == nil {
+		r.outln(i18n.T(r.loc, "repl.approval.noEngine"))
+		return
+	}
+	if len(fields) == 0 || strings.TrimSpace(fields[0]) == "" {
+		r.outln(i18n.T(r.loc, "cli.task.continue.usage"))
+		return
+	}
+	ref := strings.TrimSpace(fields[0])
+	note := strings.TrimSpace(strings.Join(fields[1:], " "))
+	id, ok := r.resolveRef(ref)
+	if !ok {
+		return
+	}
+	out := r.engine.Load().ContinueReviewed(r.commandContext(), id, note, askengine.StreamCallbacks{})
+	if !out.OK {
+		r.outln(out.Stderr)
+		return
+	}
+	r.outln(i18n.Tf(r.loc, "cli.task.continue.done", "id", out.TaskID))
+	if out.Warning != "" {
+		r.outln(out.Warning)
+	}
+}
+
 // cmdTaskAdd implements `/task add <title>` with the optional flags the CLI
 // takes (--prompt/--priority/--project/--requires/--preferred/--authorize,
 // and --agents/--mode for the multi-harness plan form). It needs the ask
@@ -1173,7 +1258,7 @@ func (r *repl) cmdTaskAdd(fields []string) {
 	}
 	q := core.DefaultQueueSpec()
 	q.Priority = prio
-	task, err := r.engine.Load().EnqueueTask(ctx, in, q)
+	task, warn, err := r.engine.Load().EnqueueTask(ctx, in, q)
 	if err != nil {
 		r.storeErr(err)
 		return
@@ -1187,11 +1272,11 @@ func (r *repl) cmdTaskAdd(fields []string) {
 		}
 	}
 	r.outln(i18n.Tf(r.loc, "cli.task.add.done", "id", task.TaskID, "state", task.State, "priority", priorityName(prio)))
+	if warn != "" {
+		r.outln("⚠ " + warn)
+	}
 	if sessionID != "" {
 		r.outln(i18n.Tf(r.loc, "cli.task.add.session", "id", sessionID))
-	}
-	if !queueConsumerAlive(r.cfg) {
-		warnNoConsumerTo(r.commandOutput(), r.loc)
 	}
 	if wait {
 		// Same watch-only contract as `panda task add --wait`: the command

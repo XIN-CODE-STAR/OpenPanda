@@ -115,3 +115,46 @@ func TestSweepReapsSessionGhosts(t *testing.T) {
 		t.Fatalf("stable offline row must survive (count=%d, err=%v)", n, err)
 	}
 }
+
+// TestSweepLeavesSelfRowUntouched pins the freshness-poisoning fix: a sweep
+// that flips a stale SELF row runs it through MarkOffline, which stamps
+// last_seen — refreshing the very staleness it found. A borrowed engine
+// never heartbeats, so the 5s monitor tick turned that into a perpetual
+// refresh loop that masked the dead queue from StoreConsumerFresh. The self
+// row's stamp must survive a sweep byte for byte; a stale PEER row still
+// flips offline.
+func TestSweepLeavesSelfRowUntouched(t *testing.T) {
+	ctx := context.Background()
+	c := pinCore(t, "self", "marker")
+	old := time.Now().Add(-time.Hour).Unix()
+	for _, id := range []string{c.nodeID, "peer"} {
+		if _, err := c.db.Exec(
+			`INSERT INTO employee_cache (id, name, status, last_seen) VALUES (?, ?, 'online', ?)
+			 ON CONFLICT(id) DO UPDATE SET status='online', last_seen=excluded.last_seen`,
+			id, id, old); err != nil {
+			t.Fatalf("seed %s: %v", id, err)
+		}
+	}
+
+	c.sweepStalePeers(ctx)
+
+	var seen int64
+	var status string
+	if err := c.db.QueryRow(
+		`SELECT last_seen, status FROM employee_cache WHERE id=?`, c.nodeID).Scan(&seen, &status); err != nil {
+		t.Fatalf("read self row: %v", err)
+	}
+	if seen != old {
+		t.Fatalf("self row stamp rewritten by sweep: %d → %d (freshness poisoning)", old, seen)
+	}
+	if status != "online" {
+		t.Fatalf("self row status = %q, want untouched", status)
+	}
+	if err := c.db.QueryRow(
+		`SELECT status FROM employee_cache WHERE id='peer'`).Scan(&status); err != nil {
+		t.Fatalf("read peer row: %v", err)
+	}
+	if status != "offline" {
+		t.Fatalf("stale peer row status = %q, want offline (the sweep still works)", status)
+	}
+}

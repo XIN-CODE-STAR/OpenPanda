@@ -1249,6 +1249,34 @@ func (s *TaskStore) ClaimApproved(ctx context.Context, taskID, expectedOwner, ne
 	})
 }
 
+// RequeueForContinue atomically returns a follow-up-parked review to the
+// schedulable queue — the same review→queued+scheduled=1 transition an
+// approved resume uses, gated on the accept_work disposition. The queue
+// scheduler (this process's or the daemon sharing the store) then claims and
+// runs it like any queued row, which is what makes continue work
+// cross-process: a CLI or console marks the row, the executor's scheduler
+// does the running. The caller is responsible for the needs_followup check
+// (it lives in the parked result, not the row).
+func (s *TaskStore) RequeueForContinue(ctx context.Context, taskID, expectedOwner string) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `
+			UPDATE tasks SET state=?, scheduled=1, state_version=state_version+1, updated_at=?
+			WHERE task_id=? AND state=? AND owner_node=?
+				AND approval_disposition=?`,
+			StateQueued, s.now(), taskID, StateReview, expectedOwner,
+			string(ApprovalAcceptWork))
+		if err != nil {
+			return fmt.Errorf("requeue for continue: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return fmt.Errorf("%w: task %s continue claimed concurrently", ErrConflict, taskID)
+		}
+		return s.recordEventTx(ctx, tx, taskID, EvReview, map[string]any{
+			"continued": true,
+		})
+	})
+}
+
 // reviewFromAuthorizationRefusal is the legacy-row compatibility path. Only a
 // review event that itself contains the explicit authorization-refusal sentinel
 // may resume. Generic failed events are not evidence that execution never began:
@@ -2535,6 +2563,32 @@ func (s *TaskStore) ListRecentByState(ctx context.Context, state string, limit i
 // SQL keeps a project listing from reading every other project's rows.
 func (s *TaskStore) ListByProject(ctx context.Context, project string) ([]Task, error) {
 	return s.listTasks(ctx, "", project, "created_at DESC", 0)
+}
+
+// ProjectStateCounts counts tasks grouped by project and state — one GROUP BY
+// for the whole listing, so a per-project work summary (the console's project
+// cards) does not cost a COUNT query per project row. Only named projects
+// appear; tasks outside a project are nobody's summary.
+func (s *TaskStore) ProjectStateCounts(ctx context.Context) (map[string]map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT project, state, COUNT(*) FROM tasks WHERE project != '' GROUP BY project, state`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]map[string]int{}
+	for rows.Next() {
+		var project, state string
+		var n int
+		if err := rows.Scan(&project, &state, &n); err != nil {
+			return nil, err
+		}
+		if out[project] == nil {
+			out[project] = map[string]int{}
+		}
+		out[project][state] = n
+	}
+	return out, rows.Err()
 }
 
 // ListActive returns the tasks that can still move — everything outside the

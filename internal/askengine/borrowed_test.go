@@ -58,7 +58,7 @@ func TestBorrowedEngineIsSubmitOnly(t *testing.T) {
 		t.Fatalf("borrowed engine claims the node row while the lock is held")
 	}
 
-	task, err := e.EnqueueTask(context.Background(), core.TaskInput{
+	task, _, err := e.EnqueueTask(context.Background(), core.TaskInput{
 		Title:    "borrowed submit",
 		Requires: []string{"coding"},
 	}, core.DefaultQueueSpec())
@@ -110,12 +110,15 @@ func TestOwnerEngineConsumes(t *testing.T) {
 		t.Fatalf("owner engine with free lock marked borrowed")
 	}
 
-	task, err := e.EnqueueTask(context.Background(), core.TaskInput{
+	task, warn, err := e.EnqueueTask(context.Background(), core.TaskInput{
 		Title:    "owner claim",
 		Requires: []string{"coding"},
 	}, core.DefaultQueueSpec())
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
+	}
+	if warn != "" {
+		t.Fatalf("owner engine is itself the consumer; got warning %q", warn)
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {

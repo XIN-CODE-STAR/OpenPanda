@@ -3,6 +3,8 @@
 package entry
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -51,5 +53,39 @@ func TestWrapAPIError400TruncatesLongBodies(t *testing.T) {
 	msg := WrapAPIError(&statusError{status: 400, body: body}).Error()
 	if len(msg) > 500 {
 		t.Fatalf("user message not bounded: %d chars", len(msg))
+	}
+}
+
+// TestIsModelConfigError: the web console hangs a fix-it CTA on this verdict,
+// so the classification must line up with the failures that actually live in
+// the model settings (absent/rejected key, bad endpoint, retired model id)
+// and exclude everything the user can only wait out or retry (rate limits,
+// outages, unreachable endpoints, cancellations). Wrapped ClassifyErrors
+// must classify the same as their causes — the panel sees the wrapped form.
+func TestIsModelConfigError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"no key", ErrNoKey, true},
+		{"no model", ErrNoModel, true},
+		{"401", &statusError{status: 401, body: "bad key"}, true},
+		{"403", &statusError{status: 403}, true},
+		{"404", &statusError{status: 404}, true},
+		{"400", &statusError{status: 400, body: "model retired"}, true},
+		{"429", &statusError{status: 429}, false},
+		{"500", &statusError{status: 500}, false},
+		{"canceled", context.Canceled, false},
+		{"generic", errors.New("boom"), false},
+		{"wrapped 401", WrapAPIError(&statusError{status: 401, body: "bad key"}), true},
+		{"wrapped no-key", &ClassifyError{UserMsg: "x", Err: ErrNoKey}, true},
+		{"wrapped canceled", &ClassifyError{UserMsg: "x", Err: context.Canceled}, false},
+	}
+	for _, tc := range cases {
+		if got := IsModelConfigError(tc.err); got != tc.want {
+			t.Fatalf("%s: IsModelConfigError = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

@@ -61,6 +61,12 @@ func runTask(args []string) {
 		case "followup":
 			runTaskFollowup(args[1:])
 			return
+		case "send", "msg", "message":
+			runTaskSend(args[1:])
+			return
+		case "continue":
+			runTaskContinue(args[1:])
+			return
 		case "board":
 			runTaskBoard(args[1:])
 			return
@@ -93,6 +99,8 @@ func taskUsage() {
 	fmt.Fprintln(os.Stderr, "  delete <id>                             remove a task and its subtree (queued/finished)")
 	fmt.Fprintln(os.Stderr, "  revert <id>                             roll the run's git checkout back to its pre-task baseline")
 	fmt.Fprintln(os.Stderr, "  followup <id>                           hand the task's recorded result to the model and continue")
+	fmt.Fprintln(os.Stderr, "  send [--inject] <id> <text>             message a running/queued task: queue (next-round context) or inject (leads the next round)")
+	fmt.Fprintln(os.Stderr, "  continue <id> [-m NOTE]                 requeue a follow-up-parked task so it keeps working")
 	fmt.Fprintln(os.Stderr, "  board <id>                              show the sibling-message boards a task reads")
 	fmt.Fprintln(os.Stderr, "  artifact <id> [--list|--file P|--out D]  fetch the task's output artifact (list, preview, or extract)")
 	fmt.Fprintln(os.Stderr, "  approve|reject|cancel|logs <id>         same as the bare commands")
@@ -849,7 +857,7 @@ func runTaskAdd(args []string) {
 		return
 	}
 
-	task, err := engine.EnqueueTask(context.Background(), in, q)
+	task, warn, err := engine.EnqueueTask(context.Background(), in, q)
 	if err != nil {
 		fatal("enqueue task", err)
 	}
@@ -860,9 +868,11 @@ func runTaskAdd(args []string) {
 
 	// The advisory precedes the output split: --json keeps stdout clean but a
 	// stderr line is still the cheapest way to keep a silently-stalled queue
-	// from looking like a successful enqueue.
-	if !queueConsumerAlive(cfg) {
-		warnNoConsumerStderr(loc)
+	// from looking like a successful enqueue. The engine's warning is
+	// store-aware: it also fires when a running daemon/web console drains a
+	// different db_path, which the process probes alone cannot see.
+	if warn != "" {
+		fmt.Fprintln(os.Stderr, "⚠ "+warn)
 	}
 	if *wait {
 		waitForTaskAdd(loc, cfg, task.TaskID, *waitTimeout)
@@ -997,11 +1007,12 @@ func runTaskAddNodes(loc i18n.Locale, engine *askengine.Engine, cfg *config.Conf
 	}
 	results := make([]fanResult, 0, len(nodes))
 	failed := 0
+	consumerWarn := ""
 	for _, node := range nodes {
 		per := in
 		per.TargetNode = node
 		r := fanResult{Node: node}
-		task, err := engine.EnqueueTask(context.Background(), per, q)
+		task, warn, err := engine.EnqueueTask(context.Background(), per, q)
 		if err != nil {
 			r.Error = err.Error()
 			failed++
@@ -1009,11 +1020,14 @@ func runTaskAddNodes(loc i18n.Locale, engine *askengine.Engine, cfg *config.Conf
 			r.TaskID = task.TaskID
 			r.State = task.State
 			r.SessionID = linkTaskSession(cfg, task.TaskID, in.Title, in.Intent)
+			if consumerWarn == "" {
+				consumerWarn = warn
+			}
 		}
 		results = append(results, r)
 	}
-	if failed < len(nodes) && !queueConsumerAlive(cfg) {
-		warnNoConsumerStderr(loc)
+	if consumerWarn != "" {
+		fmt.Fprintln(os.Stderr, "⚠ "+consumerWarn)
 	}
 	if jsonOutput {
 		emitJSON(map[string]any{"fanout": len(nodes), "tasks": results})
@@ -1317,6 +1331,103 @@ func runTaskBoard(args []string) {
 			fmt.Printf("  %s -> %s  #%d  %-12s %s ago\n    %s\n",
 				m.Sender, to, m.SenderSeq, m.Grade, age, m.Body)
 		}
+	}
+}
+
+// runTaskSend delivers a user message into a running or queued task — the
+// two send modes (core/steer.go): default queues the text as board context
+// the agent reads at its next supervision round; --inject marks it a steer
+// that leads the next round and aborts the in-flight one when this process
+// holds the task's execution (a QueueTasks REPL/web console). A message sent
+// from a process that does not run the task degrades to next-boundary
+// delivery — the note is durable either way.
+func runTaskSend(args []string) {
+	fs := flag.NewFlagSet("task send", flag.ExitOnError)
+	configPath := fs.String("config", cliConfigPath, "path to config.yaml")
+	cardPath := fs.String("card", "", "path to capabilities.yaml")
+	inject := fs.Bool("inject", false, "abort the in-flight round and make the text the next round's leading directive")
+	fs.Parse(reorderFlags(args, commonValueFlags))
+	rest := fs.Args()
+	loc := i18n.Detect()
+	if len(rest) < 2 {
+		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.task.send.usage"))
+		os.Exit(2)
+	}
+	ref := strings.TrimSpace(rest[0])
+	text := strings.TrimSpace(strings.Join(rest[1:], " "))
+	if text == "" {
+		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.task.send.usage"))
+		os.Exit(2)
+	}
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		fatal("load config", err)
+	}
+	engine, err := askengine.New(context.Background(), cfg, askengine.Options{
+		CardPath:   *cardPath,
+		ConfigPath: *configPath,
+	})
+	if err != nil {
+		fatal("ask engine", err)
+	}
+	defer engine.Close()
+	id := resolveTaskRef(engine.TaskStore(), ref)
+	status, err := engine.SendTaskMessage(context.Background(), id, text, *inject)
+	if err != nil {
+		fatal("send task message", err)
+	}
+	key := "cli.task.send.queued"
+	if status == "interrupted" {
+		key = "cli.task.send.interrupted"
+	}
+	if jsonOutput {
+		emitJSON(map[string]string{"task_id": id, "status": status})
+		return
+	}
+	fmt.Println(i18n.Tf(loc, key, "id", id))
+}
+
+// runTaskContinue implements `panda task continue <id> [-m NOTE]` — requeue a
+// task the supervisor parked with needs_followup so the queue scheduler runs
+// it under a fresh round budget (same session, same work dir). The note, when
+// given, leads the continued round as a steer-grade directive.
+func runTaskContinue(args []string) {
+	fs := flag.NewFlagSet("task continue", flag.ExitOnError)
+	configPath := fs.String("config", cliConfigPath, "path to config.yaml")
+	cardPath := fs.String("card", "", "path to capabilities.yaml")
+	note := fs.String("m", "", "operator note leading the continued round")
+	fs.StringVar(note, "note", "", "operator note leading the continued round")
+	fs.Parse(reorderFlags(args, map[string]bool{"config": true, "card": true, "m": true, "note": true}))
+	loc := i18n.Detect()
+	id := strings.TrimSpace(strings.Join(fs.Args(), " "))
+	if id == "" {
+		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.task.continue.usage"))
+		os.Exit(2)
+	}
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		fatal("load config", err)
+	}
+	engine, err := askengine.New(context.Background(), cfg, askengine.Options{
+		CardPath:   *cardPath,
+		ConfigPath: *configPath,
+	})
+	if err != nil {
+		fatal("ask engine", err)
+	}
+	defer engine.Close()
+	id = resolveTaskRef(engine.TaskStore(), id)
+	out := engine.ContinueReviewed(context.Background(), id, strings.TrimSpace(*note), askengine.StreamCallbacks{})
+	if !out.OK {
+		fatal("continue", errors.New(out.Stderr))
+	}
+	if jsonOutput {
+		emitJSON(map[string]string{"task_id": out.TaskID, "state": out.TaskState, "warning": out.Warning})
+		return
+	}
+	fmt.Println(i18n.Tf(loc, "cli.task.continue.done", "id", out.TaskID))
+	if out.Warning != "" {
+		fmt.Fprintln(os.Stderr, "⚠ "+out.Warning)
 	}
 }
 

@@ -64,6 +64,10 @@ type askResult struct {
 	Approval      *approvalPayload `json:"approval,omitempty"`
 	Denied        bool             `json:"denied,omitempty"`
 	ConsentScope  string           `json:"consent_scope,omitempty"`
+	// Warning is a non-fatal advisory the surface should show alongside the
+	// result — currently the "queued work with no consumer to drain this
+	// store" notice, which distinguishes parked work from dispatched work.
+	Warning string `json:"warning,omitempty"`
 }
 
 // approvalPayload is the wire form of an engine ApprovalRequest: what the
@@ -100,6 +104,7 @@ func planResultOf(out *askengine.Result) askResult {
 		PlanGoal:     out.PlanGoal,
 		Denied:       out.Denied,
 		ConsentScope: out.ConsentSource,
+		Warning:      out.Warning,
 	}
 	if out.NeedsApproval && out.Approval != nil {
 		res.NeedsApproval = true
@@ -337,7 +342,7 @@ func (h *handler) listProjects(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"projects": names, "detail": []projectView{}, "active": ""})
 		return
 	}
-	views, active, err := h.projectViews(h.projectStore)
+	views, active, err := h.projectViews(r.Context(), h.projectStore)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, errors.New("list projects failed"))
 		return

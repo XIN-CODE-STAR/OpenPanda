@@ -10,8 +10,11 @@ import { useModalFocus } from '../components/modal-focus'
 /** The multi-model registry — web parity with the TUI's `/model` verb table:
  *  list, switch, add (provider catalogue wizard), remove, fetch remote model
  *  ids, and connectivity test. API keys are write-only: the panel answers
- *  `key_set`/`key_hint`, never the secret. */
-export function ModelsSection() {
+ *  `key_set`/`key_hint`, never the secret.
+ *  `onOpenAdvanced` is wired by the settings view: a failed test of the
+ *  *active* model means its key/endpoint is broken, and the only repair
+ *  surface is the advanced form behind a disclosure — the button jumps to it. */
+export function ModelsSection(props: { onOpenAdvanced?: () => void }) {
   useLocaleRerender()
   const [data, setData] = useState<ModelsResponse | null>(null)
   const [error, setError] = useState('')
@@ -103,6 +106,11 @@ export function ModelsSection() {
           </div>
         </div>
         {results[active.alias] && <ModelResult line={results[active.alias]!} />}
+        {results[active.alias]?.startsWith('err:') && props.onOpenAdvanced && (
+          <button class="btn small" onClick={props.onOpenAdvanced}>
+            {t('models.fixKey')}
+          </button>
+        )}
       </div>
 
       <div class="card settings-card">

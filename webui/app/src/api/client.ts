@@ -321,6 +321,16 @@ export type CreateTaskResult = {
   task_id: string
   session_id: string
   state: string
+  /** Advisory when the task queued into a store no live consumer drains —
+   *  parked work, not dispatch. Server-localized; empty when fine. */
+  warning?: string
+}
+
+export type TaskMessageResult = {
+  task_id: string
+  /** "interrupted" — a live round was aborted and the text leads the next
+   *  one; "queued" — the note waits for the next round (or the first run). */
+  status: 'queued' | 'interrupted' | string
 }
 
 export interface ApprovalOperation {
@@ -365,6 +375,10 @@ export interface AskResult {
   approval?: AskApproval
   denied?: boolean
   consent_scope?: 'session' | 'project' | string
+  /** Non-fatal advisory from the engine — e.g. the work was queued but no
+   *  live consumer drains this store, so the receipt is parked work, not
+   *  dispatch. Rendered verbatim (server-localized). */
+  warning?: string
 }
 
 /** The parked tier-2 request inside an ask result — what it is, and the
@@ -664,6 +678,9 @@ export interface ProjectDetail {
   memory_entries: number
   memory_chars: number
   sessions?: number
+  /** Work filed under the project: state → count (queued/running/review/done/…).
+   *  Absent on nodes whose panel predates the summary. */
+  tasks?: Record<string, number>
   /** Per-project approval policy: '' mode inherits the global approval.mode;
    *  scope is where the approval card preselects its remember; decision is a
    *  remembered project-scope answer ('' | approve | deny). */
@@ -721,6 +738,14 @@ export const api = {
     return request('PATCH', `/api/tasks/${encodeURIComponent(id)}`, { priority })
   },
 
+  /** Deliver a user message into a running or queued task — the two send
+   *  modes: queue (board context the agent reads at its next round) or
+   *  inject (a steer that leads the next round, aborting the in-flight one
+   *  when this console runs the task). */
+  sendTaskMessage(id: string, text: string, inject: boolean): Promise<TaskMessageResult> {
+    return request('POST', `/api/tasks/${encodeURIComponent(id)}/messages`, { text, inject })
+  },
+
   /** Persist a drag: ids arrive top-to-bottom and get seq 1..n. */
   reorderTasks(ids: string[]): Promise<{ updated: number }> {
     return request('POST', '/api/tasks/reorder', { ids })
@@ -754,6 +779,18 @@ export const api = {
 
   approvalOperation(id: string, operationID: string): Promise<ApprovalOperation> {
     return request('GET', `/api/tasks/${encodeURIComponent(id)}/operations/${encodeURIComponent(operationID)}`)
+  },
+
+  /** Requeue a follow-up-parked task: the supervisor said more work remains
+   *  and the operator's answer is "keep going" — the queue scheduler runs
+   *  the continuation under a fresh round budget, keeping the agent session
+   *  and work dir. An optional note leads the continued round's intent. */
+  continueTask(id: string, note?: string): Promise<{ id: string; state: string; warning: string }> {
+    return request(
+      'POST',
+      `/api/tasks/${encodeURIComponent(id)}/continue`,
+      note ? { note } : undefined,
+    )
   },
 
   reject(id: string, reason?: string, scope?: ApprovalScope): Promise<void> {
@@ -1618,6 +1655,9 @@ export interface SessionTurn {
   text: string
   kind?: 'answer' | 'task' | 'error'
   ref?: string
+  /** Machine reason on an error-kind turn (e.g. "model_config") — the panel
+   *  stamps it so a replayed transcript keeps the matching fix-it CTA. */
+  code?: string
 }
 
 export interface SessionOperation {
@@ -1765,7 +1805,9 @@ export interface AskStreamHandlers {
   onStatus(text: string): void
   onOperation(operationID: string): void
   onResult(r: AskResult): void
-  onError(message: string): void
+  /** `code` carries the panel's machine reason when one exists —
+   *  "model_config" marks the fix-in-settings class of failure. */
+  onError(message: string, code?: string): void
 }
 
 /** POST /api/sessions/{id}/ask and consume its SSE stream. Resolves when the
@@ -1800,7 +1842,7 @@ export async function askSessionStream(
       else if (event === 'status') h.onStatus(payload.text ?? '')
       else if (event === 'operation') h.onOperation(payload.operation_id ?? '')
       else if (event === 'result') h.onResult(payload as AskResult)
-      else if (event === 'error') h.onError(payload.message ?? 'unknown error')
+      else if (event === 'error') h.onError(payload.message ?? 'unknown error', payload.code || undefined)
     },
   })
   // openSSE resolves on abort; the composer's stop button contract is an

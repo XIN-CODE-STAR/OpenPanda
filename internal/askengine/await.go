@@ -110,9 +110,11 @@ func (e *Engine) awaitSettled(ctx context.Context, sched *core.Core, cur core.Ta
 		// A row parked in the queue with no live consumer waits forever —
 		// the borrowed-engine/mixed-version edge. One probe after the grace
 		// window, logged once: the wait itself keeps polling (the work is
-		// still recoverable the moment a consumer comes up).
+		// still recoverable the moment a consumer comes up). The probe is
+		// store-aware: a daemon draining a different db_path holds the
+		// identity lock but never claims this store's rows.
 		if !consumerChecked && (t.State == core.StateQueued || t.State == core.StateSubmitted) &&
-			time.Since(queuedSince) > 20*awaitPollInterval && !core.QueueConsumerAlive(e.cfg) {
+			time.Since(queuedSince) > 20*awaitPollInterval && !e.queueConsumerAlive(ctx) {
 			consumerChecked = true
 			e.logger.Warn("askengine: queued task unclaimed and no queue consumer is alive; it waits until one starts",
 				"task", cur.TaskID)

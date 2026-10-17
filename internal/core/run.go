@@ -938,6 +938,12 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 	// marker-happy agent; the mesh budget bounds the spawned tree itself.
 	const maxDelegateRequests = 4
 	delegations := 0
+	// steerRounds bounds how many extra rounds user injects (steer.go) may
+	// grant: the steer's round is on the house (a single-round task would
+	// otherwise end empty when its only round is aborted), but a spamming
+	// sender must not extend the loop without bound.
+	const maxSteerRounds = 4
+	steerRounds := 0
 	// pendingChildren are delegate children still in flight — a request whose
 	// result had not landed when its wait window closed. Rebuilding the set
 	// from the rows (not just this episode's memory) means a resumed run also
@@ -970,6 +976,12 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 		// the agent reads them next round rather than blocking on them.
 		if lines := c.drainTaskMessages(execCtx, task, boardSeen); len(lines) > 0 {
 			currentIntent += "\n\n[sibling board]\n" + strings.Join(lines, "\n")
+		}
+		// User inject (steer.go): a message sent in "inject" mode leads this
+		// round's intent — ahead of the task spec and any folded notes — so
+		// the user's directive sets the course instead of reading as context.
+		if steer := c.takeSteer(execCtx, taskID, boardSeen); steer != "" {
+			currentIntent = "[user directive]\n" + steer + "\n\n" + currentIntent
 		}
 		// The agent can spawn children itself (a CLI `task add
 		// --parent-id $PANDA_TASK_ID`), which the episode's opening snapshot
@@ -1123,7 +1135,34 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 				runCtx = commander.WithResultSchema(runCtx, agentResultSchemaFor(c.abilityIDs(), restricted))
 			}
 		}
-		res = router.Execute(runCtx, *plan, prompt, workDir, task.Authorized)
+		// The round runs under its own cancel so a user inject (steer.go) can
+		// abort the in-flight agent turn: the kill drops the live session
+		// (its result envelope would desync the next turn) and the loop
+		// re-runs carrying the steer as the leading directive. execCtx
+		// cancellation (task cancel) rides through unchanged. Past the steer
+		// budget the round is not steerable: an inject then waits for the
+		// natural boundary (delivered at the next round, or as a durable
+		// note if the task ends first).
+		roundCtx := runCtx
+		var roundCancel context.CancelFunc
+		steerable := steerRounds < maxSteerRounds
+		if steerable {
+			roundCtx, roundCancel = context.WithCancel(runCtx)
+			c.registerInterrupt(taskID, roundCancel)
+		}
+		res = router.Execute(roundCtx, *plan, prompt, workDir, task.Authorized)
+		interrupted := false
+		if steerable {
+			c.clearInterrupt(taskID)
+			interrupted = roundCtx.Err() != nil && c.steerUnseen(execCtx, taskID, boardSeen)
+			roundCancel()
+		}
+		if interrupted {
+			steerRounds++
+			maxRounds++ // the steer round is on the house — it must not eat the task's budget
+			c.EvTrace(execCtx, taskID, "user_inject_interrupt", map[string]any{"round": round + 1})
+			continue
+		}
 		structured := parseStructuredResult(res.Structured)
 		// The schema's status field is the model's self-report. question and
 		// delegate are consumed below; "failed" is traced as evidence for the
@@ -1668,6 +1707,14 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 			c.logger.Warn("record supervise event", "task", taskID, "err", err)
 		}
 		if v.Status == entry.VerdictDone {
+			// A user inject that landed while the judge deliberated outranks
+			// the verdict: run one more round carrying it rather than
+			// closing the task with the message unread.
+			if c.steerUnseen(execCtx, taskID, boardSeen) && steerRounds < maxSteerRounds {
+				steerRounds++
+				maxRounds++
+				continue
+			}
 			break
 		}
 		if v.Status == entry.VerdictReview {

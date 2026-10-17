@@ -668,6 +668,72 @@ func (c *Core) resumeApproved(ctx context.Context, taskID string, relayUpstream 
 	return final, res, rerr
 }
 
+// needsFollowupResult reports whether a parked result carries the supervised
+// "more work remains" flag — the signal that distinguishes a follow-up park
+// (verdict=continue) from every other accept_work review, where approve and
+// reject are already the complete set of honest answers.
+func needsFollowupResult(resultJSON string) bool {
+	var res struct {
+		NeedsFollowup bool `json:"needs_followup"`
+	}
+	return json.Unmarshal([]byte(resultJSON), &res) == nil && res.NeedsFollowup
+}
+
+// ContinueReviewed requeues a task whose round budget ran out mid-work: the
+// supervisor parked it in review with needs_followup, and the operator's
+// answer is neither "accept the half" (approve) nor "throw it away" (reject)
+// but "keep going". The continuation is expressed as a requeue — the same
+// review→queued+scheduled=1 transition an approved resume records — so the
+// store's scheduler adopts it and the call returns immediately instead of
+// blocking on another full execution budget. That is also what makes the
+// action cross-process: a CLI or console marks the row, the queue-owning
+// daemon does the running.
+//
+// The operator's note lands as a steer-grade board note BEFORE the requeue,
+// so the scheduler's first continued round sees it lead the intent even when
+// the claim lands in the same tick. With no note the steer carries a plain
+// "keep going" directive — the resumed agent session supplies the rest of
+// the context.
+//
+// Scope is deliberately local: a task whose last dispatch went to a peer is
+// refused rather than silently re-routed — the remote continue deserves the
+// task_resume wire path a follow-up change can add, not a quiet re-execution
+// on the wrong machine.
+func (c *Core) ContinueReviewed(ctx context.Context, taskID, note string) (Task, error) {
+	cur, err := c.store.Get(ctx, taskID)
+	if err != nil {
+		return Task{}, err
+	}
+	if cur.State != StateReview || !needsFollowupResult(cur.ResultJSON) {
+		return cur, fmt.Errorf("%w: task %s is not parked for follow-up", ErrConflict, taskID)
+	}
+	if target, terr := c.store.DispatchTarget(ctx, taskID); terr == nil &&
+		target != "" && !scheduler.SameRuntimeIdentity(target, c.nodeID) {
+		return cur, fmt.Errorf("continue: task %s executed on %s — continuation belongs to that node", taskID, target)
+	}
+	if !scheduler.SameRuntimeIdentity(cur.OwnerNode, c.nodeID) {
+		return cur, fmt.Errorf("continue: task owner %s does not match node %s", cur.OwnerNode, c.nodeID)
+	}
+	steer := strings.TrimSpace(note)
+	if steer == "" {
+		steer = "the operator asked to continue — pick up where the previous round stopped and finish the remaining work"
+	}
+	if err := c.userMessage(ctx, taskID, steer, MsgGradeSteer, "continue"); err != nil {
+		return cur, err
+	}
+	if err := c.store.RequeueForContinue(ctx, taskID, cur.OwnerNode); err != nil {
+		final, gerr := c.store.Get(ctx, taskID)
+		if gerr != nil {
+			return cur, gerr
+		}
+		return final, fmt.Errorf("continue: requeue task: %w", err)
+	}
+	// Same freshness the approval path grants: the park already reset the
+	// retry budget, and the continue starts a new run under it.
+	c.reviewReset(taskID)
+	return c.store.Get(ctx, taskID)
+}
+
 // resumeRemote forwards an approval to the node that executed the task: it
 // grants the consent on the local copy (review -> queued -> dispatched, the
 // same transitions Submit's forward path records so the inbound result

@@ -15,6 +15,7 @@ package panel
 // about what a project is or which one is active.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -25,14 +26,17 @@ import (
 )
 
 // projectView is one project as the console sees it: the metadata row plus the
-// two things the row does not know — how big its memory is, and whether it is the
-// one currently entered.
+// three things the row does not know — how big its memory is, whether it is the
+// one currently entered, and how the work filed under it stands. A project is a
+// unit of work; a card that shows memory and sessions but never the tasks it
+// exists to group leaves the user guessing where the project's work went.
 type projectView struct {
 	projectstore.Project
-	Active   bool `json:"active"`
-	Entries  int  `json:"memory_entries"`
-	Chars    int  `json:"memory_chars"`
-	Sessions int  `json:"sessions"`
+	Active   bool           `json:"active"`
+	Entries  int            `json:"memory_entries"`
+	Chars    int            `json:"memory_chars"`
+	Sessions int            `json:"sessions"`
+	Tasks    map[string]int `json:"tasks,omitempty"`
 }
 
 // projectStoreOrErr guards the handlers that need the metadata table. A database
@@ -58,10 +62,24 @@ func (h *handler) projectMemorySize(name string) (entries, chars int) {
 	return len(m.Entries), m.Chars()
 }
 
+// projectTaskCounts is the one-query work summary behind every projectView:
+// project → state → count. A nil store (no task table) or a read error yields
+// nil — counts are supplementary, never worth failing a project listing over.
+func (h *handler) projectTaskCounts(ctx context.Context) map[string]map[string]int {
+	if h.store == nil {
+		return nil
+	}
+	counts, err := h.store.ProjectStateCounts(ctx)
+	if err != nil {
+		return nil
+	}
+	return counts
+}
+
 // projectViews assembles the full listing, folding in projects that exist only as
 // a memory file. They predate the metadata table, and a listing that showed the
 // table alone would report that work the user can still see does not exist.
-func (h *handler) projectViews(store *projectstore.Store) ([]projectView, string, error) {
+func (h *handler) projectViews(ctx context.Context, store *projectstore.Store) ([]projectView, string, error) {
 	list, err := store.List()
 	if err != nil {
 		return nil, "", err
@@ -86,6 +104,7 @@ func (h *handler) projectViews(store *projectstore.Store) ([]projectView, string
 	if err != nil {
 		return nil, "", err
 	}
+	taskCounts := h.projectTaskCounts(ctx)
 	out := make([]projectView, 0, len(list))
 	for _, p := range list {
 		entries, chars := h.projectMemorySize(p.Name)
@@ -101,6 +120,7 @@ func (h *handler) projectViews(store *projectstore.Store) ([]projectView, string
 			Entries:  entries,
 			Chars:    chars,
 			Sessions: sessCount,
+			Tasks:    taskCounts[p.Name],
 		})
 	}
 	return out, active, nil
@@ -132,6 +152,7 @@ func (h *handler) getProject(w http.ResponseWriter, r *http.Request) {
 		Entries:  entries,
 		Chars:    chars,
 		Sessions: sessCount,
+		Tasks:    h.projectTaskCounts(r.Context())[name],
 	})
 }
 
@@ -247,7 +268,7 @@ func (h *handler) patchProject(w http.ResponseWriter, r *http.Request) {
 			sessionCount = len(sList)
 		}
 	}
-	writeJSON(w, projectView{Project: p, Active: p.Name == active, Entries: entries, Chars: chars, Sessions: sessionCount})
+	writeJSON(w, projectView{Project: p, Active: p.Name == active, Entries: entries, Chars: chars, Sessions: sessionCount, Tasks: h.projectTaskCounts(r.Context())[name]})
 }
 
 // clearProjectApproval serves DELETE /api/projects/{name}/approval — drops the
@@ -279,7 +300,7 @@ func (h *handler) clearProjectApproval(w http.ResponseWriter, r *http.Request) {
 			sessCount = len(sList)
 		}
 	}
-	writeJSON(w, projectView{Project: p, Active: p.Name == active, Entries: entries, Chars: chars, Sessions: sessCount})
+	writeJSON(w, projectView{Project: p, Active: p.Name == active, Entries: entries, Chars: chars, Sessions: sessCount, Tasks: h.projectTaskCounts(r.Context())[name]})
 }
 
 // renameProjectMemory moves a project's memory directory. Copy-then-drop rather
@@ -380,7 +401,7 @@ func (h *handler) enterProject(w http.ResponseWriter, r *http.Request) {
 	h.bindEngineProject(store, name)
 	p, _ := store.Get(name)
 	entries, chars := h.projectMemorySize(name)
-	writeJSON(w, projectView{Project: p, Active: true, Entries: entries, Chars: chars})
+	writeJSON(w, projectView{Project: p, Active: true, Entries: entries, Chars: chars, Tasks: h.projectTaskCounts(r.Context())[name]})
 }
 
 // exitProject serves POST /api/projects/exit.

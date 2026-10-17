@@ -1563,6 +1563,12 @@ func (r *repl) cmdTask(arg string) {
 	case "followup":
 		r.cmdTaskFollowup(strings.Join(fields[1:], " "))
 		return
+	case "send", "msg", "message":
+		r.cmdTaskSend(fields[1:])
+		return
+	case "continue":
+		r.cmdTaskContinue(fields[1:])
+		return
 	}
 	id, ok := r.resolveRef(arg)
 	if !ok {

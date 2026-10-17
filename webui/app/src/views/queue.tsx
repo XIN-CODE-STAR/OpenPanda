@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { useMemo, useState } from 'preact/hooks'
+import { useEffect, useMemo, useState } from 'preact/hooks'
 import { api, ApiError, isTaskStalled, type ApprovalScope, type NodeInfo, type Task } from '../api/client'
 import { useAsync, useChangeSignal, useLocaleRerender, useTraceForTask, useVisibleInterval } from '../hooks'
 import { t } from '../i18n'
@@ -57,9 +57,13 @@ function sortTasks(tasks: Task[]): Task[] {
 
 export function QueueView({
   focusReview,
+  project,
   onOpen,
   onOpenSession,
 }: {
+  /** Deep-link filter (#/queue?project=x) — seeds the board's project
+   *  filter so a link from a project card lands on that project's work. */
+  project?: string | null
   focusReview?: boolean
   onOpen(id: string): void
   onOpenSession(id: string): void
@@ -67,7 +71,12 @@ export function QueueView({
   useLocaleRerender()
   const change = useChangeSignal()
   const [refresh, setRefresh] = useState(0)
-  const [projectFilter, setProjectFilter] = useState('')
+  const [projectFilter, setProjectFilter] = useState(project ?? '')
+  // Re-seed when the route's project param changes — the view stays mounted
+  // across hash changes, so the prop is the source of truth for deep links.
+  useEffect(() => {
+    if (project != null) setProjectFilter(project)
+  }, [project])
   const bump = () => setRefresh((v) => v + 1)
   // A stalled task emits no SSE event — nothing changes — so the badge can
   // only appear on a local clock tick.
@@ -212,13 +221,16 @@ function NewTaskForm({ projects, onCreated }: { projects: string[]; onCreated():
     setBusy(true)
     setError('')
     try {
-      await api.createTask({
+      const res = await api.createTask({
         title: title.trim(),
         prompt: prompt.trim() || undefined,
         priority,
         project: project || undefined,
         node: node || undefined,
       })
+      // A queued task nobody can drain must not read as dispatched — surface
+      // the engine's advisory before clearing the composer.
+      if (res.warning) toast(res.warning)
       setTitle('')
       setPrompt('')
       setPriority('normal')

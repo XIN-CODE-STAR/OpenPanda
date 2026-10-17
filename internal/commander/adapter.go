@@ -1099,6 +1099,13 @@ func runAdapterProcess(ctx context.Context, name string, prompt string, cwd stri
 				return res
 			}
 			req.Session = false
+			if ctx.Err() != nil {
+				// The caller aborted this turn (a user inject's round cancel,
+				// a task cancel): a one-shot respawn would redo the very work
+				// the abort discards — and would race the round loop's next
+				// iteration. Report the abort and let the caller decide.
+				return AgentResult{OK: false, Result: "run aborted", ExitCode: 1}
+			}
 		}
 	}
 	if tid := TaskID(ctx); tid != "" {
@@ -1485,6 +1492,20 @@ func (p *AgentSessions) turn(ctx context.Context, key, adapter string, req Adapt
 	turnCtx, cancel := context.WithTimeout(ctx, hard)
 	defer cancel()
 	res := s.await(turnCtx)
+	if ctx.Err() != nil && !s.isDead() {
+		// The caller aborted this turn while the CLI was mid-generation (a
+		// user inject's round cancel, a task cancel). The session cannot be
+		// reused: the aborted turn's result envelope would arrive ahead of
+		// the next turn's and desync the read. Drop the process — the
+		// conversation resumes from the last completed turn via --resume.
+		// The per-turn hard limit does NOT land here (the parent is still
+		// live); it keeps its existing envelope-returning behavior.
+		s.kill()
+		p.mu.Lock()
+		delete(p.live, key)
+		p.mu.Unlock()
+		return AgentResult{}, false
+	}
 	if !res.OK && (s.isDead() || res.SessionDead) {
 		// The envelope arrived but the process is gone and the turn failed:
 		// one more shot via the plain spawn — which also covers the
