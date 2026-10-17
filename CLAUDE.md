@@ -33,7 +33,7 @@ Everything goes through the Makefile:
 make build        # native binary (fmt-check + vet run first as prerequisites)
 make test         # unit/integration suite (adapter-test runs first as a prerequisite)
 make race         # race detector, whole tree (pre-release superset check)
-make race-focused # race detector on concurrency-heavy pkgs only (core/commander/bus/storage)
+make race-focused # race detector on concurrency-heavy pkgs only (core/commander/bus/storage/askengine/scheduler/webui-panel)
 make vet          # go vet
 make fmt / fmt-check
 make gate         # pre-merge bar: fmt + vet + build + adapter-test + test + race-focused
