@@ -279,6 +279,11 @@ func TestLandProjectPackRecordsContextDegraded(t *testing.T) {
 		Project:     "demo",
 		Title:       "test task",
 		ProjectPack: []byte("invalid non-tar corrupted data"),
+		// An unsatisfiable requirement keeps the router on the decline path:
+		// an empty requirement would be taken ActionLocal on this fixture and
+		// spawn the real exec goroutine, whose work-dir writes then race the
+		// test's TempDir removal.
+		Requires: []string{"ability:nowhere"},
 	}
 
 	env, err := bus.NewEnvelope(bus.MsgTaskDelegate, "source-node", "msg-1", payload)
