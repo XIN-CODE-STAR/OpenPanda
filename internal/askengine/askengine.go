@@ -1980,15 +1980,14 @@ func (e *Engine) DialPeer(ctx context.Context, addr string) error {
 //     actually up. The process probes alone cannot tell a daemon sharing this
 //     db from one draining another db_path — the row heartbeat is the only
 //     store-bound signal.
-//   - no scheduler at all → the callers that get here require one, so fall
-//     back to the process-level probe.
+//   - no scheduler at all → only a heartbeat written into THIS store proves a
+//     consumer. The process probes cannot: a panel's own listening port would
+//     count as a consumer even though this engine has no queue scheduler, and
+//     a daemon draining another db_path would count too.
 func (e *Engine) queueConsumerAlive(ctx context.Context) bool {
 	sched := e.sched.Load()
 	if sched == nil {
-		e.cfgMu.RLock()
-		cfg := e.cfg
-		e.cfgMu.RUnlock()
-		return core.QueueConsumerAlive(cfg)
+		return core.StoreRowHeartbeating(ctx, e.db, e.stableNodeID())
 	}
 	if e.queueTasks && sched.OwnsNodeRow() {
 		return true // this engine is the consumer

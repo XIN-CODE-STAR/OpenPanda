@@ -5,6 +5,7 @@ package panel
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/Xustalis/OpenPanda/internal/config"
 	"github.com/Xustalis/OpenPanda/internal/core"
+	"github.com/Xustalis/OpenPanda/internal/ledger"
+	"github.com/Xustalis/OpenPanda/internal/storage"
 )
 
 // TestSendTaskMessageWithoutEngine pins the scheduler-less path: queue mode
@@ -58,6 +61,64 @@ func TestSendTaskMessageWithoutEngine(t *testing.T) {
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("inject without engine: status = %d, want 503", rr.Code)
+	}
+}
+
+// TestSendTaskMessageWithoutEngineWarnsDeadQueue pins the engine-less
+// warning: the console's own listening port is not a consumer, so a note to a
+// still-queued row must carry the advisory unless a foreign heartbeat proves
+// something drains this store. The handler is built without Deps.DB on
+// purpose — the probe belongs to the store the note was posted to.
+func TestSendTaskMessageWithoutEngineWarnsDeadQueue(t *testing.T) {
+	db, err := storage.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := storage.Migrate(db); err != nil {
+		t.Fatalf("migrate db: %v", err)
+	}
+	store := core.NewTaskStore(db, slog.New(slog.DiscardHandler))
+	ctx := context.Background()
+	cfg := &config.Config{
+		Node: config.NodeConfig{Name: "panel-warn", Kind: config.NodeKindVM, Identity: "panel-warn-identity"},
+		UI:   config.UIConfig{Locale: "en"},
+	}
+	nodeID := core.RuntimeNodeID(cfg.Node.Name, cfg.Node.Kind, cfg.Node.EffectiveIdentity())
+	task, err := store.Create(ctx, "", "proj", "queued target", nodeID, []string{nodeID})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := store.Queue(ctx, task.TaskID, nodeID); err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	h := New(Deps{Store: store, Cfg: cfg, StaticDir: t.TempDir(), Token: testToken})
+
+	send := func() string {
+		rr := httptest.NewRecorder()
+		req := authedReq(http.MethodPost, "/api/tasks/"+task.TaskID+"/messages", strings.NewReader(`{"text":"later"}`))
+		req.Header.Set("Content-Type", "application/json")
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("send: status = %d, body %s", rr.Code, rr.Body.String())
+		}
+		var out struct {
+			Warning string `json:"warning"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		return out.Warning
+	}
+
+	if warn := send(); warn == "" {
+		t.Fatal("a queued task on a store with no heartbeat must carry the no-consumer warning")
+	}
+	if err := ledger.Register(db, ledger.Card{Device: "panel-warn"}, nodeID, 1); err != nil {
+		t.Fatalf("register heartbeat row: %v", err)
+	}
+	if warn := send(); warn != "" {
+		t.Fatalf("a fresh foreign heartbeat must clear the warning, got %q", warn)
 	}
 }
 

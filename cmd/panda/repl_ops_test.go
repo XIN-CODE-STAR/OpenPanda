@@ -173,6 +173,34 @@ func TestReplTaskVerbs(t *testing.T) {
 	}
 }
 
+func TestReplTaskSendWarnsDeadQueue(t *testing.T) {
+	r, st := newOpsTestRepl(t)
+	nodeID := core.RuntimeNodeID(r.cfg.Node.Name, r.cfg.Node.Kind, r.cfg.Node.EffectiveIdentity())
+	task, err := st.Create(context.Background(), "", "", "send target", nodeID, []string{nodeID})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := st.Queue(context.Background(), task.TaskID, nodeID); err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+
+	// No engine and no foreign heartbeat: the note is durable but unread, and
+	// the engine-less REPL path must say so instead of printing a bare success.
+	out := dispatchCapture(t, r, "/task send "+task.TaskID+" read this")
+	if !strings.Contains(out, "no queue consumer") {
+		t.Fatalf("/task send on a dead store should warn, got %q", out)
+	}
+
+	// A heartbeat into this store is the signal that a consumer exists.
+	if err := ledger.Register(r.db, ledger.Card{Device: "repl-warn"}, nodeID, 1); err != nil {
+		t.Fatalf("register heartbeat row: %v", err)
+	}
+	out = dispatchCapture(t, r, "/task send "+task.TaskID+" read this too")
+	if strings.Contains(out, "no queue consumer") {
+		t.Fatalf("/task send with a live heartbeat must not warn, got %q", out)
+	}
+}
+
 func TestReplNodesRemove(t *testing.T) {
 	r, _ := newOpsTestRepl(t)
 	out := dispatchCapture(t, r, "/nodes remove ghost-node")
