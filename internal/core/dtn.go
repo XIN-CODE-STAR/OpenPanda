@@ -37,7 +37,7 @@ func (c *Core) handleDTNBundle(ctx context.Context, env bus.Envelope) {
 		c.logger.Warn("dtn_bundle: decode", "from", env.From, "err", err)
 		return
 	}
-	if err := bnd.Verify([]byte(c.sharedSecret), time.Now().Unix()); err != nil {
+	if err := bnd.Verify([]byte(c.sharedSecretValue()), time.Now().Unix()); err != nil {
 		// Tampered or dead: drop without a reply — the origin's own deadline
 		// sweep closes its copy, and a forged bundle earns no signal.
 		c.logger.Warn("dtn_bundle: verify failed", "from", env.From,
@@ -61,7 +61,7 @@ func (c *Core) handleDTNBundle(ctx context.Context, env bus.Envelope) {
 	// check. The payload is opened here, not at the relay: version-2 bundles
 	// carry ciphertext whose AAD is the signed header, so an opened payload
 	// is bound to exactly this destination and lifetime.
-	payload, err := bnd.Open([]byte(c.sharedSecret))
+	payload, err := bnd.Open([]byte(c.sharedSecretValue()))
 	if err != nil {
 		c.logger.Warn("dtn_bundle: open payload failed", "from", env.From,
 			"bundle", bnd.BundleID, "err", err)
@@ -130,7 +130,7 @@ func (c *Core) parkBundle(ctx context.Context, via, dest string, bnd *bus.Bundle
 	// task_id lives in the opened payload. A relay holds the mesh secret so
 	// opening is always possible; a payload that will not open fails closed
 	// rather than parking a row keyed wrong.
-	payload, err := bnd.Open([]byte(c.sharedSecret))
+	payload, err := bnd.Open([]byte(c.sharedSecretValue()))
 	if err != nil {
 		c.logger.Warn("dtn_bundle: relay park open failed", "bundle", bnd.BundleID, "err", err)
 		return

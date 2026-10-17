@@ -157,6 +157,13 @@ type Core struct {
 	// — not as the agent's work product.
 	hostStatePaths []string
 
+	// netMu guards the hot-reloadable network policy below — the shared
+	// secret and the cleartext gate. The setters run on a settings save
+	// (Engine.applyNetworkConfig) while connection, discovery, DTN, UDP and
+	// outbox goroutines read the values; every read goes through the
+	// accessors (sharedSecretValue, cleartextPolicy), never the raw fields.
+	netMu sync.RWMutex
+
 	// sharedSecret authenticates inbound hello messages (design §16 / P0-1).
 	// Empty is fail-closed: no peer can authenticate until it is set.
 	sharedSecret string
@@ -961,14 +968,29 @@ func (c *Core) filterHostDrift(workDir string, drift []string) []string {
 // SetSharedSecret sets the shared secret used to authenticate inbound hello
 // messages (design §16 / P0-1). An empty secret is fail-closed: no peer can
 // authenticate, so the WebSocket listener accepts no hello until a secret is
-// configured.
+// configured. Hot-reloadable: readers take netMu via sharedSecretValue, so a
+// settings save is safe against in-flight hellos, discovery and DTN traffic.
 func (c *Core) SetSharedSecret(secret string) {
+	c.netMu.Lock()
+	defer c.netMu.Unlock()
 	c.sharedSecret = secret
+}
+
+// sharedSecretValue is the synchronized read of the hot-reloadable shared
+// secret (netMu). Every read site goes through it: the write side is a
+// settings save that can land while connection, discovery, UDP, DTN and
+// outbox goroutines are mid-flight.
+func (c *Core) sharedSecretValue() string {
+	c.netMu.RLock()
+	defer c.netMu.RUnlock()
+	return c.sharedSecret
 }
 
 // SetAllowCleartext lifts the outbound plaintext gate (network.allow_cleartext).
 // See cleartextOK for what it opts back into.
 func (c *Core) SetAllowCleartext(allow bool) {
+	c.netMu.Lock()
+	defer c.netMu.Unlock()
 	c.allowCleartext = allow
 }
 
@@ -976,7 +998,18 @@ func (c *Core) SetAllowCleartext(allow bool) {
 // (network.allow_cleartext_for). Entries are CIDRs, literal IPs, or exact
 // hostnames — validated at config load, stored verbatim here.
 func (c *Core) SetCleartextAllowlist(entries []string) {
+	c.netMu.Lock()
+	defer c.netMu.Unlock()
 	c.cleartextFor = slices.Clone(entries)
+}
+
+// cleartextPolicy returns the cleartext gate and its scope as one consistent
+// snapshot (netMu). The slice is replaced, never mutated, on write, so the
+// returned reference stays safe to read.
+func (c *Core) cleartextPolicy() (bool, []string) {
+	c.netMu.RLock()
+	defer c.netMu.RUnlock()
+	return c.allowCleartext, c.cleartextFor
 }
 
 // SetLimits configures the global and per-IP inbound connection limits. A
@@ -1817,7 +1850,7 @@ func (c *Core) dial(ctx context.Context, addr string) (*bus.Conn, error) {
 		Card:          card,
 		Ts:            ts,
 		Nonce:         nonce,
-		Sig:           bus.HelloSigN(c.sharedSecret, c.nodeID, ts, nonce),
+		Sig:           bus.HelloSigN(c.sharedSecretValue(), c.nodeID, ts, nonce),
 		UDPPort:       c.UDPPort(),
 		Caps:          c.helloCaps(),
 		Authoritative: c.edgeAuthority.Load(),
@@ -1849,7 +1882,7 @@ func (c *Core) dial(ctx context.Context, addr string) (*bus.Conn, error) {
 // to seal frames with, so advertising it would be a lie.
 func (c *Core) helloCaps() []string {
 	caps := []string{bus.CapBinaryData}
-	if c.sharedSecret != "" {
+	if c.sharedSecretValue() != "" {
 		caps = append(caps, bus.CapSessionAEAD)
 	}
 	return caps
@@ -2216,7 +2249,7 @@ func (c *Core) handleHello(ctx context.Context, conn *bus.Conn, env bus.Envelope
 	// registers nothing and receives no reply — but it DOES receive a
 	// hello_reject first, so the dialer can tell "my credential is wrong"
 	// from "the network dropped us".
-	if !bus.VerifyHelloP(c.sharedSecret, p, time.Now()) {
+	if !bus.VerifyHelloP(c.sharedSecretValue(), p, time.Now()) {
 		c.logger.Warn("rejected hello: bad signature", "peer", p.NodeID)
 		c.rejectHello(conn, "auth")
 		return
@@ -2458,7 +2491,7 @@ func (c *Core) sendHelloReply(conn *bus.Conn, to string) {
 		Card:          card,
 		Ts:            ts,
 		Nonce:         nonce,
-		Sig:           bus.HelloSigN(c.sharedSecret, c.nodeID, ts, nonce),
+		Sig:           bus.HelloSigN(c.sharedSecretValue(), c.nodeID, ts, nonce),
 		UDPPort:       c.UDPPort(),
 		You:           observed,
 		Caps:          c.helloCaps(),
@@ -2488,7 +2521,8 @@ func (c *Core) armSessionLink(conn *bus.Conn, p bus.HelloPayload) error {
 		// in-flight frames from a mid-stream key swap.
 		return nil
 	}
-	if c.sharedSecret != "" && conn.RemoteNonce() != "" &&
+	secret := c.sharedSecretValue()
+	if secret != "" && conn.RemoteNonce() != "" &&
 		conn.LocalNonce() != "" && conn.Supports(bus.CapSessionAEAD) {
 		var dialerNonce, listenerNonce, dialerID, listenerID string
 		if conn.Outbound() {
@@ -2498,7 +2532,7 @@ func (c *Core) armSessionLink(conn *bus.Conn, p bus.HelloPayload) error {
 			dialerNonce, listenerNonce = conn.RemoteNonce(), conn.LocalNonce()
 			dialerID, listenerID = p.NodeID, c.nodeID
 		}
-		aead, err := bus.SessionAEAD(c.sharedSecret, dialerID, listenerID, dialerNonce, listenerNonce)
+		aead, err := bus.SessionAEAD(secret, dialerID, listenerID, dialerNonce, listenerNonce)
 		if err != nil {
 			return err
 		}
@@ -2516,12 +2550,13 @@ func (c *Core) armSessionLink(conn *bus.Conn, p bus.HelloPayload) error {
 // network is still refused plaintext, because a hello signature proves
 // membership, not that the link itself is free of relays.
 func (c *Core) enforceLinkPolicy(conn *bus.Conn, peerID string) error {
+	allow, allowFor := c.cleartextPolicy()
 	if conn.Outbound() {
 		addr := conn.DialAddr()
 		if addr == "" {
 			addr = conn.RemoteAddr()
 		}
-		if err := cleartextOK(addr, c.allowCleartext, c.cleartextFor); err != nil {
+		if err := cleartextOK(addr, allow, allowFor); err != nil {
 			c.logger.Warn("refusing cleartext link", "peer", peerID, "addr", addr)
 			return fmt.Errorf("peer %s cannot encrypt (needs sessaead) and %w", peerID, err)
 		}
@@ -2531,7 +2566,7 @@ func (c *Core) enforceLinkPolicy(conn *bus.Conn, peerID string) error {
 	if err != nil {
 		host = conn.RemoteAddr()
 	}
-	if c.allowCleartext || cleartextSafeHost(host) || cleartextListed(host, c.cleartextFor) {
+	if allow || cleartextSafeHost(host) || cleartextListed(host, allowFor) {
 		return nil
 	}
 	c.logger.Warn("refusing cleartext inbound", "peer", peerID, "remote", conn.RemoteAddr())
