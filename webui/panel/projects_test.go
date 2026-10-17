@@ -3,6 +3,7 @@
 package panel
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -321,5 +322,48 @@ func TestProjectSessionsAssociationAndDeletion(t *testing.T) {
 	oldCList, _ := sessStore.ListByProject("projC")
 	if len(oldCList) != 0 {
 		t.Errorf("oldCList len = %d, want 0", len(oldCList))
+	}
+}
+
+// TestProjectViewTaskCounts pins the work summary on the project card: the
+// detail rows carry the project's task states, counted per state, so the
+// console can show "2 in flight · 1 to review" without a second round trip.
+func TestProjectViewTaskCounts(t *testing.T) {
+	db, err := storage.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := storage.Migrate(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	ps := projectstore.NewStore(db)
+	h := New(Deps{
+		Store:        core.NewTaskStore(db, slog.New(slog.DiscardHandler)),
+		DB:           db,
+		Projects:     memory.NewProjects(t.TempDir()),
+		ProjectStore: ps,
+		StaticDir:    t.TempDir(),
+		Token:        testToken,
+	})
+	if _, err := ps.Create("work", "", ""); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	ctx := context.Background()
+	store := core.NewTaskStore(db, slog.New(slog.DiscardHandler))
+	for _, title := range []string{"one", "two"} {
+		if _, err := store.Create(ctx, "", "work", title, "node", []string{"node"}); err != nil {
+			t.Fatalf("create task %s: %v", title, err)
+		}
+	}
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, authedReq(http.MethodGet, "/api/projects/work", nil))
+	var view projectView
+	if err := json.Unmarshal(rr.Body.Bytes(), &view); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := view.Tasks[core.StateSubmitted]; got != 2 {
+		t.Fatalf("submitted count = %d, want 2 (view %+v)", got, view.Tasks)
 	}
 }

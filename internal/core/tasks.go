@@ -2537,6 +2537,32 @@ func (s *TaskStore) ListByProject(ctx context.Context, project string) ([]Task, 
 	return s.listTasks(ctx, "", project, "created_at DESC", 0)
 }
 
+// ProjectStateCounts counts tasks grouped by project and state — one GROUP BY
+// for the whole listing, so a per-project work summary (the console's project
+// cards) does not cost a COUNT query per project row. Only named projects
+// appear; tasks outside a project are nobody's summary.
+func (s *TaskStore) ProjectStateCounts(ctx context.Context) (map[string]map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT project, state, COUNT(*) FROM tasks WHERE project != '' GROUP BY project, state`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]map[string]int{}
+	for rows.Next() {
+		var project, state string
+		var n int
+		if err := rows.Scan(&project, &state, &n); err != nil {
+			return nil, err
+		}
+		if out[project] == nil {
+			out[project] = map[string]int{}
+		}
+		out[project][state] = n
+	}
+	return out, rows.Err()
+}
+
 // ListActive returns the tasks that can still move — everything outside the
 // terminal set (done/cancelled/expired). Unlike the archive it is naturally
 // small: the completed history a daemon accumulates never enters it, which is

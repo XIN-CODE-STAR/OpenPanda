@@ -678,6 +678,9 @@ export interface ProjectDetail {
   memory_entries: number
   memory_chars: number
   sessions?: number
+  /** Work filed under the project: state → count (queued/running/review/done/…).
+   *  Absent on nodes whose panel predates the summary. */
+  tasks?: Record<string, number>
   /** Per-project approval policy: '' mode inherits the global approval.mode;
    *  scope is where the approval card preselects its remember; decision is a
    *  remembered project-scope answer ('' | approve | deny). */

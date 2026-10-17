@@ -342,7 +342,7 @@ func (h *handler) listProjects(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"projects": names, "detail": []projectView{}, "active": ""})
 		return
 	}
-	views, active, err := h.projectViews(h.projectStore)
+	views, active, err := h.projectViews(r.Context(), h.projectStore)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, errors.New("list projects failed"))
 		return

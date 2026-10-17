@@ -1745,3 +1745,44 @@ func TestFailStaleLeaseless(t *testing.T) {
 		t.Fatalf("dtn run = %s, want running (deadline-bound, not lease-bound)", g.State)
 	}
 }
+
+// TestProjectStateCounts covers the one-query work summary behind the console's
+// project cards: counts grouped per project and state, unnamed tasks excluded.
+func TestProjectStateCounts(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	mk := func(project, title, state string) {
+		tk, err := s.Create(ctx, "", project, title, "node", []string{"node"})
+		if err != nil {
+			t.Fatalf("create %s: %v", title, err)
+		}
+		if state != "" {
+			if _, err := s.db.ExecContext(ctx, `UPDATE tasks SET state = ? WHERE task_id = ?`, state, tk.TaskID); err != nil {
+				t.Fatalf("set state %s: %v", state, err)
+			}
+		}
+	}
+	mk("alpha", "a1", StateRunning)
+	mk("alpha", "a2", StateRunning)
+	mk("alpha", "a3", StateReview)
+	mk("beta", "b1", StateDone)
+	mk("", "unprojected", StateRunning) // must not appear under any project
+
+	counts, err := s.ProjectStateCounts(ctx)
+	if err != nil {
+		t.Fatalf("counts: %v", err)
+	}
+	if got := counts["alpha"][StateRunning]; got != 2 {
+		t.Fatalf("alpha running = %d, want 2", got)
+	}
+	if got := counts["alpha"][StateReview]; got != 1 {
+		t.Fatalf("alpha review = %d, want 1", got)
+	}
+	if got := counts["beta"][StateDone]; got != 1 {
+		t.Fatalf("beta done = %d, want 1", got)
+	}
+	if _, ok := counts[""]; ok {
+		t.Fatalf("unnamed bucket present: %v", counts[""])
+	}
+}

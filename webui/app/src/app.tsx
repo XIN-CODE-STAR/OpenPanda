@@ -156,6 +156,7 @@ export function App() {
         )}
         {route.view === 'queue' && (
           <QueueView
+            project={route.project}
             focusReview={!!route.review}
             onOpen={(id) => navigate({ view: 'detail', id })}
             onOpenSession={(id) => navigate({ view: 'sessions', id })}
@@ -178,6 +179,7 @@ export function App() {
               api.enterProject(name).catch(() => {})
               navigate({ view: 'sessions', id: null, project: name })
             }}
+            onOpenQueue={(name) => navigate({ view: 'queue', project: name })}
           />
         )}
         {route.view === 'settings' && (
