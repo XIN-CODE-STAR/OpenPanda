@@ -134,6 +134,7 @@ func New(d Deps) http.Handler {
 	mux.HandleFunc("POST /api/tasks/{id}/reject", h.rejectTask)
 	mux.HandleFunc("POST /api/tasks/{id}/cancel", h.cancelTask)
 	mux.HandleFunc("POST /api/tasks/{id}/revert", h.revertTask)
+	mux.HandleFunc("POST /api/tasks/{id}/messages", h.sendTaskMessage)
 	mux.HandleFunc("GET /api/tasks/{id}/operations/{operation}", h.getApprovalOperation)
 	mux.HandleFunc("GET /api/tasks/{id}/logs", h.taskLogs)
 	// Task output artifacts: the download/list/preview trio — a screenshot a

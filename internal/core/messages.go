@@ -38,6 +38,10 @@ const (
 	MsgGradeStatus      = "status"
 	MsgGradeReport      = "report"
 	MsgGradeArtifactRef = "artifact_ref"
+	// MsgGradeSteer marks a user inject (steer.go): the note is delivered by
+	// the round loop as the next round's leading directive, not folded as a
+	// board line — the drain skips it so the text never lands twice.
+	MsgGradeSteer = "steer"
 )
 
 const (
@@ -215,6 +219,9 @@ func (c *Core) drainTaskMessages(ctx context.Context, task Task, seen msgSeen) [
 			}
 			if m.Rcpt != "" && m.Rcpt != task.TaskID {
 				continue // addressed elsewhere; replica noise
+			}
+			if m.Grade == MsgGradeSteer {
+				continue // a user inject: delivered as the round's directive, not folded context
 			}
 			k := msgSlotKey(m)
 			if seen[k] >= m.SenderSeq {

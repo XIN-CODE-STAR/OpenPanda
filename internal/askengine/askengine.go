@@ -477,6 +477,35 @@ func (e *Engine) TaskStore() *core.TaskStore {
 	return core.NewSigningTaskStore(e.db, e.logger)
 }
 
+// SendTaskMessage delivers a user message into a task — the two send modes
+// (steer.go). Queue posts a durable advisory the agent reads at its next
+// supervision round; inject additionally aborts the in-flight round when one
+// is live so the message leads the next one as a directive. The returned
+// token is "interrupted" (a running turn was aborted), "queued" (the message
+// waits for the next round — or the task's first run), and callers localize
+// it for their surface.
+func (e *Engine) SendTaskMessage(ctx context.Context, taskID, text string, inject bool) (string, error) {
+	sched := e.sched.Load()
+	if sched == nil {
+		// A message needs the store's board only; a scheduler-less engine
+		// still delivers it to the row.
+		if inject {
+			return "", fmt.Errorf("inject requires the scheduler (capability card initialization failed)")
+		}
+		if err := core.NewSigningTaskStore(e.db, e.logger).PostUserMessage(ctx, taskID, text, core.MsgGradeStatus); err != nil {
+			return "", err
+		}
+		return "queued", nil
+	}
+	if inject {
+		return sched.InjectUserMessage(ctx, taskID, text)
+	}
+	if err := sched.QueueUserMessage(ctx, taskID, text); err != nil {
+		return "", err
+	}
+	return "queued", nil
+}
+
 // SetOnReview installs the callback fired when a task enters review — i.e. when
 // work is waiting on a human decision. It is attached to the store the scheduler
 // core actually transitions tasks on (and re-attached across card reloads), so

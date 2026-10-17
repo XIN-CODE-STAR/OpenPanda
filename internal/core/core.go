@@ -114,6 +114,11 @@ type Core struct {
 	// send (the metering half of the message layer — a spent budget reports
 	// back to the agent rather than hard-failing). <= 0 → defaultMsgBudget.
 	msgBudgetCap int
+	// steerMu guards interrupts — the user-inject delivery state (steer.go):
+	// the running round's cancel, so an inject can abort the in-flight agent
+	// turn. The message text itself travels on the task's board (durable).
+	steerMu    sync.Mutex
+	interrupts map[string]context.CancelFunc
 	// loop pauses a task that keeps failing instead of retrying it forever
 	// (design §14.2 signal C, P2-18).
 	loop *defense.LoopDetector

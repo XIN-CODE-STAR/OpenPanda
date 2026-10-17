@@ -61,6 +61,9 @@ func runTask(args []string) {
 		case "followup":
 			runTaskFollowup(args[1:])
 			return
+		case "send", "msg", "message":
+			runTaskSend(args[1:])
+			return
 		case "board":
 			runTaskBoard(args[1:])
 			return
@@ -93,6 +96,7 @@ func taskUsage() {
 	fmt.Fprintln(os.Stderr, "  delete <id>                             remove a task and its subtree (queued/finished)")
 	fmt.Fprintln(os.Stderr, "  revert <id>                             roll the run's git checkout back to its pre-task baseline")
 	fmt.Fprintln(os.Stderr, "  followup <id>                           hand the task's recorded result to the model and continue")
+	fmt.Fprintln(os.Stderr, "  send [--inject] <id> <text>             message a running/queued task: queue (next-round context) or inject (leads the next round)")
 	fmt.Fprintln(os.Stderr, "  board <id>                              show the sibling-message boards a task reads")
 	fmt.Fprintln(os.Stderr, "  artifact <id> [--list|--file P|--out D]  fetch the task's output artifact (list, preview, or extract)")
 	fmt.Fprintln(os.Stderr, "  approve|reject|cancel|logs <id>         same as the bare commands")
@@ -1324,6 +1328,59 @@ func runTaskBoard(args []string) {
 				m.Sender, to, m.SenderSeq, m.Grade, age, m.Body)
 		}
 	}
+}
+
+// runTaskSend delivers a user message into a running or queued task — the
+// two send modes (core/steer.go): default queues the text as board context
+// the agent reads at its next supervision round; --inject marks it a steer
+// that leads the next round and aborts the in-flight one when this process
+// holds the task's execution (a QueueTasks REPL/web console). A message sent
+// from a process that does not run the task degrades to next-boundary
+// delivery — the note is durable either way.
+func runTaskSend(args []string) {
+	fs := flag.NewFlagSet("task send", flag.ExitOnError)
+	configPath := fs.String("config", cliConfigPath, "path to config.yaml")
+	cardPath := fs.String("card", "", "path to capabilities.yaml")
+	inject := fs.Bool("inject", false, "abort the in-flight round and make the text the next round's leading directive")
+	fs.Parse(reorderFlags(args, commonValueFlags))
+	rest := fs.Args()
+	loc := i18n.Detect()
+	if len(rest) < 2 {
+		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.task.send.usage"))
+		os.Exit(2)
+	}
+	ref := strings.TrimSpace(rest[0])
+	text := strings.TrimSpace(strings.Join(rest[1:], " "))
+	if text == "" {
+		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.task.send.usage"))
+		os.Exit(2)
+	}
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		fatal("load config", err)
+	}
+	engine, err := askengine.New(context.Background(), cfg, askengine.Options{
+		CardPath:   *cardPath,
+		ConfigPath: *configPath,
+	})
+	if err != nil {
+		fatal("ask engine", err)
+	}
+	defer engine.Close()
+	id := resolveTaskRef(engine.TaskStore(), ref)
+	status, err := engine.SendTaskMessage(context.Background(), id, text, *inject)
+	if err != nil {
+		fatal("send task message", err)
+	}
+	key := "cli.task.send.queued"
+	if status == "interrupted" {
+		key = "cli.task.send.interrupted"
+	}
+	if jsonOutput {
+		emitJSON(map[string]string{"task_id": id, "status": status})
+		return
+	}
+	fmt.Println(i18n.Tf(loc, key, "id", id))
 }
 
 func pluralS(n int) string {

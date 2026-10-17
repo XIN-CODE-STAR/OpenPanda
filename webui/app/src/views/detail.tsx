@@ -36,6 +36,7 @@ export function DetailView({
   // Where the review answer is remembered — "once" by default; session and
   // project write a standing gate answer for what comes after.
   const [scope, setScope] = useState<ApprovalScope>('once')
+  const [msgText, setMsgText] = useState('')
 
   async function act(fn: () => Promise<unknown>, okMsg?: string) {
     if (busy) return
@@ -76,6 +77,23 @@ export function DetailView({
         }),
         'success',
       )
+    })
+  }
+
+  // The two send modes: queue leaves the current round alone and the note
+  // lands as context at the next one; inject aborts the in-flight round when
+  // this console runs the task and makes the text the next round's leading
+  // directive. The toast reports which one actually happened.
+  async function sendMessage(inject: boolean) {
+    const text = msgText.trim()
+    if (!text) return
+    await act(async () => {
+      const r = await api.sendTaskMessage(task!.id, text, inject)
+      toast(
+        r.status === 'interrupted' ? t('detail.msgInjectedToast') : t('detail.msgQueuedToast'),
+        'success',
+      )
+      setMsgText('')
     })
   }
 
@@ -185,6 +203,35 @@ export function DetailView({
           )}
         </div>
       </div>
+
+      {cancellable && (
+        // Send into the task while it runs: queue leaves the round alone
+        // (the note is read as context at the next one), inject steers it
+        // (the in-flight round aborts and the text leads the next one).
+        <div class="card task-msg u-mt-16">
+          <input
+            class="input"
+            type="text"
+            placeholder={t('detail.msgPlaceholder')}
+            value={msgText}
+            onInput={(e) => setMsgText((e.target as HTMLInputElement).value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void sendMessage(false)
+            }}
+          />
+          <button class="btn" disabled={busy || !msgText.trim()} onClick={() => sendMessage(false)}>
+            {t('detail.msgQueue')}
+          </button>
+          <button
+            class="btn primary"
+            disabled={busy || !msgText.trim()}
+            onClick={() => sendMessage(true)}
+          >
+            {t('detail.msgInject')}
+          </button>
+          <span class="dim task-msg-hint">{t('detail.msgHint')}</span>
+        </div>
+      )}
 
       {isTaskStalled(task) && (
         // The row has not moved past its own bound — nothing is consuming,

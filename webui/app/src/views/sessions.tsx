@@ -1665,6 +1665,7 @@ function ChatBubble(props: {
                 {chainOpen ? t('sessions.chainHide') : t('sessions.chainShow')}
               </button>
               {chainOpen && <TaskChain taskId={msg.ref} />}
+              <TaskQuickSend taskId={msg.ref} />
               <a href={`#/task/${encodeURIComponent(msg.ref)}`} onClick={() => onOpenTask(msg.ref!)}>
                 {t('sessions.viewTask')} →
               </a>
@@ -1801,6 +1802,74 @@ function TaskOrbit(props: {
       selfNodeId={props.selfNodeId}
       defaultOpen={false}
     />
+  )
+}
+
+/** TaskQuickSend delivers a message into the task straight from its card in
+ *  the thread — the same two modes the detail view and TUI expose: queue
+ *  (the agent reads it at its next round) or inject (a steer that leads the
+ *  next round, aborting the in-flight one when this console runs the task).
+ *  Renders nothing once the task is terminal: a finished task refuses
+ *  messages, and a button that can only fail is worse than none. */
+function TaskQuickSend({ taskId }: { taskId: string }) {
+  const change = useChangeSignal()
+  const { data: task } = useAsync<Task | null>(
+    () => api.task(taskId).catch(() => null),
+    [taskId],
+    change,
+  )
+  const [open, setOpen] = useState(false)
+  const [text, setText] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  if (!task || ['done', 'failed', 'cancelled', 'expired'].includes(task.state)) return null
+
+  async function deliver(inject: boolean) {
+    const body = text.trim()
+    if (!body || busy) return
+    setBusy(true)
+    try {
+      const r = await api.sendTaskMessage(taskId, body, inject)
+      toast(
+        r.status === 'interrupted' ? t('detail.msgInjectedToast') : t('detail.msgQueuedToast'),
+        'success',
+      )
+      setText('')
+      setOpen(false)
+    } catch (e) {
+      toastError(e)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!open) {
+    return (
+      <button class="btn small" onClick={() => setOpen(true)}>
+        {t('sessions.msgSend')}
+      </button>
+    )
+  }
+  return (
+    <div class="task-quick-send">
+      <input
+        class="input"
+        type="text"
+        placeholder={t('detail.msgPlaceholder')}
+        value={text}
+        onInput={(e) => setText((e.target as HTMLInputElement).value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') void deliver(false)
+          if (e.key === 'Escape') setOpen(false)
+        }}
+      />
+      <button class="btn small" disabled={busy || !text.trim()} onClick={() => deliver(false)}>
+        {t('detail.msgQueue')}
+      </button>
+      <button class="btn small primary" disabled={busy || !text.trim()} onClick={() => deliver(true)}>
+        {t('detail.msgInject')}
+      </button>
+    </div>
   )
 }
 

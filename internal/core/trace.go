@@ -42,6 +42,10 @@ const (
 	// EvClarification records an agent parking the task on a PANDA_QUESTION
 	// marker (§4.3): the question and the round it surfaced in.
 	EvClarification = "clarification"
+	// EvUserMsg records a user message delivered into a task (steer.go) —
+	// mode=queue (next-round context) or mode=inject (leads the next round,
+	// interrupting the in-flight one when live).
+	EvUserMsg = "user_msg"
 )
 
 // EvTrace records one trace event. Errors are downgraded to a warning log: a

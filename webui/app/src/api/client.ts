@@ -326,6 +326,13 @@ export type CreateTaskResult = {
   warning?: string
 }
 
+export type TaskMessageResult = {
+  task_id: string
+  /** "interrupted" — a live round was aborted and the text leads the next
+   *  one; "queued" — the note waits for the next round (or the first run). */
+  status: 'queued' | 'interrupted' | string
+}
+
 export interface ApprovalOperation {
   operation_id: string
   task_id: string
@@ -726,6 +733,14 @@ export const api = {
   /** Quick priority change from a board card. */
   patchTask(id: string, priority: 'high' | 'normal' | 'low'): Promise<{ id: string; priority: string }> {
     return request('PATCH', `/api/tasks/${encodeURIComponent(id)}`, { priority })
+  },
+
+  /** Deliver a user message into a running or queued task — the two send
+   *  modes: queue (board context the agent reads at its next round) or
+   *  inject (a steer that leads the next round, aborting the in-flight one
+   *  when this console runs the task). */
+  sendTaskMessage(id: string, text: string, inject: boolean): Promise<TaskMessageResult> {
+    return request('POST', `/api/tasks/${encodeURIComponent(id)}/messages`, { text, inject })
   },
 
   /** Persist a drag: ids arrive top-to-bottom and get seq 1..n. */

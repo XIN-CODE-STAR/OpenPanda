@@ -1007,6 +1007,59 @@ func (r *repl) cmdNodesAdmit(arg string) {
 	r.outln(i18n.Tf(r.loc, "cli.nodes.admit.none", "id", id))
 }
 
+// cmdTaskSend implements `/task send [--inject] <task-id> <text>`: deliver a
+// user message into a running or queued task. Queue mode (the default) lands
+// board context the agent reads at its next supervision round; --inject makes
+// the text lead the next round and aborts the in-flight one when this REPL's
+// own engine runs the task (a QueueTasks seat). Falls back to the plain store
+// when the engine has no scheduler: the durable note still lands.
+func (r *repl) cmdTaskSend(fields []string) {
+	inject := false
+	var pos []string
+	for _, f := range fields {
+		if f == "--inject" || f == "-inject" {
+			inject = true
+			continue
+		}
+		pos = append(pos, f)
+	}
+	if len(pos) < 2 {
+		r.outln(i18n.T(r.loc, "cli.task.send.usage"))
+		return
+	}
+	ref := strings.TrimSpace(pos[0])
+	text := strings.TrimSpace(strings.Join(pos[1:], " "))
+	ctx := r.commandContext()
+	id, ok := r.resolveRef(ref)
+	if !ok {
+		return
+	}
+	status := "queued"
+	if eng := r.engine.Load(); eng != nil {
+		st, err := eng.SendTaskMessage(ctx, id, text, inject)
+		if err != nil {
+			r.storeErr(err)
+			return
+		}
+		status = st
+	} else {
+		if inject {
+			r.outln(i18n.T(r.loc, "repl.approval.noEngine"))
+			return
+		}
+		grade := core.MsgGradeStatus
+		if err := r.store.PostUserMessage(ctx, id, text, grade); err != nil {
+			r.storeErr(err)
+			return
+		}
+	}
+	key := "cli.task.send.queued"
+	if status == "interrupted" {
+		key = "cli.task.send.interrupted"
+	}
+	r.outln(i18n.Tf(r.loc, key, "id", id))
+}
+
 // cmdTaskAdd implements `/task add <title>` with the optional flags the CLI
 // takes (--prompt/--priority/--project/--requires/--preferred/--authorize,
 // and --agents/--mode for the multi-harness plan form). It needs the ask

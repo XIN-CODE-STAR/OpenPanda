@@ -121,6 +121,70 @@ func (h *handler) createTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"task_id": task.TaskID, "session_id": sessionID, "state": task.State, "warning": warn})
 }
 
+// sendMessageRequest is the body of POST /api/tasks/{id}/messages — the two
+// send modes: a queued note the agent reads at its next supervision round,
+// or an injected steer that leads the next round and aborts the in-flight
+// one when this console's engine runs the task.
+type sendMessageRequest struct {
+	Text   string `json:"text"`
+	Inject bool   `json:"inject"`
+}
+
+// sendTaskMessage serves POST /api/tasks/{id}/messages (steer.go): deliver a
+// user message into a running or queued task. The response's status tells the
+// surface how it landed — "interrupted" (a live round was aborted, the text
+// leads the next one) or "queued" (the note waits for the next round or the
+// task's first run). The message itself is durable either way.
+func (h *handler) sendTaskMessage(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req sendMessageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, errors.New("invalid JSON body"))
+		return
+	}
+	req.Text = strings.TrimSpace(req.Text)
+	if req.Text == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("text must not be empty"))
+		return
+	}
+	status := "queued"
+	if eng := h.currentEngine(); eng != nil {
+		st, err := eng.SendTaskMessage(r.Context(), id, req.Text, req.Inject)
+		if err != nil {
+			writeTaskMessageErr(w, err)
+			return
+		}
+		status = st
+	} else {
+		if req.Inject {
+			writeErr(w, http.StatusServiceUnavailable, errors.New("inject requires the ask engine (set model.base_url to enable)"))
+			return
+		}
+		grade := core.MsgGradeStatus
+		if err := h.store.PostUserMessage(r.Context(), id, req.Text, grade); err != nil {
+			writeTaskMessageErr(w, err)
+			return
+		}
+	}
+	writeJSON(w, map[string]string{"task_id": id, "status": status})
+}
+
+// writeTaskMessageErr maps a message-delivery failure onto the right status:
+// unknown task → 404, terminal or remote-executor refusals → 409 (a state
+// conflict the user must resolve), anything else → 500.
+func writeTaskMessageErr(w http.ResponseWriter, err error) {
+	msg := err.Error()
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		writeErr(w, http.StatusNotFound, errors.New("no such task"))
+	case strings.Contains(msg, "messages reach running or queued work only"),
+		strings.Contains(msg, "runs on "):
+		writeErr(w, http.StatusConflict, errors.New(msg))
+	default:
+		writeErr(w, http.StatusInternalServerError, errors.New("send failed: "+msg))
+	}
+}
+
 // patchTaskRequest is the body of PATCH /api/tasks/{id}.
 type patchTaskRequest struct {
 	Priority string `json:"priority"` // "high"|"normal"|"low"

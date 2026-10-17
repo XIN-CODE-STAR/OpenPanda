@@ -1230,6 +1230,40 @@
   width: 240px;
 }
 
+/* Send-into-task composer (detail view): input takes the row, the two mode
+   buttons keep natural width, the hint drops to its own line. */
+.task-msg {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.task-msg .input {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.task-msg-hint {
+  flex-basis: 100%;
+  font-size: 12px;
+}
+
+/* In-thread quick send (task card in the conversation): input takes the
+   row, the two small mode buttons keep natural width. */
+.task-quick-send {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+.task-quick-send .input {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+
 /* ---- Session worktree diff drawer ---- */
 
 
