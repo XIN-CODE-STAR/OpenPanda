@@ -680,18 +680,34 @@ type TaskResumePayload struct {
 // "parent", "siblings", or a member task id); the owner's fan-out copies
 // carry Rcpt (the resolved member task id) and Fanout=true instead, so a
 // replica can tell "store this slot" from "resolve and forward".
+//
+// Src is the node the post originates from — the posting member on the
+// member→owner leg, the scope owner on fan-out copies. It lives in the
+// payload for the same reason punch keeps Src there: relays re-mint the
+// envelope as themselves (env.From = last hop, or the receiving conn's
+// bound-peer check kills the link), so the origin identity can only survive
+// inside. Receivers bind Src against what their own rows know — the owner
+// expects a member-leg frame to ARRIVE along the member's dispatch path
+// (env.From = the first dispatch hop), and a replica expects Src to name
+// the scope owner its member row's chain root records.
+//
+// TTL bounds relay hops; each forwarder spends one and a spent copy drops,
+// so a routed post cannot orbit the mesh between dedup evictions. A zero
+// TTL is a pre-TTL peer: the first forwarder grants the standard budget.
 type TaskMessagePayload struct {
 	Scope       string `json:"scope"`
 	Sender      string `json:"sender"`                 // sender task_id
 	To          string `json:"to,omitempty"`           // unresolved address (member → owner leg)
 	Rcpt        string `json:"rcpt,omitempty"`         // resolved recipient task id ("" = broadcast)
 	Member      string `json:"member,omitempty"`       // member this fan-out copy is for (receiver-side check)
+	Src         string `json:"src,omitempty"`          // origin node id — survives relay re-enveloping
 	SenderLabel string `json:"sender_label,omitempty"` // stage id or title, owner-resolved
 	Grade       string `json:"grade"`                  // status | report | artifact_ref
 	Body        string `json:"body"`
 	Seq         int64  `json:"seq"` // sender's monotone slot seq
 	SentAt      int64  `json:"sent_at"`
 	Fanout      bool   `json:"fanout,omitempty"` // owner → member copy marker
+	TTL         int    `json:"ttl,omitempty"`    // remaining relay hops — one spent per forward
 }
 
 // ContextFetchPayload asks the source node for a full context snapshot.
