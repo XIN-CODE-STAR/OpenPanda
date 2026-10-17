@@ -590,7 +590,10 @@ func TestTUISubmitEmptyAndWhitespace(t *testing.T) {
 // it either returns a cmd, changes mode (a panel/confirm opened), or quits.
 // Exec-routed commands are additionally pumped and must leave real output in
 // the transcript (a handler that produces nothing is indistinguishable from
-// broken). "/web" is excluded: it binds a real loopback port.
+// broken). "/web" is not submitted at all: startExec launches the handler
+// goroutine at submit — not on the first pump — so it would keep booting a
+// real loopback server (updater, panel, builtin-skill seeding) in the
+// background, whose writes then race the fixture TempDir removal.
 func TestEverySlashCommandResponds(t *testing.T) {
 	seen := map[string]bool{}
 	var names []string
@@ -601,9 +604,11 @@ func TestEverySlashCommandResponds(t *testing.T) {
 		}
 	}
 	names = append(names, "exit", "cls", "v", "ver", "bogus") // TUI aliases + unknown
-	skipPump := map[string]bool{"web": true, "quit": true, "exit": true}
 
 	for _, name := range names {
+		if name == "web" {
+			continue
+		}
 		m := newIsolatedTUI(t)
 		next, cmd := m.submit("/" + name)
 		m = next.(tuiModel)
@@ -617,7 +622,7 @@ func TestEverySlashCommandResponds(t *testing.T) {
 			t.Errorf("/%s is a dead command: no cmd, mode still idle", name)
 			continue
 		}
-		if m.mode != modeExec || skipPump[name] {
+		if m.mode != modeExec {
 			continue
 		}
 		before := len(m.chatHistory.blocks)
