@@ -909,6 +909,15 @@ func (c *Core) dispatchDelegated(ctx context.Context, taskID, target string, p b
 			c.artifactPushEnqueue(ctx, target, taskID, h, pushDeadline)
 		}
 	}
+	if dtn || park {
+		// A DTN or to-be-parked copy holds no lease; its bound is the
+		// absolute deadline (§8.2). Stamping it also marks the dispatched,
+		// lease-less row as in-flight custody, so the stale-claim sweep does
+		// not requeue a delegation that is merely riding store-and-forward.
+		if derr := c.store.SetDeadlineIfUnset(ctx, taskID, pushDeadline); derr != nil {
+			c.logger.Warn("delegate: stamp dtn deadline", "task", taskID, "err", derr)
+		}
+	}
 	p.Chain = chain
 	msgID, err := newUUID()
 	if err != nil {

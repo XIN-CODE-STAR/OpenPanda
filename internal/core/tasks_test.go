@@ -1626,7 +1626,8 @@ func TestRequeueStaleClaims(t *testing.T) {
 	orphan := createTask(t, s, "", "dead claim", "owner")
 	leased := createTask(t, s, "", "live claim", "owner")
 	parked := createTask(t, s, "", "parked forward", "owner")
-	for _, tk := range []Task{orphan, leased, parked} {
+	inflight := createTask(t, s, "", "DTN in flight", "owner")
+	for _, tk := range []Task{orphan, leased, parked, inflight} {
 		if err := s.Queue(ctx, tk.TaskID, "owner"); err != nil {
 			t.Fatalf("queue %s: %v", tk.Title, err)
 		}
@@ -1645,9 +1646,15 @@ func TestRequeueStaleClaims(t *testing.T) {
 		 VALUES ('peer-x', ?, '', '', '', 0, ?)`, parked.TaskID, time.Now().Unix()); err != nil {
 		t.Fatalf("outbox: %v", err)
 	}
+	// inflight is a DTN delegation whose outbox row was already dropped by a
+	// successful hop: it carries no lease (DTN is lease-exempt) and its only
+	// marker is the absolute deadline the store-and-forward paths stamp.
+	if err := s.SetDeadlineIfUnset(ctx, inflight.TaskID, time.Now().Add(time.Hour).Unix()); err != nil {
+		t.Fatalf("deadline: %v", err)
+	}
 	old := time.Now().Add(-10 * time.Minute).Unix()
 	if _, err := s.db.ExecContext(ctx,
-		`UPDATE tasks SET updated_at=? WHERE task_id IN (?,?,?)`, old, orphan.TaskID, leased.TaskID, parked.TaskID); err != nil {
+		`UPDATE tasks SET updated_at=? WHERE task_id IN (?,?,?,?)`, old, orphan.TaskID, leased.TaskID, parked.TaskID, inflight.TaskID); err != nil {
 		t.Fatalf("backdate: %v", err)
 	}
 
@@ -1679,6 +1686,13 @@ func TestRequeueStaleClaims(t *testing.T) {
 	}
 	if g.State != StateDispatched {
 		t.Fatalf("parked forward = %s, want dispatched (outbox custody)", g.State)
+	}
+	g, err = s.Get(ctx, inflight.TaskID)
+	if err != nil {
+		t.Fatalf("get inflight: %v", err)
+	}
+	if g.State != StateDispatched {
+		t.Fatalf("DTN in flight = %s, want dispatched (the absolute deadline is its bound)", g.State)
 	}
 }
 

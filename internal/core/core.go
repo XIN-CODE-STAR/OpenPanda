@@ -127,7 +127,9 @@ type Core struct {
 	// checkpoint the retry resumes, so it draws the larger checkpoint
 	// budget (maxCheckpointRetries) rather than the hard-failure one.
 	checkpointLoop *defense.LoopDetector
-	// sleep is the retry backoff sleeper, injectable for tests. retryBackoff is
+	// sleep is the retry backoff sleeper, injectable for tests. Nil uses the
+	// production cancellable wait (waitBackoff), which wakes early when the
+	// task's context ends or the row leaves the failed state. retryBackoff is
 	// the base delay between task retries, doubling each retry.
 	sleep        func(time.Duration)
 	retryBackoff time.Duration
@@ -585,7 +587,6 @@ func NewCore(db *sql.DB, nodeID string, card ledger.Card, tier int, logger *slog
 
 		superviseRounds: defaultSuperviseRounds,
 		leaseTimeout:    defaultDelegateTimeout,
-		sleep:           time.Sleep,
 		retryBackoff:    time.Second,
 
 		peerLivenessWindow: bus.KeepaliveTimeout(),

@@ -142,7 +142,9 @@ func (c *Core) run(ctx context.Context, taskID, intent string, required []string
 			wCtx, cancel := c.storeWriteCtx(ctx)
 			defer cancel()
 			if t, err := c.store.Get(wCtx, taskID); err == nil && t.State == StateRunning {
-				_ = c.store.Fail(wCtx, taskID, c.nodeID, rerr.Error())
+				if ferr := c.store.Fail(wCtx, taskID, c.nodeID, rerr.Error()); ferr != nil {
+					c.logger.Error("fail stranded run", "task", taskID, "err", ferr)
+				}
 			}
 		}
 	}()
@@ -1026,7 +1028,13 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 		// persisted row because the task snapshot predates any spend, and it
 		// parks for every plan kind: a human tops up the quota or closes the
 		// task out, the way a scope-drift pause already works.
-		if left, serr := c.store.SpendTokens(ctx, taskID, 0); serr == nil && left < 0 {
+		if left, serr := c.store.SpendTokens(ctx, taskID, 0); serr != nil {
+			// Fail open, but not silently: a broken read must not look like a
+			// healthy budget. The round proceeds — refusing work on a transient
+			// database error would strand tasks that a retry drains normally —
+			// and the log names the reason the cap was not enforced.
+			c.logger.Warn("token budget check failed, allowing round", "task", taskID, "err", serr)
+		} else if left < 0 {
 			msg := "token budget exhausted"
 			if err := c.store.Pause(ctx, taskID, c.nodeID, msg); err != nil {
 				if errors.Is(err, ErrConflict) || errors.Is(err, ErrIllegal) {

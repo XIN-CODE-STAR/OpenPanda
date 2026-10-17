@@ -326,6 +326,11 @@ func (c *Core) outboxFlush(ctx context.Context, peer string) {
 			taskEntries = append(taskEntries, e)
 		}
 		trows.Close()
+		if err := trows.Err(); err != nil {
+			c.logger.Warn("outbox: task rows", "peer", peer, "err", err)
+			fail()
+			return
+		}
 	}
 
 	// Parked approvals (resume_outbox) ride the same custody contract as
@@ -348,6 +353,11 @@ func (c *Core) outboxFlush(ctx context.Context, peer string) {
 			resumes = append(resumes, e)
 		}
 		rrows.Close()
+		if err := rrows.Err(); err != nil {
+			c.logger.Warn("outbox: resume rows", "peer", peer, "err", err)
+			fail()
+			return
+		}
 	}
 
 	// Deferred artifact pushes are custody too: a peer whose only pending
@@ -801,6 +811,12 @@ func (c *Core) taskOutboxPersist(ctx context.Context, peer string, p bus.TaskDel
 		lifetimeSec = ttl - time.Now().Unix()
 		if lifetimeSec < 1 {
 			lifetimeSec = 1
+		}
+		// A parked copy holds no lease: the bundle TTL is the row's absolute
+		// bound (§8.2), and the stamp also keeps RequeueStaleClaims from
+		// treating in-flight custody as an orphaned claim.
+		if derr := c.store.SetDeadlineIfUnset(ctx, p.TaskID, ttl); derr != nil {
+			c.logger.Warn("task_outbox: stamp dtn deadline", "task", p.TaskID, "err", derr)
 		}
 	}
 	var blob []byte

@@ -137,7 +137,9 @@ func (s *TaskStore) ListPlans(ctx context.Context) ([]PlanSummary, error) {
 		SELECT plan_id, COUNT(*), MIN(created_at), MAX(updated_at),
 		       SUM(state = 'done'), SUM(state = 'failed'),
 		       SUM(state IN ('running', 'dispatched', 'waiting_context')), SUM(state = 'review'),
-		       GROUP_CONCAT(stage_id), MIN(title)
+		       GROUP_CONCAT(stage_id),
+		       (SELECT t2.title FROM tasks t2 WHERE t2.plan_id = tasks.plan_id
+		        ORDER BY t2.rowid ASC LIMIT 1)
 		FROM tasks
 		WHERE plan_id IS NOT NULL AND plan_id != ''
 		GROUP BY plan_id
@@ -157,8 +159,11 @@ func (s *TaskStore) ListPlans(ctx context.Context) ([]PlanSummary, error) {
 		if stageIDs.Valid && stageIDs.String != "" {
 			p.StageIDs = strings.Split(stageIDs.String, ",")
 		}
-		// A plan has no goal of its own on disk; the first stage's title is the
-		// closest thing to one, and it is what the user typed the plan for.
+		// A plan has no goal of its own on disk; the first-declared stage's
+		// title is the closest thing to one, and it is what the user typed the
+		// plan for. Stage rows are created in declaration order, so the lowest
+		// rowid is the first stage (MIN(title) would pick the alphabetically
+		// smallest, which is often an unrelated later stage).
 		p.Goal = goal.String
 		out = append(out, p)
 	}
@@ -528,9 +533,13 @@ func (c *Core) planStageInputs(ctx context.Context, consumer Task, byStage map[s
 			return nil, fmt.Errorf("stage %s is not part of this plan", need)
 		}
 		if dep.OutputArtifact == "" {
-			// The predecessor finished without producing a tree (no artifact
-			// pool on that node, or a pack that failed). Nothing to hand on.
-			continue
+			// The predecessor is done but has no tree to hand on (an old row,
+			// or an executor that reported no artifact). Releasing the
+			// successor with no inputs would run it against an empty
+			// directory and surface a mystery failure two hops later; fail it
+			// here with the real name. AdvancePlan turns this error into a
+			// cancelled stage with the reason on its audit trail.
+			return nil, fmt.Errorf("stage %s finished without an output artifact to hand to stage %s", need, consumer.StageID)
 		}
 		source := ""
 		if c.artifacts != nil {
@@ -707,7 +716,10 @@ func (c *Core) fetchStageInputs(ctx context.Context, t Task, workDir string) err
 	}
 	for _, in := range t.Inputs {
 		if in.Hash == "" {
-			continue
+			// A ref without a hash names nothing fetchable: a stage released
+			// with it would run against a hole in its inputs. Fail with the
+			// declaring stage named rather than skipping the input silently.
+			return fmt.Errorf("stage %s declares an input from stage %s with no artifact hash", t.StageID, in.Stage)
 		}
 		if _, held := c.artifacts.Has(in.Hash); !held {
 			if in.Source == "" || in.Source == c.nodeID {
@@ -799,7 +811,14 @@ func (c *Core) packStageOutput(ctx context.Context, t Task, workDir string) (str
 		return "", fmt.Errorf("marshal manifest: %w", err)
 	}
 	if err := c.store.RecordArtifact(ctx, m.Hash, m.Size, t.TaskID, string(manifestJSON)); err != nil {
-		c.logger.Warn("index stage artifact", "task", t.TaskID, "hash", m.Hash, "err", err)
+		// The index row backs the index-based authorization path; the grant
+		// path (artifactBoundToTask) also accepts the task's own
+		// OutputArtifact, which lands below. Retry once — an index write that
+		// failed transiently should not silently narrow who may pull — then
+		// keep going and log loudly: the hash is still bound to the task.
+		if rerr := c.store.RecordArtifact(ctx, m.Hash, m.Size, t.TaskID, string(manifestJSON)); rerr != nil {
+			c.logger.Error("index stage artifact", "task", t.TaskID, "hash", m.Hash, "err", rerr)
+		}
 	}
 	if err := c.store.SetOutputArtifact(ctx, t.TaskID, m.Hash); err != nil {
 		return "", fmt.Errorf("record stage output: %w", err)
