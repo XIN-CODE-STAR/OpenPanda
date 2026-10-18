@@ -93,7 +93,11 @@ function editorPlain(text: string): string {
 }
 
 /** The caret's offset in the plain text, so @file completion can slice the
- *  editor's value the same way it sliced the textarea's. */
+ *  editor's value the same way it sliced the textarea's. The offset has to
+ *  count exactly what editorText counts — Range.toString sees only text
+ *  nodes, so it under-reads by the <br> and block newlines editorText
+ *  synthesizes and over-reads by the pill names it skips. Both adjustments
+ *  land here so caret and `input` stay in the same space. */
 function editorCaretOffset(el: HTMLElement): number {
   const sel = el.ownerDocument.getSelection()
   if (!sel || sel.rangeCount === 0) return editorTextOf(el).length
@@ -101,13 +105,40 @@ function editorCaretOffset(el: HTMLElement): number {
   const head = el.ownerDocument.createRange()
   head.selectNodeContents(el)
   head.setEnd(range.startContainer, range.startOffset)
-  return head.toString().length
+  let len = head.toString().length
+  for (const pill of el.querySelectorAll('.attach-pill')) {
+    if (head.intersectsNode(pill)) len -= (pill.textContent ?? '').length
+  }
+  for (const n of el.querySelectorAll('br, div, p')) {
+    if (head.intersectsNode(n)) len += 1
+  }
+  return len
 }
 
 function editorTextOf(el: HTMLElement): string {
   let out = ''
   for (const child of el.childNodes) out += editorText(child)
   return out
+}
+
+/** Character stream as `input` counts it: text nodes at their length, <br>
+ *  and block elements as the one '\n' editorText gives them, nothing for an
+ *  attachment pill (REJECT keeps its name out too). Positions along this
+ *  walk and offsets into editorTextOf are the same space, which is what
+ *  atQuery's [start, caret) addresses. */
+function editorTextWalker(el: HTMLElement): TreeWalker {
+  return el.ownerDocument.createTreeWalker(el, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
+    acceptNode: (n) => {
+      if (n.nodeType === Node.ELEMENT_NODE) {
+        const e = n as HTMLElement
+        if (e.classList.contains('attach-pill')) return NodeFilter.FILTER_REJECT
+        return e.tagName === 'BR' || e.tagName === 'DIV' || e.tagName === 'P'
+          ? NodeFilter.FILTER_ACCEPT
+          : NodeFilter.FILTER_SKIP
+      }
+      return NodeFilter.FILTER_ACCEPT
+    },
+  })
 }
 
 /** Plain text into the editor at the caret, without the HTML a paste would
@@ -358,10 +389,6 @@ export function SessionsView({
   const [diffError, setDiffError] = useState('')
   const [merging, setMerging] = useState(false)
   const [reverting, setReverting] = useState(false)
-  // Below 920px the thread rail is an off-canvas drawer (it has nowhere to
-  // sit next to the transcript); above it, this state is inert because the
-  // rail is always laid out.
-  const [railOpen, setRailOpen] = useState(false)
   const scroller = useRef<HTMLDivElement>(null)
   const composer = useRef<HTMLDivElement>(null)
   // The in-flight ask, so the stop button can abort it.
@@ -666,21 +693,6 @@ export function SessionsView({
     setIsPinned(true)
   }, [activeId])
 
-  // Picking a thread on a phone should reveal the transcript, not leave the
-  // drawer covering the thing you just asked to see.
-  useEffect(() => setRailOpen(false), [activeId])
-
-  // Escape closes the drawer — the same key that dismisses every other
-  // overlay in the console.
-  useEffect(() => {
-    if (!railOpen) return
-    const on = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setRailOpen(false)
-    }
-    addEventListener('keydown', on)
-    return () => removeEventListener('keydown', on)
-  }, [railOpen])
-
   // Keep the composer's height in step with its value — including the reset
   // to two rows after a send clears it, and after a starter chip fills it.
   // A fresh query also restarts the completion highlight at the top hit.
@@ -815,10 +827,10 @@ export function SessionsView({
     }
   }
 
-  async function newChat() {
-    const s = await api.createSession(undefined, project || selectedProject || undefined)
-    setSessions((ls) => [s, ...ls])
-    onOpenSession(s.id)
+  function newChat() {
+    // 新对话 mints nothing — the thread comes into being with the first send,
+    // the same rule the rail's new-chat row follows.
+    onOpenSession('')
     composer.current?.focus()
   }
 
@@ -839,7 +851,11 @@ export function SessionsView({
   async function send(e?: Event) {
     e?.preventDefault()
     const raw = input.trim()
-    const tray = pending
+    // The tray mirrors the pills still in the editor: anything whose pill is
+    // gone (Backspace, a selection-delete) stays behind instead of uploading
+    // with the send.
+    const el0 = composer.current
+    const tray = el0 ? pending.filter((p) => livePillKeys(el0).has(p.key)) : pending
     // A tray-only send is a real send: dropping a screenshot and hitting Enter
     // is the whole point, and the prompt then carries nothing but the file.
     if ((!raw && tray.length === 0) || busy || inflight.current) return
@@ -1100,22 +1116,38 @@ export function SessionsView({
     const grp = t('sessions.cmdGroup')
     const go = (view: string) => () => navigateView(view)
     return [
-      { id: 'cmd:new', group: grp, label: '/new', hint: t('sessions.cmdNew'), run: () => void newChat() },
+      { id: 'cmd:new', group: grp, label: '/new', hint: t('sessions.cmdNew'), run: () => newChat() },
       { id: 'cmd:export', group: grp, label: '/export', hint: t('sessions.cmdExport'), run: exportSession },
-      { id: 'cmd:clear', group: grp, label: '/clear', hint: t('sessions.cmdClear'), run: () => setInput('') },
+      { id: 'cmd:clear', group: grp, label: '/clear', hint: t('sessions.cmdClear'), run: () => { clearPending(); setInput('') } },
       { id: 'cmd:cost', group: grp, label: '/cost', hint: t('sessions.cmdCost'), run: go('settings:system') },
       { id: 'cmd:context', group: grp, label: '/context', hint: t('sessions.cmdContext'), run: go('settings:system') },
       { id: 'cmd:doctor', group: grp, label: '/doctor', hint: t('sessions.cmdDoctor'), run: go('settings:system') },
       { id: 'cmd:model', group: grp, label: '/model', hint: t('sessions.cmdModel'), run: go('settings:models') },
       { id: 'cmd:tasks', group: grp, label: '/tasks', hint: t('sessions.cmdTasks'), run: go('queue') },
       { id: 'cmd:plans', group: grp, label: '/plans', hint: t('sessions.cmdPlans'), run: go('plans') },
-      { id: 'cmd:sessions', group: grp, label: '/sessions', hint: t('sessions.cmdSessions'), run: () => setRailOpen((v) => !v) },
       {
         id: 'cmd:read',
         group: grp,
         label: '/read',
         hint: t('sessions.cmdRead'),
-        run: (arg) => setInput(arg ? `@${arg} ` : '@'),
+        // The DOM is the composer's truth: an argument rides insertMentions
+        // like a picked path; a bare '@' lands without its trailing space so
+        // atQuery still sees the open token and the file menu comes up.
+        run: (arg) => {
+          if (arg) {
+            insertMentions([`@${arg}`])
+            return
+          }
+          const el = composer.current
+          el?.focus()
+          editorInsertText('@')
+          requestAnimationFrame(() => {
+            if (!el) return
+            setInput(editorTextOf(el))
+            setCaret(editorCaretOffset(el))
+            autoGrow(el)
+          })
+        },
       },
     ]
   })()
@@ -1183,24 +1215,29 @@ export function SessionsView({
     if (!el || !atTok) return
     el.focus()
     // Replace the whole @token under the caret, not just insert at the caret:
-    //  the token's span is [atTok.start, caret.
+    //  the token's span is [atTok.start, caret).
     const end = caret
-    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)
-    let at = atTok.start
+    const walker = editorTextWalker(el)
+    let at = 0
     let startNode: Text | null = null
     let startOff = 0
     let endNode: Text | null = null
     let endOff = 0
     let node: Node | null
     while ((node = walker.nextNode())) {
-      const len = (node.textContent ?? '').length
-      if (!startNode && at + len > atTok.start) {
+      // Non-text nodes the walker accepts are the breaks editorText renders
+      // as one '\n' — they count a character but can never anchor an
+      // endpoint, since the token is a run of text.
+      const len = node.nodeType === Node.TEXT_NODE ? (node.textContent ?? '').length : 1
+      if (!startNode && node.nodeType === Node.TEXT_NODE && at + len > atTok.start) {
         startNode = node as Text
         startOff = atTok.start - at
       }
       if (at + len >= end) {
-        endNode = node as Text
-        endOff = end - at
+        if (node.nodeType === Node.TEXT_NODE) {
+          endNode = node as Text
+          endOff = end - at
+        }
         break
       }
       at += len
@@ -1243,6 +1280,9 @@ export function SessionsView({
     // would silently drop the path.
     const arg = /^\/\S+\s+(.+)$/.exec(input)?.[1]?.trim() || undefined
     setInput('')
+    // The state is not the surface: clearing `input` alone left the typed
+    // slash line sitting in the editable under whatever the command inserts.
+    editorClear(composer.current)
     setCompleteDismissed('')
     item.run(arg)
   }
@@ -1314,6 +1354,25 @@ export function SessionsView({
       setInput(editorTextOf(el))
       autoGrow(el)
     }
+  }
+
+  /** The pill keys actually in the editor right now. The DOM is authoritative:
+   *  Backspace or a selection-delete takes the node out without asking, so
+   *  the tray drops whatever lost its pill rather than upload a file the user
+   *  took back out of the turn. */
+  function livePillKeys(el: HTMLElement): Set<string> {
+    const keys = new Set<string>()
+    el.querySelectorAll('.attach-pill').forEach((n) => {
+      const k = (n as HTMLElement).dataset.pk
+      if (k) keys.add(k)
+    })
+    return keys
+  }
+
+  /** Drop pending entries whose pill is no longer in the editor. */
+  function syncPending(el: HTMLElement): void {
+    const keys = livePillKeys(el)
+    setPending((ps) => (ps.some((p) => !keys.has(p.key)) ? ps.filter((p) => keys.has(p.key)) : ps))
   }
 
   function clearPending(): void {
@@ -1709,6 +1768,10 @@ export function SessionsView({
                 const el = e.currentTarget as HTMLDivElement
                 setInput(editorTextOf(el))
                 setCaret(editorCaretOffset(el))
+                // Deleting a pill with Backspace or a selection only removes
+                // the node — drop the file behind it too, or a send would
+                // still upload what the user took out.
+                syncPending(el)
                 autoGrow(el)
               }}
               onClick={(e) => {
@@ -1734,11 +1797,22 @@ export function SessionsView({
                 }
                 // Pasted text goes in as <br>-separated lines: the browser's
                 // own paste plants literal newline text nodes, which Chromium
-                // does not lay out as line breaks in here.
+                // does not lay out as line breaks in here. A single line goes
+                // through insertText — the default paste would bring the
+                // source page's HTML styling into a plain-text surface.
                 const text = e.clipboardData?.getData('text/plain')
-                if (!text || !text.includes('\n')) return
+                if (!text) return
                 e.preventDefault()
                 const el3 = e.currentTarget as HTMLDivElement
+                if (!text.includes('\n')) {
+                  editorInsertText(text)
+                  requestAnimationFrame(() => {
+                    setInput(editorTextOf(el3))
+                    setCaret(editorCaretOffset(el3))
+                    autoGrow(el3)
+                  })
+                  return
+                }
                 const parts = text.split('\n')
                 const frag = el3.ownerDocument.createDocumentFragment()
                 parts.forEach((part, i) => {
@@ -2641,8 +2715,9 @@ function TaskQuickSend({ taskId }: { taskId: string }) {
     try {
       const r = await api.sendTaskMessage(taskId, body, inject)
       toast(
-        r.status === 'interrupted' ? t('detail.msgInjectedToast') : t('detail.msgQueuedToast'),
-        'success',
+        r.warning ||
+          (r.status === 'interrupted' ? t('detail.msgInjectedToast') : t('detail.msgQueuedToast')),
+        r.warning ? 'info' : 'success',
       )
       setText('')
       setOpen(false)
