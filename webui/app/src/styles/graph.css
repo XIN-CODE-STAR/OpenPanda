@@ -74,8 +74,12 @@
 }
 
 /* Arrowheads follow the edge colors. */
-.mg-arrow-ref { fill: var(--border-strong); }
-.mg-arrow-promo { fill: var(--accent); }
+.mg-arrow-ref {
+  fill: var(--border-strong);
+}
+.mg-arrow-promo {
+  fill: var(--accent);
+}
 
 /* Edges fade in under the nodes, then glow + thicken when they touch the
    hovered node. Promotion edges are animated dotted beads flowing toward
@@ -88,7 +92,9 @@
   stroke: var(--border-strong);
   stroke-width: 1.2;
   stroke-linecap: round;
-  transition: opacity var(--dur-fast) var(--ease), stroke var(--dur-fast) var(--ease);
+  transition:
+    opacity var(--dur-fast) var(--ease),
+    stroke var(--dur-fast) var(--ease);
 }
 .mg-edge-promotion {
   stroke: var(--accent);
@@ -108,7 +114,9 @@
   opacity: 0.5;
 }
 @keyframes mg-flow {
-  to { stroke-dashoffset: -7; }
+  to {
+    stroke-dashoffset: -7;
+  }
 }
 .mg-edge-g.dim .mg-edge,
 .mg-edge-g.dim .mg-badge {
@@ -164,16 +172,41 @@
   stroke: var(--bg-raised);
   stroke-width: 3.5px;
 }
-.mg-cluster.mg-core .mg-cluster-label { fill: var(--accent); }
-.mg-cluster.mg-topic .mg-cluster-label { fill: var(--accent-2); }
-.mg-cluster.mg-project .mg-cluster-label { fill: var(--semantic-info); }
-.mg-cluster.mg-daily .mg-cluster-label { fill: var(--semantic-warn); }
-.mg-cluster.mg-skill .mg-cluster-label { fill: var(--danger); }
-.mg-cluster.mg-core .mg-cluster-ring { stroke: var(--accent); opacity: 0.3; }
-.mg-cluster.mg-topic .mg-cluster-ring { stroke: var(--accent-2); opacity: 0.35; }
-.mg-cluster.mg-project .mg-cluster-ring { stroke: var(--semantic-info); opacity: 0.35; }
-.mg-cluster.mg-daily .mg-cluster-ring { stroke: var(--semantic-warn); opacity: 0.4; }
-.mg-cluster.mg-skill .mg-cluster-ring { stroke: var(--danger); opacity: 0.35; }
+.mg-cluster.mg-core .mg-cluster-label {
+  fill: var(--accent);
+}
+.mg-cluster.mg-topic .mg-cluster-label {
+  fill: var(--accent-2);
+}
+.mg-cluster.mg-project .mg-cluster-label {
+  fill: var(--semantic-info);
+}
+.mg-cluster.mg-daily .mg-cluster-label {
+  fill: var(--semantic-warn);
+}
+.mg-cluster.mg-skill .mg-cluster-label {
+  fill: var(--danger);
+}
+.mg-cluster.mg-core .mg-cluster-ring {
+  stroke: var(--accent);
+  opacity: 0.3;
+}
+.mg-cluster.mg-topic .mg-cluster-ring {
+  stroke: var(--accent-2);
+  opacity: 0.35;
+}
+.mg-cluster.mg-project .mg-cluster-ring {
+  stroke: var(--semantic-info);
+  opacity: 0.35;
+}
+.mg-cluster.mg-daily .mg-cluster-ring {
+  stroke: var(--semantic-warn);
+  opacity: 0.4;
+}
+.mg-cluster.mg-skill .mg-cluster-ring {
+  stroke: var(--danger);
+  opacity: 0.35;
+}
 
 .mg-node {
   cursor: pointer;
@@ -187,10 +220,15 @@
   transform-origin: center;
 }
 @keyframes mg-pop {
-  from { opacity: 0; transform: scale(0.45); }
+  from {
+    opacity: 0;
+    transform: scale(0.45);
+  }
 }
 @keyframes mg-fade {
-  from { opacity: 0; }
+  from {
+    opacity: 0;
+  }
 }
 .mg-hit {
   fill: transparent;
@@ -241,8 +279,15 @@
   animation: mg-halo 2.6s ease-in-out infinite;
 }
 @keyframes mg-halo {
-  0%, 100% { transform: scale(1); opacity: 0.55; }
-  50% { transform: scale(1.16); opacity: 0.15; }
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  50% {
+    transform: scale(1.16);
+    opacity: 0.15;
+  }
 }
 .mg-node text {
   font-size: 10.5px;
@@ -271,11 +316,21 @@
 /* Kind palette (stroke colors; fills come from the mg-fill-* gradients):
    accent for long-term cores, blue for topics, indigo for project memory,
    amber for the daily diary, red for skills, green for knowledge terms. */
-.mg-core .mg-dot { stroke: var(--accent); }
-.mg-topic .mg-dot { stroke: var(--accent-2); }
-.mg-project .mg-dot { stroke: var(--semantic-info); }
-.mg-daily .mg-dot { stroke: var(--semantic-warn); }
-.mg-skill .mg-dot { stroke: var(--danger); }
+.mg-core .mg-dot {
+  stroke: var(--accent);
+}
+.mg-topic .mg-dot {
+  stroke: var(--accent-2);
+}
+.mg-project .mg-dot {
+  stroke: var(--semantic-info);
+}
+.mg-daily .mg-dot {
+  stroke: var(--semantic-warn);
+}
+.mg-skill .mg-dot {
+  stroke: var(--danger);
+}
 .mg-node:hover .mg-dot {
   transform: scale(1.14);
   stroke-width: 2;
@@ -355,12 +410,24 @@ button.mg-legend-item:hover {
   background: currentColor;
   box-shadow: 0 0 0 1.5px color-mix(in srgb, currentColor 30%, transparent);
 }
-.mg-legend-item.mg-core i { color: var(--accent); }
-.mg-legend-item.mg-topic i { color: var(--accent-2); }
-.mg-legend-item.mg-project i { color: var(--semantic-info); }
-.mg-legend-item.mg-daily i { color: var(--semantic-warn); }
-.mg-legend-item.mg-skill i { color: var(--danger); }
-.mg-legend-item.mg-entity i { color: var(--semantic-good); }
+.mg-legend-item.mg-core i {
+  color: var(--accent);
+}
+.mg-legend-item.mg-topic i {
+  color: var(--accent-2);
+}
+.mg-legend-item.mg-project i {
+  color: var(--semantic-info);
+}
+.mg-legend-item.mg-daily i {
+  color: var(--semantic-warn);
+}
+.mg-legend-item.mg-skill i {
+  color: var(--danger);
+}
+.mg-legend-item.mg-entity i {
+  color: var(--semantic-good);
+}
 .mg-legend-edge-promotion line {
   stroke: var(--accent);
   stroke-width: 1.7;
@@ -491,18 +558,42 @@ button.mg-legend-item:hover {
   border-radius: 50%;
   background: currentColor;
 }
-.mg-kind-chip.mg-core i { color: var(--accent); }
-.mg-kind-chip.mg-topic i { color: var(--accent-2); }
-.mg-kind-chip.mg-project i { color: var(--semantic-info); }
-.mg-kind-chip.mg-daily i { color: var(--semantic-warn); }
-.mg-kind-chip.mg-skill i { color: var(--danger); }
-.mg-kind-chip.mg-entity i { color: var(--semantic-good); }
-.mg-detail-core { border-left-color: var(--accent); }
-.mg-detail-topic { border-left-color: var(--accent-2); }
-.mg-detail-project { border-left-color: var(--semantic-info); }
-.mg-detail-daily { border-left-color: var(--semantic-warn); }
-.mg-detail-skill { border-left-color: var(--danger); }
-.mg-detail-entity { border-left-color: var(--semantic-good); }
+.mg-kind-chip.mg-core i {
+  color: var(--accent);
+}
+.mg-kind-chip.mg-topic i {
+  color: var(--accent-2);
+}
+.mg-kind-chip.mg-project i {
+  color: var(--semantic-info);
+}
+.mg-kind-chip.mg-daily i {
+  color: var(--semantic-warn);
+}
+.mg-kind-chip.mg-skill i {
+  color: var(--danger);
+}
+.mg-kind-chip.mg-entity i {
+  color: var(--semantic-good);
+}
+.mg-detail-core {
+  border-left-color: var(--accent);
+}
+.mg-detail-topic {
+  border-left-color: var(--accent-2);
+}
+.mg-detail-project {
+  border-left-color: var(--semantic-info);
+}
+.mg-detail-daily {
+  border-left-color: var(--semantic-warn);
+}
+.mg-detail-skill {
+  border-left-color: var(--danger);
+}
+.mg-detail-entity {
+  border-left-color: var(--semantic-good);
+}
 .mg-detail-head {
   display: flex;
   align-items: center;
