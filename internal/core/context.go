@@ -487,7 +487,23 @@ func (c *Core) handleContextAck(ctx context.Context, env bus.Envelope) {
 			c.terminalizeDeclined(runCtx, p.TaskID, err.Error())
 			return
 		}
-		if t, gerr := c.store.Get(runCtx, p.TaskID); gerr == nil {
+		// A context-parked task that failed its resumed run used to report
+		// upstream after exactly one attempt — a resumable stall died while a
+		// local run checkpoint-resumed. Settle it through the shared loop.
+		if _, result, serr := c.settleDelegated(runCtx, p.TaskID, pc.intent, pc.required, result); serr != nil {
+			// Cancelled, or a sibling transition (resume, second runner) owns
+			// the row now — its result lands on its own channel.
+			if !errors.Is(serr, ErrCancelled) && !errors.Is(serr, ErrConflict) {
+				c.logger.Warn("settle fetched-context task", "task", p.TaskID, "err", serr)
+				if t, gerr := c.store.Get(runCtx, p.TaskID); gerr == nil {
+					c.relayToParent(runCtx, bus.MsgTaskDecline, t.Chain, bus.TaskDeclinePayload{
+						TaskID: p.TaskID, Reason: serr.Error(),
+					})
+				}
+				c.terminalizeDeclined(runCtx, p.TaskID, serr.Error())
+			}
+			return
+		} else if t, gerr := c.store.Get(runCtx, p.TaskID); gerr == nil {
 			c.relayToParent(runCtx, bus.MsgTaskResult, t.Chain, result)
 		}
 	})

@@ -645,6 +645,26 @@ func (c *Core) proceedLocalDelegate(ctx context.Context, env bus.Envelope, taskI
 			c.terminalizeDeclined(ctx, taskID, err.Error())
 			return
 		}
+		// One execute call is one attempt; without the shared retry/review
+		// loop a resumable watchdog stall (exit 124 + live session) reported
+		// failure upstream where the identical local failure would have
+		// checkpoint-resumed (observed: a peer-run task died on a 4-minute
+		// silence kill holding a minted session). settleDelegated also maps
+		// an exhausted-retry park to State:review so the delegator mirrors it.
+		_, result, err = c.settleDelegated(ctx, taskID, p.Intent, required, result)
+		if err != nil {
+			// ErrConflict means the row left the failed state under us — a
+			// task_resume or a sibling runner claimed it: that runner owns the
+			// reply now, and declining would race it. Same for ErrCancelled.
+			if errors.Is(err, ErrCancelled) || errors.Is(err, ErrConflict) {
+				c.logger.Info("task moved on during retry settlement", "task", taskID)
+				return
+			}
+			c.logger.Warn("settle delegated task", "err", err, "task", taskID)
+			c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{TaskID: taskID, Reason: err.Error()})
+			c.terminalizeDeclined(ctx, taskID, err.Error())
+			return
+		}
 		if err := c.reply(ctx, env, bus.MsgTaskResult, result); err != nil {
 			c.logger.Warn("send task_result", "err", err, "task", taskID)
 			// The delegator is unreachable at the moment the result is ready

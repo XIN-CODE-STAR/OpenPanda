@@ -445,3 +445,48 @@ func TestPackStageOutputSkipsIsolationBookkeeping(t *testing.T) {
 		t.Fatalf("content missing from pack: %v", paths)
 	}
 }
+
+// TestPackStageOutputSkipsRegenerableDirs pins the output-side weight fix:
+// a delegated run that installs its own environment must not pack and ship
+// node_modules/.venv/__pycache__/target-cache back upstream — inbound trees
+// never carry them, so nothing on the wire can depend on receiving them.
+// Build products (dist/, target/) remain deliverables and must survive.
+func TestPackStageOutputSkipsRegenerableDirs(t *testing.T) {
+	c := NewCore(openTestDB(t), "pack-node2", ledger.Card{Device: "pack-node2"}, 5, testLogger(), config.ModelConfig{})
+	c.artifacts = artifact.NewStore(t.TempDir())
+	ws := t.TempDir()
+	writeFile(t, filepath.Join(ws, "src", "app.go"), "package main\n")
+	writeFile(t, filepath.Join(ws, "node_modules", "dep", "index.js"), "module.exports=1\n")
+	writeFile(t, filepath.Join(ws, ".venv", "lib", "python.py"), "x=1\n")
+	writeFile(t, filepath.Join(ws, "__pycache__", "mod.cpython-312.pyc"), "pyc\n")
+	writeFile(t, filepath.Join(ws, "dist", "bundle.js"), "built output\n")
+	writeFile(t, filepath.Join(ws, "target", "release", "app"), "binary\n")
+	writeFile(t, filepath.Join(ws, ".git", "config"), "[remote]\n")
+	task, _, _, err := c.createTask(context.Background(), TaskInput{Title: "prune-pack"})
+	if err != nil {
+		t.Fatalf("createTask: %v", err)
+	}
+	hash, err := c.packStageOutput(context.Background(), task, ws)
+	if err != nil {
+		t.Fatalf("packStageOutput: %v", err)
+	}
+	entries, err := c.artifacts.Entries(hash)
+	if err != nil {
+		t.Fatalf("entries: %v", err)
+	}
+	var paths []string
+	for _, e := range entries {
+		paths = append(paths, e.Path)
+	}
+	joined := strings.Join(paths, ",")
+	for _, dropped := range []string{"node_modules", ".venv", "__pycache__", ".git"} {
+		if strings.Contains(joined, dropped) {
+			t.Fatalf("regenerable dir %q shipped in output pack: %v", dropped, paths)
+		}
+	}
+	for _, kept := range []string{"dist/bundle.js", "target/release/app", "src/app.go"} {
+		if !strings.Contains(joined, kept) {
+			t.Fatalf("deliverable %q missing from output pack: %v", kept, paths)
+		}
+	}
+}

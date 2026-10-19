@@ -1006,6 +1006,17 @@ func (c *Core) retryLoop(ctx context.Context, taskID, intent string, required []
 		retries++
 		c.logger.Info("retrying task", "task", taskID)
 		result, err = c.run(ctx, taskID, intent, required, nil)
+		if errors.Is(err, ErrAlreadyRunning) {
+			// Between our requeue and the re-run a sibling runner claimed the
+			// row (a resume beat us to it, a duplicate delivery). It owns the
+			// outcome and the reply — failing the row here would kill live
+			// work and its terminal write would lose to the conflict anyway.
+			final, gerr := c.store.Get(ctx, taskID)
+			if gerr != nil {
+				return Task{}, result, gerr
+			}
+			return final, result, err
+		}
 		if err != nil && !errors.Is(err, ErrCancelled) {
 			c.failLocal(ctx, taskID, err)
 			final, gerr := c.store.Get(ctx, taskID)
@@ -1015,6 +1026,31 @@ func (c *Core) retryLoop(ctx context.Context, taskID, intent string, required []
 			return final, result, err
 		}
 	}
+}
+
+// settleDelegated drives a delegated task's first execution outcome through the
+// shared retry/review loop — the same machinery local submissions and the queue
+// runner already get. A peer-run task used to have exactly one attempt: a
+// resumable watchdog stall (exit 124 carrying a live session) reported failure
+// upstream while the identical local failure checkpoint-resumed, and an
+// exhausted retry parked the executor copy in a review queue the delegator
+// could not see. Returns the settled row plus the payload to report: a review
+// park goes upstream as State:review so the delegator mirrors the park
+// (ReviewFromRemote) and its operator can approve the resume through the
+// normal accept mirror, instead of a bare failure nobody can act on.
+func (c *Core) settleDelegated(ctx context.Context, taskID, intent string, required []string, result bus.TaskResultPayload) (Task, bus.TaskResultPayload, error) {
+	final, result, err := c.retryLoop(ctx, taskID, intent, required, result, nil)
+	if err != nil {
+		return final, result, err
+	}
+	if final.State == StateReview && result.State != StateReview {
+		result.State = StateReview
+		result.OK = false
+		if final.ApprovalDisposition != "" {
+			result.ApprovalDisposition = string(final.ApprovalDisposition)
+		}
+	}
+	return final, result, nil
 }
 
 // retriesExhausted reports whether the persisted retry budget (EvRetry events

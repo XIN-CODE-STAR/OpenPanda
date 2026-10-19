@@ -77,6 +77,33 @@ var worktreeSkipDirs = map[string]bool{
 	"target":     true,
 }
 
+// outputSkipDirs names directories pruned from a stage/task OUTPUT pack —
+// the return leg of worktreeSkipDirs. Inbound trees never carry them (the
+// executor recreates them), so shipping an executor's freshly-installed
+// node_modules or .venv back upstream is pure weight: a delegated run that
+// created its own environment packed ~390 MB / 48k files to report one
+// report file. The set stays narrower than the inbound one on purpose:
+// target/ and vendor/ CAN be the deliverable (a cross-node release build's
+// binary lives in target/, a vendored dep tree is real work product), while
+// caches and interpreter/env dirs are regenerable by definition. .git is
+// skipped for the second reason worktreeSkipDirs gives it — VCS plumbing
+// and remote-URL credentials never ride to a peer — and the extract side
+// would refuse to write it back over the adopter's .git anyway.
+var outputSkipDirs = map[string]bool{
+	".git":          true,
+	"node_modules":  true,
+	"__pycache__":   true,
+	".venv":         true,
+	"venv":          true,
+	".tox":          true,
+	".mypy_cache":   true,
+	".pytest_cache": true,
+	".ruff_cache":   true,
+	".gocache":      true,
+	".panda-shadow": true,
+	".openpanda":    true,
+}
+
 // extractProtectedDirs is the return-leg counterpart of worktreeSkipDirs.
 // The outbound set prunes for weight; this set answers a different question —
 // what a peer's output must never write back over the user's checkout. A

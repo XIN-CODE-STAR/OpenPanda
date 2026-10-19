@@ -579,7 +579,23 @@ func (c *Core) resumePushedTask(ctx context.Context, taskID string, p bus.TaskDe
 			c.terminalizeDeclined(ctx, taskID, err.Error())
 			return
 		}
-		if t, gerr := c.store.Get(ctx, taskID); gerr == nil {
+		// Same gap as proceedLocalDelegate: a parked-then-resumed run used to
+		// be a single attempt — a resumable stall died upstream while a local
+		// run checkpoint-resumed.
+		if _, result, serr := c.settleDelegated(ctx, taskID, p.Intent, required, result); serr != nil {
+			// Cancelled or lost the row to a sibling transition (a resume's
+			// fresh runner): its owner reports; declining would race it.
+			if !errors.Is(serr, ErrCancelled) && !errors.Is(serr, ErrConflict) {
+				c.logger.Warn("settle pushed-input task", "task", taskID, "err", serr)
+				if t, gerr := c.store.Get(ctx, taskID); gerr == nil {
+					c.relayToParent(ctx, bus.MsgTaskDecline, t.Chain, bus.TaskDeclinePayload{
+						TaskID: taskID, Reason: serr.Error(),
+					})
+				}
+				c.terminalizeDeclined(ctx, taskID, serr.Error())
+			}
+			return
+		} else if t, gerr := c.store.Get(ctx, taskID); gerr == nil {
 			c.relayToParent(ctx, bus.MsgTaskResult, t.Chain, result)
 		}
 	})
