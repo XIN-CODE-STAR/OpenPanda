@@ -99,7 +99,10 @@ func deriveResourceKeys(in TaskInput) []string {
 		// The scope root joins the legacy project key: a task that never
 		// narrowed its claim must exclude scoped children (whose leaf keys
 		// sit under this root) as well as other whole-project writers.
-		keys = append(keys, "project:"+in.Project, queue.ScopeRootKey(in.Project))
+		// queue.ProjectKey folds the name's case — ask-emitted spec.project
+		// arrives in the model's casing while --project is verbatim, and
+		// the two spellings of one tree must collide, not parallel-write.
+		keys = append(keys, queue.ProjectKey(in.Project), queue.ScopeRootKey(in.Project))
 	} else {
 		if in.TargetNode != "" {
 			keys = append(keys, "node:"+in.TargetNode)

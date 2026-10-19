@@ -628,6 +628,13 @@ func (s *TaskStore) Dispatch(ctx context.Context, taskID, owner, target string) 
 // event is appended, which is what DispatchTarget and isCurrentExecutor
 // authenticate the peer's result/decline against.
 func (s *TaskStore) RetargetDelegation(ctx context.Context, taskID, target string) error {
+	// A park→redeliver round (task_outbox offline custody) re-runs the whole
+	// send path, which would otherwise stamp an identical delegate row per
+	// flush. The audit only needs the retarget when the aim actually moved —
+	// DispatchTarget reads the newest row either way.
+	if prev, err := s.DispatchTarget(ctx, taskID); err == nil && prev == target {
+		return nil
+	}
 	return s.recordEvent(ctx, taskID, EvDelegate, map[string]any{"target": target, "by": "queue-forward"})
 }
 
@@ -2142,9 +2149,12 @@ func (s *TaskStore) ForceFail(ctx context.Context, taskID, reason string) error 
 }
 
 // Recover normalizes tasks left in an active state by a previous process
-// instance. Running/waiting_context become failed (execution was interrupted);
-// dispatched/submitted return to queued for re-dispatch. Returns the number of
-// tasks touched.
+// instance. Running/waiting_context rows carrying a session checkpoint minted
+// on this node return to queued — the retry's session affinity resumes the
+// same agent conversation, so a daemon restart costs a re-dispatch instead of
+// the whole interrupted exploration. The remainder become failed (execution
+// was interrupted and nothing consumable survived); dispatched/submitted
+// return to queued for re-dispatch. Returns the number of tasks touched.
 //
 // review is deliberately excluded: a task parked for human sign-off has no
 // executing process to lose, so a restart must not discard the queue of things
@@ -2154,10 +2164,29 @@ func (s *TaskStore) ForceFail(ctx context.Context, taskID, reason string) error 
 // every daemon start. The interrupted rows also keep their result_json so the
 // evidence of what ran survives, and each transition is written to the audit
 // chain rather than mutating state_version silently.
-func (s *TaskStore) Recover(ctx context.Context) (int, error) {
+//
+// selfNode is this node's runtime identity — it gates the resume predicate
+// because an agent session handle is only consumable on the node whose
+// adapter minted it: a checkpoint learned from a peer (agent_session_node =
+// env.From) must still take the interrupted path rather than queuing a run
+// that cannot resume.
+//
+// Resume is only safe HERE, at startup: the node-identity lock proves the
+// previous executor process is gone before Recover runs, so no zombie runner
+// can race the requeued clone. The mid-life twin (FailStaleLeaseless) cannot
+// make that assumption and keeps failing.
+func (s *TaskStore) Recover(ctx context.Context, selfNode string) (int, error) {
 	var failed, requeued int
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		n, err := s.recoverBatchTx(ctx, tx, []string{StateRunning, StateWaitingCtx}, StateFailed, "interrupted", "")
+		n, err := s.recoverBatchTx(ctx, tx, []string{StateRunning, StateWaitingCtx}, StateQueued, "resumed",
+			`AND agent_session_id IS NOT NULL AND agent_session_id != ''
+			 AND (agent_session_node IS NULL OR agent_session_node = '' OR agent_session_node = ?)`,
+			selfNode)
+		if err != nil {
+			return fmt.Errorf("recover resumable tasks: %w", err)
+		}
+		requeued += n
+		n, err = s.recoverBatchTx(ctx, tx, []string{StateRunning, StateWaitingCtx}, StateFailed, "interrupted", "")
 		if err != nil {
 			return fmt.Errorf("recover active tasks: %w", err)
 		}

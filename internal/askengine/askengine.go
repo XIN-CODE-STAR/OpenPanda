@@ -2309,6 +2309,22 @@ func (e *Engine) submitTask(ctx context.Context, spec *entry.TaskSpec, prompt st
 			workDir = projectDir
 		}
 	}
+	// Canonicalize the name against the registry regardless of who supplied
+	// it: the classifier emits spec.project in the casing it inferred from
+	// the tree ("Needlen" for a "needlen" row), and an unnormalized variant
+	// misses this project's approval policy, lands a different lock key, and
+	// — when the scope carried no directory — leaves workDir on the caller's
+	// cwd so the agent reads one tree while its footprint is judged on
+	// another (observed live: a Needlen-scoped ask ran in the panda repo and
+	// tripped scope-drift on files the agent never touched).
+	if in.Project != "" && e.projStore != nil {
+		if p, perr := e.projStore.GetFold(in.Project); perr == nil {
+			in.Project = p.Name
+			if workDir == "" && p.WorkDir != "" {
+				workDir = p.WorkDir
+			}
+		}
+	}
 	if workDir == "" {
 		if cwd, err := os.Getwd(); err == nil {
 			workDir = cwd

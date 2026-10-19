@@ -1483,7 +1483,7 @@ func TestRecoverPreservesUnreleasedPlanStages(t *testing.T) {
 		t.Fatalf("dispatch: %v", err)
 	}
 
-	if _, err := s.Recover(ctx); err != nil {
+	if _, err := s.Recover(ctx, "node-a"); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
 
@@ -1500,6 +1500,71 @@ func TestRecoverPreservesUnreleasedPlanStages(t *testing.T) {
 	g3, _ := s.Get(ctx, t3.TaskID)
 	if g3.State != StateQueued {
 		t.Fatalf("t3 state = %s, want %s (released plan stage should requeue)", g3.State, StateQueued)
+	}
+}
+
+// TestRecoverResumesSessionedRuns pins the restart-resume contract: a running
+// (or context-parked) task whose agent session was minted on THIS node goes
+// back to queued so the retry resumes the live conversation — daemon restart
+// must not burn the whole interrupted exploration. Runs without a consumable
+// checkpoint (no session, or a session minted by a peer) still take the honest
+// interrupted-failed verdict: a foreign session id is not resumable here.
+func TestRecoverResumesSessionedRuns(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	mkRunning := func(title string) Task {
+		tk := createTask(t, s, "", title, "node-a")
+		if err := s.Queue(ctx, tk.TaskID, "node-a"); err != nil {
+			t.Fatalf("queue %s: %v", title, err)
+		}
+		if err := s.Dispatch(ctx, tk.TaskID, "node-a", "node-a"); err != nil {
+			t.Fatalf("dispatch %s: %v", title, err)
+		}
+		if err := s.Accept(ctx, tk.TaskID, "node-a"); err != nil {
+			t.Fatalf("accept %s: %v", title, err)
+		}
+		return tk
+	}
+
+	// Local session — resumable.
+	t1 := mkRunning("local session")
+	if err := s.SetAgentSession(ctx, t1.TaskID, "ses-local", "node-a", "opencode.py"); err != nil {
+		t.Fatalf("set session t1: %v", err)
+	}
+	// Legacy/unknown-node session — still resumes locally.
+	t2 := mkRunning("legacy session")
+	if err := s.SetAgentSessionID(ctx, t2.TaskID, "ses-legacy"); err != nil {
+		t.Fatalf("set session t2: %v", err)
+	}
+	// Session minted by a peer — not consumable here, must fail.
+	t3 := mkRunning("remote session")
+	if err := s.SetAgentSession(ctx, t3.TaskID, "ses-remote", "node-b", "opencode.py"); err != nil {
+		t.Fatalf("set session t3: %v", err)
+	}
+	// No session at all — nothing to resume, must fail.
+	t4 := mkRunning("no session")
+
+	failed, err := s.Recover(ctx, "node-a")
+	_ = failed
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+
+	for _, id := range []string{t1.TaskID, t2.TaskID} {
+		g, _ := s.Get(ctx, id)
+		if g.State != StateQueued {
+			t.Fatalf("task %s state = %s, want queued (session resumable)", id, g.State)
+		}
+		if !g.Scheduled {
+			t.Fatalf("task %s scheduled = false, want true (queued must be schedulable)", id)
+		}
+	}
+	for _, id := range []string{t3.TaskID, t4.TaskID} {
+		g, _ := s.Get(ctx, id)
+		if g.State != StateFailed {
+			t.Fatalf("task %s state = %s, want failed (no consumable checkpoint)", id, g.State)
+		}
 	}
 }
 
@@ -1637,7 +1702,7 @@ func TestRecoverRequeueSchedulableAndParked(t *testing.T) {
 		t.Fatalf("park outbox row: %v", err)
 	}
 
-	if _, err := s.Recover(ctx); err != nil {
+	if _, err := s.Recover(ctx, "node-a"); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
 

@@ -94,6 +94,11 @@ const (
 	// EvAgentFallback records that the scored primary agent was unavailable
 	// and execution fell back to a runner-up (A2 fallback chain).
 	EvAgentFallback = "agent_fallback"
+	// EvAgentSwitch records the same swap the moment it happens inside
+	// execAgent — exec_agent_start names the plan's primary, and without a
+	// live correction the task card attributes a long fallback run to an
+	// agent that never launched.
+	EvAgentSwitch = "agent_switch"
 	// EvMemoryPromotion records that the Dreaming engine promoted an entry
 	// into MEMORY.md (A4 visibility): the console shows what was memorized
 	// — and whether it came through the repeated-emphasis whitelist channel —

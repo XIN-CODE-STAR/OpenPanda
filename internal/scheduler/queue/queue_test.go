@@ -185,7 +185,7 @@ func TestReleaseDuringWaitLetsChildStart(t *testing.T) {
 
 	s.tick(context.Background())
 	waitForStarted(t, runner, 1)
-	if got := s.Registry().HeldBy("project:X"); got != "parent" {
+	if got := s.Registry().HeldBy(ProjectKey("X")); got != "parent" {
 		t.Fatalf("holder = %q, want parent", got)
 	}
 	// The child cannot start while the parent holds the key.
@@ -205,13 +205,13 @@ func TestReleaseDuringWaitLetsChildStart(t *testing.T) {
 	runner.release <- "child"
 	<-runner.done
 	s.registry.Release("child")
-	keys := []string{"project:X"}
+	keys := []string{ProjectKey("X")}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if !s.AcquireTask(ctx, "parent", keys) {
 		t.Fatal("re-acquire failed")
 	}
-	if got := s.Registry().HeldBy("project:X"); got != "parent" {
+	if got := s.Registry().HeldBy(ProjectKey("X")); got != "parent" {
 		t.Fatalf("holder = %q, want parent after re-acquire", got)
 	}
 	// An unheld task owes no re-acquire.

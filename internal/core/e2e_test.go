@@ -123,7 +123,7 @@ func TestRecoverRestoresState(t *testing.T) {
 	must(s.Accept(ctx, done.TaskID, "root"))
 	must(s.Complete(ctx, done.TaskID, "root", map[string]any{"ok": true}))
 
-	if _, err := s.Recover(ctx); err != nil {
+	if _, err := s.Recover(ctx, "node-a"); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
 
@@ -179,7 +179,7 @@ func TestRecoverPreservesReviewQueue(t *testing.T) {
 	running := createTask(t, s, "", "interrupted", "root")
 	drive(running)
 
-	if _, err := s.Recover(ctx); err != nil {
+	if _, err := s.Recover(ctx, "node-a"); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
 

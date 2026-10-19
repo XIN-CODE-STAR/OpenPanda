@@ -347,6 +347,47 @@ func (c *Core) resolveRunPlan(ctx context.Context, taskID string, required []str
 			}
 			plan.Alternates = alternates
 		}
+		// Checkpoint affinity: a task carrying a live agent session resumes
+		// that conversation ONLY on the adapter that minted it — the offer
+		// is adapter-affine (buildAdapterRequest drops a foreign handle).
+		// Route scores from scratch every attempt, so a checkpoint retry or
+		// a yield/restart can name a different primary and the resume dies
+		// on the floor: the new agent cold-starts and re-pays the whole
+		// orientation the session exists to save. When a routed alternate
+		// owns the minting adapter, promote it to primary so the checkpoint
+		// actually resumes; a candidate that is not on the route at all is
+		// not forced — a stale handle cannot resurrect a dead adapter.
+		if t, terr := c.store.Get(ctx, taskID); terr == nil &&
+			t.AgentSessionID != "" && t.AgentSessionAdapter != "" {
+			if cur, ok := router.Agent(plan.Agent); ok && cur.Adapter != t.AgentSessionAdapter {
+				for i, alt := range plan.Alternates {
+					ag, ok := router.Agent(alt)
+					if !ok || ag.Adapter != t.AgentSessionAdapter || !c.breaker.Allow("agent:"+alt) {
+						continue
+					}
+					prev := plan.Agent
+					newAlts := make([]string, 0, len(plan.Alternates))
+					newAlts = append(newAlts, prev)
+					newAlts = append(newAlts, plan.Alternates[:i]...)
+					newAlts = append(newAlts, plan.Alternates[i+1:]...)
+					plan.Alternates = newAlts
+					plan.Agent = alt
+					plan.Ability = alt
+					plan.Adapter = ag.Adapter
+					plan.Tier = ag.Tier
+					if plan.Tier == 0 {
+						plan.Tier = defense.TierReversible
+					}
+					breakerKey = "agent:" + alt
+					c.EvTrace(ctx, taskID, "agent_session_affinity", map[string]any{
+						"agent": alt, "adapter": ag.Adapter, "was": prev,
+					})
+					c.audit(ctx, taskID, "agent:session_affinity", alt, "promoted",
+						"checkpoint resume prefers minting adapter "+t.AgentSessionAdapter)
+					break
+				}
+			}
+		}
 	}
 	return plan, router, breakerKey, nil
 }
@@ -750,6 +791,23 @@ func (c *Core) decorateExecCtx(execCtx, ctx context.Context, taskID string, task
 				}
 				return
 			}
+			// Agent-switch notes are lifecycle truth, not progress chatter:
+			// the card started the round under the plan's primary name and
+			// must not keep wearing it while a fallback candidate actually
+			// runs. Recorded unthrottled and relayed like a progress note —
+			// the origin's copy of a delegated task deserves the same
+			// correction.
+			if kind == "agent_switch" {
+				if err := c.store.RecordEvent(context.WithoutCancel(ctx), taskID,
+					EvAgentSwitch, map[string]any{"note": note}); err != nil {
+					c.logger.Warn("record agent switch", "task", taskID, "err", err)
+				}
+				if len(task.Chain) > 0 {
+					c.relayToParent(context.WithoutCancel(ctx), bus.MsgTaskProgress, task.Chain,
+						bus.TaskProgressPayload{TaskID: taskID, AttemptID: task.AttemptID, Note: note})
+				}
+				return
+			}
 			if prev, _ := lastNote.Load().(string); prev == note {
 				return // identical consecutive note: skip
 			}
@@ -788,6 +846,21 @@ func (c *Core) decorateExecCtx(execCtx, ctx context.Context, taskID string, task
 		// the cap one truncation marker records that the stream was cut.
 		var evCount atomic.Int64
 		execCtx = commander.WithAgentEvents(execCtx, func(ev commander.AgentEvent) {
+			if ev.Ev == "session" && ev.ID != "" {
+				// The adapter minted (or resumed under) a conversation id:
+				// persist it NOW, not at round end — a kill mid-round still
+				// leaves a consumable checkpoint, which is what lets the
+				// startup Recover requeue the run instead of failing a
+				// 25-minute exploration that had a live session all along.
+				if err := c.store.SetAgentSession(context.WithoutCancel(ctx),
+					taskID, ev.ID, c.nodeID, ev.Adapter); err != nil {
+					c.logger.Warn("persist mid-run agent session", "task", taskID, "err", err)
+				}
+				c.EvTrace(context.WithoutCancel(ctx), taskID, "adapter_session_mint", map[string]any{
+					"session": ev.ID, "adapter": ev.Adapter,
+				})
+				return
+			}
 			if n := evCount.Add(1); n > maxAgentTranscriptEvents {
 				if n == maxAgentTranscriptEvents+1 {
 					c.EvTrace(context.WithoutCancel(ctx), taskID, EvAgentEvent, map[string]any{

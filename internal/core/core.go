@@ -1456,7 +1456,7 @@ func (c *Core) handleHeartbeat(ctx context.Context, env bus.Envelope) {
 // — the keepalive is in-memory and does not survive the restart that left
 // those rows.
 func (c *Core) Recover(ctx context.Context) (int, error) {
-	n, err := c.store.Recover(ctx)
+	n, err := c.store.Recover(ctx, c.nodeID)
 	c.resumeReviewHolds(ctx)
 	return n, err
 }

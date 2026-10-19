@@ -950,7 +950,7 @@ func TestOrphanSweepSparesParkedPin(t *testing.T) {
 		t.Fatalf("dispatch: %v", err)
 	}
 	// Simulate the restart: dispatched → queued, custody row still parked.
-	if _, err := root.store.Recover(ctx); err != nil {
+	if _, err := root.store.Recover(ctx, "node-a"); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
 	got := mustGetTask(t, root, ctx, tk.TaskID)

@@ -588,6 +588,20 @@ func (r *Router) execAgent(ctx context.Context, plan Plan, prompt string, cwd st
 			unavailable = append(unavailable, name+" ("+reason+")")
 			continue
 		}
+		// The run is starting on a fallback candidate: say so NOW, at the
+		// switch, not only in the end-of-round fallback record — an
+		// exec_agent_start tracing the plan's primary must not keep naming
+		// an agent that never launched while the real runner works for
+		// minutes underneath it.
+		if name != plan.Agent {
+			reason := "primary failed or skipped"
+			if len(unavailable) > 0 {
+				reason = unavailable[len(unavailable)-1]
+			}
+			if sink, ok := ctx.Value(progressKey{}).(ProgressFunc); ok {
+				sink(fmt.Sprintf("agent fallback — %s; %s is running this round", reason, name), "agent_switch")
+			}
+		}
 		// The tools policy rides the context (the runAdapter seam's signature
 		// stays unchanged for tests); runAdapterProcess copies it into the
 		// request. MCP passthrough materializes a project .mcp.json for the

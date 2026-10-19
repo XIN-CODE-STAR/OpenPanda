@@ -125,3 +125,20 @@ func TestScopeKeysFoldCase(t *testing.T) {
 		t.Fatalf("workdir keys differ by case: %q vs %q", a, b)
 	}
 }
+
+// TestProjectKeyFoldsCase: the project lock must collide across casings —
+// spec.project arrives in whatever casing the classifier inferred from the
+// directory ("Needlen") while --project is verbatim ("needlen"). Live
+// evidence: two whole-project tasks on one tree landed project:Needlen and
+// project:needlen in the same queue, parallel writers the lock exists to
+// exclude.
+func TestProjectKeyFoldsCase(t *testing.T) {
+	if ProjectKey("Needlen") != ProjectKey("needlen") {
+		t.Fatalf("ProjectKey casing differs: %q vs %q", ProjectKey("Needlen"), ProjectKey("needlen"))
+	}
+	a := DefaultKeys(nil, "Needlen", "", "t1")
+	b := DefaultKeys(nil, "needlen", "", "t2")
+	if a[0] != b[0] {
+		t.Fatalf("default project keys diverged: %q vs %q", a[0], b[0])
+	}
+}

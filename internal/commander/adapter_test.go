@@ -551,6 +551,47 @@ func TestAdapterSessionEventWithoutSinkIsLatched(t *testing.T) {
 	}
 }
 
+// TestAdapterSessionEventReachesSink: the minted session must reach the
+// structured-event sink mid-run — the run loop persists it as the task's
+// resume checkpoint the moment it arrives, so a kill before the result
+// envelope still leaves a consumable handle. The sink copy also carries the
+// adapter file that minted it (checkpoint resume is adapter-affine).
+func TestAdapterSessionEventReachesSink(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "ann.py"), []byte(sessionAnnouncingAdapter), 0o755); err != nil {
+		t.Fatalf("write adapter: %v", err)
+	}
+	oldDir := adapterDir
+	adapterDir = dir
+	defer func() { adapterDir = oldDir }()
+	oldTimeout := adapterHardTimeout
+	adapterHardTimeout = 300 * time.Millisecond
+	defer func() { adapterHardTimeout = oldTimeout }()
+	oldAdvertised := adapterTimeoutS
+	adapterTimeoutS = 1
+	defer func() { adapterTimeoutS = oldAdvertised }()
+	oldGrace := hardTimeoutGrace
+	hardTimeoutGrace = 100 * time.Millisecond
+	defer func() { hardTimeoutGrace = oldGrace }()
+
+	var gotID, gotAdapter string
+	ctx := WithAgentEvents(context.Background(), func(ev AgentEvent) {
+		if ev.Ev == "session" {
+			gotID, gotAdapter = ev.ID, ev.Adapter
+		}
+	})
+	res := runAdapterProcess(ctx, "ann.py", "p", "", nil)
+	if res.ExitCode != 124 || res.SessionID != "ses_ann123" {
+		t.Fatalf("hard-killed run = code %d session %q, want 124 + ses_ann123", res.ExitCode, res.SessionID)
+	}
+	if gotID != "ses_ann123" {
+		t.Fatalf("sink session id = %q, want ses_ann123 (checkpoint must persist mid-run)", gotID)
+	}
+	if gotAdapter != "ann.py" {
+		t.Fatalf("sink adapter = %q, want ann.py (resume is adapter-affine)", gotAdapter)
+	}
+}
+
 // TestResumeAdapterAffinity: buildAdapterRequest only sends the resume handle
 // to the adapter that minted it — a fallback onto a different adapter must
 // drop the foreign id instead of feeding it a session it cannot parse.

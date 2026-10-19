@@ -72,6 +72,14 @@ type Runner interface {
 // runs in a private per-task work dir (core.prepareRunDir), so a shared lock
 // would only make independent tasks queue behind each other. Concurrency for
 // those stays bounded by the node's MaxConcurrent, not by exclusion.
+// ProjectKey returns the lock identity a whole-project task serializes on.
+// The name folds case through lockFold: spec.project comes back in whatever
+// casing the classifier inferred from the directory, --project arrives
+// verbatim, and the same tree under two spellings must still exclude itself.
+func ProjectKey(project string) string {
+	return "project:" + lockFold(project)
+}
+
 func DefaultKeys(keys []string, project, workDir, taskID string) []string {
 	if len(keys) > 0 {
 		return keys
@@ -80,8 +88,13 @@ func DefaultKeys(keys []string, project, workDir, taskID string) []string {
 		// The scope root rides next to the legacy project key: scoped
 		// children hold "scope:<p>/<path>" leaves and must still exclude a
 		// whole-project task (and vice versa), while tasks created before
-		// scope keys existed keep serializing on "project:<p>".
-		return []string{"project:" + project, ScopeRootKey(project)}
+		// scope keys existed keep serializing on "project:<p>". The project
+		// key folds case like every other path-ish lock — the classifier's
+		// spec.project arrives in whatever casing the model inferred from
+		// the directory name ("Needlen"), while a typed --project flag is
+		// verbatim ("needlen"), and two spellings of one tree must not get
+		// parallel writers.
+		return []string{ProjectKey(project), ScopeRootKey(project)}
 	}
 	if wd := workdirKey(workDir); wd != "" {
 		return []string{"dir:" + wd}

@@ -379,6 +379,11 @@ type AgentEvent struct {
 	Content  string          `json:"content,omitempty"`
 	Input    json.RawMessage `json:"input,omitempty"`
 	IsError  bool            `json:"is_error,omitempty"`
+	// Adapter names the adapter file that produced the event — stamped by
+	// the process wrapper, never parsed off the wire, so control-plane
+	// consumers (session-checkpoint persistence) can attribute a minted
+	// handle to the adapter that must later resume it.
+	Adapter string `json:"adapter,omitempty"`
 }
 
 // AgentEventFunc receives one structured agent-activity event. It is the
@@ -432,6 +437,10 @@ type progressWriter struct {
 	sink       ProgressFunc
 	evSink     AgentEventFunc
 	onActivity func() // set before Start; read-only afterwards
+	// adapterName is the adapter file this process runs — stamped onto
+	// session events so the persisting consumer attributes the minted
+	// handle to the adapter that must resume it.
+	adapterName string
 	// mu guards partial and capture: a session-mode caller snapshots
 	// diagnostics mid-stream (await) while the copier goroutine is still
 	// writing, and bytes.Buffer is not concurrent-safe.
@@ -560,10 +569,20 @@ func (w *progressWriter) event(b []byte) {
 	// is resuming under). Latch it regardless of whether a transcript sink
 	// is attached: the kill paths below read it to turn a dead run into a
 	// resumable checkpoint. It is control-plane metadata, not agent output —
-	// it never reaches the transcript.
+	// the sink copy is stamped Adapter so consumers persist it as a
+	// checkpoint rather than rendering it as transcript chatter.
 	if ev.Ev == "session" {
 		if ev.ID != "" {
 			w.lastSession = ev.ID
+			// Surface the checkpoint to the structured sink too: the run
+			// loop persists it the moment it is minted, so a mid-round kill
+			// still leaves a resumable session on the task row instead of
+			// losing the whole interrupted exploration. Redaction is a
+			// no-op on an opaque session id, but the event is control-plane
+			// metadata that never carries secrets regardless.
+			if w.evSink != nil {
+				w.evSink(AgentEvent{Ev: "session", ID: ev.ID, Adapter: w.adapterName})
+			}
 		}
 		return
 	}
@@ -1230,6 +1249,7 @@ func runAdapterProcess(ctx context.Context, name string, prompt string, cwd stri
 	stderr.onActivity = touch
 	stderr.sink = progressSink
 	stderr.evSink = AgentEvents(ctx)
+	stderr.adapterName = name
 	// Tool-call fuse (P0): adapters that ignore req.MaxTurns have no other
 	// turn bound — a model that never converges would otherwise loop tool
 	// calls until the wall-clock timeout, spending tokens the whole time.
@@ -1608,7 +1628,7 @@ func startAgentSession(spawnCtx, turnCtx context.Context, name string, req Adapt
 		cancel()
 		return nil, err
 	}
-	stderr := &progressWriter{}
+	stderr := &progressWriter{adapterName: name}
 	if sink, ok := turnCtx.Value(progressKey{}).(ProgressFunc); ok {
 		stderr.sink = sink
 	}

@@ -216,6 +216,21 @@ func (s *Store) Get(name string) (Project, error) {
 	return p, err
 }
 
+// GetFold reads one project matching the name case-insensitively. Task
+// inputs carry project names from two sources — the operator's flags, which
+// arrive verbatim, and the classifier's spec.project, which arrives in the
+// casing the model inferred from the directory ("Needlen" for a "needlen"
+// row). Both spell the same tree; the registry answers with the canonical
+// stored name so locks, approval policy and the task row agree on one.
+func (s *Store) GetFold(name string) (Project, error) {
+	p, err := scanProject(s.db.QueryRow(
+		`SELECT `+projectColumns+` FROM projects WHERE name = ? COLLATE NOCASE`, name))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Project{}, fmt.Errorf("%w: %s", ErrNotFound, name)
+	}
+	return p, err
+}
+
 // FindByWorkDir looks up the first project pointing at the given work directory.
 func (s *Store) FindByWorkDir(dir string) (Project, error) {
 	if dir == "" {
