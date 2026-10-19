@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Xustalis/OpenPanda/internal/agents"
 	"github.com/Xustalis/OpenPanda/internal/carddetect"
@@ -1099,13 +1100,23 @@ func resultText(resultJSON string) string {
 
 // compactJSON flattens an event's data JSON to one short line: the excerpt
 // keeps the head of the payload, which is where the identifying fields live.
+// The byte cut is walked back to a rune boundary — a multibyte string value
+// would otherwise leak a dangling continuation byte into the line.
 func compactJSON(dataJSON string) string {
 	s := strings.TrimSpace(dataJSON)
 	if s == "" || s == "{}" {
 		return ""
 	}
 	if len(s) > 160 {
-		s = s[:160] + "…"
+		s = s[:160]
+		for len(s) > 0 {
+			r, sz := utf8.DecodeLastRuneInString(s)
+			if !(r == utf8.RuneError && sz <= 1) {
+				break
+			}
+			s = s[:len(s)-1]
+		}
+		s += "…"
 	}
 	return s
 }

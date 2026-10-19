@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Xustalis/OpenPanda/internal/bus"
 	"github.com/Xustalis/OpenPanda/internal/scheduler/queue"
 )
 
@@ -298,6 +299,14 @@ func (c *Core) execLockAcquire(ctx context.Context, taskID, runID string, keys, 
 	}
 	tick := time.NewTicker(execLockPollEvery)
 	defer tick.Stop()
+	// The wait can sit in dispatched far past the stale-claim grace and a
+	// dispatch lease alike — the holder is an entire live run — so the row
+	// needs its own liveness signal until renewLease takes over: HeartbeatWait
+	// refreshes the local sweeps' clock (and pushes an existing lease), the
+	// progress relay does the same for the delegator's copy. A dead waiter
+	// simply stops beating and the sweeps take it.
+	beat := time.NewTicker(c.execWaitBeatInterval())
+	defer beat.Stop()
 	for {
 		c.execAcquireMu.Lock()
 		already := false
@@ -325,9 +334,44 @@ func (c *Core) execLockAcquire(ctx context.Context, taskID, runID string, keys, 
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-beat.C:
+			c.execWaitBeat(taskID)
 		case <-tick.C:
 		}
 	}
+}
+
+// execWaitBeatInterval paces the wait heartbeat: comfortably inside the
+// stranded-claim window (the sweep must never mistake a live wait for an
+// orphan) and at least the lease renewal cadence, floored like renewLease.
+func (c *Core) execWaitBeatInterval() time.Duration {
+	interval := c.lease() / leaseRenewDivisor
+	if stale := staleRowAfter / 3; interval > stale {
+		interval = stale
+	}
+	if interval < minLeaseRenewInterval {
+		interval = minLeaseRenewInterval
+	}
+	return interval
+}
+
+// execWaitBeat writes one liveness heartbeat for a task parked in the
+// execution-lock wait and beats task_progress up its delegation chain, so
+// the delegator's copy — whose lease was stamped once at dispatch and only
+// beats renew — keeps the task alive for as long as the wait itself is.
+func (c *Core) execWaitBeat(taskID string) {
+	wCtx, cancel := c.storeWriteCtx(context.Background())
+	defer cancel()
+	if err := c.store.HeartbeatWait(wCtx, taskID, c.lease().Milliseconds()); err != nil {
+		c.logger.Debug("exec lock wait heartbeat", "task", taskID, "err", err)
+		return
+	}
+	t, err := c.store.Get(wCtx, taskID)
+	if err != nil {
+		return // row gone mid-wait: the acquire loop's ctx ends it anyway
+	}
+	c.relayToParent(context.Background(), bus.MsgTaskProgress, t.Chain,
+		bus.TaskProgressPayload{TaskID: taskID, AttemptID: t.AttemptID})
 }
 
 // execReleaseFor drops taskID's worktree exec_locks rows for a wait — the

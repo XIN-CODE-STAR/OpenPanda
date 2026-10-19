@@ -1498,6 +1498,26 @@ func (s *TaskStore) SetLease(ctx context.Context, taskID string, durationMS int6
 	return nil
 }
 
+// HeartbeatWait refreshes a task row's liveness while its run sits blocked
+// acquiring execution leases: the row is still dispatched and the stranded
+// sweeps must see the process is alive. updated_at always moves — the
+// stale-claim requeue keys on it — while lease_expires_at only pushes where
+// a lease already exists: a queued claim carries none, and stamping one
+// would turn a dead waiter's "orphaned claim → requeue" outcome into a
+// wrongful "expired → fail" for work that never ran.
+func (s *TaskStore) HeartbeatWait(ctx context.Context, taskID string, durationMS int64) error {
+	now := s.now()
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE tasks SET updated_at=?,
+			lease_expires_at=CASE WHEN lease_expires_at IS NOT NULL THEN ? ELSE lease_expires_at END
+			WHERE task_id=?`,
+		now, now+(durationMS+999)/1000, taskID)
+	if err != nil {
+		return fmt.Errorf("heartbeat wait: %w", err)
+	}
+	return nil
+}
+
 // ClearLease drops a task's lease deadline entirely. A task parked in the
 // outbox waiting on a peer link holds no executor, so nothing it could
 // measure would fire legitimately — the DTN deadline (or a human cancel) is

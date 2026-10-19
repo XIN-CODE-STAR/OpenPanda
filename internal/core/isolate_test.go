@@ -332,6 +332,83 @@ func TestIsolatedChildrenRunInParallelAndMerge(t *testing.T) {
 	}
 }
 
+// TestIsolatedWorkspacePreservesSymlinks covers the non-git copy path's
+// symlink fidelity: links survive the copy as links (a flattened copy
+// would rewrite every link into its target's bytes at merge), and the
+// three-way sees link creation, retarget, and deletion exactly like file
+// changes.
+func TestIsolatedWorkspacePreservesSymlinks(t *testing.T) {
+	ctx := context.Background()
+	c := NewCore(openTestDB(t), "iso-link", ledger.Card{Device: "iso-link"}, 5, testLogger(), config.ModelConfig{})
+	c.SetWorkDir(t.TempDir())
+
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, "lib", "real.txt"), "v1\n")
+	writeFile(t, filepath.Join(src, "lib", "moved.txt"), "v2\n")
+	if err := os.Symlink("lib/real.txt", filepath.Join(src, "link.txt")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := os.Symlink("lib", filepath.Join(src, "libdir")); err != nil {
+		t.Fatalf("symlink libdir: %v", err)
+	}
+
+	task := Task{TaskID: "01a151d0-0000-7000-8000-000000000003", Project: "proj"}
+	dir, err := c.setupIsolatedWorkDir(ctx, task, src)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	// A non-git tree took the copy path; every link must arrive as a link.
+	for _, p := range []string{"link.txt", "libdir"} {
+		st, err := os.Lstat(filepath.Join(dir, p))
+		if err != nil {
+			t.Fatalf("lstat %s: %v", p, err)
+		}
+		if st.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("%s flattened to mode %v in the copy", p, st.Mode())
+		}
+	}
+	if target, err := os.Readlink(filepath.Join(dir, "link.txt")); err != nil || target != "lib/real.txt" {
+		t.Fatalf("link.txt target = %q err=%v, want lib/real.txt", target, err)
+	}
+
+	// The child's run retargets a link, deletes one, and adds one — the
+	// untouched main tree (src itself) must receive all three as links.
+	if err := os.Remove(filepath.Join(dir, "link.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("lib/moved.txt", filepath.Join(dir, "link.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "libdir")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("lib/real.txt", filepath.Join(dir, "newlink")); err != nil {
+		t.Fatal(err)
+	}
+	merged, conflicts, err := c.mergeIsolatedWork(dir, src)
+	if err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if len(conflicts) != 0 {
+		t.Fatalf("conflicts = %v, want none", conflicts)
+	}
+	if merged != 3 {
+		t.Fatalf("merged = %d, want 3 (retarget, delete, create)", merged)
+	}
+	if target, err := os.Readlink(filepath.Join(src, "link.txt")); err != nil || target != "lib/moved.txt" {
+		t.Fatalf("merged link.txt = %q err=%v, want lib/moved.txt", target, err)
+	}
+	if target, err := os.Readlink(filepath.Join(src, "newlink")); err != nil || target != "lib/real.txt" {
+		t.Fatalf("merged newlink = %q err=%v, want lib/real.txt", target, err)
+	}
+	if _, err := os.Lstat(filepath.Join(src, "libdir")); !os.IsNotExist(err) {
+		t.Fatal("deleted libdir still present in the main tree")
+	}
+	if got := readFile(t, filepath.Join(src, "lib", "real.txt")); got != "v1\n" {
+		t.Fatalf("link target bytes disturbed: %q", got)
+	}
+}
+
 // TestPackStageOutputSkipsIsolationBookkeeping locks the wire hygiene an
 // isolated remote child needs: the packed output must not carry the merge
 // baseline or the worktree's .git pointer — extracting either on the origin

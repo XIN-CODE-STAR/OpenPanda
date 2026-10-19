@@ -195,7 +195,23 @@ func overlayDirtyFiles(ctx context.Context, source, dir string) error {
 			_ = os.Remove(dst)
 			continue
 		}
-		if st, err := os.Stat(src); err == nil && st.Mode().IsRegular() {
+		st, err := os.Lstat(src)
+		if err != nil {
+			continue
+		}
+		if st.Mode()&os.ModeSymlink != 0 {
+			// git tracks symlinks; a flattened copy would rewrite the link
+			// as its target's bytes at merge time.
+			target, rerr := os.Readlink(src)
+			if rerr != nil {
+				return fmt.Errorf("overlay %s: %w", p, rerr)
+			}
+			if err := linkIsolatedPath(dst, target); err != nil {
+				return fmt.Errorf("overlay %s: %w", p, err)
+			}
+			continue
+		}
+		if st.Mode().IsRegular() {
 			if err := copyRegularFile(src, dst, st.Mode()); err != nil {
 				return fmt.Errorf("overlay %s: %w", p, err)
 			}
@@ -205,7 +221,11 @@ func overlayDirtyFiles(ctx context.Context, source, dir string) error {
 }
 
 // copyWorkTree copies source into dst (which exists) skipping the derived-dir
-// set: the non-git fallback for isolation.
+// set: the non-git fallback for isolation. Symlinks are recreated as links —
+// the copy must preserve what git would have, or the three-way merge later
+// flattens every link into its target's bytes. A link the platform refuses
+// (Windows without developer mode) degrades to a skip, the pre-symlink
+// behavior, rather than failing the whole workspace over it.
 func (c *Core) copyWorkTree(source, dst string) error {
 	return filepath.WalkDir(source, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -225,7 +245,20 @@ func (c *Core) copyWorkTree(source, dst string) error {
 			}
 			return os.MkdirAll(filepath.Join(dst, filepath.FromSlash(relSlash)), 0o755)
 		}
-		if !d.Type().IsRegular() || isolateSkippedPath(relSlash) || c.isHostStatePath(p) {
+		if isolateSkippedPath(relSlash) || c.isHostStatePath(p) {
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			target, terr := os.Readlink(p)
+			if terr != nil {
+				return terr
+			}
+			if lerr := linkIsolatedPath(filepath.Join(dst, filepath.FromSlash(relSlash)), target); lerr != nil {
+				c.logger.Debug("copy symlink skipped", "path", relSlash, "err", lerr)
+			}
+			return nil
+		}
+		if !d.Type().IsRegular() {
 			return nil
 		}
 		info, ierr := d.Info()
@@ -261,8 +294,22 @@ func (c *Core) hashWorkTree(root string) (map[string]string, error) {
 			}
 			return nil
 		}
-		if !d.Type().IsRegular() || relSlash == isolatedBaselineFile ||
-			isolateSkippedPath(relSlash) || c.isHostStatePath(p) {
+		if relSlash == isolatedBaselineFile || isolateSkippedPath(relSlash) || c.isHostStatePath(p) {
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			// A symlink's "content" is its target: hashing the target text
+			// (under a prefix no file bytes can collide with) lets the
+			// three-way see link creation, retarget, and deletion exactly
+			// like file create/modify/delete.
+			target, terr := os.Readlink(p)
+			if terr != nil {
+				return terr
+			}
+			out[relSlash] = hashLinkTarget(target)
+			return nil
+		}
+		if !d.Type().IsRegular() {
 			return nil
 		}
 		h, herr := sha256File(p)
@@ -316,6 +363,35 @@ func sha256File(path string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// hashLinkTarget is a symlink's three-way identity: the digest of its
+// target text namespaced so no file's content hash can alias it — a file
+// replacing a link (or vice versa) always compares unequal, which is the
+// change the merge must see.
+func hashLinkTarget(target string) string {
+	h := sha256.New()
+	h.Write([]byte("symlink\x00"))
+	h.Write([]byte(target))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// linkIsolatedPath recreates a symlink at dst inside the walked trees:
+// anything already occupying the path (a file, an older link) is removed
+// first — os.Symlink refuses to overwrite — and the parent directory is
+// made on demand like copyRegularFile's.
+func linkIsolatedPath(dst, target string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(dst); err == nil {
+		if err := os.Remove(dst); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return os.Symlink(target, dst)
 }
 
 func copyRegularFile(src, dst string, mode fs.FileMode) error {
@@ -534,9 +610,19 @@ func applyIsolatedPath(isoDir, mainDir, rel string, present bool) error {
 		return nil
 	}
 	src := filepath.Join(isoDir, filepath.FromSlash(rel))
-	st, err := os.Stat(src)
+	st, err := os.Lstat(src)
 	if err != nil {
 		return fmt.Errorf("stat %s: %w", rel, err)
+	}
+	if st.Mode()&os.ModeSymlink != 0 {
+		target, rerr := os.Readlink(src)
+		if rerr != nil {
+			return fmt.Errorf("readlink %s: %w", rel, rerr)
+		}
+		if err := linkIsolatedPath(dst, target); err != nil {
+			return fmt.Errorf("apply %s: %w", rel, err)
+		}
+		return nil
 	}
 	if err := copyRegularFile(src, dst, st.Mode()); err != nil {
 		return fmt.Errorf("apply %s: %w", rel, err)

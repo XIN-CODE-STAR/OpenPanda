@@ -586,6 +586,43 @@ func TestAuthRateLimitWindowReset(t *testing.T) {
 	}
 }
 
+// TestAuthLimiterBoundedMap: a sprayed brute-force run from fresh
+// addresses must not grow the failure table without end — expired windows
+// reap first and the map stays inside the cap regardless of address count.
+func TestAuthLimiterBoundedMap(t *testing.T) {
+	l := &authLimiter{failures: map[string]*authFailure{}}
+	for i := 0; i < authFailureMapMax+100; i++ {
+		l.fail(fmt.Sprintf("10.%d.%d.%d", i>>16&0xff, i>>8&0xff, i&0xff))
+	}
+	l.mu.Lock()
+	n := len(l.failures)
+	l.mu.Unlock()
+	if n > authFailureMapMax {
+		t.Fatalf("failures map = %d entries, want <= %d", n, authFailureMapMax)
+	}
+}
+
+// TestAuthLimiterReapsExpired: an expired window must not linger in the
+// table — reads drop it so a long-lived panel never accumulates dead IPs.
+func TestAuthLimiterReapsExpired(t *testing.T) {
+	old := authFailWindow
+	authFailWindow = 20 * time.Millisecond
+	t.Cleanup(func() { authFailWindow = old })
+
+	l := &authLimiter{failures: map[string]*authFailure{}}
+	l.fail("192.0.2.1")
+	time.Sleep(2 * authFailWindow)
+	if l.locked("192.0.2.1") {
+		t.Fatal("expired window still locks")
+	}
+	l.mu.Lock()
+	n := len(l.failures)
+	l.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("expired entry left behind: %d entries", n)
+	}
+}
+
 func TestDeleteTask(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()

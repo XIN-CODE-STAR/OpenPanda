@@ -3,12 +3,19 @@
 package core
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/Xustalis/OpenPanda/internal/commander"
+	"github.com/Xustalis/OpenPanda/internal/config"
+	"github.com/Xustalis/OpenPanda/internal/entry"
 )
 
 // TestContextOverflowCompactRetry verifies the in-round recovery: a context
@@ -113,6 +120,38 @@ func TestCompactRunNotesTruncatesWithoutSupervisor(t *testing.T) {
 	}
 	if got[len(got)-1] != notes[len(notes)-1] {
 		t.Fatal("newest note must survive the truncation")
+	}
+}
+
+// TestCompactRunNotesCutOnRuneBoundary: the 96000-byte tail cut can land
+// inside a multi-byte rune — a dangling continuation byte would reach the
+// supervisor as mojibake. The cut must advance to a rune boundary first.
+func TestCompactRunNotesCutOnRuneBoundary(t *testing.T) {
+	var captured []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured, _ = io.ReadAll(r.Body)
+		w.Header().Set("content-type", "application/json")
+		resp := map[string]any{"content": []map[string]string{{"type": "text", "text": "digest"}}}
+		b, _ := json.Marshal(resp)
+		_, _ = w.Write(b)
+	}))
+	defer srv.Close()
+	client, err := entry.NewClient(config.ModelConfig{BaseURL: srv.URL, APIKey: "sk-test", Model: "deepseek-chat"})
+	if err != nil {
+		t.Fatalf("supervisor client: %v", err)
+	}
+	c := &Core{logger: testLogger()}
+	c.SetSupervisor(client)
+
+	// "é" straddles the 96000-byte cut: without the boundary walk the tail
+	// begins on its continuation byte.
+	note := strings.Repeat("x", 999) + "é" + strings.Repeat("y", 95999)
+	got := c.compactRunNotes(context.Background(), []string{note})
+	if len(got) != 1 || !strings.Contains(got[0], "digest") {
+		t.Fatalf("digest path lost: %v", got)
+	}
+	if bytes.Contains(captured, []byte("�")) || bytes.Contains(captured, []byte(`�`)) {
+		t.Fatal("mojibake reached the supervisor prompt")
 	}
 }
 

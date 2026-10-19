@@ -94,7 +94,8 @@ func DefaultKeys(keys []string, project, workDir, taskID string) []string {
 // must collide on the same key or the serialization the key exists for
 // leaks. Symlinks resolve on a best-effort basis — an unresolvable path
 // still gets a cleaned absolute spelling, which is exactly what the pinned
-// dir's second task would compute too.
+// dir's second task would compute too — and case folds like every other
+// path-typed key (see lockFold).
 func workdirKey(dir string) string {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
@@ -107,12 +108,12 @@ func workdirKey(dir string) string {
 	}
 	abs, err := filepath.Abs(dir)
 	if err != nil {
-		return filepath.Clean(dir)
+		return lockFold(filepath.Clean(dir))
 	}
 	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-		return resolved
+		return lockFold(resolved)
 	}
-	return abs
+	return lockFold(abs)
 }
 
 // WorkDirKey is the exported form of workdirKey for lock composition done
