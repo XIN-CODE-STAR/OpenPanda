@@ -144,7 +144,8 @@ func executeCheck(includePre bool) {
 		}
 		fmt.Println()
 		fmt.Println(p.Muted(i18n.T(loc, "cli.update.applyHint")))
-		fmt.Println("  " + p.Command("panda update apply") + "  " + p.Muted("(or: "+p.Command("panda upgrade")+")"))
+		applyCmd, upgradeCmd := updateApplyCommands(includePre)
+		fmt.Println("  " + p.Command(applyCmd) + "  " + p.Muted("(or: "+p.Command(upgradeCmd)+")"))
 	} else {
 		if st.Notes != "" && strings.HasPrefix(st.Notes, "暂无法检查更新") {
 			fmt.Println(p.Warn(st.Notes))
@@ -210,7 +211,13 @@ func executeApply(includePre, force bool) {
 			case st.Latest == "":
 				fmt.Println(p.Warn(i18n.T(loc, "cli.update.noRelease")))
 			default:
-				fmt.Println(p.Success(i18n.Tf(loc, "cli.update.uptodate", "current", versionpkg.Display())))
+				if pre, ok := newerPrerelease(ctx, versionpkg.Version); ok {
+					fmt.Println(p.Warn(i18n.Tf(loc, "cli.update.prereleaseHint", "version", verDisplay(pre.Version, pre.Codename))))
+					applyCmd, upgradeCmd := updateApplyCommands(true)
+					fmt.Println("  " + p.Command(applyCmd) + "  " + p.Muted("(or: "+p.Command(upgradeCmd)+")"))
+				} else {
+					fmt.Println(p.Success(i18n.Tf(loc, "cli.update.uptodate", "current", versionpkg.Display())))
+				}
 			}
 		}
 		if st.Latest == "" && force {
@@ -268,6 +275,33 @@ func executeApply(includePre, force bool) {
 		}
 		fmt.Println(p.Muted(i18n.T(loc, "cli.update.restartHint")))
 	}
+}
+
+// updateApplyCommands returns the exact commands that re-discover the release
+// a check just found. `apply` re-runs the check from scratch, so a --pre check
+// must carry the flag into apply; otherwise a stable build only sees the
+// stable channel and reports itself up to date.
+func updateApplyCommands(includePre bool) (apply, upgrade string) {
+	if includePre {
+		return "panda update apply --pre", "panda upgrade --pre"
+	}
+	return "panda update apply", "panda upgrade"
+}
+
+// newerPrerelease reports a pre-release newer than current when the stable
+// channel has nothing. A bare `apply` is a fresh process with no memory of the
+// `check --pre` that found the preview, so without this it would answer "up to
+// date" and leave the user with no hint that the preview exists.
+func newerPrerelease(ctx context.Context, current string) (updater.Release, bool) {
+	if strings.Contains(current, "-") {
+		return updater.Release{}, false
+	}
+	repo := updateEnvOptions(updater.Options{}).Repo
+	rel, err := updater.FindLatest(ctx, repo, true, current)
+	if err != nil || !strings.Contains(rel.Version, "-") || updater.CompareVersion(rel.Version, current) <= 0 {
+		return updater.Release{}, false
+	}
+	return rel, true
 }
 
 // verDisplay renders a version for a human reader: "v" + semver, with the
