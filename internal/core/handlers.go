@@ -19,6 +19,7 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/plan"
 	"github.com/Xustalis/OpenPanda/internal/scheduler"
 	"github.com/Xustalis/OpenPanda/internal/trust"
+	"github.com/Xustalis/OpenPanda/internal/util"
 )
 
 // handleDelegate processes an incoming task_delegate. It decides where the
@@ -51,10 +52,34 @@ func (c *Core) handleDelegate(ctx context.Context, env bus.Envelope) {
 		return
 	}
 
-	// Idempotency: if we already know this task, do not re-create.
-	if _, err := c.store.Get(ctx, p.TaskID); err == nil {
-		c.logger.Info("duplicate task_delegate ignored", "task", p.TaskID, "msg", env.MsgID)
-		return
+	// Idempotency: if we already know this task, do not re-create. One
+	// exception — the delegator's expiry re-route can land back on a node
+	// whose copy of an OLDER attempt already closed (done/failed/cancelled/
+	// expired). A stale verdict must not dead-end a fresh attempt: replace
+	// the row and let the new delivery run. The event log keeps both
+	// attempts' history under the same task id.
+	//
+	// The replacement is attempt-ordered: only a strictly NEWER attempt may
+	// evict a closed copy. A stale delivery carrying an older attempt id —
+	// a re-sent delegate that wandered in after the reroute already landed —
+	// must not resurrect abandoned work. Unordered stored ids (legacy rows
+	// without UUIDv7 lineage) have no order to defend and stay replaceable.
+	if cur, err := c.store.Get(ctx, p.TaskID); err == nil {
+		newer := p.AttemptID != "" && cur.AttemptID != p.AttemptID &&
+			(!util.IsUUIDv7(cur.AttemptID) || attemptIsNewer(p.AttemptID, cur.AttemptID))
+		if newer {
+			if derr := c.store.DeleteTerminal(ctx, p.TaskID); derr == nil {
+				c.logger.Info("replaced closed task copy for re-routed attempt",
+					"task", p.TaskID, "prev_attempt", cur.AttemptID)
+			} else {
+				c.logger.Info("duplicate task_delegate ignored", "task", p.TaskID,
+					"msg", env.MsgID, "state", cur.State)
+				return
+			}
+		} else {
+			c.logger.Info("duplicate task_delegate ignored", "task", p.TaskID, "msg", env.MsgID)
+			return
+		}
 	}
 
 	// Append this node to the delegation chain. Revisiting a node means a

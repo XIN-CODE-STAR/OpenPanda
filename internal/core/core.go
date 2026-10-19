@@ -1685,12 +1685,17 @@ func (c *Core) sweepTaskDirs(ctx context.Context) {
 	}
 }
 
-// expireLeases fails every active task whose lease or absolute deadline has
-// passed, then cleans up what the failure leaves behind: the local execution
-// (if this process drives it), the parked-context reservation, the remote
-// executor still burning tokens, and any blocked upstream waiter.
+// expireLeases settles every active task whose lease or absolute deadline has
+// passed. Phase one releases what the lapsed row still holds — the local
+// execution (if this process drives it), the parked-context reservation, the
+// remote executor still burning tokens — BEFORE any settle, so a re-queued
+// row can never be re-claimed while its predecessor still runs. Phase two
+// settles: lease-lapsed rows re-queue for re-route while retry budget lasts
+// (a dead executor's work moves to a live peer instead of dying); budget-
+// spent and deadline rows take their terminal verdict and propagate it up
+// the chain so a root scheduler blocked in Submit unblocks (D3).
 func (c *Core) expireLeases(ctx context.Context) {
-	expired, err := c.store.ExpireTasks(ctx)
+	expired, err := c.store.ScanExpired(ctx)
 	if err != nil {
 		c.logger.Warn("expire tasks", "err", err)
 		return
@@ -1698,28 +1703,72 @@ func (c *Core) expireLeases(ctx context.Context) {
 	if len(expired) == 0 {
 		return
 	}
-	for _, id := range expired {
-		// A force-fail that only rewrites the database row leaves the
-		// agent subprocess running — still writing files, still
-		// committing — under a task already reported failed upstream,
-		// which the parent then re-routes to a second node. Abort the
-		// local execution for real.
-		c.cancelRunning(id)
+	var failedN, reroutedN int
+	for _, r := range expired {
+		// Order matters: settle the row BEFORE killing the process. The
+		// run's deferred cleanup writes 'failed' while the row still says
+		// running — cancelling first would let that write land ahead of the
+		// settle and turn a recoverable lease expiry into a terminal failure.
+		// Settled first (queued under a fresh attempt, or closed), the
+		// dying runner's read sees the row moved on and its write no-ops.
+		//
+		// Snapshot the execution handle now so the post-settle cancel hits
+		// exactly the run that held the expired lease: the re-queued row
+		// may already be re-claimed and re-registered under a fresh attempt,
+		// and that new execution must survive.
+		snap, wasRunning := c.running.Load(r.TaskID)
 		// A task that timed out while paused in waiting_context would
 		// otherwise leak its entry in pendingCtx (P2-7) — and with the
 		// entry, the capacity reservation it carries.
-		c.dropPendingContext(id)
+		c.dropPendingContext(r.TaskID)
 		// The lease expired on a task this node dispatched to a remote
 		// executor: tell that executor to stop (review P1-4). Without
 		// this the remote agent keeps burning tokens and writing files
-		// under a task this node has already reported failed — work that
-		// a re-route then duplicates. forwardCancelDownstream no-ops
+		// under a task this node has already replaced — work that the
+		// re-route would duplicate. This must ride the delegate target
+		// BEFORE SettleExpired clears it. forwardCancelDownstream no-ops
 		// when the task never left this node.
-		c.forwardCancelDownstream(ctx, id, "lease expired")
-		// Propagate the timeout up the delegation chain so a root
+		c.forwardCancelDownstream(ctx, r.TaskID, "lease expired")
+
+		outcome, err := c.store.SettleExpired(ctx, r, c.nodeID)
+		if err != nil {
+			c.logger.Warn("expire task", "task", r.TaskID, "err", err)
+			continue
+		}
+		// Kill the expired run's process — still writing files, still
+		// committing — now that the verdict it would have overwritten is
+		// durably settled. CompareAndDelete refuses if the slot was already
+		// released or re-registered: a stale handle never cancels the
+		// re-routed attempt that replaced it.
+		if wasRunning {
+			if h, ok := snap.(*runningHandle); ok && c.running.CompareAndDelete(r.TaskID, snap) {
+				h.cancel()
+				c.logger.Info("aborted expired local execution", "task", r.TaskID)
+			}
+		}
+		if outcome == ExpiryRerouted {
+			reroutedN++
+			// The task lives on under a fresh attempt — tell the upstream
+			// copy so its own lapsed lease renews instead of cascading the
+			// same expiry one hop up. relayToParent no-ops for a root task.
+			if tk, err := c.store.Get(ctx, r.TaskID); err == nil {
+				note := "executor lease expired — re-queued for re-route"
+				if rerr := c.store.RecordEvent(ctx, r.TaskID, EvProgress,
+					map[string]any{"note": note}); rerr == nil {
+					c.relayToParent(ctx, bus.MsgTaskProgress, tk.Chain,
+						bus.TaskProgressPayload{TaskID: r.TaskID, AttemptID: tk.AttemptID, Note: note})
+				}
+			}
+			continue
+		}
+		if outcome != ExpiryFailed {
+			continue // ExpirySkipped: a concurrent transition owns it
+		}
+		failedN++
+		// Propagate the terminal verdict up the delegation chain so a root
 		// scheduler blocked in Submit unblocks (D3). relayToParent is
 		// a no-op for a root task; signalResult no-ops without a waiter.
-		if tk, err := c.store.Get(ctx, id); err == nil {
+		if tk, err := c.store.Get(ctx, r.TaskID); err == nil {
 			// Report the state the row actually reached: a lease
 			// expiry is a failure, a deadline is 'expired' — the
 			// delegator renders them differently and only the row
@@ -1731,15 +1780,15 @@ func (c *Core) expireLeases(ctx context.Context) {
 				state = StateFailed
 			}
 			res := bus.TaskResultPayload{
-				TaskID: id, AttemptID: tk.AttemptID, State: state, OK: false, ExitCode: 1, Stderr: stderr,
+				TaskID: r.TaskID, AttemptID: tk.AttemptID, State: state, OK: false, ExitCode: 1, Stderr: stderr,
 				Chain: tk.Chain,
 			}
 			c.relayToParent(ctx, bus.MsgTaskResult, tk.Chain, res)
-			c.signalResult(id, res)
-			c.reportLateChildResult(ctx, id)
+			c.signalResult(r.TaskID, res)
+			c.reportLateChildResult(ctx, r.TaskID)
 		}
 	}
-	c.logger.Info("monitor expired tasks", "count", len(expired))
+	c.logger.Info("monitor expired tasks", "count", failedN+reroutedN, "failed", failedN, "rerouted", reroutedN)
 }
 
 // reconcileLocalWork stops this process's own executions whose task rows left

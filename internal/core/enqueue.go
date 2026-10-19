@@ -292,7 +292,13 @@ func (c *Core) runScheduled(ctx context.Context, taskID string) {
 		c.logger.Warn("queue: task run error", "task", taskID, "err", rerr)
 		return
 	}
-	c.logger.Info("queue: task finished", "task", taskID, "state", final.State)
+	if Terminal(final.State) {
+		c.logger.Info("queue: task finished", "task", taskID, "state", final.State)
+	} else {
+		// A non-terminal row means a sibling runner took the outcome over
+		// (ErrAlreadyRunning stand-down) — calling it "finished" would lie.
+		c.logger.Info("queue: task run yielded", "task", taskID, "state", final.State)
+	}
 	// A delegated row that ran here — e.g. released from a trust-zone
 	// admission park by `panda approve` — owes its verdict to the delegator,
 	// whose copy still sits in dispatched waiting on this node. Relay it up
@@ -397,6 +403,17 @@ func (c *Core) forwardScheduled(ctx context.Context, t Task) bool {
 			return true
 		}
 	} else {
+		// An executor whose custody lapsed mid-run is excluded from the
+		// re-route too — handing the task straight back to a node that just
+		// went silent re-parks it on the same dead link. Pinned tasks above
+		// never take this path: a pin is a fixed destination, not a candidacy.
+		evicted, err := c.store.EvictedExecutors(ctx, t.TaskID)
+		if err != nil {
+			c.logger.Warn("queue forward: evicted executors", "task", t.TaskID, "err", err)
+		}
+		if len(evicted) > 0 {
+			seenChain = append(seenChain, evicted...)
+		}
 		decision = scheduler.RouteP(c.nodeID, seenChain,
 			c.eligibleForSend(ctx, needsForTask(t), c.onlineEmployees(ctx)),
 			c.localMatch(), t.Requires,

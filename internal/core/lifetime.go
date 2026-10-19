@@ -93,12 +93,20 @@ func (c *Core) lease() time.Duration {
 	return d
 }
 
+// runningHandle makes an execution's cancel func pointer-comparable, so the
+// release path and a snapshot cancel both target exactly the run they saw.
+// An unconditional Delete would let a dying run's late release erase the
+// binding a re-registered run (a re-routed attempt's fresh execution) just
+// stored — CompareAndDelete on the handle itself cannot.
+type runningHandle struct{ cancel context.CancelFunc }
+
 // registerRunning binds taskID to the CancelFunc of the context its execution
 // runs under and returns a release func the caller must defer. While bound,
 // cancelRunning can actually stop the work.
 func (c *Core) registerRunning(taskID string, cancel context.CancelFunc) func() {
-	c.running.Store(taskID, cancel)
-	return func() { c.running.Delete(taskID) }
+	h := &runningHandle{cancel: cancel}
+	c.running.Store(taskID, h)
+	return func() { c.running.CompareAndDelete(taskID, h) }
 }
 
 // cancelRunning aborts local execution of taskID, reporting whether this node
@@ -111,11 +119,11 @@ func (c *Core) cancelRunning(taskID string) bool {
 	if !ok {
 		return false
 	}
-	cancel, ok := v.(context.CancelFunc)
+	h, ok := v.(*runningHandle)
 	if !ok {
 		return false
 	}
-	cancel()
+	h.cancel()
 	c.logger.Info("aborted local execution", "task", taskID)
 	return true
 }

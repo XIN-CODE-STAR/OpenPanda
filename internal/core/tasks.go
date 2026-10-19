@@ -2023,87 +2023,270 @@ func (s *TaskStore) lastProgressNote(ctx context.Context, taskID string) string 
 // shows a failure, and an adapter note is a status line, not a report.
 const leaseNoteLimit = 120
 
-// ExpireTasks fails any active task whose lease has expired. It returns the
-// task IDs actually failed, so the caller can clean up per-task state. Called
-// periodically by the monitor.
-func (s *TaskStore) ExpireTasks(ctx context.Context) ([]string, error) {
+// ExpiredRow is one active row whose lease or absolute deadline has lapsed.
+// The scan returns it without acting so the caller can first release whatever
+// execution resources the row still holds — a local agent subprocess, a
+// parked-context reservation, a downstream executor still burning tokens —
+// before SettleExpired decides the row's fate.
+type ExpiredRow struct {
+	TaskID string
+	State  string
+	Owner  string
+	// Deadline marks an absolute-lifetime expiry (§8.2 DTN bound): those
+	// settle terminally regardless of retry budget — the bundle outlived
+	// its lifetime and re-running cannot extend it.
+	Deadline bool
+	// Rerouted is the settle outcome: the row re-queued for another run
+	// rather than recording a terminal verdict.
+	Rerouted bool
+}
+
+// Expiry outcomes reported by SettleExpired.
+const (
+	ExpiryFailed   = "failed"   // terminal verdict recorded on the row
+	ExpiryRerouted = "rerouted" // re-queued under a fresh attempt
+	ExpirySkipped  = "skipped"  // a concurrent transition settled it first
+)
+
+// ScanExpired returns every active row past its lease or absolute deadline.
+// review is deliberately absent from the lease scan: a task paused for human
+// analysis has no deadline pressure, and the monitor must never kill it out
+// from under the reviewer (P1-8).
+func (s *TaskStore) ScanExpired(ctx context.Context) ([]ExpiredRow, error) {
 	now := s.now()
-	// review is deliberately absent: a task paused for human analysis has no
-	// deadline pressure, and the monitor must never kill it out from under the
-	// reviewer (P1-8). The lease is also cleared on entering review (see
-	// transition), so a stale timestamp here would be doubly wrong to act on.
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT task_id FROM tasks
+		`SELECT task_id, state, owner_node, 0 FROM tasks
 		 WHERE lease_expires_at > 0 AND lease_expires_at < ?
-		   AND state IN ('dispatched','waiting_context','running')`, now)
+		   AND state IN ('dispatched','waiting_context','running')
+		 UNION ALL
+		 SELECT task_id, state, owner_node, 1 FROM tasks
+		 WHERE deadline_unix > 0 AND deadline_unix < ?
+		   AND state IN ('submitted','queued','dispatched','waiting_context','running')`,
+		now, now)
 	if err != nil {
-		return nil, fmt.Errorf("scan leases: %w", err)
+		return nil, fmt.Errorf("scan expired: %w", err)
 	}
-	var ids []string
+	var out []ExpiredRow
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var r ExpiredRow
+		var deadline int
+		if err := rows.Scan(&r.TaskID, &r.State, &r.Owner, &deadline); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		ids = append(ids, id)
+		r.Deadline = deadline != 0
+		out = append(out, r)
 	}
 	rows.Close()
-	if err := rows.Err(); err != nil {
+	return out, rows.Err()
+}
+
+// SettleExpired gives one scanned row its expiry verdict.
+//
+// A deadline expiry is terminal outright: the task's lifetime is over and no
+// re-queue can extend it (running rows fail like a lease so the monitor kills
+// the subprocess; anything earlier is marked expired — the distinction the
+// 'expired' state exists to carry).
+//
+// A lease expiry means the supervising executor stopped renewing — process
+// dead, link partitioned, supervisor goroutine lost — while the work itself
+// was never adjudicated. With retry budget left the row re-queues under a
+// fresh attempt so the scheduler re-decides where it runs: a dead executor's
+// task re-routes to a live peer instead of dying on the lease; a self-owned
+// run re-runs locally and can resume its minted session. The persisted retry
+// budget bounds the loop — once spent, the row fails exactly as before.
+func (s *TaskStore) SettleExpired(ctx context.Context, r ExpiredRow, selfNode string) (string, error) {
+	t, err := s.Get(ctx, r.TaskID)
+	if err != nil {
+		return ExpirySkipped, nil // the row is gone — nothing left to settle
+	}
+	if t.State != r.State || Terminal(t.State) {
+		return ExpirySkipped, nil // a concurrent transition moved it on
+	}
+	if r.Deadline {
+		if r.State == StateRunning {
+			if err := s.ForceFail(ctx, r.TaskID, "deadline exceeded"); err != nil {
+				return ExpirySkipped, err
+			}
+		} else if err := s.MarkExpired(ctx, r.TaskID, "deadline exceeded"); err != nil {
+			return ExpirySkipped, err
+		}
+		return ExpiryFailed, nil
+	}
+	hard, herr := s.HardRetries(ctx, r.TaskID)
+	if herr != nil {
+		s.logger.Warn("expiry settle: retry count failed", "task", r.TaskID, "err", herr)
+	}
+	if herr == nil && hard < maxPersistedRetries {
+		if err := s.requeueExpiredRun(ctx, t, selfNode); err != nil {
+			if errors.Is(err, ErrConflict) {
+				return ExpirySkipped, nil // an accept/result landed mid-settle
+			}
+			return ExpirySkipped, err
+		}
+		s.logger.Info("task lease expired — re-queued for re-route", "task", r.TaskID, "prev_owner", t.OwnerNode)
+		return ExpiryRerouted, nil
+	}
+	// The monitor acts on behalf of the lease holder regardless of the stored
+	// owner (a crashed process may no longer hold it).
+	if err := s.ForceFail(ctx, r.TaskID, s.leaseExpiredReason(ctx, r.TaskID)); err != nil {
+		return ExpirySkipped, err
+	}
+	s.logger.Info("task failed by timeout", "task", r.TaskID)
+	return ExpiryFailed, nil
+}
+
+// requeueExpiredRun returns an expired active row to the queue under a fresh
+// attempt so the scheduler re-decides where it runs. The attempt rotation is
+// the split-brain fence: a partitioned executor's late beats and results keep
+// carrying the old attempt and drop as stale, while the cleared delegate
+// target and reclaimed owner revoke its executor credentials.
+//
+// A session handle minted by another node can never be resumed here (or on
+// whichever peer the re-run lands), so remote-custody rows drop it; a
+// self-owned run keeps its handle so the re-run can resume the checkpoint.
+func (s *TaskStore) requeueExpiredRun(ctx context.Context, t Task, selfNode string) error {
+	aid, err := util.UUIDv7()
+	if err != nil {
+		return fmt.Errorf("uuid: %w", err)
+	}
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		// The evicted executor is whoever held custody when the lease
+		// lapsed: the recorded owner once accepted, or the dispatch target
+		// when the row was still awaiting accept. Recording it on the retry
+		// event lets the re-router exclude the node without poisoning the
+		// decline trail (a pin targeting it must still be able to wait).
+		var prevTarget string
+		{
+			var data []byte
+			if err := tx.QueryRowContext(ctx,
+				`SELECT data_json FROM task_events WHERE task_id=? AND type=? ORDER BY id DESC LIMIT 1`,
+				t.TaskID, EvDelegate).Scan(&data); err == nil {
+				var d struct {
+					Target string `json:"target"`
+				}
+				_ = json.Unmarshal(data, &d)
+				prevTarget = d.Target
+			}
+		}
+		evicted := t.OwnerNode
+		if evicted == "" || evicted == selfNode {
+			evicted = prevTarget
+		}
+		if evicted == selfNode {
+			evicted = ""
+		}
+		q := `UPDATE tasks SET state=?, owner_node=?, attempt_id=?,
+			lease_expires_at=NULL, scheduled=1,
+			state_version=state_version+1, updated_at=?`
+		args := []any{StateQueued, selfNode, aid, s.now()}
+		if t.OwnerNode != selfNode {
+			// The columns are NOT NULL — an empty string is the cleared form
+			// (SetAgentSession writes "" for absent handles).
+			q += `, agent_session_id='', agent_session_node='', agent_session_adapter=''`
+		}
+		q += ` WHERE task_id=? AND state=? AND owner_node=? AND attempt_id=?`
+		args = append(args, t.TaskID, t.State, t.OwnerNode, t.AttemptID)
+		res, err := tx.ExecContext(ctx, q, args...)
+		if err != nil {
+			return fmt.Errorf("requeue expired run: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return fmt.Errorf("%w: task %s moved during expiry settle", ErrConflict, t.TaskID)
+		}
+		if err := s.recordEventTx(ctx, tx, t.TaskID, EvRetry,
+			map[string]any{"reroute": true, "reason": "lease expired", "executor": evicted}); err != nil {
+			return err
+		}
+		// Clear the dispatch aim: until the scheduler re-dispatches, nobody
+		// is the current executor — the lapsed one least of all.
+		return s.recordEventTx(ctx, tx, t.TaskID, EvDelegate,
+			map[string]any{"target": "", "by": "lease-reroute"})
+	})
+}
+
+// EvictedExecutors returns the nodes whose custody of this task lapsed — the
+// "executor" stamped on each expiry-reroute retry event. The re-router
+// excludes them so a task does not get handed straight back to a node that
+// already went silent once, while a hard pin (which bypasses scoring) still
+// names its own destination.
+func (s *TaskStore) EvictedExecutors(ctx context.Context, taskID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT data_json FROM task_events WHERE task_id=? AND type=? ORDER BY id`,
+		taskID, EvRetry)
+	if err != nil {
 		return nil, err
 	}
-	var failed []string
-	for _, id := range ids {
-		// The monitor acts on behalf of the lease holder regardless of the
-		// stored owner (a crashed process may no longer hold it).
-		if err := s.ForceFail(ctx, id, s.leaseExpiredReason(ctx, id)); err != nil {
-			s.logger.Warn("expire task", "task", id, "err", err)
-			continue
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var data []byte
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
 		}
-		failed = append(failed, id)
-		s.logger.Info("task failed by timeout", "task", id)
+		var d struct {
+			Reroute  bool   `json:"reroute"`
+			Executor string `json:"executor"`
+		}
+		if json.Unmarshal(data, &d) == nil && d.Reroute && d.Executor != "" {
+			out = append(out, d.Executor)
+		}
 	}
-	// §8.2 absolute deadline: a DTN task has no lease to expire — its bound is
-	// deadline_unix, shared verbatim across hops. Running tasks fail like a
-	// lease (the monitor cancels the subprocess); anything not yet running is
-	// marked expired outright — the bundle simply outlived its lifetime.
-	// Terminal rows (failed included) are skipped: relabeling a finished task
-	// would erase the verdict its delegator already saw.
-	drows, err := s.db.QueryContext(ctx,
-		`SELECT task_id, state FROM tasks
-		 WHERE deadline_unix > 0 AND deadline_unix < ?
-		   AND state IN ('submitted','queued','dispatched','waiting_context','running')`, now)
+	return out, rows.Err()
+}
+
+// ExpireTasks settles every expired row in one shot — the simple path for
+// callers that hold no per-task runtime state to release (a fresh process at
+// startup owns no running executions). The daemon monitor instead scans,
+// settles, then cancels exactly the runs that held the lapsed leases, so a
+// dying runner's deferred verdict never beats the settle to the row.
+func (s *TaskStore) ExpireTasks(ctx context.Context, selfNode string) ([]ExpiredRow, error) {
+	rows, err := s.ScanExpired(ctx)
 	if err != nil {
-		return failed, fmt.Errorf("scan deadlines: %w", err)
+		return nil, err
 	}
-	type dexp struct{ id, state string }
-	var dexpired []dexp
-	for drows.Next() {
-		var e dexp
-		if err := drows.Scan(&e.id, &e.state); err != nil {
-			drows.Close()
-			return failed, err
-		}
-		dexpired = append(dexpired, e)
-	}
-	drows.Close()
-	if err := drows.Err(); err != nil {
-		return failed, err
-	}
-	for _, e := range dexpired {
-		if e.state == StateRunning {
-			if err := s.ForceFail(ctx, e.id, "deadline exceeded"); err != nil {
-				s.logger.Warn("expire task by deadline", "task", e.id, "err", err)
-				continue
-			}
-		} else if err := s.MarkExpired(ctx, e.id, "deadline exceeded"); err != nil {
-			s.logger.Warn("expire task by deadline", "task", e.id, "err", err)
+	var settled []ExpiredRow
+	for _, r := range rows {
+		outcome, err := s.SettleExpired(ctx, r, selfNode)
+		if err != nil {
+			s.logger.Warn("expire task", "task", r.TaskID, "err", err)
 			continue
 		}
-		failed = append(failed, e.id)
-		s.logger.Info("task expired by deadline", "task", e.id)
+		switch outcome {
+		case ExpiryRerouted:
+			r.Rerouted = true
+			s.logger.Info("task re-queued by expiry", "task", r.TaskID)
+			settled = append(settled, r)
+		case ExpiryFailed:
+			if r.Deadline {
+				s.logger.Info("task expired by deadline", "task", r.TaskID)
+			}
+			settled = append(settled, r)
+		}
+		// ExpirySkipped rows are reported as unsettled — nothing acted on them.
 	}
-	return failed, nil
+	return settled, nil
+}
+
+// DeleteTerminal drops a row that reached a closed verdict
+// (done/failed/cancelled/expired). It exists for one purpose: an expiry
+// re-route can land back on a node whose stale copy of the task already
+// closed — replace the dead row so the fresh attempt can run. Active and
+// review-parked rows refuse: a live execution or a pending human decision
+// owns the identity. The task_events audit trail is keyed by task_id and is
+// deliberately left in place — it keeps the previous attempt's history under
+// the same id.
+func (s *TaskStore) DeleteTerminal(ctx context.Context, taskID string) error {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM tasks WHERE task_id=? AND state IN ('done','failed','cancelled','expired')`,
+		taskID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("%w: task %s not in a closed state", ErrConflict, taskID)
+	}
+	return nil
 }
 
 // MarkExpired moves a non-terminal task straight to expired, bypassing the

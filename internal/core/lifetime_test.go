@@ -83,22 +83,27 @@ func TestLeaseStopsRenewingAfterExecution(t *testing.T) {
 
 	// While renewal runs the lease stays in the future.
 	time.Sleep(500 * time.Millisecond)
-	if expired, err := c.store.ExpireTasks(ctx); err != nil {
+	if expired, err := c.store.ExpireTasks(ctx, "worker"); err != nil {
 		t.Fatalf("expire: %v", err)
 	} else if len(expired) != 0 {
 		t.Fatalf("live task expired while its lease was being renewed: %v", expired)
 	}
 
-	// The executor dies: renewal stops and the lease ages out.
+	// The executor dies: renewal stops and the lease ages out. With retry
+	// budget left the row re-queues for re-route rather than dying.
 	stopRenew()
 	cancel()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		expired, err := c.store.ExpireTasks(ctx)
+		expired, err := c.store.ExpireTasks(ctx, "worker")
 		if err != nil {
 			t.Fatalf("expire: %v", err)
 		}
-		if len(expired) == 1 && expired[0] == tk.TaskID {
+		if len(expired) == 1 && expired[0].TaskID == tk.TaskID {
+			got, _ := c.store.Get(ctx, tk.TaskID)
+			if got.State != StateQueued {
+				t.Fatalf("expired task state = %s, want re-queued", got.State)
+			}
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -223,16 +228,27 @@ func TestMonitorExpiryAbortsRunningExecution(t *testing.T) {
 	select {
 	case <-execCtx.Done():
 	case <-time.After(20 * time.Second):
-		t.Fatalf("monitor force-failed the task but left its execution running")
+		t.Fatalf("monitor settled the task but left its execution running")
 	}
 
-	final, err := c.store.Get(ctx, tk.TaskID)
-	if err != nil {
-		t.Fatalf("get: %v", err)
+	// The expired row re-queues for re-route while retry budget lasts — the
+	// verdict is deferred to the next run, but the dead execution's context
+	// is cancelled either way: settle first cancels the zombie, never leaves
+	// it writing beside the fresh run. The ctx cancellation lands in phase
+	// one, the state move in phase two — poll briefly rather than racing it.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		final, err := c.store.Get(ctx, tk.TaskID)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if final.State == StateQueued {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	if final.State != StateFailed {
-		t.Fatalf("state = %s, want failed after a force-fail on lease expiry", final.State)
-	}
+	got, _ := c.store.Get(ctx, tk.TaskID)
+	t.Fatalf("state = %s, want queued for re-route on lease expiry", got.State)
 }
 
 // TestProgressBeatRefreshesDelegatorLease covers the other half of the renewal

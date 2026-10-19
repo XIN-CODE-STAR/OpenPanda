@@ -875,16 +875,21 @@ func TestLeaseExpiryReasonCarriesLastActivity(t *testing.T) {
 	must(s.Accept(ctx, tk.TaskID, "root"))
 	must(s.RecordEvent(ctx, tk.TaskID, "progress",
 		map[string]any{"note": "no output for 3m45s — agent still running"}))
+	// Terminal expiry verdicts only land once the persisted retry budget is
+	// spent — with budget left the row would re-queue for re-route instead.
+	for i := 0; i < maxPersistedRetries; i++ {
+		must(s.RecordEvent(ctx, tk.TaskID, EvRetry, nil))
+	}
 	if _, err := s.db.Exec(`UPDATE tasks SET lease_expires_at=? WHERE task_id=?`,
 		s.now()-1, tk.TaskID); err != nil {
 		t.Fatalf("stamp lease: %v", err)
 	}
 
-	expired, err := s.ExpireTasks(ctx)
+	expired, err := s.ExpireTasks(ctx, "root")
 	if err != nil {
 		t.Fatalf("expire: %v", err)
 	}
-	if len(expired) != 1 || expired[0] != tk.TaskID {
+	if len(expired) != 1 || expired[0].TaskID != tk.TaskID {
 		t.Fatalf("expired = %v, want [%s]", expired, tk.TaskID)
 	}
 	got, err := s.Get(ctx, tk.TaskID)
@@ -917,11 +922,16 @@ func TestLeaseExpiryReasonWithoutNotes(t *testing.T) {
 	must(s.Queue(ctx, tk.TaskID, "root"))
 	must(s.Dispatch(ctx, tk.TaskID, "root", "root"))
 	must(s.Accept(ctx, tk.TaskID, "root"))
+	// Same terminal precondition as above: the bare-reason path only exists
+	// past the persisted retry budget.
+	for i := 0; i < maxPersistedRetries; i++ {
+		must(s.RecordEvent(ctx, tk.TaskID, EvRetry, nil))
+	}
 	if _, err := s.db.Exec(`UPDATE tasks SET lease_expires_at=? WHERE task_id=?`,
 		s.now()-1, tk.TaskID); err != nil {
 		t.Fatalf("stamp lease: %v", err)
 	}
-	if _, err := s.ExpireTasks(ctx); err != nil {
+	if _, err := s.ExpireTasks(ctx, "root"); err != nil {
 		t.Fatalf("expire: %v", err)
 	}
 	got, err := s.Get(ctx, tk.TaskID)
@@ -930,6 +940,133 @@ func TestLeaseExpiryReasonWithoutNotes(t *testing.T) {
 	}
 	if got.ResultJSON != `{"failed":"lease expired"}` {
 		t.Fatalf("result_json = %s, want the bare reason", got.ResultJSON)
+	}
+}
+
+// TestLeaseExpiryReroutesRemoteCustody pins the HA settle for a dead remote
+// executor: the delegator's running copy (owner=peer) must re-queue under a
+// fresh attempt with the delegate aim cleared — the task re-routes to a live
+// peer instead of dying, the zombie's late beats drop as stale, and the
+// foreign-minted session handle it could never resume is discarded.
+func TestLeaseExpiryReroutesRemoteCustody(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	tk := createTask(t, s, "", "delegated", "root")
+
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+	}
+	must(s.Queue(ctx, tk.TaskID, "root"))
+	must(s.Dispatch(ctx, tk.TaskID, "root", "peer-b"))
+	must(s.Accept(ctx, tk.TaskID, "peer-b")) // executor accepted → running, owner=peer
+	must(s.SetAgentSession(ctx, tk.TaskID, "ses-remote", "peer-b", "opencode"))
+	if _, err := s.db.Exec(`UPDATE tasks SET lease_expires_at=? WHERE task_id=?`,
+		s.now()-1, tk.TaskID); err != nil {
+		t.Fatalf("stamp lease: %v", err)
+	}
+
+	expired, err := s.ExpireTasks(ctx, "root")
+	if err != nil {
+		t.Fatalf("expire: %v", err)
+	}
+	if len(expired) != 1 || !expired[0].Rerouted {
+		t.Fatalf("expired = %+v, want 1 rerouted row", expired)
+	}
+	got, err := s.Get(ctx, tk.TaskID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.State != StateQueued || got.OwnerNode != "root" {
+		t.Fatalf("row = %s/%s, want queued under root custody", got.State, got.OwnerNode)
+	}
+	if got.AttemptID == tk.AttemptID {
+		t.Fatalf("attempt not rotated — a partitioned executor's late result would pass")
+	}
+	if !got.Scheduled {
+		t.Fatalf("re-queued row lacks scheduled=1 — invisible to the queue scheduler")
+	}
+	if got.AgentSessionID != "" {
+		t.Fatalf("foreign session handle survived re-route: %s", got.AgentSessionID)
+	}
+	// The delegate aim is cleared — a late beat/result from the dead executor
+	// authenticates against neither the new attempt nor the cleared target.
+	if target, err := s.DispatchTarget(ctx, tk.TaskID); err != nil || target != "" {
+		t.Fatalf("dispatch target = %q err=%v, want cleared", target, err)
+	}
+}
+
+// TestLeaseExpirySelfRunKeepsSession is the local mirror: when THIS node's
+// own supervised run expires, the re-queued retry keeps the self-minted
+// session handle so the next run resumes the checkpoint instead of starting
+// over.
+func TestLeaseExpirySelfRunKeepsSession(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	tk := createTask(t, s, "", "selfrun", "root")
+
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+	}
+	must(s.Queue(ctx, tk.TaskID, "root"))
+	must(s.Dispatch(ctx, tk.TaskID, "root", "root"))
+	must(s.Accept(ctx, tk.TaskID, "root"))
+	must(s.SetAgentSession(ctx, tk.TaskID, "ses-local", "root", "claude"))
+	if _, err := s.db.Exec(`UPDATE tasks SET lease_expires_at=? WHERE task_id=?`,
+		s.now()-1, tk.TaskID); err != nil {
+		t.Fatalf("stamp lease: %v", err)
+	}
+
+	expired, err := s.ExpireTasks(ctx, "root")
+	if err != nil {
+		t.Fatalf("expire: %v", err)
+	}
+	if len(expired) != 1 || !expired[0].Rerouted {
+		t.Fatalf("expired = %+v, want 1 rerouted row", expired)
+	}
+	got, _ := s.Get(ctx, tk.TaskID)
+	if got.AgentSessionID != "ses-local" {
+		t.Fatalf("self-minted session lost on re-route: %q", got.AgentSessionID)
+	}
+}
+
+// TestLeaseExpirySettleSkipsConcurrentTerminal proves the settle's CAS guard:
+// a row that completed between scan and settle must not be re-queued or
+// failed — the real result won the race.
+func TestLeaseExpirySettleSkipsConcurrentTerminal(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	tk := createTask(t, s, "", "racer", "root")
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+	}
+	must(s.Queue(ctx, tk.TaskID, "root"))
+	must(s.Dispatch(ctx, tk.TaskID, "root", "root"))
+	must(s.Accept(ctx, tk.TaskID, "root"))
+	if _, err := s.db.Exec(`UPDATE tasks SET lease_expires_at=? WHERE task_id=?`,
+		s.now()-1, tk.TaskID); err != nil {
+		t.Fatalf("stamp lease: %v", err)
+	}
+	rows, err := s.ScanExpired(ctx)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("scan = %+v err=%v", rows, err)
+	}
+	must(s.Complete(ctx, tk.TaskID, "root", map[string]any{"done": "won"}))
+	outcome, err := s.SettleExpired(ctx, rows[0], "root")
+	if err != nil || outcome != ExpirySkipped {
+		t.Fatalf("settle = %s err=%v, want skipped", outcome, err)
+	}
+	got, _ := s.Get(ctx, tk.TaskID)
+	if got.State != StateDone {
+		t.Fatalf("concurrent result overwritten: state=%s", got.State)
 	}
 }
 
@@ -960,6 +1097,175 @@ func TestForceFailDoesNotOverwriteTerminal(t *testing.T) {
 	}
 	if got.State != StateDone {
 		t.Fatalf("state = %s, want done (force fail must not overwrite)", got.State)
+	}
+}
+
+// TestLeaseExpiryDeadlineStaysTerminal proves the deadline branch ignores the
+// retry budget: a task whose absolute lifetime ran out is never re-queued —
+// re-routing would extend a lifetime the deadline exists to bound. Queued
+// rows mark 'expired'; a running row force-fails so its monitor kills the
+// subprocess.
+func TestLeaseExpiryDeadlineStaysTerminal(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	past := s.now() - 1
+
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+	}
+
+	queued := createTask(t, s, "", "queued-dl", "root")
+	must(s.Queue(ctx, queued.TaskID, "root"))
+	if _, err := s.db.Exec(`UPDATE tasks SET deadline_unix=? WHERE task_id=?`, past, queued.TaskID); err != nil {
+		t.Fatalf("stamp deadline: %v", err)
+	}
+
+	running := createTask(t, s, "", "running-dl", "root")
+	must(s.Queue(ctx, running.TaskID, "root"))
+	must(s.Dispatch(ctx, running.TaskID, "root", "root"))
+	must(s.Accept(ctx, running.TaskID, "root"))
+	if _, err := s.db.Exec(`UPDATE tasks SET deadline_unix=? WHERE task_id=?`, past, running.TaskID); err != nil {
+		t.Fatalf("stamp deadline: %v", err)
+	}
+
+	rows, err := s.ScanExpired(ctx)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("scan = %+v err=%v, want both deadline rows", rows, err)
+	}
+	for _, r := range rows {
+		if !r.Deadline {
+			t.Fatalf("row %+v not flagged deadline", r)
+		}
+		outcome, err := s.SettleExpired(ctx, r, "root")
+		if err != nil || outcome != ExpiryFailed {
+			t.Fatalf("settle %s = %s err=%v, want terminal", r.TaskID, outcome, err)
+		}
+	}
+	gq, _ := s.Get(ctx, queued.TaskID)
+	if gq.State != StateExpired {
+		t.Fatalf("queued deadline row = %s, want expired", gq.State)
+	}
+	gr, _ := s.Get(ctx, running.TaskID)
+	if gr.State != StateFailed {
+		t.Fatalf("running deadline row = %s, want failed", gr.State)
+	}
+}
+
+// TestLeaseExpiryRecordsEvictedExecutor pins the re-route exclusion source:
+// settling a remote-custody expiry must stamp the dead executor on the retry
+// event so the re-router never hands the task straight back to a node that
+// just went silent on it.
+func TestLeaseExpiryRecordsEvictedExecutor(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	tk := createTask(t, s, "", "evict", "root")
+
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+	}
+	must(s.Queue(ctx, tk.TaskID, "root"))
+	must(s.Dispatch(ctx, tk.TaskID, "root", "peer-dead"))
+	must(s.Accept(ctx, tk.TaskID, "peer-dead"))
+	if _, err := s.db.Exec(`UPDATE tasks SET lease_expires_at=? WHERE task_id=?`,
+		s.now()-1, tk.TaskID); err != nil {
+		t.Fatalf("stamp lease: %v", err)
+	}
+
+	if _, err := s.ExpireTasks(ctx, "root"); err != nil {
+		t.Fatalf("expire: %v", err)
+	}
+	evicted, err := s.EvictedExecutors(ctx, tk.TaskID)
+	if err != nil {
+		t.Fatalf("evicted executors: %v", err)
+	}
+	if len(evicted) != 1 || evicted[0] != "peer-dead" {
+		t.Fatalf("evicted = %v, want [peer-dead]", evicted)
+	}
+
+	// A task that never left this node (dispatched but never accepted —
+	// owner stays self) evicts the dispatch TARGET, not ourselves.
+	pre := createTask(t, s, "", "pre-accept", "root")
+	must(s.Queue(ctx, pre.TaskID, "root"))
+	must(s.Dispatch(ctx, pre.TaskID, "root", "peer-ghost"))
+	if _, err := s.db.Exec(`UPDATE tasks SET lease_expires_at=? WHERE task_id=?`,
+		s.now()-1, pre.TaskID); err != nil {
+		t.Fatalf("stamp lease: %v", err)
+	}
+	if _, err := s.ExpireTasks(ctx, "root"); err != nil {
+		t.Fatalf("expire pre-accept: %v", err)
+	}
+	evicted, err = s.EvictedExecutors(ctx, pre.TaskID)
+	if err != nil {
+		t.Fatalf("evicted executors: %v", err)
+	}
+	if len(evicted) != 1 || evicted[0] != "peer-ghost" {
+		t.Fatalf("evicted = %v, want [peer-ghost] — a silent target must be excluded, not self", evicted)
+	}
+}
+
+// TestDeleteTerminal proves the handleDelegate stale-copy replacement guard:
+// only a closed row is deletable (its event history is kept), while an active
+// or review-parked copy always wins over an incoming attempt.
+func TestDeleteTerminal(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+	}
+
+	done := createTask(t, s, "", "closed", "root")
+	must(s.Queue(ctx, done.TaskID, "root"))
+	must(s.Dispatch(ctx, done.TaskID, "root", "root"))
+	must(s.Accept(ctx, done.TaskID, "root"))
+	must(s.Complete(ctx, done.TaskID, "root", map[string]any{"ok": true}))
+	if err := s.DeleteTerminal(ctx, done.TaskID); err != nil {
+		t.Fatalf("delete done row: %v", err)
+	}
+	if _, err := s.Get(ctx, done.TaskID); err == nil {
+		t.Fatalf("done row still readable after DeleteTerminal")
+	}
+	if evs, err := s.Events(ctx, done.TaskID); err != nil || len(evs) == 0 {
+		t.Fatalf("event history lost with the row: n=%d err=%v", len(evs), err)
+	}
+
+	for _, st := range []struct {
+		name  string
+		setup func(t *testing.T, s *TaskStore, id string)
+	}{
+		{"queued", func(t *testing.T, s *TaskStore, id string) {
+			must(s.Queue(ctx, id, "root"))
+		}},
+		{"running", func(t *testing.T, s *TaskStore, id string) {
+			must(s.Queue(ctx, id, "root"))
+			must(s.Dispatch(ctx, id, "root", "root"))
+			must(s.Accept(ctx, id, "root"))
+		}},
+		{"review", func(t *testing.T, s *TaskStore, id string) {
+			must(s.Queue(ctx, id, "root"))
+			must(s.Dispatch(ctx, id, "root", "root"))
+			must(s.Accept(ctx, id, "root"))
+			must(s.ForceFail(ctx, id, "spend"))
+			must(s.Review(ctx, id, "root", "parked"))
+		}},
+	} {
+		tk := createTask(t, s, "", "live-"+st.name, "root")
+		st.setup(t, s, tk.TaskID)
+		if err := s.DeleteTerminal(ctx, tk.TaskID); err == nil {
+			t.Fatalf("%s row deleted — a live copy must never lose to an incoming attempt", st.name)
+		}
+		if got, err := s.Get(ctx, tk.TaskID); err != nil || got.State == "" {
+			t.Fatalf("%s row gone after refused delete", st.name)
+		}
 	}
 }
 

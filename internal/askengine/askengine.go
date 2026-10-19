@@ -1126,12 +1126,14 @@ func (e *Engine) initSchedulerLocked(cardPath string) error {
 		sched.TaskStore().SetOnReview(fn)
 	}
 
-	// Clean up stale leases from interrupted runs so tasks aren't stranded in running.
+	// Clean up stale leases from interrupted runs so tasks aren't stranded in
+	// running: with retry budget left they re-queue for another execution
+	// rather than dying on a lease their previous process stopped renewing.
 	if sched.TaskStore() != nil {
-		if expired, err := sched.TaskStore().ExpireTasks(context.Background()); err != nil {
+		if expired, err := sched.TaskStore().ExpireTasks(context.Background(), sched.NodeID()); err != nil {
 			e.logger.Debug("expire stale tasks at startup", "err", err)
 		} else if len(expired) > 0 {
-			e.logger.Info("expired stale tasks from previous run", "count", len(expired), "tasks", expired)
+			e.logger.Info("settled stale tasks from previous run", "count", len(expired), "tasks", expired)
 		}
 	}
 

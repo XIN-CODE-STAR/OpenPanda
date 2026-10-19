@@ -60,8 +60,97 @@ func TestDelegateIdempotent(t *testing.T) {
 	}
 }
 
-// TestTaskTimeoutFails verifies a running task with an expired lease becomes
-// failed (P0-36).
+// TestDelegateReplacesTerminalCopy covers the re-route landing case: a node
+// already holds a CLOSED copy of a task from an older attempt (it ran the
+// task once, the delegator's lease lapsed, the re-route came back here). The
+// stale verdict must not dead-end the fresh attempt — the terminal row is
+// replaced and the new delivery runs. An ACTIVE or review-parked copy still
+// wins: a duplicate delivery must never kill live work.
+func TestDelegateReplacesTerminalCopy(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	card := ledger.Card{
+		Device:        "replacee",
+		ResourceClass: "Standard",
+		Native:        []ledger.NativeAbility{{ID: "sys:info", Command: "uname"}},
+		Capacity:      ledger.Capacity{CPUCores: 2, RAMGB: 4, MaxConcurrent: 2},
+	}
+	c := NewCore(db, "replacee", card, 5, testLogger(), config.ModelConfig{})
+	c.SetWorkDir(t.TempDir())
+	c.SetSharedSecret(testSharedSecret)
+
+	// The stale copy: attempt A already closed on this node.
+	stale := createTask(t, c.store, "", "rr-task", "origin")
+	if err := c.store.Queue(ctx, stale.TaskID, "origin"); err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	if err := c.store.ForceFail(ctx, stale.TaskID, "old attempt died here"); err != nil {
+		t.Fatalf("close old copy: %v", err)
+	}
+	storedAttempt := stale.AttemptID
+	time.Sleep(3 * time.Millisecond)
+	newAttempt, err := util.UUIDv7()
+	if err != nil {
+		t.Fatalf("mint attempt: %v", err)
+	}
+	if !attemptIsNewer(newAttempt, storedAttempt) {
+		t.Fatalf("test premise broken: %s should order after %s", newAttempt, storedAttempt)
+	}
+
+	env, err := bus.NewEnvelope(bus.MsgTaskDelegate, "origin", "m-rr", bus.TaskDelegatePayload{
+		TaskID: stale.TaskID, Title: "t", Intent: "x",
+		Requires: []string{"sys:info"}, Chain: []string{"origin"},
+		AttemptID: newAttempt,
+	})
+	if err != nil {
+		t.Fatalf("envelope: %v", err)
+	}
+	c.handleDelegate(ctx, env)
+
+	got, err := c.store.Get(ctx, stale.TaskID)
+	if err != nil {
+		t.Fatalf("replaced row missing: %v", err)
+	}
+	if got.AttemptID != newAttempt {
+		t.Fatalf("attempt = %s, want the re-routed attempt adopted", got.AttemptID)
+	}
+	if Terminal(got.State) && got.State != StateDone {
+		t.Fatalf("re-routed copy settled %s without running — stale verdict dead-ended it", got.State)
+	}
+	waitLocalTasksSettled(t, c)
+
+	// Same-attempt duplicates still dead-end: re-delivering the delivered
+	// attempt is idempotency, not replacement.
+	env2, _ := bus.NewEnvelope(bus.MsgTaskDelegate, "origin", "m-rr2", bus.TaskDelegatePayload{
+		TaskID: stale.TaskID, Title: "t", Intent: "x",
+		Requires: []string{"sys:info"}, Chain: []string{"origin"},
+		AttemptID: newAttempt,
+	})
+	c.handleDelegate(ctx, env2)
+	got2, _ := c.store.Get(ctx, stale.TaskID)
+	if got2.AttemptID != newAttempt {
+		t.Fatalf("same-attempt re-delivery mutated the row: %s", got2.AttemptID)
+	}
+
+	// And a stale delivery of the ORIGINAL attempt — wandering in after the
+	// re-route already landed — must not resurrect the closed copy either.
+	env3, _ := bus.NewEnvelope(bus.MsgTaskDelegate, "origin", "m-rr3", bus.TaskDelegatePayload{
+		TaskID: stale.TaskID, Title: "t", Intent: "x",
+		Requires: []string{"sys:info"}, Chain: []string{"origin"},
+		AttemptID: storedAttempt,
+	})
+	c.handleDelegate(ctx, env3)
+	got3, _ := c.store.Get(ctx, stale.TaskID)
+	if got3.AttemptID != newAttempt {
+		t.Fatalf("older-attempt re-delivery evicted the live row: attempt = %s", got3.AttemptID)
+	}
+}
+
+// TestTaskTimeoutFails verifies the lease-expiry lifecycle: a running task
+// whose lease lapses re-queues under a fresh attempt while retry budget
+// remains — an expired lease means the supervisor died, not that the work
+// was judged — and only fails once the persisted retry budget is spent
+// (P0-36).
 func TestTaskTimeoutFails(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -77,21 +166,51 @@ func TestTaskTimeoutFails(t *testing.T) {
 	must(s.Dispatch(ctx, tk.TaskID, "root", "root"))
 	must(s.Accept(ctx, tk.TaskID, "root"))
 	// Stamp an already-expired lease directly (SetLease ignores non-positive).
-	now := s.now()
-	if _, err := s.db.Exec(`UPDATE tasks SET lease_expires_at=? WHERE task_id=?`, now-1, tk.TaskID); err != nil {
-		t.Fatalf("stamp lease: %v", err)
+	expire := func() {
+		if _, err := s.db.Exec(`UPDATE tasks SET lease_expires_at=? WHERE task_id=?`, s.now()-1, tk.TaskID); err != nil {
+			t.Fatalf("stamp lease: %v", err)
+		}
 	}
+	expire()
 
-	expired, err := s.ExpireTasks(ctx)
+	expired, err := s.ExpireTasks(ctx, "root")
 	if err != nil {
 		t.Fatalf("expire: %v", err)
 	}
-	if len(expired) != 1 {
-		t.Fatalf("expected 1 expired, got %d", len(expired))
+	if len(expired) != 1 || expired[0].TaskID != tk.TaskID || !expired[0].Rerouted {
+		t.Fatalf("expected 1 rerouted row for %s, got %+v", tk.TaskID, expired)
 	}
 	got, _ := s.Get(ctx, tk.TaskID)
+	if got.State != StateQueued {
+		t.Fatalf("state = %s, want queued for re-route", got.State)
+	}
+	if got.AttemptID == tk.AttemptID {
+		t.Fatalf("attempt not rotated on re-route: %s", got.AttemptID)
+	}
+	if got.LeaseExpires != 0 {
+		t.Fatalf("stale lease survived re-route: %d", got.LeaseExpires)
+	}
+
+	// Each requeue burns one persisted retry. Drive it around the loop until
+	// the budget is spent — then expiry must fail terminally again.
+	for i := 0; i < maxPersistedRetries; i++ {
+		must(s.Dispatch(ctx, tk.TaskID, "root", "root"))
+		must(s.Accept(ctx, tk.TaskID, "root"))
+		expire()
+		if _, err := s.ExpireTasks(ctx, "root"); err != nil {
+			t.Fatalf("expire %d: %v", i, err)
+		}
+		got, _ = s.Get(ctx, tk.TaskID)
+		if got.State == StateFailed {
+			break
+		}
+		if got.State != StateQueued {
+			t.Fatalf("cycle %d: state = %s, want queued or failed", i, got.State)
+		}
+	}
+	got, _ = s.Get(ctx, tk.TaskID)
 	if got.State != StateFailed {
-		t.Fatalf("state = %s, want failed", got.State)
+		t.Fatalf("state = %s, want failed after retry budget spent", got.State)
 	}
 }
 

@@ -251,6 +251,11 @@ func (c *Core) rerouteDeclined(ctx context.Context, taskID string) bool {
 	// Route's seen-set doubles as the exclusion list: chain nodes plus every
 	// past decliner. Suffixing the chain keeps the persisted/wire chain clean.
 	seenChain := append(slices.Clone(t.Chain), excluded...)
+	// Executors whose custody lapsed mid-run are excluded likewise — the
+	// rescue is only a rescue if it does not pick the same dead link again.
+	if evicted, err := c.store.EvictedExecutors(ctx, taskID); err == nil {
+		seenChain = append(seenChain, evicted...)
+	}
 
 	decision := scheduler.RouteP(c.nodeID, seenChain,
 		c.eligibleForSend(ctx, needsForTask(t), c.onlineEmployees(ctx)),
