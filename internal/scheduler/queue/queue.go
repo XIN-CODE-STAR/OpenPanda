@@ -36,9 +36,16 @@ import (
 // ReadyTask is the scheduler's view of one queued task — just the fields the
 // ordering policy and the resource registry need.
 type ReadyTask struct {
-	ID           string
-	Project      string
-	WorkDir      string // submitter-pinned work directory ("" = derive per task)
+	ID      string
+	Project string
+	WorkDir string // submitter-pinned work directory ("" = derive per task)
+	// Pin carries spec.node verbatim — the hard destination a pinned task
+	// names. The scheduler reads it only to decide whether this node's
+	// resource table applies: a task pinned ELSEWHERE never runs locally
+	// (the pin forbids local fallback — the forward parks or fails), so
+	// holding a local project/scope key against it serializes remote work
+	// behind unrelated local runs for nothing.
+	Pin          string
 	Priority     int
 	Seq          int64
 	CreatedAt    int64
@@ -256,6 +263,11 @@ type Scheduler struct {
 	// itself is one cheap SQLite read.
 	pollInterval time.Duration
 	wake         chan struct{}
+
+	// selfPin resolves a ReadyTask.Pin to "names this node". Injected by the
+	// owner (core's resolvePin), nil in tests — a nil resolver treats every
+	// pin as local, preserving the pre-feature conservative serialization.
+	selfPin func(ctx context.Context, ref string) bool
 }
 
 // The fallback poll relaxes once the queue has been empty for a while: 400ms
@@ -288,6 +300,13 @@ func New(store Store, runner Runner, maxConcurrent int, logger *slog.Logger) *Sc
 		pollInterval: 400 * time.Millisecond,
 		wake:         make(chan struct{}, 1),
 	}
+}
+
+// WithSelfPin installs the resolver that tells a foreign pin from a local
+// one (see ReadyTask.Pin). Returns the scheduler for chaining.
+func (s *Scheduler) WithSelfPin(fn func(ctx context.Context, ref string) bool) *Scheduler {
+	s.selfPin = fn
+	return s
 }
 
 // Registry exposes the lock table (tests and diagnostics).
@@ -403,6 +422,14 @@ func (s *Scheduler) tick(ctx context.Context) int {
 			return len(ready) // budget exhausted; a finishing task wakes the next pass
 		}
 		keys := DefaultKeys(t.ResourceKeys, t.Project, t.WorkDir, t.ID)
+		if t.Pin != "" && s.selfPin != nil && !s.selfPin(ctx, t.Pin) {
+			// Foreign-pinned work forwards in the runner and returns; the
+			// local lock table only guards local execution — taking these
+			// keys would park the remote run behind a local holder of the
+			// same project (observed live: a node2-pinned audit queued
+			// behind a local run's root scope while node2 sat idle).
+			keys = nil
+		}
 		if !s.registry.TryAcquire(keys, t.ID) {
 			continue // a running task holds a needed resource: stay queued
 		}

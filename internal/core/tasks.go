@@ -1937,7 +1937,9 @@ func (s *TaskStore) ListReady(ctx context.Context) ([]Task, error) {
 // is claimed and the runner loads it for real.
 func (s *TaskStore) ListReadySummaries(ctx context.Context) ([]queue.ReadyTask, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT task_id, project, priority, seq, created_at, resource_keys_json, work_dir
+		`SELECT task_id, project, priority, seq, created_at, resource_keys_json, work_dir,
+			CASE WHEN json_valid(spec_json)
+				 THEN COALESCE(json_extract(spec_json, '$.node'), '') ELSE '' END
 		 FROM tasks WHERE state = ? AND scheduled = 1`, StateQueued)
 	if err != nil {
 		return nil, err
@@ -1947,7 +1949,7 @@ func (s *TaskStore) ListReadySummaries(ctx context.Context) ([]queue.ReadyTask, 
 	for rows.Next() {
 		var t queue.ReadyTask
 		var keysJSON sql.NullString
-		if err := rows.Scan(&t.ID, &t.Project, &t.Priority, &t.Seq, &t.CreatedAt, &keysJSON, &t.WorkDir); err != nil {
+		if err := rows.Scan(&t.ID, &t.Project, &t.Priority, &t.Seq, &t.CreatedAt, &keysJSON, &t.WorkDir, &t.Pin); err != nil {
 			return nil, err
 		}
 		if keysJSON.Valid {
@@ -2178,15 +2180,23 @@ func (s *TaskStore) ForceFail(ctx context.Context, taskID, reason string) error 
 func (s *TaskStore) Recover(ctx context.Context, selfNode string) (int, error) {
 	var failed, requeued int
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		// Every batch is gated on owner_node = self: custody, not just state.
+		// A running row owned by another node is a delegated-out execution
+		// this process only tracks — the remote run survives this restart,
+		// and its result lands through the relay. Killing it here (observed
+		// live: a node2-pinned run marked interrupted while node2 was
+		// executing it) reports a verdict the executor never gave.
 		n, err := s.recoverBatchTx(ctx, tx, []string{StateRunning, StateWaitingCtx}, StateQueued, "resumed",
-			`AND agent_session_id IS NOT NULL AND agent_session_id != ''
+			`AND owner_node = ?
+			 AND agent_session_id IS NOT NULL AND agent_session_id != ''
 			 AND (agent_session_node IS NULL OR agent_session_node = '' OR agent_session_node = ?)`,
-			selfNode)
+			selfNode, selfNode)
 		if err != nil {
 			return fmt.Errorf("recover resumable tasks: %w", err)
 		}
 		requeued += n
-		n, err = s.recoverBatchTx(ctx, tx, []string{StateRunning, StateWaitingCtx}, StateFailed, "interrupted", "")
+		n, err = s.recoverBatchTx(ctx, tx, []string{StateRunning, StateWaitingCtx}, StateFailed, "interrupted",
+			`AND owner_node = ?`, selfNode)
 		if err != nil {
 			return fmt.Errorf("recover active tasks: %w", err)
 		}
@@ -2194,8 +2204,11 @@ func (s *TaskStore) Recover(ctx context.Context, selfNode string) (int, error) {
 		// Rows parked in task_outbox are NOT requeued: their custody is the
 		// parked bundle itself, delivered by the flush on the peer's next
 		// connect — moving them to queued would double-hand them (outbox +
-		// scheduler racing to forward). They stay dispatched until either
-		// the link or the TTL closes the matter.
+		// scheduler racing to forward). Sent-but-unaccepted forwards ARE
+		// requeued — the queue re-runs forwardScheduled, the resend dedups
+		// on the peer's task_id, and the orphan sweep is the reaper for a
+		// delivery that truly never lands (same policy the mid-life
+		// RequeueStaleClaims applies).
 		n, err = s.recoverBatchTx(ctx, tx, []string{StateDispatched}, StateQueued, "requeued",
 			`AND NOT EXISTS (SELECT 1 FROM task_outbox o WHERE o.task_id = tasks.task_id)`)
 		if err != nil {

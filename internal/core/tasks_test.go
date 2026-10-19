@@ -1483,7 +1483,7 @@ func TestRecoverPreservesUnreleasedPlanStages(t *testing.T) {
 		t.Fatalf("dispatch: %v", err)
 	}
 
-	if _, err := s.Recover(ctx, "node-a"); err != nil {
+	if _, err := s.Recover(ctx, "root"); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
 
@@ -1565,6 +1565,56 @@ func TestRecoverResumesSessionedRuns(t *testing.T) {
 		if g.State != StateFailed {
 			t.Fatalf("task %s state = %s, want failed (no consumable checkpoint)", id, g.State)
 		}
+	}
+}
+
+// TestRecoverSparesPeerExecutedRows is the live restart regression: the
+// delegator's copy of a task executing on a peer sits in running with
+// owner_node=<peer> (handleAccept stamped the executor). A restart of the
+// delegator must not stamp "interrupted" onto work the peer is still doing —
+// the observed failure killed a node2-pinned run mid-flight and reported a
+// verdict the executor never gave.
+func TestRecoverSparesPeerExecutedRows(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	remote := createTask(t, s, "", "delegated out", "node-a")
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(s.Queue(ctx, remote.TaskID, "node-a"))
+	must(s.ClaimLocal(ctx, remote.TaskID, "node-a"))
+	must(s.RetargetDelegation(ctx, remote.TaskID, "node-b"))
+	// The peer's accept flips the origin row to running under the peer's
+	// custody — the state signature of remote execution.
+	must(s.Accept(ctx, remote.TaskID, "node-b"))
+
+	// Self-owned waiting_context — no peer custody, no session — still takes
+	// the interrupted verdict (control for the owner gate).
+	local := createTask(t, s, "", "ctx wait here", "node-a")
+	must(s.Queue(ctx, local.TaskID, "node-a"))
+	must(s.Dispatch(ctx, local.TaskID, "node-a", "node-a"))
+	must(s.SetWaitingContext(ctx, local.TaskID, "node-a"))
+
+	if _, err := s.Recover(ctx, "node-a"); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	g, err := s.Get(ctx, remote.TaskID)
+	if err != nil {
+		t.Fatalf("get remote: %v", err)
+	}
+	if g.State == StateFailed || g.State == StateQueued {
+		t.Fatalf("peer-executed task state = %s, want untouched (running)", g.State)
+	}
+	g, err = s.Get(ctx, local.TaskID)
+	if err != nil {
+		t.Fatalf("get local: %v", err)
+	}
+	if g.State != StateFailed {
+		t.Fatalf("self-executed task state = %s, want failed (control)", g.State)
 	}
 }
 
@@ -1674,18 +1724,35 @@ func TestRecoverRequeueSchedulableAndParked(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	// dispatched, nothing parked: restart requeues it and arms the scheduler.
+	// dispatched for LOCAL execution (the queue claim writes the self-target
+	// delegate event), nothing parked: restart requeues it and arms the
+	// scheduler.
 	fly := createTask(t, s, "", "mid-flight", "root")
 	if err := s.Queue(ctx, fly.TaskID, "root"); err != nil {
 		t.Fatalf("queue: %v", err)
 	}
-	if err := s.Dispatch(ctx, fly.TaskID, "root", "peer-x"); err != nil {
-		t.Fatalf("dispatch: %v", err)
+	if err := s.ClaimLocal(ctx, fly.TaskID, "root"); err != nil {
+		t.Fatalf("claim local: %v", err)
 	}
 	// Simulate the non-scheduled path: a direct submit carries scheduled=0.
 	if _, err := s.db.ExecContext(ctx,
 		`UPDATE tasks SET scheduled=0 WHERE task_id=?`, fly.TaskID); err != nil {
 		t.Fatalf("unschedule: %v", err)
+	}
+
+	// dispatched to a PEER and sent (latest delegate target), accept not yet
+	// arrived, nothing parked: the restart requeues it — forwardScheduled
+	// resends and the peer dedups by task id; custody rows in the outbox are
+	// the only ones that must not move.
+	handed := createTask(t, s, "", "handed off", "root")
+	if err := s.Queue(ctx, handed.TaskID, "root"); err != nil {
+		t.Fatalf("queue handed: %v", err)
+	}
+	if err := s.ClaimLocal(ctx, handed.TaskID, "root"); err != nil {
+		t.Fatalf("claim handed: %v", err)
+	}
+	if err := s.RetargetDelegation(ctx, handed.TaskID, "peer-x"); err != nil {
+		t.Fatalf("retarget handed: %v", err)
 	}
 
 	// dispatched AND parked in the outbox: custody is the bundle, not the row.
@@ -1702,7 +1769,7 @@ func TestRecoverRequeueSchedulableAndParked(t *testing.T) {
 		t.Fatalf("park outbox row: %v", err)
 	}
 
-	if _, err := s.Recover(ctx, "node-a"); err != nil {
+	if _, err := s.Recover(ctx, "root"); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
 
@@ -1712,6 +1779,14 @@ func TestRecoverRequeueSchedulableAndParked(t *testing.T) {
 	}
 	if g1.State != StateQueued || !g1.Scheduled {
 		t.Fatalf("recovered dispatch = state:%s scheduled:%v, want queued+scheduled", g1.State, g1.Scheduled)
+	}
+
+	gh, err := s.Get(ctx, handed.TaskID)
+	if err != nil {
+		t.Fatalf("get handed: %v", err)
+	}
+	if gh.State != StateQueued {
+		t.Fatalf("handed-off task state = %s, want %s (requeue re-forwards; the peer dedups the resend)", gh.State, StateQueued)
 	}
 
 	g2, err := s.Get(ctx, parked.TaskID)

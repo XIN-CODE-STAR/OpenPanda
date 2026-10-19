@@ -201,7 +201,10 @@ func (c *Core) StartQueueScheduler(ctx context.Context) *queue.Scheduler {
 	if max < 1 {
 		max = 1
 	}
-	s := queue.New(queueStoreAdapter{c: c}, queueRunnerAdapter{c: c}, max, c.logger)
+	s := queue.New(queueStoreAdapter{c: c}, queueRunnerAdapter{c: c}, max, c.logger).
+		WithSelfPin(func(ctx context.Context, ref string) bool {
+			return c.resolvePin(ctx, ref).self
+		})
 	c.mu.Lock()
 	c.queueSched = s
 	c.mu.Unlock()
