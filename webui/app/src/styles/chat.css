@@ -1020,7 +1020,34 @@
   display: flex;
   align-items: center;
   flex: 0 0 auto;
+  /* 6px between the clock and the icon: they are one footnote in two parts,
+     and the button's own 22px box already carries 4px of air inside it. */
+  gap: 6px;
   margin-top: 2px;
+}
+/* The wall clock on a question, to the left of its copy icon. It arrives on the
+   same beat as the icon — both annotate the message rather than belong to it —
+   and keeps its box while hidden (opacity, not display), so revealing it never
+   nudges the icon or the bubble above. */
+.msg-time {
+  color: var(--text-tertiary);
+  font-size: var(--text-sm);
+  line-height: 1;
+  /* Fixed-width digits: 08:31 and 11:41 must occupy the same box, or the icon
+     beside them moves a pixel per message as the clock changes. */
+  font-variant-numeric: tabular-nums;
+  opacity: 0;
+  transition: opacity var(--dur-fast) ease;
+}
+.msg:hover .msg-time {
+  opacity: 1;
+}
+/* No hover to reveal it with on a touch screen, so it is simply shown — the
+   same fallback the copy icon takes. */
+@media (hover: none) {
+  .msg-time {
+    opacity: 1;
+  }
 }
 /* A reply's copy is a row under the prose, on the same left edge. The negative
    margin swallows the column's own gap, so the affordance costs the reply 22px
@@ -1264,24 +1291,53 @@
   /* Deliberately NOT `overflow: hidden` (nor a radius, which would clip
      nothing without it): the squish scales the sprite up and lifts it, and a
      clip on this 44px box cut the ears off exactly when the pet was at its
-     tallest. The frame is cropped by `background-size` (264px = six 44px
+     tallest. The frame is cropped by `background-size` (308px = seven 44px
      frames on a 44px box), not by overflow, so nothing else depended on it.
      No plate behind the sprite either: the PNG carries an alpha channel (its
      white background is keyed out), so the pet sits on the page in either
      theme instead of on a white tile that turned into a glaring sticker on
      dark. */
+  /* The mirror lives here, not on the sprite: the sprite's `transform` belongs
+     to whichever animation is running, and an animation owns its properties
+     outright. A 260ms transition takes the flip through zero width, so the pet
+     rolls onto its other side instead of popping into a reflection. */
+  transition: transform 260ms var(--ease-standard);
+}
+.composer-panda-stage.is-flipped {
+  transform: scaleX(-1);
+}
+/* The pet is drawn in cream (#f8f5f0). On the light theme's white page and
+   white composer that body is invisible — what is left is a handful of black
+   dots where the ears and limbs are, which reads as a rendering bug, and was
+   reported as one. Four hard drop-shadows draw a 1px rim around the ink; a
+   blurred shadow would smudge a 44px sprite, and an outline is what the art
+   already implies. Dark theme needs none of it — cream reads on #151515 by
+   itself — so the rim colour goes transparent rather than the filter going
+   away, which keeps it to one rule for both themes. */
+:root {
+  --panda-rim: rgba(41, 41, 41, 0.34);
+}
+[data-theme='dark'] {
+  --panda-rim: transparent;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --panda-rim: transparent;
+  }
 }
 .composer-panda-sprite {
   display: block;
   width: 44px;
   height: 44px;
+  filter: drop-shadow(1px 0 0 var(--panda-rim)) drop-shadow(-1px 0 0 var(--panda-rim))
+    drop-shadow(0 1px 0 var(--panda-rim)) drop-shadow(0 -1px 0 var(--panda-rim));
   /* The `?v=` is a cache key, not decoration: this file is not content-hashed
      like everything under /assets/, and the service worker serves static
      assets cache-first, so a browser that fetched an older sprite keeps that
      copy forever — the pre-keying PNG carried an opaque grey plate around the
      frame, which read as a bubble behind the pet. Bump the number whenever the
      image changes; it is the only way to retire the cached copy. */
-  background-image: url('/panda-pet-sprites.png?v=2');
+  background-image: url('/panda-pet-sprites.png?v=4');
   /* Six 128px frames across 768px, drawn at 44: 6 × 44 = 264. */
   background-size: 264px 44px;
   background-position: 0 0;
@@ -1303,10 +1359,6 @@
    The shorthand replaces `panda-bob` rather than out-declaring it, for the
    same reason the working frame does: a running animation owns its
    properties. */
-.composer-panda.is-bouncing .composer-panda-sprite {
-  transform-origin: 50% 86%;
-  animation: panda-squish 0.72s cubic-bezier(0.33, 0, 0.25, 1);
-}
 .composer-panda.is-working .composer-panda-sprite {
   /* Frame 5 of 6, i.e. four frame widths in. */
   background-position: -176px 0;
@@ -1314,6 +1366,40 @@
      `panda-bob` still runs it owns the element's animated properties, so the
      frame has to replace the animation, not out-declare it. */
   animation: panda-working 1.05s ease-in-out infinite;
+}
+/* Office hours: 20:00–08:00 the pet is off duty and lies on the edge instead
+   of standing on it. One frame, the side-on sprawl (frame 6) — the only pose in
+   the sheet that reads as a panda lying down with its face showing. It used to
+   alternate with frame 4, the face-down sprawl, which at 44px is a faceless
+   black-and-cream blob; the pet now turns over by mirroring this frame instead
+   (`.composer-panda-stage.is-flipped`).
+   These rules sit after `is-working` and before `is-bouncing` on purpose —
+   all three are 0-2-1, so the last one wins, and the order is the priority:
+   night over working, a poke over both. */
+.composer-panda.is-resting .composer-panda-sprite {
+  /* Frame 6 of 7. */
+  background-position: -220px 0;
+  /* Slow and shallow: at this size a big breath reads as a shiver. */
+  animation: panda-resting 5.6s ease-in-out infinite;
+}
+/* The lying frame does not share the standing frame's floor. The standing ink
+   stops at y=110 of 128, i.e. 6px above the element's bottom at 44px, which is
+   exactly the 6px the button hangs below the border — feet on the line. The
+   side-on frame stops at y=88 (13.75px short), so the whole button drops by
+   that gap; without this the panda floats over the composer's edge like a
+   sticker. */
+.composer-panda.is-resting {
+  bottom: calc(100% - 14px);
+}
+.composer-panda.is-bouncing .composer-panda-sprite {
+  transform-origin: 50% 86%;
+  animation: panda-squish 0.72s cubic-bezier(0.33, 0, 0.25, 1);
+}
+/* A poke at night squashes the lying frame, and the squish pivots on the feet
+   — which are at 69% of the box there, not at the standing frame's 86%. Same
+   reason as the bottom offset above. */
+.composer-panda.is-resting.is-bouncing .composer-panda-sprite {
+  transform-origin: 50% 69%;
 }
 /* The status word is gone from the page, not from the live region: the pet's
    own pose carries "ready / working" for the eye, and a screen reader still
@@ -1337,6 +1423,12 @@
   0%, 100% { transform: translateY(0); }
   50% { transform: translateY(-2px); }
 }
+/* Asleep: a breath, not a bounce. Half a pixel and a 1.5% stretch is the most
+   the frame can take before a 44px sprite starts to look like it is panting. */
+@keyframes panda-resting {
+  0%, 100% { transform: translateY(0) scaleY(1); }
+  50% { transform: translateY(0.5px) scaleY(1.015); }
+}
 /* Squash and stretch, decaying: 1.16×0.8 flat, 0.88×1.14 tall, then two
    smaller rings. Scaling y and x in opposite directions is what makes it read
    as rubber instead of as a zoom — volume looks conserved, so the pet appears
@@ -1355,7 +1447,8 @@
 @media (prefers-reduced-motion: reduce) {
   .composer-panda-sprite,
   .composer-panda.is-bouncing .composer-panda-sprite,
-  .composer-panda.is-working .composer-panda-sprite {
+  .composer-panda.is-working .composer-panda-sprite,
+  .composer-panda.is-resting .composer-panda-sprite {
     animation: none;
   }
 }
@@ -1551,36 +1644,68 @@
 /* ---- Orchestration card --------------------------------------------------- */
 
 /* Same corner, same shell as the node card: the two share one slot on the bar
-   (see `panel` in sessions.tsx), so the structure — button, card hanging under
-   the header, panel-in animation, the button as the only click that closes it —
-   is deliberately identical and only the contents differ. It is 60px wider than
-   the node card because its rows hold tiles rather than a list of names: two
-   tiles have to fit side by side, and a tile whose title is cut in half says
-   nothing. */
+   (see `panel` in sessions.tsx), so the structure — button, cards hanging under
+   the header, panel-in animation, the button as the only click that closes
+   them — is deliberately identical and only the contents differ. It is 60px
+   wider than the node card because its rows hold tiles rather than a list of
+   names: two tiles have to fit side by side, and a tile whose title is cut in
+   half says nothing. */
 .orch-picker {
   display: flex;
 }
-.orch-panel {
+/* The row both cards hang in. Positioning lives here now, not on the panel:
+   the trace card is a sibling on the left, and a row is what puts it there
+   without either card having to know the other's width.
+   `row-reverse` is the whole trick: the list is first in the DOM and ends up on
+   the right, under the button it belongs to, while the trace — second in the
+   DOM — is placed to its left. When 360 + 8 + 360 does not fit, the trace wraps
+   to the next line, i.e. *under* the list, so a narrow pane stacks the two the
+   way they used to be instead of sliding the trace off the left edge. */
+.orch-flyout {
   position: absolute;
   top: calc(100% + 8px);
   /* Under its own button — the last one in the bar, so no offset maths. */
   right: var(--sp-5);
   z-index: 20;
   display: flex;
+  flex-direction: row-reverse;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  /* Per line, and the main-start of a reversed row is the right edge: both the
+     two-card line and a wrapped trace line stay flush with the card below the
+     button. */
+  justify-content: flex-start;
+  gap: 8px;
+  max-width: calc(100% - 40px);
+  /* Only bites when the task card wrapped under the list: the two together can
+     be taller than the viewport, and the popover has no page scroll to fall
+     back on. Measured from the header's bottom edge (64px) plus the 8px gap, so
+     a stacked pair can use the whole screen instead of 80% of it. */
+  max-height: calc(100vh - 84px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.orch-panel {
+  /* One tile's height, and the grid's view is two of them plus the gap: four
+     tasks on screen, which is what the strips are sized around. Declared here
+     so the tile, the empty slot and the grid's ceiling cannot drift apart. */
+  --orch-card-h: 128px;
+  position: relative;
+  display: flex;
   flex-direction: column;
-  width: min(360px, calc(100% - 40px));
-  /* Three strips (labels + one tile row each) plus a trace rail and a detail
-     pane need the height, and the card is read at a glance: the floor is what
-     keeps 进行中 / 待审核 / 已完成 all on screen at once instead of a scrolling
-     popover. The ceiling is a laptop viewport — past it the card itself
-     scrolls (see `overflow-y` below); nothing inside it is allowed to shrink
-     to a sliver. */
-  min-height: 340px;
-  max-height: min(80vh, 700px);
+  flex: none;
+  width: min(360px, calc(100vw - 48px));
+  /* Three strips (labels + two tile rows each) plus a detail pane need the
+     height, and the card is read at a glance: the floor is what keeps 进行中 /
+     待审核 / 已完成 all on screen at once instead of a scrolling popover. The
+     ceiling is a laptop viewport — past it the card itself scrolls (see
+     `overflow-y` below); nothing inside it is allowed to shrink to a sliver. */
+  min-height: 420px;
+  max-height: min(86vh, 760px);
   /* The card scrolls as a whole. It used to hand the leftover height to
-     whichever pane was open, which meant the trace plus a detail pane squeezed
-     the strips down to half a tile row. Every section now keeps its full
-     height and the card scrolls when trace + strips + detail do not fit.
+     whichever pane was open, which meant a detail pane squeezed the strips
+     down to half a tile row. Every section now keeps its full height and the
+     card scrolls when strips + detail do not fit.
      `contain` keeps that scroll off the transcript behind the card. */
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -1592,8 +1717,8 @@
   animation: node-panel-in var(--dur-fast) var(--ease-enter);
 }
 /* The strips: natural height, no box of their own to scroll — the card does
-   that. A section is one label plus one row of tiles, and rows scroll sideways
-   rather than wrapping, so this block has a ceiling anyway. */
+   that. A section is one label plus one grid of tiles, and a grid stops at two
+   rows and scrolls the rest, so this block has a ceiling anyway. */
 .orch-body {
   flex: 0 0 auto;
   min-height: 0;
@@ -1604,78 +1729,78 @@
   font-size: var(--text-sm);
   color: var(--text-tertiary);
 }
-/* ---- The trace, above the strips ----------------------------------------- */
-/* The DecisionOrbit that used to ride above every task reply in the transcript
-   lives here now: the strips say which tasks this thread produced, this says
-   how the focused one was classified, routed and run. It is the card's first
-   block — the one whose height the reader controls — so expanding its steps
-   pushes the strips down instead of squeezing them, and a long step list
-   scrolls inside its own box rather than pushing the list off the card. */
-.orch-trace {
-  flex: 0 0 auto;
-  min-height: 0;
-  /* 220, not the transcript's 380: the steps are the one block that can be
-     read in slices (they arrive one at a time anyway), and the card still has
-     three strips and a detail pane to show below. */
-  max-height: min(30vh, 220px);
-  overflow-y: auto;
-  /* No `overscroll-behavior: contain` here: at the end of the steps the wheel
-     should carry on into the card, not stop dead inside a rail. The card
-     itself contains the scroll, so the transcript never moves. */
-  margin: 0 0 2px;
-  padding: 2px 4px 8px;
-  border-bottom: 1px solid var(--border-soft);
-}
-/* Names the task the trace belongs to. The selection is a chip highlight two
-   blocks down, and a trace that only said 大总管 left the reader guessing which
-   task's steps those were. */
-.orch-trace-head {
+/* ---- The picked task, in its own card on the left ------------------------- */
+/* Everything about the task you clicked lives here: identity, the orbit, the
+   brief, the result, the actions. It used to be split — trace card on the left,
+   detail pane under the strips on the right — which made you read one task in
+   two places across the width of the screen. The list next door stays a list
+   and never grows on a click; the reading happens in this card. 360px, the same
+   footprint as the list, so the pair reads as a pair. */
+.orch-orch-card {
   display: flex;
-  align-items: baseline;
-  gap: 6px;
-  margin: 0;
-  padding: 0 6px 6px;
-  font-size: var(--text-xs);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--text-tertiary);
+  flex-direction: column;
+  flex: none;
+  gap: 9px;
+  width: min(360px, calc(100vw - 48px));
+  max-height: min(86vh, 760px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 8px 6px 6px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  animation: node-panel-in var(--dur-fast) var(--ease-enter);
 }
-.orch-trace-task {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--text-sm);
-  letter-spacing: 0;
-  text-transform: none;
-  color: var(--text-secondary);
+/* The orbit keeps its label: inside a card that is otherwise the task itself,
+   "任务编排" is what separates "what it was asked to do" from "how it ran". */
+.orch-orch-trace {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 0 4px;
 }
-/* A card inside a card reads as two windows: the panel is already one raised
+/* A card inside a card reads as two windows: this card is already one raised
    plate, so the orbit drops its own background, border and shadow and keeps
    only its header row and steps. */
-.orch-trace .orbit {
+.orch-orch-card .orbit {
   gap: 6px;
-  padding: 0;
+  padding: 0 2px;
   border: 0;
   border-radius: 0;
   background: none;
   box-shadow: none;
 }
-.orch-trace .orbit:hover {
+.orch-orch-card .orbit:hover {
   box-shadow: none;
 }
-/* Tighter than the transcript's strip: 360px minus the panel's padding is the
+/* Tighter than the transcript's strip: 360px minus the card's padding is the
    whole width, and the summary pills have to share the row with the brand. */
-.orch-trace .orbit-head-btn {
+.orch-orch-card .orbit-head-btn {
   gap: 6px;
   padding: 5px 8px;
 }
-.orch-trace .orbit-brand-title {
+.orch-orch-card .orbit-brand-title {
   font-size: var(--text-md);
 }
-.orch-trace .orbit-body {
+.orch-orch-card .orbit-body {
   padding: 2px 4px 0;
+}
+/* Narrow panes wrap the trace under the list (see `.orch-flyout`). A list at
+   its full 760px would then push the trace past the bottom of the popover, so
+   the click that opens it would look like it did nothing — the list gives up
+   height to keep both cards inside one screen. 1000px is the viewport at which
+   the pane stops having room for 360 + 8 + 360 beside the sidebar; below it the
+   two cards are always stacked. */
+@media (max-width: 1000px) {
+  .orch-flyout:has(.orch-orch-card) .orch-panel {
+    max-height: min(48vh, 420px);
+  }
+  /* The task card gives up height too: stacked, the two have to share one
+     screen, and 420 + 8 + 380 is what fits at 900px tall. */
+  .orch-flyout:has(.orch-orch-card) .orch-orch-card {
+    max-height: min(42vh, 380px);
+  }
 }
 /* The bottom gap lives on the section, not on the row/slot: a `<p>`'s
    margin-bottom would collapse out of the section and make an empty strip 8px
@@ -1705,17 +1830,16 @@
   text-align: center;
   color: var(--text-tertiary);
 }
-/* A strip with nothing in it still reserves one tile row: 87px is the height
-   of a chip (two-line title + meta + the acts strip — measured, not guessed),
-   and with the section's 8px bottom padding the empty strip ends up exactly as
-   tall as a filled one (126px either way). Drawn as a dashed slot rather than
-   a bare line so the reserved space reads as "nothing here yet" instead of as
-   a gap the card forgot to collapse. */
+/* A strip with nothing in it still reserves one tile row: `--orch-card-h` is
+   the height of a chip (three-line title + meta + the acts strip — measured,
+   not guessed), so an empty strip is exactly as tall as a strip with one task
+   in it. Drawn as a dashed slot rather than a bare line so the reserved space
+   reads as "nothing here yet" instead of as a gap the card forgot to collapse. */
 .orch-sec-slot {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 87px;
+  min-height: var(--orch-card-h);
   margin: 0 6px;
   border: 1px dashed var(--border-soft);
   border-radius: var(--radius-md);
@@ -1733,21 +1857,41 @@
   font-size: var(--text-sm);
   color: var(--text-tertiary);
 }
-/* The horizontal strip: the second row has to stay above the fold, so tasks
-   run left to right and the strip scrolls instead of wrapping. */
-.orch-row {
-  display: flex;
+/* The strip: two tiles across, two rows in view — four tasks without a click.
+   Past four it scrolls downwards inside its own ceiling, so a thread with
+   twenty finished tasks still leaves 进行中 and 待审核 where they were. The
+   ceiling is exactly two rows plus the gap; the tiles are fixed at
+   `--orch-card-h` so the fifth task is what starts the scroll, not a rounding
+   error. A wheel and a press-drag both move it (`.is-dragging`, bound in
+   `strip-drag.ts`), and the thin scrollbar is the third way in. */
+.orch-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   padding: 0 6px;
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-  scroll-snap-type: x proximity;
+  max-height: calc(var(--orch-card-h) * 2 + 8px);
+  overflow-y: auto;
+  /* The grid is the scroller here, and it is inside a card that scrolls too:
+     letting the notch chain out at either end is what keeps the wheel useful
+     once the strip is exhausted. */
+  overscroll-behavior-y: auto;
+  /* A strip that can be pulled says so before the first pull. */
+  cursor: grab;
+}
+/* Mid-drag: the hand closes, and the text under the pointer stops being
+   selectable so a pull across a title does not turn into a highlight. The
+   descendant rule is what makes the closed hand win over the pointer a tile
+   carries — `cursor` is inherited, but a child's own rule beats the parent's,
+   and a drag that shows an arrow over the tile it started on reads as stuck. */
+.orch-grid.is-dragging,
+.orch-grid.is-dragging * {
+  cursor: grabbing;
+  user-select: none;
 }
 .orch-chip {
-  flex: 0 0 156px;
   display: flex;
   flex-direction: column;
-  scroll-snap-align: start;
+  min-height: var(--orch-card-h);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-md);
   background: var(--bg-inset);
@@ -1768,6 +1912,7 @@
    something a keyboard can reach. */
 .orch-chip-open {
   display: flex;
+  flex: 1;
   flex-direction: column;
   gap: 7px;
   padding: 8px 9px 5px;
@@ -1779,20 +1924,25 @@
 }
 .orch-chip-title {
   display: -webkit-box;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
   font-size: var(--text-md);
   line-height: 1.35;
-  /* Two lines is the tile's budget: titles are sentences, and the strip is
-     scanned, not read. */
-  min-height: calc(2 * 1.35em);
+  /* Three lines is the tile's budget, and the budget is what the tile's height
+     was measured against: titles are sentences, and a tile tall enough to read
+     four of them at once can afford the third line. */
+  min-height: calc(3 * 1.35em);
 }
 .orch-chip-meta {
   display: flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
+  /* Badge and age sit on the tile's bottom edge, not under the title: four
+     tiles of different title lengths read as a row of columns only if the
+     state of each lands on the same line. */
+  margin-top: auto;
 }
 .orch-chip-age {
   font-size: var(--text-xs);
@@ -1840,19 +1990,9 @@
 /* The detail pane sits *under* the strips, in the same card — a hairline is
    the whole separation. It is capped so a long result scrolls in place rather
    than turning the card into a page; the card scrolls around it. */
-.orch-detail {
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-  margin-top: 2px;
-  padding: 8px 6px 4px;
-  border-top: 1px solid var(--border-soft);
-  /* 300 keeps the pane a reading pane: a task's result can be a wall of JSON,
-     and the strips above it have to stay one wheel-tick away. */
-  max-height: min(42vh, 300px);
-  overflow-y: auto;
-}
+/* The parts of the task card. The pane wrapper they used to live in is gone —
+   the card itself (`.orch-orch-card`) is the column now, and its own scroll
+   replaces the 300px reading cap: one task, one scrollbar. */
 .orch-detail-head {
   display: flex;
   align-items: flex-start;
@@ -2243,6 +2383,175 @@
 .composer-foot:has(.workdir-btn[data-tip]:hover) .composer-shortcut-hint,
 .composer-foot:has(.workdir-btn[data-tip]:focus-visible) .composer-shortcut-hint {
   opacity: 0;
+}
+
+/* ---- The workdir card ----------------------------------------------------- */
+/* The pill's card: the directories this node has already filed work under,
+   newest first, with the native chooser demoted to its last row. It opens
+   upward from the footer like every other composer popover — the composer is
+   docked to the pane's bottom edge, so a card below it would hang off screen.
+   Same width band as the thread pick it sits beside on 工作空间, so the two
+   footers read as one family. */
+.workdir-pick {
+  position: relative;
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: min(300px, 100%);
+}
+/* The caret is the whole difference between "opens a dialog" and "opens a
+   card", and it costs 12px of a chip that already ends in a hairline. */
+.workdir-caret {
+  flex: none;
+  opacity: 0.55;
+}
+.wd-panel {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  /* Above the model switch's card: both hang off this footer and the one on
+     top is the one that was just opened. */
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  width: min(340px, calc(100vw - 48px));
+  max-height: min(46vh, 420px);
+  padding: 6px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  animation: wd-panel-in var(--dur-fast) var(--ease-enter);
+}
+@keyframes wd-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+/* The magnifier rides inside the field rather than beside it: a search box
+   with a glyph parked outside reads as two controls. */
+.wd-search-wrap {
+  position: relative;
+  flex: none;
+  margin: 2px 2px 6px;
+}
+.wd-search-icon {
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-tertiary);
+  pointer-events: none;
+}
+.wd-search {
+  height: 34px;
+  padding-left: 30px;
+}
+.wd-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.wd-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
+}
+.wd-row:hover {
+  background: var(--bg-hover);
+}
+/* The current directory is marked, not tinted: the tick is the answer, and a
+   filled row in a column of grey ones would read as the hovered one — which is
+   the wrong thing to say about a value you already have. The tick is ink and
+   not a hue: this system keeps green for the brand mark, so "chosen" is said
+   the same way the rest of the console says it — with weight, not colour. */
+.wd-row-check {
+  flex: none;
+  color: var(--text);
+}
+.wd-row-icon {
+  flex: none;
+  color: var(--text-secondary);
+}
+.wd-row-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+}
+.wd-row-name {
+  font-size: var(--text-md);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The name is usually the folder's own name, which is exactly why the path
+   earns the second line: two `panda` folders on two drives are one name. */
+.wd-row-path {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wd-empty {
+  margin: 0;
+  padding: 10px 10px 12px;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+/* The actions are a footer, not more rows: a hairline separates "pick one of
+   these" from "there is no such thing in the list". */
+.wd-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: none;
+  margin-top: 4px;
+  padding-top: 5px;
+  border-top: 1px solid var(--border-soft);
+}
+.wd-action {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-md);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
+}
+.wd-action:hover {
+  background: var(--bg-hover);
+}
+.wd-action svg {
+  flex: none;
+  color: var(--text-secondary);
 }
 
 /* ---- Composer model switch ------------------------------------------------- */
