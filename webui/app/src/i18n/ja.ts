@@ -17,6 +17,8 @@ const ja: Messages = {
   'nav.system': 'システム',
   'nav.settings': '設定',
   'nav.aria': 'メインナビゲーション',
+  'nav.menuOpen': 'ナビゲーションを開く',
+  'nav.menuClose': 'ナビゲーションを閉じる',
   'nav.fleet': 'フリート',
   'nav.workspace': 'ワークスペース',
 
@@ -97,6 +99,7 @@ const ja: Messages = {
   'queue.empty': 'タスクはまだありません。「チャット」から何か依頼してみましょう。',
   'queue.title': 'タイトル',
   'queue.project': 'プロジェクト',
+  'queue.filterProject': 'プロジェクトで絞り込む',
   'queue.state': '状態',
   'queue.owner': '担当',
   'queue.updated': '更新日時',

@@ -6,6 +6,7 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/Xustalis/OpenPanda/internal/cliui"
@@ -392,7 +393,7 @@ func (s SelectionList) formatItemLine(th theme, item SelectionItem, isCursor boo
 			parts = append(parts, th.muted.Render(item.Time))
 		}
 		if item.Turns >= 0 {
-			parts = append(parts, th.muted.Render(fmt.Sprintf("%d turns", item.Turns)))
+			parts = append(parts, th.muted.Render(i18n.Tf(th.loc, "tui.list.turns", "n", strconv.Itoa(item.Turns))))
 		}
 		if item.Snippet != "" {
 			// Limit snippet length so line fits comfortably

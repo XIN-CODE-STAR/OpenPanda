@@ -203,12 +203,10 @@ func TestResultBlockPlanFailed(t *testing.T) {
 	}
 }
 
-// TestThoughtFoldDoesNotPromiseAnUnavailableKey pins the inline-mode constraint.
-// A committed block has already been written into the terminal's scrollback, so
-// it can never be redrawn — advertising ctrl+o on it would point at a key that
-// cannot touch it. The fold reports how much is hidden instead, which is a fact
-// about this block rather than a promise about a future one.
-func TestThoughtFoldDoesNotPromiseAnUnavailableKey(t *testing.T) {
+// TestThoughtFoldReportsHiddenLines pins the folded block's content: it reports
+// how much is hidden instead of repeating the ctrl+o legend, which lives in the
+// footer where it is available in every mode.
+func TestThoughtFoldReportsHiddenLines(t *testing.T) {
 	b := block{kind: blockThought, thoughtLines: []string{"first", "second", "third"}}
 
 	folded := b.render(theme{loc: loc}, 80, false, false)

@@ -6,9 +6,11 @@ package main
 
 // Launch glue for the full-screen interactive front end. runTUI builds the
 // Bubble Tea program over an already-constructed repl (engine, stores, locale)
-// and runs it inline — committed turns flow into scrollback, so the terminal
-// keeps the conversation after exit. shouldUseTUI decides when `panda` /
-// `panda repl` open this front end instead of the classic line loop.
+// and runs it in the alternate screen: View repaints the transcript from
+// chatHistory each frame, so the conversation is on screen for the life of the
+// program. Quitting restores the shell's previous screen and prints where the
+// conversation was saved. shouldUseTUI decides when `panda` / `panda repl` open
+// this front end instead of the classic line loop.
 
 import (
 	"fmt"
@@ -20,10 +22,10 @@ import (
 )
 
 // shouldUseTUI reports whether the rich TUI should drive this session. It needs
-// an interactive TTY and a configured engine (the TUI is a chat front end; with
-// no model endpoint the classic command loop is the right fallback). The
-// PANDA_CLASSIC_REPL escape hatch forces the old line editor — a safety valve
-// while the TUI matures and for scripted/e2e use that expects the plain loop.
+// an interactive TTY; an install with no configured model still enters the TUI,
+// where the onboarding/model wizard handles setup. The PANDA_CLASSIC_REPL escape
+// hatch forces the old line editor — a safety valve for scripted/e2e use that
+// expects the plain loop.
 func shouldUseTUI(r *repl) bool {
 	if os.Getenv("PANDA_CLASSIC_REPL") != "" {
 		return false

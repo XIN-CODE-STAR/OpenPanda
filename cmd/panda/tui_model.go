@@ -5,13 +5,12 @@
 package main
 
 // The root Bubble Tea model for the full-screen interactive `panda` front end.
-// It runs inline (committed turns flow into the terminal's own scrollback via
-// tea.Println; only the in-flight region and the input box are repainted each
-// frame), so quitting leaves the conversation on screen the way a shell session
-// does. The heavy lifting — classify/route/exec/judge, streaming, reasoning,
-// approval — all lives behind the ask engine; this model is a thin, race-free
-// front end that turns engine callbacks (delivered over a channel, see
-// tui_msgs.go) into screen updates and keystrokes into asks.
+// It runs in the alternate screen, repainting the welcome banner, the committed
+// transcript in chatHistory, the live turn and the input box each frame. The
+// heavy lifting — classify/route/exec/judge, streaming, reasoning, approval —
+// all lives behind the ask engine; this model is a thin, race-free front end
+// that turns engine callbacks (delivered over a channel, see tui_msgs.go) into
+// screen updates and keystrokes into asks.
 
 import (
 	"math"
@@ -428,18 +427,14 @@ func newScrollLimit() *int {
 	return &limit
 }
 
-// Init focuses the input, starts the cursor blink, prints the welcome banner
-// into scrollback so it sits above the first prompt like a shell MOTD, and arms
-// the out-of-band task watcher.
+// Init focuses the input, starts the cursor blink, and arms the out-of-band
+// task watcher. The welcome banner is part of the frame (see View), so it is
+// not built here: Bubble Tea has not reported the terminal size yet, and an
+// 80-column wordmark in a 52-column window would wrap.
 func (m tuiModel) Init() tea.Cmd {
 	if m.r != nil {
 		m.r.resetWatchBaseline() // adopt already-finished tasks, so startup is quiet
 	}
-	// The welcome banner is not printed here: Init runs before Bubble Tea reports
-	// the terminal size, so a banner printed now would be drawn to the fallback
-	// width — 80-column art in a 52-column window. The first WindowSizeMsg
-	// prints it (see Update), which is the earliest moment the banner can match
-	// the terminal it is sitting in.
 	return tea.Batch(textarea.Blink, watchTasks(m.r), altScrollCmd(m.mouse))
 }
 
@@ -465,45 +460,6 @@ func (m tuiModel) printBlock(b block) tea.Cmd {
 	return func() tea.Msg {
 		return blockCommitMsg{text: rendered}
 	}
-}
-
-// startupPrints is what the first WindowSizeMsg commits to scrollback: the
-// welcome banner, then — when a previous run left a conversation behind — that
-// conversation replayed as transcript blocks. A restored thread used to come
-// back completely invisible: its turns existed only in the model's memory, so
-// the screen showed a banner and an empty prompt no matter how many turns had
-// been banked, and with the wheel belonging to the terminal there was nothing
-// above the banner to scroll to either. The replay caps itself to the most
-// recent turns — its job is orientation, not a verbatim wall — and says so when
-// it folds. Each entry carries the same leading blank line printBlock uses, so
-// the replay reads as part of the transcript's rhythm; the banner does not,
-// because it is the frame the transcript hangs from.
-func (m tuiModel) startupPrints() []string {
-	prints := []string{m.welcome()}
-	if m.r == nil || m.r.convoLen() == 0 {
-		return prints
-	}
-	turns := m.r.convoNow()
-	const maxTurns = 10 // user+assistant pairs, taken from the tail
-	add := func(b block) {
-		prints = append(prints, "\n"+b.render(m.th, m.textWidth(), m.expandThought, m.expandHints))
-	}
-	if n := len(turns) / 2; n > maxTurns {
-		add(block{
-			kind: blockNote,
-			body: i18n.Tf(m.loc, "tui.replay.folded", "n", strconv.Itoa(len(turns)-maxTurns*2)),
-		})
-		turns = turns[len(turns)-maxTurns*2:]
-	}
-	for _, t := range turns {
-		switch {
-		case t.Role == "user":
-			add(block{kind: blockUser, body: t.Content})
-		case t.Role == "assistant" && strings.TrimSpace(t.Content) != "":
-			add(block{kind: blockAnswer, body: t.Content})
-		}
-	}
-	return prints
 }
 
 // refreshProject re-reads the active project pointer into the model; see the

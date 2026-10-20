@@ -11,9 +11,9 @@ package main
 // stdout from a goroutine would land inside the frame Bubble Tea is repainting.
 //
 // So the same single-poll step (repl.pollCompletions) is driven as a Bubble Tea
-// command instead: it returns a message, Update commits the lines to scrollback
-// as transcript notes, and re-arms the next poll. One poll is ever in flight, and
-// only the Update loop touches the model.
+// command instead: it returns a message, Update commits the lines to the
+// transcript as block notes, and re-arms the next poll. One poll is ever in
+// flight, and only the Update loop touches the model.
 
 import (
 	"context"
@@ -80,7 +80,7 @@ func absorbBaseline(r *repl) tea.Cmd {
 // The review case is the point of this path: an approval that arrives out of
 // band — a queued task, a web submission, a peer's delegation — must still be
 // decided by the user, so the first such task is promoted to the same
-// foreground card an inline ask would raise. A line in the scrollback is not a
+// foreground card an inline ask would raise. A line in the transcript is not a
 // decision; nothing else in the system may answer it. Cards are raised only
 // while the screen is idle (never over an in-flight ask, another card, or a
 // panel), and any further review tasks keep their actionable note so they are

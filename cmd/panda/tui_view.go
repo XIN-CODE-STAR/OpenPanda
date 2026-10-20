@@ -4,11 +4,12 @@
 
 package main
 
-// View renders the ephemeral region: the live turn (streaming answer or thought
-// preview) with its spinner status while asking, the approval card while
-// approving, and the bottom rounded input box while idle. Committed turns are
-// not re-rendered here — they live in the terminal's scrollback (tea.Println),
-// which is why quitting leaves the whole conversation on screen.
+// View renders the whole frame: the welcome banner, the committed transcript
+// from chatHistory, the live turn (streaming answer, thought preview or task
+// card) with its spinner while asking, the approval card while approving, and
+// the bottom rounded input box. The frame is repainted in the alternate screen,
+// which has no scrollback of its own; quitting restores the shell's previous
+// screen.
 
 import (
 	"fmt"
@@ -58,7 +59,8 @@ func (m tuiModel) View() string {
 		}
 		if strings.TrimSpace(strings.Join(lines, "\n")) != "" {
 			// The same muted bar the committed blockInfo wears, so a finishing
-			// exec does not visibly shift its output when it lands in scrollback.
+			// exec does not visibly shift its output when it commits to the
+			// transcript.
 			bar := m.th.muted.Render(m.th.glyph("│", "|")) + " "
 			for i, l := range lines {
 				lines[i] = bar + l
@@ -864,7 +866,7 @@ func (m tuiModel) liveRegion() string {
 		parts = append(parts, text)
 	} else if m.liveTask == nil {
 		// Once a task card is up it is the focus; the thought that led to the
-		// delegation has already been committed to scrollback.
+		// delegation has already been committed to the transcript.
 		if tv := m.thoughtView(); tv != "" {
 			parts = append(parts, tv)
 		}
@@ -1502,8 +1504,8 @@ type welcomeCache struct {
 	out string
 }
 
-// welcome is the startup banner pushed into scrollback: the wordmark, version,
-// working directory and orientation tips.
+// welcome is the startup banner rendered at the top of the frame: the wordmark,
+// version, working directory and orientation tips.
 func (m tuiModel) welcome() string {
 	w := m.width
 	if w <= 0 {

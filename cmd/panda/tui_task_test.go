@@ -11,6 +11,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Xustalis/OpenPanda/internal/askengine"
 	"github.com/Xustalis/OpenPanda/internal/core"
@@ -25,10 +26,10 @@ func TestTaskProgressAdvanceDedups(t *testing.T) {
 	if tp.title != "Explain PPO" {
 		t.Fatalf("title = %q", tp.title)
 	}
-	tp.advance("routing to node-a", t0.Add(1*time.Second))
-	tp.advance("routing to node-a", t0.Add(2*time.Second)) // duplicate, dropped
-	tp.advance("", t0.Add(3*time.Second))                  // empty, dropped
-	tp.advance("running claude_code", t0.Add(4*time.Second))
+	tp.advance(askengine.ProgressRoute, "routing to node-a", t0.Add(1*time.Second))
+	tp.advance(askengine.ProgressRoute, "routing to node-a", t0.Add(2*time.Second)) // duplicate, dropped
+	tp.advance(askengine.ProgressRoute, "", t0.Add(3*time.Second))                  // empty, dropped
+	tp.advance(askengine.ProgressExec, "running claude_code", t0.Add(4*time.Second))
 	if len(tp.stages) != 2 {
 		t.Fatalf("expected 2 stages, got %d: %+v", len(tp.stages), tp.stages)
 	}
@@ -42,8 +43,8 @@ func TestTaskProgressAdvanceDedups(t *testing.T) {
 func TestTaskProgressTrail(t *testing.T) {
 	t0 := time.Now()
 	tp := newTaskProgress("build", t0, i18n.English)
-	tp.advance("routed", t0.Add(2*time.Second))
-	tp.advance("running", t0.Add(5*time.Second))
+	tp.advance(askengine.ProgressRoute, "routed", t0.Add(2*time.Second))
+	tp.advance(askengine.ProgressExec, "running", t0.Add(5*time.Second))
 
 	lines := tp.trail(20 * time.Second)
 	if len(lines) != 2 {
@@ -83,14 +84,40 @@ func TestTaskProgressRenderLive(t *testing.T) {
 	}
 
 	// With stages: earlier ones are ticked, the last one holds the spinner.
-	tp.advance("routed to node-a", t0.Add(1*time.Second))
-	tp.advance("running claude_code", t0.Add(3*time.Second))
+	tp.advance(askengine.ProgressRoute, "routed to node-a", t0.Add(1*time.Second))
+	tp.advance(askengine.ProgressExec, "running claude_code", t0.Add(3*time.Second))
 	out = tp.renderLive(th, "en", "SPIN", t0.Add(10*time.Second))
 	if !strings.Contains(out, "routed to node-a") || !strings.Contains(out, "running claude_code") {
 		t.Errorf("card should list both stages: %q", out)
 	}
 	if strings.Count(out, "SPIN") != 1 {
 		t.Errorf("exactly the current stage should spin: %q", out)
+	}
+}
+
+// TestTaskPipelineUsesKindNotLocale pins the fix for the visualizer stalling
+// outside English/Chinese: stages are classified by the engine's ProgressKind,
+// so Japanese labels (which carry none of the old keyword substrings) still
+// light route, exec and judge.
+func TestTaskPipelineUsesKindNotLocale(t *testing.T) {
+	th := newTheme(i18n.Japanese)
+	t0 := time.Now()
+	tp := newTaskProgress("資料を分析", t0, i18n.Japanese)
+	tp.advance(askengine.ProgressRoute, "ルーティング中…", t0.Add(time.Second))
+	tp.advance(askengine.ProgressExec, "実行中…", t0.Add(2*time.Second))
+	tp.advance(askengine.ProgressJudge, "評価中…", t0.Add(3*time.Second))
+
+	out := ansi.Strip(tp.renderLive(th, i18n.Japanese, "SPIN", t0.Add(4*time.Second)))
+	tick, dot := th.glyph("✓", "v"), th.glyph("●", "*")
+	for _, want := range []string{
+		tick + " " + i18n.T(i18n.Japanese, "tui.pipeline.triage"),
+		tick + " " + i18n.T(i18n.Japanese, "tui.pipeline.route"),
+		tick + " " + i18n.T(i18n.Japanese, "tui.pipeline.exec"),
+		dot + " " + i18n.T(i18n.Japanese, "tui.pipeline.judge"),
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("pipeline missing %q:\n%s", want, out)
+		}
 	}
 }
 
@@ -189,9 +216,8 @@ func TestCommitAttachesTaskTrail(t *testing.T) {
 	}
 }
 
-// printedText runs a tea.Println command and returns the text it would print.
-// tea.Println wraps the body in an unexported message type, so the text is read
-// back through its default format — enough for these assertions.
+// printedText runs a commit command and returns the text it carries.
+// blockCommitMsg formats itself through Stringer — enough for these assertions.
 func printedText(cmd tea.Cmd) string {
 	if cmd == nil {
 		return ""
@@ -236,9 +262,9 @@ func TestTaskProgressCompressesTools(t *testing.T) {
 	tp := newTaskProgress("Deep Analysis", t0, i18n.ChineseSimp)
 
 	// Advance milestone 1: route
-	tp.advance("路由至 本地节点", t0.Add(1*time.Second))
+	tp.advance(askengine.ProgressRoute, "路由至 本地节点", t0.Add(1*time.Second))
 	// Advance milestone 2: exec agent
-	tp.advance("正在运行 claude_code...", t0.Add(2*time.Second))
+	tp.advance(askengine.ProgressExec, "正在运行 claude_code...", t0.Add(2*time.Second))
 
 	if len(tp.stages) != 2 {
 		t.Fatalf("expected 2 milestone stages, got %d", len(tp.stages))
@@ -267,7 +293,7 @@ func TestTaskProgressCompressesTools(t *testing.T) {
 	}
 
 	// Advance to judge
-	tp.advance("正在评审执行结果...", t0.Add(21*time.Second))
+	tp.advance(askengine.ProgressJudge, "正在评审执行结果...", t0.Add(21*time.Second))
 	if len(tp.stages) != 3 {
 		t.Fatalf("expected 3 milestone stages after judge, got %d", len(tp.stages))
 	}

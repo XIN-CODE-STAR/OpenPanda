@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { useEffect, useState } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import { PandaAscii } from './brand/panda'
 import { api, clearToken, displayVersion, getToken, onUnauthorized, setToken, subscribeEvents, type UpdateStatus } from './api/client'
 import { onLocaleChange, t } from './i18n'
@@ -42,8 +42,28 @@ export function App() {
   const route = useRoute()
   const [authed, setAuthed] = useState<boolean>(getToken() !== '')
   const [gateError, setGateError] = useState('')
+  const [menuOpen, setMenuOpen] = useState(false)
+  const sidebar = useRef<HTMLElement>(null)
 
   useEffect(() => onUnauthorized(() => setAuthed(false)), [])
+  // A route change means the reader picked a destination; the mobile panel
+  // has done its job and must not cover the page they asked for.
+  useEffect(() => setMenuOpen(false), [route])
+  useEffect(() => {
+    if (!menuOpen) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMenuOpen(false)
+    }
+    const onDown = (e: MouseEvent) => {
+      if (!sidebar.current?.contains(e.target as Node)) setMenuOpen(false)
+    }
+    document.addEventListener('keydown', onKey)
+    document.addEventListener('mousedown', onDown)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('mousedown', onDown)
+    }
+  }, [menuOpen])
 
   if (!authed) {
     return (
@@ -63,6 +83,7 @@ export function App() {
   const active: string = route.view === 'detail' ? 'control' : route.view
   const reviewCount = useReviewCount()
   const logout = () => {
+    setMenuOpen(false)
     clearToken()
     setAuthed(false)
   }
@@ -72,7 +93,10 @@ export function App() {
       <ToastHost />
       <ConfirmHost />
       <PaletteHost onLogout={logout} />
-      <aside class="sidebar">
+      <aside
+        ref={sidebar}
+        class={`sidebar${menuOpen ? ' mobile-open' : ''}`}
+      >
         {/* One line of chrome at the head of the rail: the name and the one
             ambient action that works from any view. The name is a label, not a
             control — it used to open 总控 → 项目, which meant a stray click on
@@ -95,12 +119,26 @@ export function App() {
               class="icon-btn"
               title={`${t('palette.trigger')} ${modKeyLabel()}K`}
               aria-label={t('palette.trigger')}
-              onClick={openPalette}
+              onClick={() => {
+                setMenuOpen(false)
+                openPalette()
+              }}
             >
               <Icon name="search" />
             </button>
+            <button
+              type="button"
+              class="icon-btn mobile-menu-btn"
+              aria-label={t(menuOpen ? 'nav.menuClose' : 'nav.menuOpen')}
+              aria-expanded={menuOpen}
+              aria-controls="sidebar-panel"
+              onClick={() => setMenuOpen((open) => !open)}
+            >
+              <Icon name={menuOpen ? 'x' : 'menu'} />
+            </button>
           </div>
         </div>
+        <div class="sidebar-panel" id="sidebar-panel">
         {/* The quick block: 新对话 and 工作空间, one level above the rail's
             destinations. 新对话 is an action, not a destination — but it reads
             as a nav row (same 15px label, same hover wash) instead of a filled
@@ -185,6 +223,7 @@ export function App() {
           <button class="nav-item" onClick={logout}>
             {t('token.logout')}
           </button>
+        </div>
         </div>
       </aside>
       <main class="main">
@@ -311,7 +350,9 @@ function SidebarNode() {
     >
       <span class={`dot${self.node_running ? '' : ' off'}`} aria-hidden />
       <span class="mono sidebar-node-name">{name}</span>
-      <span class="ver mono">{displayVersion(self.version, self.codename)}</span>
+      <span class="ver mono" title={displayVersion(self.version, self.codename)}>
+        {displayVersion(self.version, self.codename)}
+      </span>
     </a>
   )
 }
