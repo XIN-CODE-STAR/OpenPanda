@@ -367,7 +367,9 @@ func TestIsolatedWorkspacePreservesSymlinks(t *testing.T) {
 			t.Fatalf("%s flattened to mode %v in the copy", p, st.Mode())
 		}
 	}
-	if target, err := os.Readlink(filepath.Join(dir, "link.txt")); err != nil || target != "lib/real.txt" {
+	// Windows normalizes the stored target to backslashes at creation —
+	// compare the canonical slash form so the check is platform-stable.
+	if target, err := os.Readlink(filepath.Join(dir, "link.txt")); err != nil || filepath.ToSlash(target) != "lib/real.txt" {
 		t.Fatalf("link.txt target = %q err=%v, want lib/real.txt", target, err)
 	}
 
@@ -395,10 +397,10 @@ func TestIsolatedWorkspacePreservesSymlinks(t *testing.T) {
 	if merged != 3 {
 		t.Fatalf("merged = %d, want 3 (retarget, delete, create)", merged)
 	}
-	if target, err := os.Readlink(filepath.Join(src, "link.txt")); err != nil || target != "lib/moved.txt" {
+	if target, err := os.Readlink(filepath.Join(src, "link.txt")); err != nil || filepath.ToSlash(target) != "lib/moved.txt" {
 		t.Fatalf("merged link.txt = %q err=%v, want lib/moved.txt", target, err)
 	}
-	if target, err := os.Readlink(filepath.Join(src, "newlink")); err != nil || target != "lib/real.txt" {
+	if target, err := os.Readlink(filepath.Join(src, "newlink")); err != nil || filepath.ToSlash(target) != "lib/real.txt" {
 		t.Fatalf("merged newlink = %q err=%v, want lib/real.txt", target, err)
 	}
 	if _, err := os.Lstat(filepath.Join(src, "libdir")); !os.IsNotExist(err) {
