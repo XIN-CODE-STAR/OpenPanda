@@ -1864,7 +1864,12 @@ export function SessionsView({
           }}
         >
           {msgs.length === 0 && loading && <ChatSkeleton />}
-          {msgs.length === 0 && !loading && !busy && <ChatEmpty onPick={useStarter} />}
+          {msgs.length === 0 && !loading && !busy && (
+            <ChatEmpty
+              onPick={useStarter}
+              hasDraft={input.trim() !== '' || pending.length > 0}
+            />
+          )}
           {msgs.map((m, i) => (
             <ChatBubble
               key={m.k}
@@ -2291,25 +2296,35 @@ function ChatSkeleton() {
  *  fill the composer. The brand mark and fleet strip stay out — the pet is
  *  already standing on the composer — but a blank page gives a first-time
  *  reader no verb, and a chip is cheaper to click than a sentence to invent. */
-function ChatEmpty({ onPick }: { onPick(text: string): void }) {
+function ChatEmpty({
+  onPick,
+  hasDraft,
+}: {
+  onPick(text: string): void
+  hasDraft: boolean
+}) {
   return (
     <div class="chat-empty">
       <div class="chat-empty-cta">
         <h1>{t('sessions.hello')}</h1>
         <p class="chat-empty-hint">{t('sessions.hint')}</p>
-        <div class="chat-starters">
-          {(['sessions.s1', 'sessions.s2', 'sessions.s3'] as const).map((key) => (
-            <button
-              type="button"
-              class="chat-starter"
-              key={key}
-              onClick={() => onPick(t(key))}
-            >
-              {t(key)}
-              <Icon name="chevron-right" size={14} />
-            </button>
-          ))}
-        </div>
+        {/* Once there is a draft or an attachment, a suggestion would replace
+            work the reader already did; the chips step aside instead. */}
+        {!hasDraft && (
+          <div class="chat-starters">
+            {(['sessions.s1', 'sessions.s2', 'sessions.s3'] as const).map((key) => (
+              <button
+                type="button"
+                class="chat-starter"
+                key={key}
+                onClick={() => onPick(t(key))}
+              >
+                {t(key)}
+                <Icon name="chevron-right" size={14} />
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   )
