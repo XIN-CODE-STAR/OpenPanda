@@ -6,7 +6,7 @@
 // a palette that lists a different set of destinations than the sidebar is a
 // bug waiting to be filed.
 
-/** 总控's three boards. They used to be three rail rows (任务队列, 计划, 项目)
+/** 队列·任务·项目's three boards. They used to be three rail rows (任务队列, 计划, 项目)
  *  over three routes; they are now one page with one tab strip, because all
  *  three answer the same question — "what is this node working on, and where
  *  does that work live" — and a rail row per board made the work group read
@@ -22,71 +22,37 @@ export type Route =
   | { view: 'settings'; tab?: string | null }
   | { view: 'detail'; id: string }
 
-/** One section of the sidebar rail: an optional heading, then its rows. */
-export type NavGroup = {
-  /** Stable identity — the rail's React key. */
-  id: string
-  /** Heading rendered above the rows as a small uppercase label. Omitted for
-   *  the work group, which sits at the top of the rail where a "Work" label
-   *  would only label the first thing on screen. */
-  head?: string
-  items: Array<[view: string, key: string]>
-}
-
-/** The primary workspace views on the main sidebar rail, grouped the way the
- *  product reads: work first (control), then the network that runs it
- *  (fleet).
+/** The rail's destinations, in the order they are painted.
  *
- *  Two views are deliberately not rows here. 新对话 is an action, and 工作空间
- *  is its peer — both sit in the quick block above the nav (app.tsx), which is
- *  why neither appears in the groups below. 对话 is not a row either: the
- *  thread history is the tail of the rail (app.tsx), and a row whose only job
- *  was to unfold a list that is now always visible just named the list again.
- *  计划 and 项目 are not rows either: both are tabs of 总控.
- *  记忆 and 技能 are not rows either: both are tabs of 设置 — the rail keeps
- *  only the destinations you *work* in, and everything about the agent's mind
- *  or its configuration lives in the one management centre. */
-export const primaryNavGroups: NavGroup[] = [
-  {
-    id: 'work',
-    items: [['control', 'nav.control']],
-  },
-  {
-    // No heading: the group has one row, and "节点网络" above "节点网络"
-    // named the same destination twice. Spacing already separates the group.
-    id: 'fleet',
-    items: [['fleet', 'nav.fleet']],
-  },
-]
-
-/** Flat nav list — the mobile top bar and any code that iterates views. */
-export const primaryNav: Array<[view: string, key: string]> = primaryNavGroups.flatMap(
-  (g) => g.items,
-)
-
-/** Palette views: includes primary workspaces plus direct jumps to settings
- *  sections. 对话 is listed here even though the rail has no row for it — the
- *  palette is a jump list, and chat is still a destination (the rail reaches
- *  it through the history and 新对话). Dropping it here too would leave ⌘K
- *  with no way to reach the chat surface. 计划 and 项目 get the same
- *  treatment: their rail rows are gone (they are tabs of 总控 now), but ⌘K
- *  still jumps straight to those tabs. */
+ *  The rail no longer has sections: every row that is a *place to work* now
+ *  sits in one block at the top (app.tsx's quick block), because the headings
+ *  had stopped earning their 24px — 节点网络 hung under a heading that repeated
+ *  its own name, and 队列·任务·项目 was the only row left under a second one. 新对话 leads
+ *  (it is an action, but it reads as a row); then the three machines-and-work
+ *  destinations: 工作空间 (the fleet as a map), 节点网络 (what each node can do),
+ *  and 队列·任务·项目 (the node's boards).
+ *
+ *  What is deliberately NOT a row: 对话 — the thread history is the tail of the
+ *  rail (app.tsx), and a row whose only job was to unfold a list that is now
+ *  always visible just named the list again. 计划 and 项目 — both are tabs of
+ *  队列·任务·项目, and ⌘K still jumps straight to each. 记忆 and 技能 — both are
+ *  tabs of 设置: the rail keeps only the destinations you work in, and
+ *  everything about the agent's mind or its configuration lives in the one
+ *  management centre. The palette below is therefore a superset of the rail,
+ *  not a mirror of it. */
 export const navViews: Array<[view: string, key: string]> = [
   ['sessions', 'nav.sessions'],
-  // 工作空间 is a rail row of its own, above the groups (app.tsx renders it
-  // beside 新对话), so the palette lists it explicitly rather than through
-  // primaryNav.
   ['workspace', 'nav.workspace'],
-  ...primaryNav.flatMap((item): Array<[string, string]> =>
-    item[0] === 'control'
-      ? [item, ['control:plans', 'nav.plans'], ['control:projects', 'nav.projects']]
-      : [item],
-  ),
+  ['fleet', 'nav.fleet'],
+  ['control', 'nav.control'],
+  // The two boards that are tabs rather than rows.
+  ['control:plans', 'nav.plans'],
+  ['control:projects', 'nav.projects'],
   ['profile', 'nav.profile'],
   ['settings', 'nav.settings'],
 ]
 
-/** `?tab=` → a valid 总控 tab. Anything unknown (including a missing param)
+/** `?tab=` → a valid board tab. Anything unknown (including a missing param)
  *  falls back to the kanban, which is the page's default board. */
 function parseControlTab(raw: string | null): ControlTab {
   return raw === 'plans' || raw === 'projects' ? raw : 'queue'
@@ -114,7 +80,7 @@ export function parseHash(): Route {
     }
   }
   // Legacy URLs: 任务队列, 计划 and 项目 were their own routes before they
-  // became the three tabs of 总控. Old deep links (and anything still linking
+  // became the three tabs of 队列·任务·项目. Old deep links (and anything still linking
   // `#/queue`, `#/plans`, `#/projects`) land on the same board, just under the
   // merged route.
   if (path === 'queue') {
@@ -143,8 +109,10 @@ export function parseHash(): Route {
   }
 
   // Graceful redirects for legacy URLs: promoted views land on their own
-  // routes now; reminders/system stay inside Settings.
-  if (path === 'reminders') return { view: 'settings', tab: 'reminders' }
+  // routes now; system stays inside Settings. 提醒 left Settings for a bell in
+  // the rail's head, so `#/reminders` lands on the thread and the app raises
+  // the reminder card over it (app.tsx) — the card is state, not a route.
+  if (path === 'reminders') return { view: 'sessions', id: null }
   if (path === 'system') return { view: 'settings', tab: 'system' }
 
   return { view: 'sessions', id: null, project: projectParam }

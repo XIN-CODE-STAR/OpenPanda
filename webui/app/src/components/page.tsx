@@ -21,7 +21,7 @@ export function PageHeader({ title, sub }: { title: string; sub: string }) {
 /** Friendly full-page error: keeps the page header so the user knows where
  *  they are, explains that loading failed (not the raw fetch error), and
  *  offers a retry. The technical detail stays for diagnosis. `head={false}`
- *  drops the header for boards hosted inside a merged page (总控), which
+ *  drops the header for boards hosted inside a merged page (队列·任务·项目), which
  *  paints the heading itself. */
 export function ErrorState({
   head = true,

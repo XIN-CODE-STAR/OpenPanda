@@ -18,7 +18,6 @@ import { TermsModal } from '../components/terms'
 import { onThemeChange, setTheme, theme } from '../theme'
 import { MemoryView } from './memory'
 import { SkillsView } from './skills'
-import { RemindersView } from './reminders'
 import { SystemView } from './system'
 import { ModelsSection } from './models'
 
@@ -37,7 +36,6 @@ export type Section =
   | 'mcp'
   | 'memory'
   | 'skills'
-  | 'reminders'
   | 'system'
 
 const SECTIONS: Array<{ id: Section; label: string; icon: IconName }> = [
@@ -48,7 +46,6 @@ const SECTIONS: Array<{ id: Section; label: string; icon: IconName }> = [
   { id: 'mcp', label: 'settings.mcp', icon: 'plug' },
   { id: 'memory', label: 'nav.memory', icon: 'orbit' },
   { id: 'skills', label: 'nav.skills', icon: 'sparkles' },
-  { id: 'reminders', label: 'nav.reminders', icon: 'bell' },
   { id: 'system', label: 'nav.system', icon: 'activity' },
 ]
 
@@ -61,6 +58,10 @@ function normalizeSection(raw?: string): Section {
   if (raw === 'nodes' || raw === 'devices') {
     return 'general'
   }
+  // 提醒 moved out of Settings: it is the bell in the rail's head now, so an
+  // old `?tab=reminders` link falls back to the page's first tab instead of
+  // rendering a section that no longer exists.
+  if (raw === 'reminders') return 'general'
   const valid: Section[] = [
     'general',
     'models',
@@ -69,17 +70,18 @@ function normalizeSection(raw?: string): Section {
     'mcp',
     'memory',
     'skills',
-    'reminders',
     'system',
   ]
   return valid.includes(raw as Section) ? (raw as Section) : 'general'
 }
 
-/** The unified settings & management centre: memory, skills, automated
- *  reminders, system governance, and model configurations all live here as
- *  controlled tabs. The rail keeps only the destinations you work in — the
- *  boards and the thread — while everything about how the node and its agents
- *  are configured or what they remember sits behind this one page. */
+/** The unified settings & management centre: memory, skills, system
+ *  governance, and model configurations all live here as controlled tabs. The
+ *  rail keeps only the destinations you work in — the boards and the thread —
+ *  while everything about how the node and its agents are configured or what
+ *  they remember sits behind this one page. 提醒 is deliberately not here: it
+ *  is a bell in the rail's head (components/reminders.tsx), because a clock you
+ *  set several times a day does not belong behind a page you open monthly. */
 export function SettingsView(props: {
   initialSection?: string
   onSelectTab?: (tab: Section) => void
@@ -150,7 +152,6 @@ export function SettingsView(props: {
           {section === 'mcp' && <MCPSection />}
           {section === 'memory' && <MemoryView />}
           {section === 'skills' && <SkillsView />}
-          {section === 'reminders' && <RemindersView />}
           {section === 'system' && <SystemView />}
         </div>
       </div>

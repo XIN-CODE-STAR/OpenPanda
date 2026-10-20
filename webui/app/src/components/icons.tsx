@@ -37,9 +37,11 @@ export type IconName =
   | 'folder'
   | 'folder-closed'
   | 'folder-open'
+  | 'folder-plus'
   | 'gear'
   | 'git-fork'
   | 'image'
+  | 'kanban'
   | 'lightbulb'
   | 'menu'
   | 'message'
@@ -188,6 +190,17 @@ const paths: Record<IconName, JSX.Element> = {
   'folder-open': (
     <path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" />
   ),
+  // A closed folder with a plus notched into its face: the workdir menu's
+  // "new workspace" row, which is the same chooser the pill used to open
+  // directly. Drawn closed so it reads as a folder being made, not as the
+  // open one that means "browse".
+  'folder-plus': (
+    <>
+      <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+      <path d="M12 10v6" />
+      <path d="M9 13h6" />
+    </>
+  ),
   gear: (
     <>
       <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
@@ -219,6 +232,19 @@ const paths: Record<IconName, JSX.Element> = {
       <rect x="3" y="3" width="18" height="18" rx="4.2" stroke-width="1.7" />
       <path fill="currentColor" stroke="none" d="M4.2 20 8.4 12.2 11.6 16.4 15.2 12.8 19.8 20z" />
       <circle cx="7.9" cy="7.9" r="1.75" fill="currentColor" stroke="none" />
+    </>
+  ),
+  // 队列·任务·项目's mark: the kanban the board itself draws, one column per
+  // tab. Bare bars, not three framed boxes — at 16px a boxed three-column grid
+  // closes up into a solid brick, while the bars keep the two gaps, and it is
+  // the uneven lengths (14/8/12, tops aligned) that say "three boards" instead
+  // of "a table". Ink spans 3.5–20.5 × 4–20 with the 2px stroke, so it sits on
+  // the same optical centre as `devices` and `network` beside it in the rail.
+  kanban: (
+    <>
+      <path d="M4.5 5v14" />
+      <path d="M12 5v8" />
+      <path d="M19.5 5v12" />
     </>
   ),
   lightbulb: (

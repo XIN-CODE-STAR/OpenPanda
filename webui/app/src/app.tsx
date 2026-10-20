@@ -5,7 +5,7 @@ import { PandaAscii } from './brand/panda'
 import { api, clearToken, displayVersion, getToken, onUnauthorized, setToken, subscribeEvents, type UpdateStatus } from './api/client'
 import { onLocaleChange, t } from './i18n'
 import { useAsync } from './hooks'
-import { navigate, parseHash, primaryNavGroups, type Route } from './nav'
+import { navigate, parseHash, type Route } from './nav'
 import { ControlView } from './views/control'
 import { DetailView } from './views/detail'
 import { SessionsView } from './views/sessions'
@@ -19,6 +19,7 @@ import { ToastHost } from './components/toast'
 import { Icon } from './components/icons'
 import { ConfirmHost } from './components/confirm'
 import { PaletteHost, openPalette } from './components/palette'
+import { ReminderBell, openReminders } from './components/reminders'
 
 /** Re-render the subtree on locale change (the whole shell is cheap). */
 function useLocaleRerender(): void {
@@ -65,6 +66,17 @@ export function App() {
     }
   }, [menuOpen])
 
+  // #/reminders was a tab of 设置 before the bell took over the reminder
+  // system. A bookmark saved back then still has to land somewhere useful, so
+  // it drops the reader on the thread with the card raised; the URL is
+  // rewritten because the card is state, not a destination. Keyed on the route
+  // so a hash typed into the address bar of an already-open tab works too.
+  useEffect(() => {
+    if (!location.hash.replace(/^#\/?/, '').startsWith('reminders')) return
+    history.replaceState(null, '', '#/chat')
+    requestAnimationFrame(openReminders)
+  }, [route])
+
   if (!authed) {
     return (
       <TokenGate
@@ -79,7 +91,7 @@ export function App() {
     )
   }
 
-  // 任务详情 is a drill-down of the board, so it keeps 总控 lit on the rail.
+  // 任务详情 is a drill-down of the board, so it keeps 队列·任务·项目 lit on the rail.
   const active: string = route.view === 'detail' ? 'control' : route.view
   const reviewCount = useReviewCount()
   const logout = () => {
@@ -99,7 +111,7 @@ export function App() {
       >
         {/* One line of chrome at the head of the rail: the name and the one
             ambient action that works from any view. The name is a label, not a
-            control — it used to open 总控 → 项目, which meant a stray click on
+            control — it used to open 队列·任务·项目 → 项目, which meant a stray click on
             the wordmark threw the reader out of whatever thread they were in.
             The projects board is still one click away in the rail below. No
             chevron after the name either: the head is the quietest thing in
@@ -114,6 +126,10 @@ export function App() {
             </span>
           </div>
           <div class="sidebar-head-actions">
+            {/* 提醒 and 搜索: the two things you reach for from wherever you
+                are. The bell replaced the 设置 → 提醒 tab, and it opens a card
+                rather than a page (see components/reminders.tsx). */}
+            <ReminderBell />
             <button
               type="button"
               class="icon-btn"
@@ -139,15 +155,23 @@ export function App() {
           </div>
         </div>
         <div class="sidebar-panel" id="sidebar-panel">
-        {/* The quick block: 新对话 and 工作空间, one level above the rail's
-            destinations. 新对话 is an action, not a destination — but it reads
-            as a nav row (same 15px label, same hover wash) instead of a filled
-            button, so the head above it stays the only chrome in the column.
-            It navigates without minting a thread: the thread comes into being
-            when the first message leaves the composer, titled after it, so
-            clicking twice cannot litter the history with empty untitled
-            sessions. 工作空间 is the map of the machines those threads run on,
-            so it belongs at the same altitude rather than down with 总控. */}
+        {/* The quick block: every destination the rail has, in one list.
+            It used to be 新对话 and 工作空间 over a `<nav>` of sectioned rows;
+            the sections are gone (each heading labelled the single row under
+            it), so what is left is four rows at one altitude, and the history
+            below them.
+            新对话 is an action, not a destination — but it reads as a nav row
+            (same 15px label, same hover wash) instead of a filled button, so
+            the head above it stays the only chrome in the column. It navigates
+            without minting a thread: the thread comes into being when the first
+            message leaves the composer, titled after it, so clicking twice
+            cannot litter the history with empty untitled sessions.
+            The three after it are the machines and the work: 工作空间 is the
+            fleet as a map, 节点网络 is what each node can do, and 队列·任务·项目
+            is the boards that work lands on. That last one is the page that
+            used to be 总控 — it is named after its three tabs now, because
+            "control room" was a metaphor you had to learn and the tabs are
+            what the row actually opens. */}
         <div class="nav-quick">
           <button
             type="button"
@@ -155,7 +179,7 @@ export function App() {
             onClick={() => navigate({ view: 'sessions', id: null })}
           >
             <Icon name="square-pen" />
-            {t('sessions.new')}
+            <span class="nav-label">{t('sessions.new')}</span>
           </button>
           <a
             href="#/workspace"
@@ -163,47 +187,58 @@ export function App() {
             aria-current={active === 'workspace' ? 'page' : undefined}
           >
             <Icon name="devices" />
-            {t('nav.workspace')}
+            <span class="nav-label">{t('nav.workspace')}</span>
+          </a>
+          {/* The tree glyph, not `devices`: 工作空间 already wears the monitor,
+              and this row is about the links between machines rather than any
+              one of them. It is the same topology mark the node picker and the
+              delegation chips draw, which is the point. */}
+          <a
+            href="#/fleet"
+            class={`nav-item${active === 'fleet' ? ' active' : ''}`}
+            aria-current={active === 'fleet' ? 'page' : undefined}
+          >
+            <Icon name="network" />
+            <span class="nav-label">{t('nav.fleet')}</span>
+          </a>
+          {/* The boards' row, and the one row in the rail that can carry a
+              count: the review badge rides at the far end of it. Nested anchors
+              are invalid HTML, so the badge is a span that hijacks the click —
+              preventDefault kills the parent link's navigation, then we route
+              to the review-focused board ourselves. */}
+          <a
+            href="#/control"
+            class={`nav-item${active === 'control' ? ' active' : ''}`}
+            aria-current={active === 'control' ? 'page' : undefined}
+          >
+            <Icon name="kanban" />
+            <span class="nav-label">{t('nav.control')}</span>
+            {reviewCount > 0 && (
+              <span
+                class="nav-badge"
+                title={t('queue.col.review')}
+                role="button"
+                tabIndex={0}
+                onClick={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  navigate({ view: 'control', tab: 'queue', review: true })
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    navigate({ view: 'control', tab: 'queue', review: true })
+                  }
+                }}
+              >
+                {reviewCount}
+              </span>
+            )}
           </a>
         </div>
 
         <nav class="primary-nav" aria-label={t('nav.aria')}>
-          {primaryNavGroups.map((g) => (
-            <div class="nav-group" key={g.id}>
-              {g.head && <div class="nav-group-head">{t(g.head)}</div>}
-              {g.items.map(([v, key]) => (
-                <a key={v} href={`#/${v}`} class={`nav-item${active === v ? ' active' : ''}`}>
-                  {t(key)}
-                  {v === 'control' && reviewCount > 0 && (
-                    <span
-                      class="nav-badge"
-                      title={t('queue.col.review')}
-                      role="button"
-                      tabIndex={0}
-                      onClick={(e) => {
-                        // Nested anchors are invalid HTML, so the badge is a
-                        // span that hijacks the click: preventDefault kills the
-                        // parent link's default navigation, then we route to
-                        // the review-focused board ourselves.
-                        e.preventDefault()
-                        e.stopPropagation()
-                        navigate({ view: 'control', tab: 'queue', review: true })
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault()
-                          e.stopPropagation()
-                          navigate({ view: 'control', tab: 'queue', review: true })
-                        }
-                      }}
-                    >
-                      {reviewCount}
-                    </span>
-                  )}
-                </a>
-              ))}
-            </div>
-          ))}
           {/* The rail's tail, not a row inside it. The history is what the rail
               is for, and 对话 above it only named the list again — so the row
               is gone and the list is always visible instead of folded. It

@@ -21,7 +21,7 @@ export function ProjectsView({
   onOpenProject,
   onOpenQueue,
 }: {
-  /** Paint the page title/subtitle. False when 总控 hosts the board: the
+  /** Paint the page title/subtitle. False when 队列·任务·项目 hosts the board: the
    *  merged page owns the heading, and two titles for one board read as a
    *  duplicate. Everything below the heading is untouched either way. */
   head?: boolean

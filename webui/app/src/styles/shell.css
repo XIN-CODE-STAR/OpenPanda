@@ -155,6 +155,15 @@
   flex: none;
   opacity: 0.85;
 }
+/* The label is the only part of a row that may shrink, so a long locale
+   (队列·任务·项目 is "Warteschlange · Aufgaben · Projekte" in German) ellipsises
+   instead of pushing the row — and the badge after it — out of the rail. */
+.nav-label {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 .nav-item:hover {
   background: var(--bg-hover);
   color: var(--text);
@@ -197,33 +206,6 @@
   flex-direction: column;
   gap: 2px;
   margin-bottom: var(--sp-1);
-}
-
-.nav-group {
-  margin-top: var(--sp-2);
-}
-.nav-group-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 4px 10px;
-  font-size: var(--text-sm);
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
-  color: var(--text-tertiary);
-  border-radius: var(--radius-sm);
-}
-.nav-group-head:hover {
-  color: var(--text-secondary);
-}
-.nav-chevron {
-  font-size: 9px;
-  transition: transform var(--dur-fast) var(--ease);
-}
-.nav-chevron.open {
-  transform: rotate(90deg);
 }
 
 .sidebar-footer {
@@ -338,6 +320,14 @@ a.sidebar-node:hover {
     padding: var(--sp-2) var(--sp-3);
     overflow: visible;
   }
+  .primary-nav {
+    flex-direction: row;
+    overflow-x: auto;
+    gap: 4px;
+  }
+  /* The head keeps its own row inside the strip: name on the left, the two
+     ambient buttons after it. `flex: none` because a shrinking item would
+     ellipsize the name to make room for the nav rows. */
   .sidebar-head {
     flex: 1;
     min-width: 0;
@@ -372,6 +362,13 @@ a.sidebar-node:hover {
   .sidebar.mobile-open .sidebar-panel {
     display: flex;
   }
+  .nav-item {
+    width: auto;
+    white-space: nowrap;
+  }
+  /* The top bar is a row of destinations; the quick block dissolves so its four
+     rows ride along as pills rather than a stacked block. The bar scrolls
+     sideways (`overflow-x: auto` on the sidebar) once the pills outgrow it. */
   .nav-quick {
     display: flex;
     flex-direction: column;

@@ -6,6 +6,7 @@ import { navigateView, navViews } from '../nav'
 import { setTheme, theme, type Theme } from '../theme'
 import { rank } from './fuzzy'
 import { useModalFocus } from './modal-focus'
+import { openReminders } from './reminders'
 
 // ⌘K command palette. Every destination and appearance switch in the console
 // reachable from one keystroke, so learning the sidebar's tree is optional
@@ -183,9 +184,9 @@ export function PaletteHost({ onLogout }: { onLogout(): void }) {
  *  appearance/language hints show what is currently selected. */
 export function buildCommands(onLogout: () => void): Command[] {
   const go = t('palette.group.go')
-  // Keyed by view, not by the board it opens: 总控 hosts two boards under one
-  // destination, so the keywords split per tab (`queue …` still finds the
-  // kanban, `plans …` still finds the pipelines) instead of piling onto one
+  // Keyed by view, not by the board it opens: 队列·任务·项目 hosts two boards
+  // under one destination, so the keywords split per tab (`queue …` still finds
+  // the kanban, `plans …` still finds the pipelines) instead of piling onto one
   // row and matching every query twice.
   const goAliases: Record<string, string> = {
     sessions: 'chat sessions threads conversation',
@@ -196,10 +197,10 @@ export function buildCommands(onLogout: () => void): Command[] {
     fleet: 'fleet nodes devices cluster hardware',
     settings: 'settings preferences config',
   }
-  // The rows 总控 absorbed still answer to their old names. The alias above is
-  // English-only by convention; without this a zh/ja/es/de user who types
-  // 任务队列 (or its translation) gets no hit, because the row is now labelled
-  // 总控. Search, not display: the label stays the merged name.
+  // The tabs 队列·任务·项目 absorbed still answer to their old names. The alias
+  // above is English-only by convention; without this a zh/ja/es/de user who
+  // types 任务队列 (or its translation) gets no hit, because the row is now
+  // labelled 队列·任务·项目. Search, not display: the label stays the merged name.
   const formerName: Record<string, string> = {
     control: t('nav.queue'),
     'control:plans': t('nav.plans'),
@@ -213,6 +214,17 @@ export function buildCommands(onLogout: () => void): Command[] {
     run: () => navigateView(view),
   }))
 
+  // 提醒 is a card behind the rail's bell, not a destination — but "reminders"
+  // is still how you would ask for it, and typing "rem" has to find it. It
+  // rides the go group because that is the group a reader looks in.
+  cmds.push({
+    id: 'action:reminders',
+    group: go,
+    label: t('nav.reminders'),
+    alias: 'reminders cron schedule timer jobs alarm remind',
+    run: openReminders,
+  })
+
   const settingsTabs: Array<{ tab: string; key: string; alias: string }> = [
     { tab: 'models', key: 'settings.model', alias: 'models model llm config ai' },
     { tab: 'policy', key: 'settings.policy', alias: 'policy security rules permissions' },
@@ -220,7 +232,6 @@ export function buildCommands(onLogout: () => void): Command[] {
     { tab: 'mcp', key: 'settings.mcp', alias: 'mcp tools servers integrations' },
     { tab: 'memory', key: 'nav.memory', alias: 'memory knowledge graph store brain dreams topics daily projects' },
     { tab: 'skills', key: 'nav.skills', alias: 'skills capabilities plugins tools hub import' },
-    { tab: 'reminders', key: 'nav.reminders', alias: 'reminders cron schedule timer jobs' },
     { tab: 'system', key: 'nav.system', alias: 'system status health audit metrics telemetry' },
   ]
   for (const s of settingsTabs) {

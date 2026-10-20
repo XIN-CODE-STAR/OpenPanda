@@ -7,13 +7,14 @@ import { QueueView } from './queue'
 import { PlansView } from './plans'
 import { ProjectsView } from './projects'
 
-// 总控 — the node's control room. Three boards that used to be three rail rows
-// live here as tabs: the live kanban (what is waiting / running / needs your
-// approval), the plan pipelines (what the engine has broken into stages), and
-// the projects (where that work lands and what it remembers). They answer the
-// same question at three time scales, so they share one page and one header;
-// the boards themselves are unchanged — each view still owns its own layout
-// and simply stops painting its own title (`head={false}`).
+// 队列·任务·项目 — the node's three boards under one tab strip. They used to be
+// three rail rows; they are now one page named after what it holds: the live
+// kanban (what is waiting / running / needs your approval), the plan pipelines
+// (what the engine has broken into stages), and the projects (where that work
+// lands and what it remembers). They answer the same question at three time
+// scales, so they share one page and one header; the boards themselves are
+// unchanged — each view still owns its own layout and simply stops painting its
+// own title (`head={false}`).
 
 const TABS: ControlTab[] = ['queue', 'plans', 'projects']
 
