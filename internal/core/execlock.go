@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Xustalis/OpenPanda/internal/bus"
 	"github.com/Xustalis/OpenPanda/internal/scheduler/queue"
 )
 
@@ -214,6 +215,42 @@ func (s *TaskStore) TryAcquireExecLocks(ctx context.Context, taskID, nodeID, run
 	return acquired, nil
 }
 
+// ExecLockBlockers reports which live runs currently hold keys contending
+// with the caller's wanted set — a read-only diagnostic for the wait
+// heartbeat's "who am I behind" note. Self-held rows are excluded (they are
+// the waiter's own restart artifacts, due for a steal inside the acquire tx,
+// not blockers worth naming). Best-effort: anything read here may change by
+// the next acquire pass, which is exactly why it is diagnostics, not policy.
+func (s *TaskStore) ExecLockBlockers(ctx context.Context, taskID string, keys []string) (map[string]string, error) {
+	out := map[string]string{}
+	if len(keys) == 0 {
+		return out, nil
+	}
+	now := s.now()
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		for _, key := range keys {
+			holders, err := conflictingExecHolders(ctx, tx, key)
+			if err != nil {
+				return err
+			}
+			for heldKey, holder := range holders {
+				if holder == taskID {
+					continue
+				}
+				live, err := liveExecHolder(ctx, tx, holder, now)
+				if err != nil {
+					return err
+				}
+				if live {
+					out[heldKey] = holder
+				}
+			}
+		}
+		return nil
+	})
+	return out, err
+}
+
 // ReleaseExecLocks drops every exec_locks row held by taskID for this run.
 // Release is by owner id AND run nonce, not by key set: a key the task no
 // longer holds was stolen after going stale and must not be deleted from
@@ -298,6 +335,15 @@ func (c *Core) execLockAcquire(ctx context.Context, taskID, runID string, keys, 
 	}
 	tick := time.NewTicker(execLockPollEvery)
 	defer tick.Stop()
+	// The wait can sit in dispatched far past the stale-claim grace and a
+	// dispatch lease alike — the holder is an entire live run — so the row
+	// needs its own liveness signal until renewLease takes over: HeartbeatWait
+	// refreshes the local sweeps' clock (and pushes an existing lease), the
+	// progress relay does the same for the delegator's copy. A dead waiter
+	// simply stops beating and the sweeps take it.
+	beat := time.NewTicker(c.execWaitBeatInterval())
+	defer beat.Stop()
+	var lastBlockers string
 	for {
 		c.execAcquireMu.Lock()
 		already := false
@@ -325,9 +371,78 @@ func (c *Core) execLockAcquire(ctx context.Context, taskID, runID string, keys, 
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-beat.C:
+			c.execWaitBeat(taskID)
+			lastBlockers = c.execWaitBlockers(ctx, taskID, keys, lastBlockers)
 		case <-tick.C:
 		}
 	}
+}
+
+// execWaitBlockers surfaces WHO is holding the keys this wait sits behind —
+// the row's heartbeat keeps it alive but nothing else answered "why is this
+// parked" (observed live: a resumed task sat in dispatched for minutes behind
+// a sibling's leaf scope, indistinguishable from a stall until the sweep was
+// ruled out). Emitted on each beat whose live blocker set changed, so the
+// timeline shows hand-offs without one row per beat.
+func (c *Core) execWaitBlockers(ctx context.Context, taskID string, keys []string, last string) string {
+	blockers, err := c.store.ExecLockBlockers(ctx, taskID, keys)
+	if err != nil || len(blockers) == 0 {
+		return last
+	}
+	pairs := make([]string, 0, len(blockers))
+	for k, holder := range blockers {
+		pairs = append(pairs, k+" held by "+holder)
+	}
+	slices.Sort(pairs)
+	sig := strings.Join(pairs, "; ")
+	if sig == last {
+		return last
+	}
+	note := "waiting for execution lock — " + sig
+	wCtx, cancel := c.storeWriteCtx(ctx)
+	defer cancel()
+	if err := c.store.RecordEvent(wCtx, taskID, EvProgress, map[string]any{"note": note}); err != nil {
+		c.logger.Debug("record exec wait blocker", "task", taskID, "err", err)
+	}
+	if t, terr := c.store.Get(wCtx, taskID); terr == nil && len(t.Chain) > 0 {
+		c.relayToParent(wCtx, bus.MsgTaskProgress, t.Chain,
+			bus.TaskProgressPayload{TaskID: taskID, AttemptID: t.AttemptID, Note: note})
+	}
+	return sig
+}
+
+// execWaitBeatInterval paces the wait heartbeat: comfortably inside the
+// stranded-claim window (the sweep must never mistake a live wait for an
+// orphan) and at least the lease renewal cadence, floored like renewLease.
+func (c *Core) execWaitBeatInterval() time.Duration {
+	interval := c.lease() / leaseRenewDivisor
+	if stale := staleRowAfter / 3; interval > stale {
+		interval = stale
+	}
+	if interval < minLeaseRenewInterval {
+		interval = minLeaseRenewInterval
+	}
+	return interval
+}
+
+// execWaitBeat writes one liveness heartbeat for a task parked in the
+// execution-lock wait and beats task_progress up its delegation chain, so
+// the delegator's copy — whose lease was stamped once at dispatch and only
+// beats renew — keeps the task alive for as long as the wait itself is.
+func (c *Core) execWaitBeat(taskID string) {
+	wCtx, cancel := c.storeWriteCtx(context.Background())
+	defer cancel()
+	if err := c.store.HeartbeatWait(wCtx, taskID, c.lease().Milliseconds()); err != nil {
+		c.logger.Debug("exec lock wait heartbeat", "task", taskID, "err", err)
+		return
+	}
+	t, err := c.store.Get(wCtx, taskID)
+	if err != nil {
+		return // row gone mid-wait: the acquire loop's ctx ends it anyway
+	}
+	c.relayToParent(context.Background(), bus.MsgTaskProgress, t.Chain,
+		bus.TaskProgressPayload{TaskID: taskID, AttemptID: t.AttemptID})
 }
 
 // execReleaseFor drops taskID's worktree exec_locks rows for a wait — the

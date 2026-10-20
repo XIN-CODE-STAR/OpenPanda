@@ -36,9 +36,16 @@ import (
 // ReadyTask is the scheduler's view of one queued task — just the fields the
 // ordering policy and the resource registry need.
 type ReadyTask struct {
-	ID           string
-	Project      string
-	WorkDir      string // submitter-pinned work directory ("" = derive per task)
+	ID      string
+	Project string
+	WorkDir string // submitter-pinned work directory ("" = derive per task)
+	// Pin carries spec.node verbatim — the hard destination a pinned task
+	// names. The scheduler reads it only to decide whether this node's
+	// resource table applies: a task pinned ELSEWHERE never runs locally
+	// (the pin forbids local fallback — the forward parks or fails), so
+	// holding a local project/scope key against it serializes remote work
+	// behind unrelated local runs for nothing.
+	Pin          string
 	Priority     int
 	Seq          int64
 	CreatedAt    int64
@@ -72,6 +79,14 @@ type Runner interface {
 // runs in a private per-task work dir (core.prepareRunDir), so a shared lock
 // would only make independent tasks queue behind each other. Concurrency for
 // those stays bounded by the node's MaxConcurrent, not by exclusion.
+// ProjectKey returns the lock identity a whole-project task serializes on.
+// The name folds case through lockFold: spec.project comes back in whatever
+// casing the classifier inferred from the directory, --project arrives
+// verbatim, and the same tree under two spellings must still exclude itself.
+func ProjectKey(project string) string {
+	return "project:" + lockFold(project)
+}
+
 func DefaultKeys(keys []string, project, workDir, taskID string) []string {
 	if len(keys) > 0 {
 		return keys
@@ -80,8 +95,13 @@ func DefaultKeys(keys []string, project, workDir, taskID string) []string {
 		// The scope root rides next to the legacy project key: scoped
 		// children hold "scope:<p>/<path>" leaves and must still exclude a
 		// whole-project task (and vice versa), while tasks created before
-		// scope keys existed keep serializing on "project:<p>".
-		return []string{"project:" + project, ScopeRootKey(project)}
+		// scope keys existed keep serializing on "project:<p>". The project
+		// key folds case like every other path-ish lock — the classifier's
+		// spec.project arrives in whatever casing the model inferred from
+		// the directory name ("Needlen"), while a typed --project flag is
+		// verbatim ("needlen"), and two spellings of one tree must not get
+		// parallel writers.
+		return []string{ProjectKey(project), ScopeRootKey(project)}
 	}
 	if wd := workdirKey(workDir); wd != "" {
 		return []string{"dir:" + wd}
@@ -94,7 +114,8 @@ func DefaultKeys(keys []string, project, workDir, taskID string) []string {
 // must collide on the same key or the serialization the key exists for
 // leaks. Symlinks resolve on a best-effort basis — an unresolvable path
 // still gets a cleaned absolute spelling, which is exactly what the pinned
-// dir's second task would compute too.
+// dir's second task would compute too — and case folds like every other
+// path-typed key (see lockFold).
 func workdirKey(dir string) string {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
@@ -107,12 +128,12 @@ func workdirKey(dir string) string {
 	}
 	abs, err := filepath.Abs(dir)
 	if err != nil {
-		return filepath.Clean(dir)
+		return lockFold(filepath.Clean(dir))
 	}
 	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-		return resolved
+		return lockFold(resolved)
 	}
-	return abs
+	return lockFold(abs)
 }
 
 // WorkDirKey is the exported form of workdirKey for lock composition done
@@ -242,6 +263,11 @@ type Scheduler struct {
 	// itself is one cheap SQLite read.
 	pollInterval time.Duration
 	wake         chan struct{}
+
+	// selfPin resolves a ReadyTask.Pin to "names this node". Injected by the
+	// owner (core's resolvePin), nil in tests — a nil resolver treats every
+	// pin as local, preserving the pre-feature conservative serialization.
+	selfPin func(ctx context.Context, ref string) bool
 }
 
 // The fallback poll relaxes once the queue has been empty for a while: 400ms
@@ -274,6 +300,13 @@ func New(store Store, runner Runner, maxConcurrent int, logger *slog.Logger) *Sc
 		pollInterval: 400 * time.Millisecond,
 		wake:         make(chan struct{}, 1),
 	}
+}
+
+// WithSelfPin installs the resolver that tells a foreign pin from a local
+// one (see ReadyTask.Pin). Returns the scheduler for chaining.
+func (s *Scheduler) WithSelfPin(fn func(ctx context.Context, ref string) bool) *Scheduler {
+	s.selfPin = fn
+	return s
 }
 
 // Registry exposes the lock table (tests and diagnostics).
@@ -389,6 +422,14 @@ func (s *Scheduler) tick(ctx context.Context) int {
 			return len(ready) // budget exhausted; a finishing task wakes the next pass
 		}
 		keys := DefaultKeys(t.ResourceKeys, t.Project, t.WorkDir, t.ID)
+		if t.Pin != "" && s.selfPin != nil && !s.selfPin(ctx, t.Pin) {
+			// Foreign-pinned work forwards in the runner and returns; the
+			// local lock table only guards local execution — taking these
+			// keys would park the remote run behind a local holder of the
+			// same project (observed live: a node2-pinned audit queued
+			// behind a local run's root scope while node2 sat idle).
+			keys = nil
+		}
 		if !s.registry.TryAcquire(keys, t.ID) {
 			continue // a running task holds a needed resource: stay queued
 		}

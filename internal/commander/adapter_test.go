@@ -355,12 +355,22 @@ func TestAdapterSilenceHeartbeatNotes(t *testing.T) {
 	}
 }
 
-// TestAdapterSilenceKill verifies the watchdog aborts an adapter that emits
-// nothing past the configured silence limit — a wedged run dies early and
-// reports itself stalled instead of burning the full agent budget.
+// startThenSilentAdapter emits one progress line then goes quiet forever —
+// the mid-run wedge the tight silence limit exists to catch.
+const startThenSilentAdapter = `#!/usr/bin/env python3
+import json, sys, time
+req = json.loads(sys.stdin.read())
+print(json.dumps({"type": "progress", "note": "started"}), file=sys.stderr, flush=True)
+time.sleep(3600)
+print(json.dumps({"ok": True, "result": "done", "exit_code": 0}))
+`
+
+// TestAdapterSilenceKill verifies the watchdog aborts an adapter that goes
+// silent mid-run past the configured silence limit — a wedged run dies early
+// and reports itself stalled instead of burning the full agent budget.
 func TestAdapterSilenceKill(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "slow.py"), []byte(slowAdapter), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "slow.py"), []byte(startThenSilentAdapter), 0o755); err != nil {
 		t.Fatalf("write adapter: %v", err)
 	}
 	oldDir := adapterDir
@@ -378,11 +388,124 @@ func TestAdapterSilenceKill(t *testing.T) {
 	if res.OK {
 		t.Fatalf("silent adapter reported success")
 	}
-	if res.ExitCode != 124 || !strings.Contains(res.Result, "stalled") {
-		t.Fatalf("res = %+v, want stalled exit-124", res)
+	if res.ExitCode != 124 || !strings.Contains(res.Result, "silence timeout") {
+		t.Fatalf("res = %+v, want stalled exit-124 silence timeout", res)
 	}
 	if time.Since(start) > 5*time.Second {
 		t.Fatalf("silence kill not enforced promptly: %v", time.Since(start))
+	}
+}
+
+// TestAdapterStartupGraceKill covers the pre-first-output window: a CLI whose
+// first model call legitimately emits nothing for a while must not be killed
+// at the silence limit — that just respawns into the same wait — but a
+// process that never produces anything still dies, bounded by the startup
+// grace rather than the full hard timeout.
+func TestAdapterStartupGraceKill(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "slow.py"), []byte(slowAdapter), 0o755); err != nil {
+		t.Fatalf("write adapter: %v", err)
+	}
+	oldDir := adapterDir
+	adapterDir = dir
+	defer func() { adapterDir = oldDir }()
+	oldSilence := silenceTimeout
+	silenceTimeout = 200 * time.Millisecond
+	defer func() { silenceTimeout = oldSilence }()
+	oldGrace := adapterStartupGrace
+	adapterStartupGrace = 600 * time.Millisecond
+	defer func() { adapterStartupGrace = oldGrace }()
+	oldHB := silenceHeartbeat
+	silenceHeartbeat = 100 * time.Millisecond
+	defer func() { silenceHeartbeat = oldHB }()
+
+	start := time.Now()
+	res := runAdapterProcess(context.Background(), "slow.py", "x", "", nil)
+	elapsed := time.Since(start)
+	if res.OK {
+		t.Fatalf("silent adapter reported success")
+	}
+	if res.ExitCode != 124 || !strings.Contains(res.Result, "startup grace") {
+		t.Fatalf("res = %+v, want stalled exit-124 startup grace", res)
+	}
+	// The grace — not the 200ms silence limit — must have been the bound.
+	if elapsed < 550*time.Millisecond {
+		t.Fatalf("killed at %v, before startup grace 600ms", elapsed)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("startup grace not enforced promptly: %v", elapsed)
+	}
+}
+
+// TestSessionWatchdogRespectsTurnState pins the session-mode silence rules the
+// one-shot path already proved: the kill only applies while a turn is in
+// flight (a pooled session resting between rounds is not stalled), and a
+// turn's pre-first-output window gets the startup grace while mid-turn
+// silence keeps the tight limit.
+func TestSessionWatchdogRespectsTurnState(t *testing.T) {
+	oldGrace := adapterStartupGrace
+	adapterStartupGrace = 250 * time.Millisecond
+	defer func() { adapterStartupGrace = oldGrace }()
+
+	newSess := func() *agentSession {
+		s := &agentSession{stderr: &progressWriter{}}
+		return s
+	}
+
+	// Idle between turns: stale lastAct must never kill — inTurn is false.
+	idle := newSess()
+	ictx, icancel := context.WithCancel(context.Background())
+	idle.cancel = icancel
+	idle.lastAct.Store(time.Now().Add(-time.Hour).UnixNano())
+	go idle.watchSilence(ictx, 100*time.Millisecond, 80*time.Millisecond, adapterStartupGrace)
+	time.Sleep(300 * time.Millisecond)
+	if idle.isDead() {
+		t.Fatalf("idle session killed — the watchdog must only guard in-flight turns")
+	}
+	icancel()
+
+	// In-flight turn, nothing emitted yet: the startup grace — not the
+	// silence limit — bounds the kill.
+	startup := newSess()
+	sctx, scancel := context.WithCancel(context.Background())
+	defer scancel()
+	startup.cancel = scancel
+	startup.inTurn.Store(true)
+	startup.lastAct.Store(time.Now().UnixNano())
+	start := time.Now()
+	go startup.watchSilence(sctx, 100*time.Millisecond, 80*time.Millisecond, adapterStartupGrace)
+	deadline := time.After(3 * time.Second)
+	for !startup.isDead() {
+		select {
+		case <-deadline:
+			t.Fatalf("startup-stalled session never killed")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if e := time.Since(start); e < 200*time.Millisecond {
+		t.Fatalf("startup window killed at %v — silence limit 100ms beat the 250ms grace", e)
+	}
+
+	// Mid-turn silence after output began: the tight limit applies.
+	mid := newSess()
+	mctx, mcancel := context.WithCancel(context.Background())
+	defer mcancel()
+	mid.cancel = mcancel
+	mid.inTurn.Store(true)
+	mid.turnSeen.Store(true)
+	mid.lastAct.Store(time.Now().UnixNano())
+	mstart := time.Now()
+	go mid.watchSilence(mctx, 100*time.Millisecond, 80*time.Millisecond, adapterStartupGrace)
+	mdeadline := time.After(3 * time.Second)
+	for !mid.isDead() {
+		select {
+		case <-mdeadline:
+			t.Fatalf("mid-turn-stalled session never killed")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if e := time.Since(mstart); e > 2*time.Second {
+		t.Fatalf("mid-turn kill took %v — silence limit 100ms not enforced", e)
 	}
 }
 
@@ -548,6 +671,47 @@ func TestAdapterSessionEventWithoutSinkIsLatched(t *testing.T) {
 	res := runAdapterProcess(context.Background(), "ann.py", "p", "", nil)
 	if res.ExitCode != 124 || res.SessionID != "ses_ann123" {
 		t.Fatalf("hard-killed run = code %d session %q, want 124 + ses_ann123", res.ExitCode, res.SessionID)
+	}
+}
+
+// TestAdapterSessionEventReachesSink: the minted session must reach the
+// structured-event sink mid-run — the run loop persists it as the task's
+// resume checkpoint the moment it arrives, so a kill before the result
+// envelope still leaves a consumable handle. The sink copy also carries the
+// adapter file that minted it (checkpoint resume is adapter-affine).
+func TestAdapterSessionEventReachesSink(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "ann.py"), []byte(sessionAnnouncingAdapter), 0o755); err != nil {
+		t.Fatalf("write adapter: %v", err)
+	}
+	oldDir := adapterDir
+	adapterDir = dir
+	defer func() { adapterDir = oldDir }()
+	oldTimeout := adapterHardTimeout
+	adapterHardTimeout = 300 * time.Millisecond
+	defer func() { adapterHardTimeout = oldTimeout }()
+	oldAdvertised := adapterTimeoutS
+	adapterTimeoutS = 1
+	defer func() { adapterTimeoutS = oldAdvertised }()
+	oldGrace := hardTimeoutGrace
+	hardTimeoutGrace = 100 * time.Millisecond
+	defer func() { hardTimeoutGrace = oldGrace }()
+
+	var gotID, gotAdapter string
+	ctx := WithAgentEvents(context.Background(), func(ev AgentEvent) {
+		if ev.Ev == "session" {
+			gotID, gotAdapter = ev.ID, ev.Adapter
+		}
+	})
+	res := runAdapterProcess(ctx, "ann.py", "p", "", nil)
+	if res.ExitCode != 124 || res.SessionID != "ses_ann123" {
+		t.Fatalf("hard-killed run = code %d session %q, want 124 + ses_ann123", res.ExitCode, res.SessionID)
+	}
+	if gotID != "ses_ann123" {
+		t.Fatalf("sink session id = %q, want ses_ann123 (checkpoint must persist mid-run)", gotID)
+	}
+	if gotAdapter != "ann.py" {
+		t.Fatalf("sink adapter = %q, want ann.py (resume is adapter-affine)", gotAdapter)
 	}
 }
 

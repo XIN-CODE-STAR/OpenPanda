@@ -1015,6 +1015,22 @@ export function SessionsView({
     composer.current?.focus()
   }
 
+  /** Put a starter prompt in the composer, ready to edit or send. The chip is
+   *  a suggestion, not a send button: a replaceable draft is cheaper to
+   *  correct than a turn that already left. */
+  function useStarter(text: string) {
+    clearPending()
+    const el = composer.current
+    el?.focus()
+    if (!el) {
+      setInput(text)
+      return
+    }
+    editorInsertText(text)
+    setInput(editorTextOf(el))
+    autoGrow(el)
+  }
+
 
 
 
@@ -1848,7 +1864,12 @@ export function SessionsView({
           }}
         >
           {msgs.length === 0 && loading && <ChatSkeleton />}
-          {msgs.length === 0 && !loading && !busy && <ChatEmpty />}
+          {msgs.length === 0 && !loading && !busy && (
+            <ChatEmpty
+              onPick={useStarter}
+              hasDraft={input.trim() !== '' || pending.length > 0}
+            />
+          )}
           {msgs.map((m, i) => (
             <ChatBubble
               key={m.k}
@@ -2271,17 +2292,39 @@ function ChatSkeleton() {
   )
 }
 
-/** Empty state: one line of type and nothing else.
- *
- *  The pane used to carry a brand mark, a hint, three starter prompts and the
- *  fleet strip above them. All of it is gone by request: a brand-new thread is
- *  now just the greeting, centred in the free space, with the composer below
- *  as the only affordance. */
-function ChatEmpty() {
+/** Empty state: the greeting, one line of orientation, and three prompts that
+ *  fill the composer. The brand mark and fleet strip stay out — the pet is
+ *  already standing on the composer — but a blank page gives a first-time
+ *  reader no verb, and a chip is cheaper to click than a sentence to invent. */
+function ChatEmpty({
+  onPick,
+  hasDraft,
+}: {
+  onPick(text: string): void
+  hasDraft: boolean
+}) {
   return (
     <div class="chat-empty">
       <div class="chat-empty-cta">
         <h1>{t('sessions.hello')}</h1>
+        <p class="chat-empty-hint">{t('sessions.hint')}</p>
+        {/* Once there is a draft or an attachment, a suggestion would replace
+            work the reader already did; the chips step aside instead. */}
+        {!hasDraft && (
+          <div class="chat-starters">
+            {(['sessions.s1', 'sessions.s2', 'sessions.s3'] as const).map((key) => (
+              <button
+                type="button"
+                class="chat-starter"
+                key={key}
+                onClick={() => onPick(t(key))}
+              >
+                {t(key)}
+                <Icon name="chevron-right" size={14} />
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   )

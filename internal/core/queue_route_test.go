@@ -83,6 +83,85 @@ func TestScheduledTaskRoutesByHardware(t *testing.T) {
 	waitLocalTasksSettled(t, win)
 }
 
+// TestLeaseRerouteParksWhenOnlyExecutorDown covers the hardest HA case of the
+// lease-expiry re-route: the only node that can serve the task is the executor
+// whose custody just lapsed — offline by definition of the sweep that evicted
+// it, invisible to Route's live-link view. Failing the task there would turn a
+// transient silence into a terminal verdict; instead the re-delivery parks in
+// task_outbox under the "revive" contract, the stale parked cancel for the same
+// pair is dropped (the new delegate carries the stand-down), and the absolute
+// deadline remains the bound on how long the wait may last.
+func TestLeaseRerouteParksWhenOnlyExecutorDown(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// origin cannot serve the requirement; peer-b could — but it is offline,
+	// which is exactly why its lease lapsed.
+	origin := newCoreWithResources(t, "origin", ledger.NativeAbility{
+		ID: "sys:info", Command: "uname", Tier: 1,
+	}, ledger.ResourceProfile{CPU: 4, RAMGB: 4}, 1)
+	if err := ledger.UpsertRemote(origin.db, "peer-b", ledger.CapabilitySummary{
+		Device: "peer-b", SchedulerTier: 1, NativeIDs: []string{"gpu:train"},
+	}); err != nil {
+		t.Fatalf("upsert peer: %v", err)
+	}
+	if _, err := origin.db.Exec(`UPDATE employee_cache SET status='offline' WHERE id='peer-b'`); err != nil {
+		t.Fatalf("mark peer offline: %v", err)
+	}
+
+	tk, err := origin.Enqueue(ctx, TaskInput{
+		Title: "stage", Intent: "run the stage", Requires: []string{"gpu:train"},
+	}, DefaultQueueSpec())
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	// Claim to self first — the queue runner calls forwardScheduled on an
+	// already-dispatched row.
+	if err := origin.store.ClaimLocal(ctx, tk.TaskID, origin.nodeID); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	// The reroute trail that marks peer-b as the evicted executor.
+	if err := origin.store.RecordEvent(ctx, tk.TaskID, EvRetry, map[string]any{
+		"reroute": true, "executor": "peer-b",
+	}); err != nil {
+		t.Fatalf("reroute evidence: %v", err)
+	}
+	// The settle phase parked a cancel for the pair while the link was down:
+	// it must be dropped when the superseding delegate parks, or the flush
+	// would kill the fresh run it just delivered.
+	origin.outboxCancelPersist(ctx, "peer-b", tk.TaskID, tk.AttemptID, "lease expired")
+
+	row, err := origin.store.Get(ctx, tk.TaskID)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !origin.forwardScheduled(ctx, row) {
+		t.Fatal("a parked re-delivery is a handoff — the runner must not run it")
+	}
+	final, err := origin.store.Get(ctx, tk.TaskID)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if final.State != StateDispatched {
+		t.Fatalf("parked-for-revival task = %s, want dispatched awaiting flush", final.State)
+	}
+	target, err := origin.store.DispatchTarget(ctx, tk.TaskID)
+	if err != nil || target != "peer-b" {
+		t.Fatalf("dispatch target = %q (err %v), want peer-b holding custody", target, err)
+	}
+	if !origin.taskOutboxPending(ctx, tk.TaskID) {
+		t.Fatal("no parked bundle for the evicted executor")
+	}
+	var cancels int
+	if err := origin.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM cancel_outbox WHERE task_id=?`, tk.TaskID).Scan(&cancels); err != nil {
+		t.Fatalf("count cancels: %v", err)
+	}
+	if cancels != 0 {
+		t.Fatalf("%d stale parked cancels survived beside the new delegate", cancels)
+	}
+}
+
 // A task pinned to a directory on this machine is local work by definition: the
 // delegate payload carries no work dir, so a forwarded copy would run somewhere
 // else entirely. Routing may not override that.

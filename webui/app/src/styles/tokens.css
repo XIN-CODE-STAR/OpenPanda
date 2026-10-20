@@ -30,7 +30,9 @@
   --text: #1b1b1e;
   --text-primary: var(--text);
   --text-secondary: #5c5c63;
-  --text-tertiary: #8e8e95;
+  /* 5.3:1 on --bg, 4.6:1 on --bg-inset: readable metadata at 11-12.5px,
+     still one step quieter than --text-secondary. */
+  --text-tertiary: #6b6b72;
   --text-disabled: #c3c3c9;
   --text-dim: var(--text-secondary);
 

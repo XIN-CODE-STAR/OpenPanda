@@ -143,9 +143,9 @@ func TestReviewHoldKeepsDelegatorLease(t *testing.T) {
 
 	// Delegator copy: dispatched to the worker under the matching attempt,
 	// so the beats pass the executor/attempt authorization checks.
-	_, err = entry.store.CreateWithID(ctx, taskID, "", "", "t", entry.nodeID, nil, false)
+	et, err := entry.store.CreateWithID(ctx, taskID, "", "", "t", entry.nodeID, nil, false)
 	must(err)
-	must(entry.store.AdoptAttempt(ctx, taskID, wt.AttemptID))
+	must(entry.store.AdoptAttempt(ctx, taskID, et.AttemptID, wt.AttemptID))
 	must(entry.store.Queue(ctx, taskID, entry.nodeID))
 	must(entry.store.Dispatch(ctx, taskID, entry.nodeID, worker.nodeID))
 
@@ -246,9 +246,9 @@ func TestAdmissionReviewIgnoresWireResume(t *testing.T) {
 
 	// Delegator mirror: dispatched under the same attempt so the refusal
 	// echo passes its authorization checks.
-	_, err := entry.store.CreateWithID(ctx, "esc-task", "", "", "t", entry.nodeID, nil, false)
+	et, err := entry.store.CreateWithID(ctx, "esc-task", "", "", "t", entry.nodeID, nil, false)
 	must(err)
-	must(entry.store.AdoptAttempt(ctx, "esc-task", wt.AttemptID))
+	must(entry.store.AdoptAttempt(ctx, "esc-task", et.AttemptID, wt.AttemptID))
 	must(entry.store.Queue(ctx, "esc-task", entry.nodeID))
 	must(entry.store.Dispatch(ctx, "esc-task", entry.nodeID, worker.nodeID))
 

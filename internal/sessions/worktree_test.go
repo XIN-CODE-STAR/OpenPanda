@@ -239,6 +239,63 @@ func TestWorktreeStat(t *testing.T) {
 	}
 }
 
+// TestEnsureRecoversStaleRegistration covers the crash debris case: the
+// worktree directory is lost (or half-deleted) while git still holds its
+// .git/worktrees/<id> registration and the panda/<id> branch. Every add
+// fails until the registration is pruned — Ensure must recover on its own
+// instead of refusing the session forever.
+func TestEnsureRecoversStaleRegistration(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	repo := newGitRepo(t)
+	w, err := OpenWorktrees(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	id := "stale-session"
+
+	path, err := w.Ensure(ctx, id)
+	if err != nil {
+		t.Fatalf("initial ensure: %v", err)
+	}
+
+	// Crash simulation one: the directory is deleted outright but the
+	// worktree registration and branch survive.
+	if err := os.RemoveAll(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Ensure(ctx, id); err != nil {
+		t.Fatalf("ensure after directory loss: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(path, ".git")); err != nil {
+		t.Fatalf("worktree not recreated: %v", err)
+	}
+
+	// Crash simulation two: the directory is half-deleted — debris without
+	// a .git marker — on top of the same stale registration.
+	if err := os.RemoveAll(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "debris.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Ensure(ctx, id); err != nil {
+		t.Fatalf("ensure over debris dir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(path, ".git")); err != nil {
+		t.Fatalf("worktree not recreated over debris: %v", err)
+	}
+	// The debris is gone — it was crash residue, never session state.
+	if _, err := os.Stat(filepath.Join(path, "debris.txt")); !os.IsNotExist(err) {
+		t.Fatal("debris survived the recreation")
+	}
+}
+
 func TestWorktreeStatusWithoutWorktree(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")

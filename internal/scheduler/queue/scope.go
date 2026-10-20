@@ -20,6 +20,16 @@ import "strings"
 // other key type keeps exact-match semantics.
 const scopeKeyPrefix = "scope:"
 
+// lockFold folds a lock-key component to its case-insensitive identity.
+// Scope leaves and pinned work dirs name filesystem paths, and the
+// filesystems most users run on (APFS, NTFS) treat "Docs" and "docs" as one
+// directory — a byte-precise key would let two writers of the same tree
+// hold disjoint locks. Folding errs toward serialization: on a
+// case-sensitive volume the odd colliding pair queues where it could have
+// run in parallel, a safe direction. (Unicode normalization differs by
+// volume and lies outside stdlib-only key math.)
+func lockFold(s string) string { return strings.ToLower(s) }
+
 // IsScopeKey reports whether key lives in the scope namespace.
 func IsScopeKey(key string) bool {
 	return strings.HasPrefix(key, scopeKeyPrefix)
@@ -31,7 +41,7 @@ func IsScopeKey(key string) bool {
 // always does, so whole-project work still excludes scoped children and
 // vice versa.
 func ScopeRootKey(project string) string {
-	return scopeKeyPrefix + project
+	return scopeKeyPrefix + lockFold(project)
 }
 
 // ScopeLeafKey returns the scope key for one declared project-relative path.
@@ -40,7 +50,7 @@ func ScopeLeafKey(project, path string) string {
 	if path == "" {
 		return ScopeRootKey(project)
 	}
-	return scopeKeyPrefix + project + "/" + path
+	return scopeKeyPrefix + lockFold(project) + "/" + lockFold(path)
 }
 
 // ScopeKeysConflict reports whether two scope keys contend for the same

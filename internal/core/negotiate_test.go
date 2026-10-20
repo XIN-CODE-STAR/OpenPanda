@@ -156,7 +156,7 @@ func TestAgentYieldOnlyFromArbitrator(t *testing.T) {
 	// The task stands in for its agent subprocess: the interrupt must reach
 	// the cancel func the running map holds for it.
 	cancelled := false
-	c.running.Store("t-holder", context.CancelFunc(func() { cancelled = true }))
+	defer c.registerRunning("t-holder", context.CancelFunc(func() { cancelled = true }))()
 
 	yield := func(from string) {
 		env, err := bus.NewEnvelope(bus.MsgAgentYield, from, "y-"+from, bus.AgentYieldPayload{

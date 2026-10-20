@@ -428,3 +428,159 @@ func TestRunWaitsOnForeignExecLock(t *testing.T) {
 		t.Fatalf("blocked task after the release = %q err=%v, want %s", tk.State, gerr, StateDone)
 	}
 }
+
+// TestExecLockWaitHeartbeats pins the wait's liveness contract: a task
+// blocked on a held key sits in dispatched — possibly for the whole length
+// of the holder's run — and neither sweep may mistake that for a dead
+// claim. updated_at must move under the stranded-claim grace, and a
+// stamped dispatch lease must keep pushing past ExpireTasks' horizon.
+func TestExecLockWaitHeartbeats(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	c := &Core{db: db, nodeID: "node-w", logger: testLogger()}
+	c.store = NewTaskStore(db, testLogger())
+	c.leaseTimeout = 900 * time.Millisecond // beats land at lease/3 ≈ 300ms
+
+	// The holder: a running row with a long lease owning the waiter's key.
+	holder := createTask(t, c.store, "", "holder", "other-node")
+	if _, err := c.store.db.ExecContext(ctx, `UPDATE tasks SET state=?, lease_expires_at=?, updated_at=? WHERE task_id=?`,
+		StateRunning, time.Now().Add(time.Hour).Unix(), time.Now().Unix(), holder.TaskID); err != nil {
+		t.Fatal(err)
+	}
+	held, err := c.store.TryAcquireExecLocks(ctx, holder.TaskID, "other-node", "run-h", []string{"project:p"})
+	if err != nil || !held {
+		t.Fatalf("holder acquire: ok=%v err=%v", held, err)
+	}
+
+	// The waiter: dispatched an hour ago — far past the stranded-claim
+	// grace — and carrying a lease that expires inside the test window.
+	waiter := createTask(t, c.store, "", "waiter", c.nodeID)
+	old := time.Now().Add(-time.Hour).Unix()
+	initialLease := time.Now().Add(300 * time.Millisecond).Unix()
+	if _, err := c.store.db.ExecContext(ctx, `UPDATE tasks SET state=?, lease_expires_at=?, updated_at=? WHERE task_id=?`,
+		StateDispatched, initialLease, old, waiter.TaskID); err != nil {
+		t.Fatal(err)
+	}
+
+	wctx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+	defer cancel()
+	err = c.execLockAcquire(wctx, waiter.TaskID, "run-w", []string{"project:p"}, nil, true)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("wait err = %v, want deadline exceeded", err)
+	}
+
+	got, err := c.store.Get(ctx, waiter.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UpdatedAt <= old {
+		t.Fatalf("updated_at = %d, want refreshed past %d — RequeueStaleClaims would requeue a live wait", got.UpdatedAt, old)
+	}
+	if got.LeaseExpires <= initialLease {
+		t.Fatalf("lease = %d, want pushed past its %d dispatch stamp — ExpireTasks would kill a live wait", got.LeaseExpires, initialLease)
+	}
+}
+
+// TestHeartbeatWaitLeaseSemantics pins the heartbeat's NULL-lease contract:
+// a queued claim carries no lease, and the wait must never stamp one — a
+// dead waiter is an orphaned claim to requeue, not an execution to expire.
+// A row that already has a lease (a dispatched delegation) pushes it.
+func TestHeartbeatWaitLeaseSemantics(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	var tick int64 = 1000
+	s.now = func() int64 { return tick }
+
+	tk := createTask(t, s, "", "waiter", "node")
+	if err := s.HeartbeatWait(ctx, tk.TaskID, 60_000); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	var lease sql.NullInt64
+	var updated int64
+	if err := s.db.QueryRow(`SELECT lease_expires_at, updated_at FROM tasks WHERE task_id=?`, tk.TaskID).
+		Scan(&lease, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if lease.Valid {
+		t.Fatalf("claim gained a lease (%d) — a dead wait would fail instead of requeue", lease.Int64)
+	}
+	if updated != 1000 {
+		t.Fatalf("updated_at = %d, want 1000", updated)
+	}
+
+	// With a lease already stamped, the heartbeat pushes it forward.
+	if err := s.SetLease(ctx, tk.TaskID, 60_000); err != nil { // lease = 1000+60
+		t.Fatal(err)
+	}
+	tick = 2000
+	if err := s.HeartbeatWait(ctx, tk.TaskID, 60_000); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT lease_expires_at, updated_at FROM tasks WHERE task_id=?`, tk.TaskID).
+		Scan(&lease, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if !lease.Valid || lease.Int64 != 2060 {
+		t.Fatalf("lease = %v, want pushed to 2060", lease)
+	}
+	if updated != 2000 {
+		t.Fatalf("updated_at = %d, want 2000", updated)
+	}
+}
+
+// ExecLockBlockers names the live holder behind a wait — the store side of
+// the wait note the acquire loop emits when a task sits parked on locks.
+// Stale or self-held rows are not blockers.
+func TestExecLockBlockers(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "blockers.db")
+	db, err := storage.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := storage.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	s := NewTaskStore(db, testLogger())
+
+	h := createTask(t, s, "", "holder", "n1")
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(s.Queue(ctx, h.TaskID, "n1"))
+	must(s.Dispatch(ctx, h.TaskID, "n1", "n1"))
+	must(s.Accept(ctx, h.TaskID, "n1"))
+	must(s.SetLease(ctx, h.TaskID, 600_000))
+	keys := []string{"scope:needlen/docs", "project:needlen"}
+	if ok, err := s.TryAcquireExecLocks(ctx, h.TaskID, "n1", "run-h", keys); err != nil || !ok {
+		t.Fatalf("holder acquire: ok=%v err=%v", ok, err)
+	}
+
+	// A waiter sees the holder under every key it blocks, its own pending
+	// rows excluded.
+	got, err := s.ExecLockBlockers(ctx, "waiter-1", append(keys, "scope:needlen"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range keys {
+		if got[k] != h.TaskID {
+			t.Fatalf("blockers[%q] = %q, want holder %s", k, got[k], h.TaskID)
+		}
+	}
+
+	// The holder asking about its own keys reports nothing: self rows are
+	// restart leftovers it would steal, not blockers to wait on.
+	if got, err := s.ExecLockBlockers(ctx, h.TaskID, keys); err != nil || len(got) != 0 {
+		t.Fatalf("self blockers = %v err=%v, want empty", got, err)
+	}
+
+	// Released locks leave nobody to name.
+	must(s.ReleaseExecLocks(ctx, h.TaskID, "run-h"))
+	if got, err := s.ExecLockBlockers(ctx, "waiter-1", keys); err != nil || len(got) != 0 {
+		t.Fatalf("post-release blockers = %v err=%v, want empty", got, err)
+	}
+}

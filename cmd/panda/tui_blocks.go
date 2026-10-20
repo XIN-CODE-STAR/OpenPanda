@@ -46,7 +46,7 @@ type block struct {
 	// ok distinguishes a succeeded task (blockTask) from a failed one for tinting.
 	ok bool
 	// Task-block state (kind == blockTask): what was delegated and the lifecycle
-	// trail it went through, so scrollback keeps the evidence the live card showed.
+	// trail it went through, so the transcript keeps the evidence the live card showed.
 	title    string
 	stages   []string
 	meta     string
@@ -169,12 +169,10 @@ func answerText(t theme, body string, width int) string {
 // part of the answer (D14) — this is a display affordance over text the engine
 // already keeps out of history.
 //
-// The fold reports its line count rather than advertising "ctrl+o". This front
-// end runs inline, so a committed block has already been written into the
-// terminal's scrollback and can never be redrawn: the toggle governs the
-// thought being streamed and every thought committed after it flips, not the
-// blocks already above the cursor. Printing a key hint on a block that key
-// cannot touch would be a promise the display cannot keep.
+// The fold reports its line count rather than advertising "ctrl+o". The key
+// legend lives in the footer, where it is available in every mode; repeating it
+// on each block would compete with the content it describes. The AltScreen
+// repaints committed blocks, so Ctrl+O does re-fold every thought on screen.
 func (b block) renderThought(t theme, expand bool) string {
 	star := t.glyph("✻", "*")
 	label := i18n.T(t.loc, "tui.thought.head")
@@ -316,8 +314,8 @@ func indentLines(s, first, cont string) string {
 // non-positive width is a no-op (the model has not learned its size yet).
 //
 // lipgloss pads every wrapped line out to the block width; that padding is
-// stripped here. A committed block is written into the terminal's own scrollback,
-// so the spaces would survive in anything the user copies out of it — and the
+// stripped here. A committed block is rendered into the frame and can be
+// selected and copied, so the spaces would survive in the copied text — and the
 // live region is repainted by Bubble Tea, which clears its own lines.
 func wrap(s string, width int) string {
 	if width <= 0 {

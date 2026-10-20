@@ -569,3 +569,55 @@ func TestUserCardSchedulingOrder(t *testing.T) {
 		}
 	}
 }
+
+// TestExecAgentSwitchNoteEarly: when the scored primary fails its dispatch
+// probe and the fallback chain lands on an alternate, the run must announce
+// the swap through the progress sink AT THE SWITCH — an exec_agent_start
+// tracing the plan's primary must not be the only word the timeline ever
+// gets for a minutes-long run that actually belonged to someone else.
+func TestExecAgentSwitchNoteEarly(t *testing.T) {
+	card := ledger.Card{
+		Device:        "test-node",
+		ResourceClass: "Standard",
+		Agents: map[string]ledger.Agent{
+			// Alphabetical order decides the tie: claude_code scores the
+			// primary, opencode arrives as the alternate.
+			"claude_code": {
+				Adapter:      "claude_code.py",
+				Capabilities: []string{"code:modify"},
+				Tier:         1,
+			},
+			"opencode": {
+				Adapter:      "opencode.py",
+				Capabilities: []string{"code:modify"},
+				Tier:         1,
+			},
+		},
+		Capacity: ledger.Capacity{CPUCores: 4, RAMGB: 8, MaxConcurrent: 2},
+	}
+	r := NewRouter(card, NewExecutor(), config.ModelConfig{}, config.InjectionConfig{}, config.RoutingConfig{})
+	r.SetAgentProber(func(name string, ag ledger.Agent) bool { return name != "claude_code" })
+	r.SetAdapterRunner(func(ctx context.Context, adapter, prompt, cwd string) AgentResult {
+		return AgentResult{OK: true, Result: "done", ExitCode: 0}
+	})
+
+	var notes, kinds []string
+	ctx := WithProgress(context.Background(), func(note, kind string) {
+		notes = append(notes, note)
+		kinds = append(kinds, kind)
+	})
+	res := r.Execute(ctx, Plan{Kind: "agent", Agent: "claude_code", Adapter: "claude_code.py",
+		Alternates: []string{"opencode"}, Tier: defense.TierReversible}, "p", t.TempDir(), true)
+	if !res.OK || res.Agent != "opencode" {
+		t.Fatalf("res = %+v, want ok run on opencode", res)
+	}
+	found := false
+	for i, k := range kinds {
+		if k == "agent_switch" && strings.Contains(notes[i], "opencode") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no agent_switch progress note emitted for the fallback run; notes=%v kinds=%v", notes, kinds)
+	}
+}

@@ -802,6 +802,18 @@ func (c *Core) packStageOutput(ctx context.Context, t Task, workDir string) (str
 		// at the node that has it.
 		return "", fmt.Errorf("no artifact pool on this node: stage %s output cannot be handed to successors", t.StageID)
 	}
+	// The pack walks and compresses the whole workdir — tens of seconds for
+	// a large tree — between the last verdict and the result frame. Without a
+	// note the task card reads as frozen at "judging" while the executor is
+	// in fact packing; the relayed copy keeps the delegator's card honest too.
+	note := "packing result tree"
+	if err := c.store.RecordEvent(ctx, t.TaskID, EvProgress, map[string]any{"note": note}); err != nil {
+		c.logger.Debug("record pack note", "task", t.TaskID, "err", err)
+	}
+	if len(t.Chain) > 0 {
+		c.relayToParent(context.WithoutCancel(ctx), bus.MsgTaskProgress, t.Chain,
+			bus.TaskProgressPayload{TaskID: t.TaskID, AttemptID: t.AttemptID, Note: note})
+	}
 	prune := c.hostStatePrune(workDir)
 	if t.Isolate {
 		// An isolated workspace carries bookkeeping a remote adopter must
@@ -813,7 +825,7 @@ func (c *Core) packStageOutput(ctx context.Context, t Task, workDir string) (str
 			filepath.Join(workDir, isolatedBaselineFile),
 			filepath.Join(workDir, ".git"))
 	}
-	m, err := c.artifacts.PackDirExceptPaths(workDir, nil, prune, 0)
+	m, err := c.artifacts.PackDirExceptPaths(workDir, outputSkipDirs, prune, 0)
 	if err != nil {
 		return "", fmt.Errorf("pack stage output: %w", err)
 	}

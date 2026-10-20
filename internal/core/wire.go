@@ -43,6 +43,16 @@ func (c *Core) handleAccept(ctx context.Context, env bus.Envelope) {
 			"from", env.From, "owner", t.OwnerNode)
 		return
 	}
+	if p.AttemptID != "" && t.AttemptID != "" && t.AttemptID != p.AttemptID &&
+		attemptIsNewer(t.AttemptID, p.AttemptID) {
+		// A delayed accept for a dispensation the row already rotated past:
+		// the executor is claiming OLD work while a newer delegate owns the
+		// row. Same directional gate as decline/cancel — only a strictly
+		// older wire attempt is stale.
+		c.logger.Info("stale dispensation accept ignored", "task", p.TaskID,
+			"stored", t.AttemptID, "got", p.AttemptID)
+		return
+	}
 	// Trust zones: a signed accept is the executor's bilateral commitment —
 	// verify it before letting it move our copy or ride further up the
 	// chain. An unsigned frame is a legacy peer and passes as before; a
@@ -53,9 +63,13 @@ func (c *Core) handleAccept(ctx context.Context, env bus.Envelope) {
 		return
 	}
 	// The executor claims the lease; the parent records the new state and
-	// owner so a later cancel/transfer routes correctly.
-	if err := c.store.Accept(ctx, p.TaskID, env.From); err != nil {
+	// owner so a later cancel/transfer routes correctly. The attempt pins the
+	// CAS so a rotation between the gate above and this write cannot be
+	// claimed by the stale frame — and a refused CAS must not be relayed
+	// upstream as if our copy accepted it.
+	if err := c.store.Accept(ctx, p.TaskID, env.From, p.AttemptID); err != nil {
 		c.logger.Debug("accept apply failed", "task", p.TaskID, "err", err)
+		return
 	}
 	c.relayToParent(ctx, bus.MsgTaskAccept, t.Chain, p)
 }
@@ -94,8 +108,14 @@ func (c *Core) handleProgress(ctx context.Context, env bus.Envelope) {
 			// sees). UUIDv7 ids are time-ordered, so a newer id can only come
 			// from a rotation after our record — adopt it and let the beat
 			// renew the lease: the executor is alive on its current attempt.
-			if aerr := c.store.AdoptAttempt(ctx, p.TaskID, p.AttemptID); aerr == nil {
+			if aerr := c.store.AdoptAttempt(ctx, p.TaskID, t.AttemptID, p.AttemptID); aerr == nil {
 				t.AttemptID = p.AttemptID
+			} else {
+				// A local rotation landed between our read and the adopt —
+				// this beat belongs to a dispensation that no longer owns
+				// the row and must not renew its lease.
+				c.logger.Debug("progress adopt raced a local rotation", "task", p.TaskID, "err", aerr)
+				return
 			}
 		} else {
 			// A beat from a superseded attempt (after a retry/transfer) must not
@@ -103,7 +123,7 @@ func (c *Core) handleProgress(ctx context.Context, env bus.Envelope) {
 			return
 		}
 	}
-	if err := c.store.SetLease(ctx, p.TaskID, c.lease().Milliseconds()); err != nil {
+	if err := c.store.SetLeaseAttempt(ctx, p.TaskID, c.lease().Milliseconds(), p.AttemptID); err != nil {
 		c.logger.Warn("refresh lease from progress", "task", p.TaskID, "err", err)
 	}
 	// A beat carrying a note is the executor's progress sink reaching the
@@ -168,6 +188,16 @@ func (c *Core) handleDecline(ctx context.Context, env bus.Envelope) {
 			"from", env.From, "owner", t.OwnerNode)
 		return
 	}
+	if p.AttemptID != "" && t.AttemptID != "" && t.AttemptID != p.AttemptID &&
+		attemptIsNewer(t.AttemptID, p.AttemptID) {
+		// The row already moved to a newer dispensation — this refusal
+		// belongs to an attempt the delegator itself replaced (its sender
+		// is the dispatch target again after a re-route). Bouncing the row
+		// to queued would re-route live work on a dead run's word.
+		c.logger.Info("stale dispensation decline ignored", "task", p.TaskID,
+			"stored", t.AttemptID, "declined", p.AttemptID)
+		return
+	}
 	c.logger.Info("task declined", "task", p.TaskID, "reason", p.Reason, "by", env.From)
 	if pin := targetNodeOf(t); pin != "" {
 		// The task names its destination: a decline from that destination is
@@ -179,7 +209,7 @@ func (c *Core) handleDecline(ctx context.Context, env bus.Envelope) {
 			c.logger.Debug("decline event record failed", "task", p.TaskID, "err", err)
 		}
 		c.failLocal(ctx, p.TaskID,
-			fmt.Errorf("pinned node %s declined: %s", env.From, p.Reason))
+			fmt.Errorf("pinned node %s declined: %s", env.From, p.Reason), p.AttemptID)
 		c.relayToParent(ctx, bus.MsgTaskDecline, t.Chain, p)
 		c.signalResult(p.TaskID, bus.TaskResultPayload{
 			TaskID: p.TaskID, State: StateFailed, OK: false, ExitCode: 1,
@@ -191,7 +221,7 @@ func (c *Core) handleDecline(ctx context.Context, env bus.Envelope) {
 	// machine reason code (DeclineCodeTrust* etc.) rides into the audit trail
 	// alongside the text so policy refusals stay distinguishable from
 	// capacity ones.
-	if err := c.store.Decline(ctx, p.TaskID, c.nodeID, p.Reason, p.ReasonCode, env.From); err != nil {
+	if err := c.store.Decline(ctx, p.TaskID, c.nodeID, p.Reason, p.ReasonCode, env.From, p.AttemptID); err != nil {
 		c.logger.Debug("decline apply failed", "task", p.TaskID, "err", err)
 	}
 	// P1-5: before giving up, try to re-route to the next-best node. A
@@ -251,11 +281,33 @@ func (c *Core) rerouteDeclined(ctx context.Context, taskID string) bool {
 	// Route's seen-set doubles as the exclusion list: chain nodes plus every
 	// past decliner. Suffixing the chain keeps the persisted/wire chain clean.
 	seenChain := append(slices.Clone(t.Chain), excluded...)
+	// Executors whose custody lapsed mid-run are excluded likewise — the
+	// rescue is only a rescue if it does not pick the same dead link again.
+	var evicted []string
+	if ev, err := c.store.EvictedExecutors(ctx, taskID); err == nil {
+		evicted = ev
+	}
+	eligible := c.eligibleForSend(ctx, needsForTask(t), c.onlineEmployees(ctx))
+	resReq := resourceRequirement(t.ResourceJSON)
 
-	decision := scheduler.RouteP(c.nodeID, seenChain,
-		c.eligibleForSend(ctx, needsForTask(t), c.onlineEmployees(ctx)),
-		c.localMatch(), t.Requires,
-		resourceRequirement(t.ResourceJSON), "", t.Project)
+	decision := scheduler.RouteP(c.nodeID, append(slices.Clone(seenChain), evicted...),
+		eligible, c.localMatch(), t.Requires, resReq, "", t.Project)
+	revival := false
+	if decision.Action == scheduler.ActionDecline && len(evicted) > 0 {
+		// Excluding the lapsed executor left no route — with no alternate it
+		// is still the only place this task can run, and parking the delivery
+		// on the outbox beats a terminal decline over a transient silence.
+		decision = scheduler.RouteP(c.nodeID, seenChain,
+			eligible, c.localMatch(), t.Requires, resReq, "", t.Project)
+		if decision.Action == scheduler.ActionDecline {
+			// No ONLINE route exists at all — Route never sees the evicted
+			// executor because its link is down. The delivery parks in
+			// task_outbox for that custodian's next hello; the task deadline,
+			// not a verdict, bounds the wait.
+			decision = scheduler.Decision{Action: scheduler.ActionForward, Target: evicted[len(evicted)-1]}
+			revival = true
+		}
+	}
 	if decision.Action != scheduler.ActionForward {
 		c.logger.Info("reroute: no alternate node", "task", taskID, "action", decision.Action,
 			"reason", c.enrichDeclineReason(ctx, taskID, decision.Reason))
@@ -324,7 +376,7 @@ func (c *Core) rerouteDeclined(ctx context.Context, taskID string) bool {
 		payload.AuthHops = 1
 		c.grantConsentFor(t, &payload)
 	}
-	if err := c.dispatchDelegated(ctx, taskID, decision.Target, payload, t.Chain); err != nil {
+	if err := c.dispatchDelegated(ctx, taskID, decision.Target, payload, t.Chain, revival); err != nil {
 		c.logger.Warn("reroute: forward failed", "task", taskID, "target", decision.Target, "err", err)
 		return false
 	}
@@ -391,8 +443,16 @@ func (c *Core) handleResult(ctx context.Context, env bus.Envelope) {
 			"from", env.From, "owner", t.OwnerNode)
 		return
 	}
-	if p.AttemptID == "" || (t.AttemptID != "" && t.AttemptID != p.AttemptID) {
-		if t.AttemptID != "" && attemptIsNewer(p.AttemptID, t.AttemptID) {
+	if p.AttemptID == "" {
+		// Every in-tree executor stamps its attempt on the way out; an empty
+		// attempt on the wire is a stripped or forged frame, not a legacy
+		// peer — letting it settle the row would defeat the whole stale-
+		// attempt fence (P1-1).
+		c.logger.Warn("result with empty attempt rejected", "task", p.TaskID, "from", env.From)
+		return
+	}
+	if t.AttemptID != "" && t.AttemptID != p.AttemptID {
+		if attemptIsNewer(p.AttemptID, t.AttemptID) {
 			// The executor rotated its attempt forward — a task_resume
 			// re-run or supervisor retry mints a fresh attempt upstream never
 			// hears about, and before this the result was dropped as stale,
@@ -401,13 +461,18 @@ func (c *Core) handleResult(ctx context.Context, env bus.Envelope) {
 			// current executor above, and UUIDv7 ids are time-ordered: a
 			// newer attempt can only come from a rotation after our record,
 			// never from a replayed older one (those stay dropped below).
-			if aerr := c.store.AdoptAttempt(ctx, p.TaskID, p.AttemptID); aerr != nil {
-				c.logger.Warn("adopt rotated attempt", "task", p.TaskID, "err", aerr)
-			} else {
-				c.logger.Info("adopted executor's rotated attempt", "task", p.TaskID,
-					"stored", t.AttemptID, "got", p.AttemptID)
-				t.AttemptID = p.AttemptID
+			if aerr := c.store.AdoptAttempt(ctx, p.TaskID, t.AttemptID, p.AttemptID); aerr != nil {
+				// The row rotated past BOTH attempts mid-handling (a local
+				// settle re-queued it) — this result belongs to a dispensation
+				// that no longer owns the row. Applying it now would write an
+				// old attempt's verdict over the fresh one.
+				c.logger.Info("adopt rotated attempt raced a local rotation; result dropped",
+					"task", p.TaskID, "err", aerr)
+				return
 			}
+			c.logger.Info("adopted executor's rotated attempt", "task", p.TaskID,
+				"stored", t.AttemptID, "got", p.AttemptID)
+			t.AttemptID = p.AttemptID
 		} else {
 			c.logger.Info("stale attempt result ignored", "task", p.TaskID,
 				"stored", t.AttemptID, "got", p.AttemptID)
@@ -485,17 +550,17 @@ func (c *Core) handleResult(ctx context.Context, env bus.Envelope) {
 				c.logger.Info("late done reconciled over timeout close", "task", p.TaskID,
 					"was", t.State, "from", env.From)
 			}
-		} else if err := c.store.CompleteFromRemote(ctx, p.TaskID, c.nodeID, p); err != nil {
+		} else if err := c.store.CompleteFromRemote(ctx, p.TaskID, c.nodeID, p, p.AttemptID); err != nil {
 			c.logger.Warn("complete from result", "task", p.TaskID, "err", err)
 			transitionOK = false
 		}
 	case StateReview:
-		if err := c.store.ReviewFromRemote(ctx, p.TaskID, c.nodeID, p, parseApprovalDisposition(p.ApprovalDisposition)); err != nil {
+		if err := c.store.ReviewFromRemote(ctx, p.TaskID, c.nodeID, p, parseApprovalDisposition(p.ApprovalDisposition), p.AttemptID); err != nil {
 			c.logger.Warn("review from result", "task", p.TaskID, "err", err)
 			transitionOK = false
 		}
 	case StateFailed:
-		if err := c.store.FailFromRemote(ctx, p.TaskID, c.nodeID, p.Stderr); err != nil {
+		if err := c.store.FailFromRemote(ctx, p.TaskID, c.nodeID, p.Stderr, p.AttemptID); err != nil {
 			c.logger.Warn("fail from result", "task", p.TaskID, "err", err)
 			transitionOK = false
 		}
@@ -511,7 +576,7 @@ func (c *Core) handleResult(ctx context.Context, env bus.Envelope) {
 		if reason == "" {
 			reason = "executor task expired"
 		}
-		if err := c.store.FailFromRemote(ctx, p.TaskID, c.nodeID, reason); err != nil {
+		if err := c.store.FailFromRemote(ctx, p.TaskID, c.nodeID, reason, p.AttemptID); err != nil {
 			c.logger.Warn("expire from result", "task", p.TaskID, "err", err)
 			transitionOK = false
 		}
@@ -692,13 +757,35 @@ func (c *Core) handleCancel(ctx context.Context, env bus.Envelope) {
 	}
 	parent := scheduler.Predecessor(t.Chain, c.nodeID)
 	// The origin's CLI and web panel cancel through their own ephemeral core
-	// (an ask-engine sibling of the daemon), so a cancel legitimately arrives
-	// from an ephemeral id of the owner node. IsSelfRow recognizes that form;
-	// anything else from another node is an unauthorized cross-node cancel and
-	// is dropped.
-	if env.From != t.OwnerNode && env.From != parent && !scheduler.IsSelfRow(t.OwnerNode, env.From) {
+	// (an ask-engine sibling of the daemon), and a daemon that bounced holds
+	// a fresh instance id — so the owner/parent bind compares runtime
+	// identity, not the raw stored id (the same drift handleAcceptWork and
+	// handleResume already tolerate). Anything else from another node is an
+	// unauthorized cross-node cancel and is dropped. Auth precedes the
+	// staleness gate: a peer outside the task's path must not even be able
+	// to write its audit trail.
+	if !scheduler.SameRuntimeIdentity(env.From, t.OwnerNode) &&
+		!scheduler.SameRuntimeIdentity(env.From, parent) &&
+		!scheduler.IsSelfRow(t.OwnerNode, env.From) {
 		c.logger.Warn("unauthorized cancel ignored", "task", p.TaskID,
 			"from", env.From, "owner", t.OwnerNode, "parent", parent)
+		return
+	}
+	if p.AttemptID != "" && t.AttemptID != "" && t.AttemptID != p.AttemptID &&
+		attemptIsNewer(t.AttemptID, p.AttemptID) {
+		// A dispensation-scoped kill order (lease expiry, reroute supersede)
+		// that arrived after the row already moved to a newer attempt: the
+		// copy it meant to stand down is gone, and applying it now would
+		// cancel the live supersedure. An empty attempt is a tree cancel —
+		// a human decision — and kills whatever the row holds.
+		c.logger.Info("stale dispensation cancel ignored", "task", p.TaskID,
+			"stored", t.AttemptID, "cancelled", p.AttemptID)
+		if rerr := c.store.RecordEvent(ctx, p.TaskID, EvResult, map[string]any{
+			"late": true, "dropped": "stale_cancel",
+			"from": env.From, "remote_attempt": p.AttemptID,
+		}); rerr != nil {
+			c.logger.Debug("stale cancel audit failed", "task", p.TaskID, "err", rerr)
+		}
 		return
 	}
 	cancelled, err := c.store.CancelCascade(ctx, p.TaskID)
@@ -718,7 +805,9 @@ func (c *Core) finishCancel(ctx context.Context, cancelled []string) {
 	for _, id := range cancelled {
 		c.cancelRunning(id)
 		c.dropPendingContext(id)
-		c.forwardCancelDownstream(ctx, id, "cancelled by delegator")
+		// Tree-scoped (empty attempt): a human decision kills whatever
+		// dispensation the downstream copy currently runs.
+		c.forwardCancelDownstream(ctx, id, "", "cancelled by delegator")
 	}
 }
 
@@ -746,7 +835,7 @@ func (c *Core) RejectTree(ctx context.Context, taskID, reason string) error {
 	if err := c.store.Reject(ctx, taskID, reason); err != nil {
 		return err
 	}
-	c.forwardCancelDownstream(ctx, taskID, "rejected by delegator: "+reason)
+	c.forwardCancelDownstream(ctx, taskID, "", "rejected by delegator: "+reason)
 	return nil
 }
 
@@ -756,21 +845,37 @@ func (c *Core) RejectTree(ctx context.Context, taskID, reason string) error {
 // completion and its eventual result landed on an already-cancelled task.
 // The receiver's handleCancel re-runs its own cascade-and-forward, so the
 // cancel walks the whole downstream chain hop by hop.
-func (c *Core) forwardCancelDownstream(ctx context.Context, taskID, reason string) {
+func (c *Core) forwardCancelDownstream(ctx context.Context, taskID, attemptID, reason string) {
 	target, err := c.store.DispatchTarget(ctx, taskID)
 	if err != nil {
 		c.logger.Warn("cancel: dispatch target lookup", "task", taskID, "err", err)
 		return
 	}
+	c.forwardCancelTo(ctx, target, taskID, attemptID, reason)
+}
+
+// forwardCancelTo delivers the cancel to an explicitly named executor — used
+// where the target was captured ahead of a mutation that rewrites the
+// dispatch target record (expiry settle re-queues and re-dispatches, so the
+// lapsed attempt's executor would otherwise be unfindable by the time its
+// stand-down order is sent).
+func (c *Core) forwardCancelTo(ctx context.Context, target, taskID, attemptID, reason string) {
 	if target == "" || target == c.nodeID {
 		return // never dispatched, or dispatched to ourselves
 	}
 	if reason == "" {
 		reason = "cancelled by delegator"
 	}
-	if c.deliverCancel(ctx, target, taskID, reason) {
-		// Delivered now: clear any copy parked from an earlier failed attempt.
-		c.outboxCancelDrop(ctx, target, taskID)
+	if c.deliverCancel(ctx, target, taskID, attemptID, reason) {
+		// Delivered now: parked copies of the order it supersedes are dead
+		// weight. A delivered tree cancel obsoletes everything parked for
+		// the pair; a dispensation-scoped one clears only its own kind — a
+		// parked human cancel still outranks it and must survive.
+		if attemptID == "" {
+			c.outboxCancelDrop(ctx, target, taskID)
+		} else {
+			c.cancelOutboxDropDispensation(ctx, target, taskID)
+		}
 		c.logger.Info("cancel forwarded downstream", "task", taskID, "to", target)
 		return
 	}
@@ -788,7 +893,7 @@ func (c *Core) forwardCancelDownstream(ctx context.Context, taskID, reason strin
 		c.logger.Info("cancel parked for delivery via the owning engine",
 			"task", taskID, "to", target)
 	}
-	c.outboxCancelPersist(ctx, target, taskID, reason)
+	c.outboxCancelPersist(ctx, target, taskID, attemptID, reason)
 }
 
 // handleResume processes an incoming task_resume: the delegator's user
@@ -811,6 +916,14 @@ func (c *Core) handleResume(ctx context.Context, env bus.Envelope) {
 		return
 	}
 	if p.Accept {
+		// An accept mirrors a finished verdict — it is not consent scoped to
+		// a run, so the attempt gate a re-run needs does not apply. Sibling
+		// copies legitimately diverge in attempt order (each side rotates
+		// independently and adopts lazily); dropping on a mismatch would
+		// lose the mirror and strand the parked copy in review forever.
+		// Staleness is still fenced at the custody source: a parked
+		// resume_outbox entry is dropped at flush once the sender's own row
+		// rotated past the attempt the verdict spoke for.
 		c.handleAcceptWork(ctx, env, t)
 		return
 	}
@@ -820,7 +933,13 @@ func (c *Core) handleResume(ctx context.Context, env bus.Envelope) {
 			"from", env.From, "parent", parent)
 		return
 	}
-	if p.AttemptID != "" && t.AttemptID != "" && t.AttemptID != p.AttemptID {
+	// A consent to re-run is dispensation-scoped: a stale resume_outbox
+	// entry that arrived after the row rotated must not re-run a fresh
+	// attempt's parked review. Directional like decline/cancel — only a
+	// strictly OLDER wire attempt is stale; a newer one is ordinary drift
+	// (the delegator re-routed and its consent still applies to the work).
+	if p.AttemptID != "" && t.AttemptID != "" && t.AttemptID != p.AttemptID &&
+		attemptIsNewer(t.AttemptID, p.AttemptID) {
 		c.logger.Info("stale attempt resume ignored", "task", p.TaskID,
 			"stored", t.AttemptID, "got", p.AttemptID)
 		return
@@ -1050,7 +1169,9 @@ func (c *Core) forwardAcceptDownstream(ctx context.Context, taskID, exclude stri
 	if target, err := c.store.DispatchTarget(ctx, taskID); err == nil && target != "" {
 		targets = append(targets, target)
 	}
+	var attemptID string
 	if t, err := c.store.Get(ctx, taskID); err == nil {
+		attemptID = t.AttemptID
 		if pred := scheduler.Predecessor(t.Chain, c.nodeID); pred != "" {
 			targets = append(targets, pred)
 		}
@@ -1064,7 +1185,7 @@ func (c *Core) forwardAcceptDownstream(ctx context.Context, taskID, exclude stri
 			continue
 		}
 		seen[target] = true
-		p := bus.TaskResumePayload{TaskID: taskID, Accept: true}
+		p := bus.TaskResumePayload{TaskID: taskID, AttemptID: attemptID, Accept: true}
 		if c.deliverResume(ctx, target, p) {
 			c.logger.Info("accept forwarded to peer copy", "task", taskID, "to", target)
 			continue

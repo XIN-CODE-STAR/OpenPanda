@@ -396,7 +396,7 @@ func (c *Core) Submit(ctx context.Context, in TaskInput) (Task, bus.TaskResultPa
 		if err := c.forwardDelegated(ctx, t.TaskID, decision.Target, payload, chain); err != nil {
 			// The delegate never left (or was never acked): settle the row so
 			// it does not linger in dispatched waiting for a monitor sweep.
-			c.failLocal(ctx, t.TaskID, fmt.Errorf("forward: %w", err))
+			c.failLocal(ctx, t.TaskID, fmt.Errorf("forward: %w", err), t.AttemptID)
 			return t, bus.TaskResultPayload{}, fmt.Errorf("forward: %w", err)
 		}
 		return c.waitRemoteResult(ctx, t, ch, "delegation")
@@ -405,7 +405,7 @@ func (c *Core) Submit(ctx context.Context, in TaskInput) (Task, bus.TaskResultPa
 		// directory"); the generic wrapper would bury it under a capability
 		// framing that was never evaluated.
 		if pinned {
-			c.failLocal(ctx, t.TaskID, fmt.Errorf("%s", decision.Reason))
+			c.failLocal(ctx, t.TaskID, fmt.Errorf("%s", decision.Reason), t.AttemptID)
 			return t, bus.TaskResultPayload{}, errors.New(decision.Reason)
 		}
 		// No route found: settle the row instead of leaving it in submitted.
@@ -417,7 +417,7 @@ func (c *Core) Submit(ctx context.Context, in TaskInput) (Task, bus.TaskResultPa
 			reason = "no capable node"
 		}
 		err := fmt.Errorf("no capability: %s", reason)
-		c.failLocal(ctx, t.TaskID, err)
+		c.failLocal(ctx, t.TaskID, err, t.AttemptID)
 		return t, bus.TaskResultPayload{}, err
 	}
 }
@@ -494,8 +494,8 @@ func (c *Core) waitRemoteResult(ctx context.Context, cur Task, ch <-chan bus.Tas
 				// stopped, so it is dead, not merely slow. Fail locally and
 				// push the cancel downstream so any still-running copy stops
 				// too (D3/S1-2).
-				c.failLocal(ctx, taskID, errors.New(what+" timeout"))
-				c.forwardCancelDownstream(ctx, taskID, what+" timeout")
+				c.failLocal(ctx, taskID, errors.New(what+" timeout"), t.AttemptID)
+				c.forwardCancelDownstream(ctx, taskID, t.AttemptID, what+" timeout")
 				return t, bus.TaskResultPayload{}, fmt.Errorf("%s timeout waiting for executor", what)
 			}
 		}
@@ -514,7 +514,7 @@ func (c *Core) createTask(ctx context.Context, in TaskInput) (Task, string, stri
 	// abandoned submitted row would be re-queued by RequeueStaleSubmitted and
 	// executed without the detail/authorization that failed to persist.
 	fail := func(err error) (Task, string, string, error) {
-		c.failLocal(ctx, t.TaskID, err)
+		c.failLocal(ctx, t.TaskID, err, t.AttemptID)
 		return Task{}, "", "", err
 	}
 	// Task creation is project activity: bump the row so `panda project list`
@@ -936,6 +936,12 @@ func (c *Core) retryLoop(ctx context.Context, taskID, intent string, required []
 			c.checkpointLoop.Reset(taskID)
 			return final, result, nil
 		}
+		if result.AttemptID != "" && final.AttemptID != result.AttemptID {
+			// The row was rotated (lease-expiry reroute) and re-attempted while
+			// this loop idled in backoff: the failed row now belongs to a
+			// different attempt that owns its verdict — stand down.
+			return final, result, nil
+		}
 		// A tier-2 authorization refusal is deterministic policy, not a
 		// failed attempt: retrying cannot produce consent, so the task goes
 		// straight to review with the actionable reason instead of burning
@@ -944,7 +950,7 @@ func (c *Core) retryLoop(ctx context.Context, taskID, intent string, required []
 			// Recorded at error level, but not fatal: the refusal is real
 			// regardless, and the task still has to be settled below instead of
 			// being abandoned mid-flight.
-			if rerr := c.store.ReviewWithDisposition(ctx, taskID, c.nodeID, result.Stderr, ApprovalResumeExecution); rerr != nil {
+			if rerr := c.store.ReviewWithDispositionAttempt(ctx, taskID, c.nodeID, result.AttemptID, result.Stderr, ApprovalResumeExecution); rerr != nil {
 				c.logger.Error("review with disposition failed for authorization refusal", "task", taskID, "err", rerr)
 			}
 			c.reviewReset(taskID)
@@ -968,7 +974,7 @@ func (c *Core) retryLoop(ctx context.Context, taskID, intent string, required []
 			allow = c.loop.Allow(taskID) && !c.retriesExhausted(ctx, taskID)
 		}
 		if !allow {
-			if rerr := c.store.Review(ctx, taskID, c.nodeID, result.Stderr); rerr != nil {
+			if rerr := c.store.ReviewAttempt(ctx, taskID, c.nodeID, result.AttemptID, result.Stderr); rerr != nil {
 				c.logger.Error("failed to transition task to review", "task", taskID, "err", rerr)
 			}
 			c.reviewReset(taskID)
@@ -999,13 +1005,24 @@ func (c *Core) retryLoop(ctx context.Context, taskID, intent string, required []
 			// row at the top of the loop instead of sleeping out a stale delay.
 			continue
 		}
-		if rerr := c.retryOnce(ctx, taskID, checkpoint); rerr != nil {
+		if rerr := c.retryOnce(ctx, taskID, checkpoint, result.AttemptID); rerr != nil {
 			c.logger.Warn("retry task", "task", taskID, "err", rerr)
 			return final, result, rerr
 		}
 		retries++
 		c.logger.Info("retrying task", "task", taskID)
 		result, err = c.run(ctx, taskID, intent, required, nil)
+		if errors.Is(err, ErrAlreadyRunning) {
+			// Between our requeue and the re-run a sibling runner claimed the
+			// row (a resume beat us to it, a duplicate delivery). It owns the
+			// outcome and the reply — failing the row here would kill live
+			// work and its terminal write would lose to the conflict anyway.
+			final, gerr := c.store.Get(ctx, taskID)
+			if gerr != nil {
+				return Task{}, result, gerr
+			}
+			return final, result, err
+		}
 		if err != nil && !errors.Is(err, ErrCancelled) {
 			c.failLocal(ctx, taskID, err)
 			final, gerr := c.store.Get(ctx, taskID)
@@ -1015,6 +1032,31 @@ func (c *Core) retryLoop(ctx context.Context, taskID, intent string, required []
 			return final, result, err
 		}
 	}
+}
+
+// settleDelegated drives a delegated task's first execution outcome through the
+// shared retry/review loop — the same machinery local submissions and the queue
+// runner already get. A peer-run task used to have exactly one attempt: a
+// resumable watchdog stall (exit 124 carrying a live session) reported failure
+// upstream while the identical local failure checkpoint-resumed, and an
+// exhausted retry parked the executor copy in a review queue the delegator
+// could not see. Returns the settled row plus the payload to report: a review
+// park goes upstream as State:review so the delegator mirrors the park
+// (ReviewFromRemote) and its operator can approve the resume through the
+// normal accept mirror, instead of a bare failure nobody can act on.
+func (c *Core) settleDelegated(ctx context.Context, taskID, intent string, required []string, result bus.TaskResultPayload) (Task, bus.TaskResultPayload, error) {
+	final, result, err := c.retryLoop(ctx, taskID, intent, required, result, nil)
+	if err != nil {
+		return final, result, err
+	}
+	if final.State == StateReview && result.State != StateReview {
+		result.State = StateReview
+		result.OK = false
+		if final.ApprovalDisposition != "" {
+			result.ApprovalDisposition = string(final.ApprovalDisposition)
+		}
+	}
+	return final, result, nil
 }
 
 // retriesExhausted reports whether the persisted retry budget (EvRetry events
@@ -1070,8 +1112,8 @@ func (c *Core) reviewReset(taskID string) {
 // attempt_id plus the failed -> dispatched move and both audit events land in
 // one transaction (RequeueForRetry), so a crash or owner-guard conflict mid-way
 // cannot leave a half-rotated row the audit trail misreads.
-func (c *Core) retryOnce(ctx context.Context, taskID string, checkpoint bool) error {
-	_, err := c.store.RequeueForRetry(ctx, taskID, c.nodeID, checkpoint)
+func (c *Core) retryOnce(ctx context.Context, taskID string, checkpoint bool, expectAttempt ...string) error {
+	_, err := c.store.RequeueForRetry(ctx, taskID, c.nodeID, checkpoint, expectAttempt...)
 	return err
 }
 
@@ -1117,9 +1159,15 @@ func (c *Core) waitBackoff(ctx context.Context, taskID string, d time.Duration) 
 }
 
 // failLocal force-fails a task left in a non-terminal state by a routing or
-// dispatch error, so the queue reflects reality.
-func (c *Core) failLocal(ctx context.Context, taskID string, err error) {
-	if ferr := c.store.ForceFail(ctx, taskID, err.Error()); ferr != nil {
+// dispatch error, so the queue reflects reality. When the caller knows which
+// attempt it was dispatching, the verdict binds it: a row rotated since the
+// caller's read is fresh custody, not this caller's failure to record.
+func (c *Core) failLocal(ctx context.Context, taskID string, err error, expectAttempt ...string) {
+	var attempt string
+	if len(expectAttempt) > 0 {
+		attempt = expectAttempt[0]
+	}
+	if ferr := c.store.ForceFailAttempt(ctx, taskID, attempt, err.Error()); ferr != nil {
 		c.logger.Warn("fail local task", "task", taskID, "err", ferr)
 	}
 }

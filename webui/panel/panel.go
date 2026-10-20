@@ -387,6 +387,10 @@ func authMiddleware(token string, next http.Handler) http.Handler {
 const maxAuthFailures = 5
 
 // authFailWindow is a var so tests can shrink it.
+// authFailureMapMax bounds the limiter's distinct tracked IPs: a sprayed
+// brute-force run from fresh addresses must not grow the map without end.
+const authFailureMapMax = 4096
+
 var authFailWindow = time.Minute
 
 // authLimiter tracks failed Bearer attempts per client IP in a fixed window.
@@ -405,12 +409,20 @@ type authFailure struct {
 }
 
 // locked reports whether ip has exhausted its failure budget for the current
-// window.
+// window. An expired entry is dropped on sight so reads never leak the dead
+// weight a spraying peer set leaves behind.
 func (l *authLimiter) locked(ip string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	f := l.failures[ip]
-	return f != nil && time.Now().Before(f.reset) && f.count >= maxAuthFailures
+	if f == nil {
+		return false
+	}
+	if !time.Now().Before(f.reset) {
+		delete(l.failures, ip)
+		return false
+	}
+	return f.count >= maxAuthFailures
 }
 
 // fail records one failed attempt for ip, starting a fresh window when the
@@ -421,10 +433,28 @@ func (l *authLimiter) fail(ip string) {
 	defer l.mu.Unlock()
 	f := l.failures[ip]
 	if f == nil || now.After(f.reset) {
+		if f == nil && len(l.failures) >= authFailureMapMax {
+			l.gcLocked(now)
+		}
 		f = &authFailure{reset: now.Add(authFailWindow)}
 		l.failures[ip] = f
 	}
 	f.count++
+}
+
+// gcLocked reclaims the failures map under pressure: expired windows go
+// first, and if a spraying peer set still fills the cap the table resets —
+// a wiped budget costs some locked-out IPs an early retry, which is what
+// the bound is for.
+func (l *authLimiter) gcLocked(now time.Time) {
+	for ip, f := range l.failures {
+		if !now.Before(f.reset) {
+			delete(l.failures, ip)
+		}
+	}
+	if len(l.failures) >= authFailureMapMax {
+		clear(l.failures)
+	}
 }
 
 // reset clears the failure budget for ip after a successful authentication.

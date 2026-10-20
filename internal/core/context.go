@@ -32,7 +32,17 @@ type pendingContext struct {
 	required []string
 	ctxType  string
 	source   string
-	release  func()
+	// hash is the snapshot this park asked its source for. A late context_ack
+	// answering an EARLIER fetch — the row was superseded and re-parked with a
+	// fresh pending entry while the old request was in flight — carries either
+	// a different hash or a stale miss verdict; matching on hash keeps it from
+	// resuming or failing a dispensation it never belonged to.
+	hash string
+	// attempt is the dispensation this park belongs to, so a decline raised
+	// by the resumed run carries the attempt that ran — not whatever the row
+	// has rotated to by the time the run settles.
+	attempt string
+	release func()
 	// waitHashes is non-empty when the entry parks a dtn task for pushed
 	// artifacts rather than a context fetch: the input hashes still missing
 	// from the pool. resume re-drives execution once every one of them
@@ -308,10 +318,19 @@ func (c *Core) answerContextServe(sv *ctxServeEntry, ack bus.ContextAckPayload) 
 	}
 }
 
-// failPendingContext removes a pending entry and fails the task.
+// failPendingContext removes a pending entry and fails the task. The verdict
+// is scoped to the entry's parked attempt: a row that rotated to a new
+// dispensation since the park belongs to the fresh owner, not to the fetch
+// or push that just broke.
 func (c *Core) failPendingContext(ctx context.Context, taskID, reason string) {
-	if c.dropPendingContext(taskID) {
-		if err := c.store.ForceFail(ctx, taskID, reason); err != nil {
+	var attempt string
+	if v, ok := c.pendingCtx.Load(taskID); ok {
+		if pc, ok2 := v.(*pendingContext); ok2 {
+			attempt = pc.attempt
+		}
+	}
+	if c.dropPendingContextAttempt(taskID, attempt) {
+		if err := c.store.ForceFailAttempt(ctx, taskID, attempt, reason); err != nil {
 			c.logger.Warn("fail pending context task", "task", taskID, "err", err)
 		}
 	}
@@ -325,8 +344,24 @@ func (c *Core) failPendingContext(ctx context.Context, taskID, reason string) {
 // nothing else ever releases it). The release is sync.Once-guarded, so firing
 // it here and again from a racing resume is still exactly-once.
 func (c *Core) dropPendingContext(taskID string) bool {
-	v, ok := c.pendingCtx.LoadAndDelete(taskID)
+	return c.dropPendingContextAttempt(taskID, "")
+}
+
+// dropPendingContextAttempt removes the parked-context entry only when it
+// belongs to the given dispensation. Expiry and cancel paths pass the
+// attempt they killed so a newer dispensation's freshly re-created entry —
+// same task id, new park — is not freed out from under its own wait. An
+// empty attempt matches any entry (tree-scoped callers: human cancels).
+func (c *Core) dropPendingContextAttempt(taskID, attemptID string) bool {
+	v, ok := c.pendingCtx.Load(taskID)
 	if !ok {
+		return false
+	}
+	if pc, ok := v.(*pendingContext); ok && attemptID != "" && pc.attempt != "" &&
+		pc.attempt != attemptID {
+		return false
+	}
+	if !c.pendingCtx.CompareAndDelete(taskID, v) {
 		return false
 	}
 	if pc, ok := v.(*pendingContext); ok && pc.release != nil {
@@ -419,6 +454,21 @@ func (c *Core) handleContextAck(ctx context.Context, env bus.Envelope) {
 			"from", env.From, "source", pc.source)
 		return
 	}
+	if len(pc.waitHashes) > 0 {
+		// This entry parks for pushed artifacts, not a context fetch — a
+		// stray context_ack naming the same task id must not claim it (the
+		// hash check below cannot: push waits carry no fetch hash).
+		c.logger.Warn("context_ack for artifact-wait entry ignored", "task", p.TaskID)
+		return
+	}
+	if pc.hash != "" && p.Hash != pc.hash {
+		// The answer is for a snapshot this park never requested — typically a
+		// late reply to a superseded dispensation's fetch landing on the fresh
+		// pending entry that replaced it.
+		c.logger.Warn("context_ack for wrong hash ignored", "task", p.TaskID,
+			"got", p.Hash, "want", pc.hash)
+		return
+	}
 	// The entry must be claimed atomically: a duplicated ack (re-sent after a
 	// connection flap) racing this handler would otherwise let two goroutines
 	// both pass the source check and both resume the same task (M-double-run).
@@ -433,7 +483,7 @@ func (c *Core) handleContextAck(ctx context.Context, env bus.Envelope) {
 	if !p.OK {
 		c.logger.Warn("context fetch declined", "task", p.TaskID)
 		release()
-		if ferr := c.store.ForceFail(ctx, p.TaskID, "context unavailable"); ferr != nil {
+		if ferr := c.store.ForceFailAttempt(ctx, p.TaskID, pc.attempt, "context unavailable"); ferr != nil {
 			c.logger.Warn("fail task on declined context", "task", p.TaskID, "err", ferr)
 		}
 		return
@@ -441,7 +491,7 @@ func (c *Core) handleContextAck(ctx context.Context, env bus.Envelope) {
 	if ctxstore.Hash(p.Data) != p.Hash {
 		c.logger.Warn("context hash mismatch", "task", p.TaskID)
 		release()
-		if ferr := c.store.ForceFail(ctx, p.TaskID, "context hash mismatch"); ferr != nil {
+		if ferr := c.store.ForceFailAttempt(ctx, p.TaskID, pc.attempt, "context hash mismatch"); ferr != nil {
 			c.logger.Warn("fail task on context hash mismatch", "task", p.TaskID, "err", ferr)
 		}
 		return
@@ -449,7 +499,7 @@ func (c *Core) handleContextAck(ctx context.Context, env bus.Envelope) {
 	if err := c.ctx.Put(ctx, p.Hash, pc.ctxType, p.Data, p.Refs); err != nil {
 		c.logger.Warn("store fetched context", "task", p.TaskID, "err", err)
 		release()
-		if ferr := c.store.ForceFail(ctx, p.TaskID, "store context: "+err.Error()); ferr != nil {
+		if ferr := c.store.ForceFailAttempt(ctx, p.TaskID, pc.attempt, "store context: "+err.Error()); ferr != nil {
 			c.logger.Warn("fail task on context store error", "task", p.TaskID, "err", ferr)
 		}
 		return
@@ -479,7 +529,7 @@ func (c *Core) handleContextAck(ctx context.Context, env bus.Envelope) {
 			c.logger.Warn("run fetched-context task", "task", p.TaskID, "err", err)
 			if t, gerr := c.store.Get(runCtx, p.TaskID); gerr == nil {
 				c.relayToParent(runCtx, bus.MsgTaskDecline, t.Chain, bus.TaskDeclinePayload{
-					TaskID: p.TaskID, Reason: err.Error(),
+					TaskID: p.TaskID, AttemptID: pc.attempt, Reason: err.Error(),
 				})
 			}
 			// Same as the synchronous path: the local row must not linger in a
@@ -487,7 +537,23 @@ func (c *Core) handleContextAck(ctx context.Context, env bus.Envelope) {
 			c.terminalizeDeclined(runCtx, p.TaskID, err.Error())
 			return
 		}
-		if t, gerr := c.store.Get(runCtx, p.TaskID); gerr == nil {
+		// A context-parked task that failed its resumed run used to report
+		// upstream after exactly one attempt — a resumable stall died while a
+		// local run checkpoint-resumed. Settle it through the shared loop.
+		if _, result, serr := c.settleDelegated(runCtx, p.TaskID, pc.intent, pc.required, result); serr != nil {
+			// Cancelled, or a sibling transition (resume, second runner) owns
+			// the row now — its result lands on its own channel.
+			if !errors.Is(serr, ErrCancelled) && !errors.Is(serr, ErrConflict) {
+				c.logger.Warn("settle fetched-context task", "task", p.TaskID, "err", serr)
+				if t, gerr := c.store.Get(runCtx, p.TaskID); gerr == nil {
+					c.relayToParent(runCtx, bus.MsgTaskDecline, t.Chain, bus.TaskDeclinePayload{
+						TaskID: p.TaskID, AttemptID: pc.attempt, Reason: serr.Error(),
+					})
+				}
+				c.terminalizeDeclined(runCtx, p.TaskID, serr.Error())
+			}
+			return
+		} else if t, gerr := c.store.Get(runCtx, p.TaskID); gerr == nil {
 			c.relayToParent(runCtx, bus.MsgTaskResult, t.Chain, result)
 		}
 	})

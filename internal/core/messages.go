@@ -280,22 +280,57 @@ func (c *Core) formatBoardLine(ctx context.Context, m TaskMessage) string {
 }
 
 // msgBoardOwner resolves the scope-owner node for a post on a given board.
+// resolved=false means the answer is only the arrival direction the roster
+// lives behind, not a verdict — usable for routing onward, not for the
+// replica-side owner authentication.
 //
-// The owner is the root of the member's delegation chain: the plan origin
-// for a plan board (the node that ran StartPlan and holds every stage row),
-// the parent's executor for a children board (the node that minted the
-// member's task_delegate — also its chain root). NOT the immediate
-// delegator: a sub-scheduler relay mid-chain holds no roster and could not
-// resolve member addresses anyway. A task addressing its own children board
-// is trivially its own host.
-func (c *Core) msgBoardOwner(scope string, t Task) string {
-	switch {
-	case scope == "task:"+t.TaskID:
-		return c.nodeID
-	case len(t.Chain) > 0:
-		return t.Chain[0]
+// A plan board's owner is the member's chain root — the node that ran
+// StartPlan holds every stage row. A children board's owner is the parent's
+// EXECUTOR — the node that minted the members' task rows and holds the
+// Children(pid) roster. That is NOT necessarily the chain root: a parent
+// that was itself delegated spawns children from mid-chain, and its rows
+// never propagate upstream, so the root has no roster to resolve against.
+// Wherever the parent row is held its owner_node resolves correctly: the
+// executor's own copy names itself (Accept stamps the executor as owner),
+// and upstream copies name the next hop toward it (handleAccept stamps
+// each relay's accept-sender), so routing to the resolved node re-resolves
+// hop-wise until it lands on the executor. A node holding no parent row —
+// a member's own executor, say — cannot name the owner; its chain
+// predecessor is the direction the roster lives behind.
+func (c *Core) msgBoardOwner(ctx context.Context, scope string, t Task) (owner string, resolved bool) {
+	if scope == "task:"+t.TaskID {
+		return c.nodeID, true
 	}
-	return c.nodeID
+	if pid, ok := strings.CutPrefix(scope, "task:"); ok {
+		if parent, err := c.store.Get(ctx, pid); err == nil && parent.OwnerNode != "" {
+			return parent.OwnerNode, true
+		}
+		if pred := scheduler.Predecessor(t.Chain, c.nodeID); pred != "" {
+			return pred, false
+		}
+		return c.nodeID, false
+	}
+	if len(t.Chain) > 0 {
+		return t.Chain[0], true
+	}
+	return c.nodeID, false
+}
+
+// msgSrcInChain reports whether src names a node on the member's own
+// delegation chain upstream of this node — the corridor a fanout copy
+// legitimately arrives through when the member cannot resolve the owner
+// locally (no parent row). The tail element is the member's own executor
+// (this node), which can never be its own board owner.
+func msgSrcInChain(chain []string, src, self string) bool {
+	for i, hop := range chain {
+		if i == len(chain)-1 && scheduler.SameRuntimeIdentity(hop, self) {
+			break // the tail is this node — the owner sits strictly before it
+		}
+		if scheduler.SameRuntimeIdentity(hop, src) {
+			return true
+		}
+	}
+	return false
 }
 
 // messageScopeFor picks the board a post goes to: the sender's own sibling
@@ -358,7 +393,7 @@ func (c *Core) deliverTaskMessage(ctx context.Context, sender Task, req msgReque
 		Body:        body,
 		SentAt:      time.Now().Unix(),
 	}
-	owner := c.msgBoardOwner(scope, sender)
+	owner, _ := c.msgBoardOwner(ctx, scope, sender)
 	if owner == c.nodeID {
 		// We are the scope owner: resolve recipients and fan out directly.
 		return c.fanoutTaskMessage(ctx, m, req.To, sender)
@@ -461,6 +496,15 @@ func (c *Core) fanoutTaskMessage(ctx context.Context, m TaskMessage, to string, 
 		return err
 	}
 	m.Rcpt = rcpt
+	// The owner re-stamps the authoritative sequence: a member's local
+	// replica is the wrong source of truth because a task re-delegated to
+	// a node whose replica is empty restarts its own counter at 1 — and
+	// the seq guard would then drop every post it ever sends as stale.
+	// The owner's board is the shared sequence space; whatever it says
+	// next is what the slot records and every replica converges to.
+	if seq := c.store.NextMsgSeq(ctx, m.Scope, m.Sender); seq > m.SenderSeq {
+		m.SenderSeq = seq
+	}
 	// The owner's roster is the best source for the sender's display name:
 	// stage id on the plan node, title on the spawner. A replica that never
 	// held the sender's row renders this label as-is.
@@ -653,8 +697,9 @@ func (c *Core) sendAgentMessages(ctx context.Context, task Task, reqs []msgReque
 // stretched over a delegation chain works where every node sees only its own
 // edge. Neither leg trusts the transport for identity: the owner admits a
 // member post only when it arrived via that member's own dispatch path, and
-// a replica admits a fan-out copy only when its Src names the scope owner
-// the member row's chain root records.
+// a replica admits a fan-out copy only when its Src names the scope owner —
+// resolved from the parent row where held, else bounded to the member's own
+// delegation chain.
 func (c *Core) handleTaskMessage(ctx context.Context, env bus.Envelope) {
 	var p bus.TaskMessagePayload
 	if err := env.PayloadInto(&p); err != nil {
@@ -711,13 +756,19 @@ func (c *Core) handleTaskMessage(ctx context.Context, env bus.Envelope) {
 			c.forwardTaskMessage(ctx, env, p, tgt)
 			return
 		}
-		// The copy's claimed origin must be the scope's owner — the chain
-		// root the member row itself records — or it is a forged slot from a
-		// node that never resolved the roster. Src carries the origin across
-		// re-minted hops; a pre-Src peer's direct send still authenticates
-		// through env.From.
-		expected := c.msgBoardOwner(p.Scope, t)
-		if src := msgSenderNode(p, env); expected == c.nodeID || !scheduler.SameRuntimeIdentity(expected, src) {
+		// The copy's claimed origin must be the scope's owner. When this node
+		// can resolve the owner (it holds the parent row, or it IS the owner)
+		// the check is exact; when it cannot — a member's own executor holds
+		// no parent row — the copy must at least arrive from a node on the
+		// member's own delegation chain, the corridor every real fanout copy
+		// travels. Src carries the origin across re-minted hops; a pre-Src
+		// peer's direct send still authenticates through env.From.
+		expected, resolved := c.msgBoardOwner(ctx, p.Scope, t)
+		src := msgSenderNode(p, env)
+		forged := expected == c.nodeID ||
+			(resolved && !scheduler.SameRuntimeIdentity(expected, src)) ||
+			(!resolved && !msgSrcInChain(t.Chain, src, c.nodeID))
+		if forged {
 			c.logger.Warn("task_message fanout from non-owner", "member", memberID,
 				"scope", p.Scope, "src", src, "from", env.From)
 			return
@@ -739,7 +790,7 @@ func (c *Core) handleTaskMessage(ctx context.Context, env bus.Envelope) {
 		c.logger.Warn("task_message from unknown sender", "sender", p.Sender, "from", env.From)
 		return
 	}
-	if owner := c.msgBoardOwner(p.Scope, sender); owner != c.nodeID {
+	if owner, _ := c.msgBoardOwner(ctx, p.Scope, sender); owner != c.nodeID {
 		env.To = owner
 		c.forwardTaskMessage(ctx, env, p, scheduler.Predecessor(sender.Chain, c.nodeID))
 		return

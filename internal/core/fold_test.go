@@ -254,7 +254,7 @@ func TestRecoveredInterruptedTaskCarriesReason(t *testing.T) {
 		t.Fatalf("accept: %v", err)
 	}
 
-	if _, err := c.store.Recover(ctx); err != nil {
+	if _, err := c.store.Recover(ctx, "rec-root"); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
 	row := mustGetTask(t, c, ctx, tk.TaskID)

@@ -823,7 +823,7 @@ func TestPinParkedSyncHoldsNoLease(t *testing.T) {
 		TaskID: tk.TaskID, Intent: "x", Requires: []string{"pin:probe"},
 		TargetNode: "pin-leaf",
 	}
-	if err := root.dispatchDelegated(ctx, tk.TaskID, "pin-leaf", p, []string{"pin-root"}); err != nil {
+	if err := root.dispatchDelegated(ctx, tk.TaskID, "pin-leaf", p, []string{"pin-root"}, false); err != nil {
 		t.Fatalf("dispatchDelegated: %v", err)
 	}
 	var leaseAt *int64
@@ -950,7 +950,7 @@ func TestOrphanSweepSparesParkedPin(t *testing.T) {
 		t.Fatalf("dispatch: %v", err)
 	}
 	// Simulate the restart: dispatched → queued, custody row still parked.
-	if _, err := root.store.Recover(ctx); err != nil {
+	if _, err := root.store.Recover(ctx, "pin-root"); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
 	got := mustGetTask(t, root, ctx, tk.TaskID)

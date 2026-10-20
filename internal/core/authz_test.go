@@ -399,7 +399,7 @@ func TestReviewLeaseClearedAndNotExpired(t *testing.T) {
 	if _, err := s.db.Exec(`UPDATE tasks SET lease_expires_at=? WHERE task_id=?`, s.now()-1, tk.TaskID); err != nil {
 		t.Fatalf("stamp lease: %v", err)
 	}
-	expired, err := s.ExpireTasks(ctx)
+	expired, err := s.ExpireTasks(ctx, "owner")
 	if err != nil {
 		t.Fatalf("expire: %v", err)
 	}

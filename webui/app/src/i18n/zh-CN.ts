@@ -17,6 +17,8 @@ const zhCN: Messages = {
   'nav.system': '系统',
   'nav.settings': '设置',
   'nav.aria': '主导航',
+  'nav.menuOpen': '打开导航',
+  'nav.menuClose': '关闭导航',
   'nav.fleet': '节点网络',
   'nav.workspace': '工作空间',
 
@@ -96,6 +98,7 @@ const zhCN: Messages = {
   'queue.more': '还有 {n} 条…',
   'queue.title': '标题',
   'queue.project': '项目',
+  'queue.filterProject': '按项目筛选',
   'queue.state': '状态',
   'queue.owner': '归属',
   'queue.updated': '更新时间',

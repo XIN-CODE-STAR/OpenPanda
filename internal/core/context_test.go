@@ -195,3 +195,90 @@ func TestCancelClearsPendingContext(t *testing.T) {
 		t.Fatalf("task state = %s, want cancelled", got.State)
 	}
 }
+
+// TestStaleContextAckCannotFailRotatedAttempt: the row rotated to a fresh
+// dispensation after the park, so a late answer to the OLD fetch — even a
+// declined one — must not fail the live attempt. The verdict is bound to the
+// pending entry's stamped attempt, not to whatever the row holds now.
+func TestStaleContextAckCannotFailRotatedAttempt(t *testing.T) {
+	ctx := context.Background()
+	c := newCore(t, "exec-rot", "")
+	tk := createTask(t, c.store, "", "t-ctx-rot", "exec-rot")
+	if err := c.store.Queue(ctx, tk.TaskID, "exec-rot"); err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	if err := c.store.Dispatch(ctx, tk.TaskID, "exec-rot", "exec-rot"); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if err := c.store.SetWaitingContext(ctx, tk.TaskID, c.nodeID); err != nil {
+		t.Fatalf("waiting: %v", err)
+	}
+	wantHash := ctxstore.Hash([]byte("snap"))
+	c.pendingCtx.Store(tk.TaskID, &pendingContext{
+		intent: "x", ctxType: "file", source: "context-src",
+		hash: wantHash, attempt: tk.AttemptID,
+	})
+
+	// The dispensation rotates — an upstream re-delegate adopted a fresh
+	// attempt while the old fetch was still in flight.
+	newAttempt := tk.AttemptID[:len(tk.AttemptID)-1] + "z" // lexically later UUIDv7-shaped
+	if err := c.store.AdoptAttempt(ctx, tk.TaskID, tk.AttemptID, newAttempt); err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+
+	env, err := bus.NewEnvelope(bus.MsgContextAck, "context-src", "ack-late",
+		bus.ContextAckPayload{TaskID: tk.TaskID, Hash: wantHash, OK: false})
+	if err != nil {
+		t.Fatalf("envelope: %v", err)
+	}
+	c.handleContextAck(ctx, env)
+
+	got, err := c.store.Get(ctx, tk.TaskID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.State == StateFailed {
+		t.Fatalf("stale fetch verdict killed the rotated attempt: state=%s", got.State)
+	}
+	if got.AttemptID != newAttempt {
+		t.Fatalf("attempt unexpectedly rotated again: %s", got.AttemptID)
+	}
+}
+
+// TestContextAckFailsMatchingAttempt is the positive twin: a declined fetch
+// whose parked attempt still owns the row must settle it — the fence scopes
+// the verdict, it does not suppress it.
+func TestContextAckFailsMatchingAttempt(t *testing.T) {
+	ctx := context.Background()
+	c := newCore(t, "exec-own", "")
+	tk := createTask(t, c.store, "", "t-ctx-own", "exec-own")
+	if err := c.store.Queue(ctx, tk.TaskID, "exec-own"); err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	if err := c.store.Dispatch(ctx, tk.TaskID, "exec-own", "exec-own"); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if err := c.store.SetWaitingContext(ctx, tk.TaskID, c.nodeID); err != nil {
+		t.Fatalf("waiting: %v", err)
+	}
+	wantHash := ctxstore.Hash([]byte("snap"))
+	c.pendingCtx.Store(tk.TaskID, &pendingContext{
+		intent: "x", ctxType: "file", source: "context-src",
+		hash: wantHash, attempt: tk.AttemptID,
+	})
+
+	env, err := bus.NewEnvelope(bus.MsgContextAck, "context-src", "ack-no",
+		bus.ContextAckPayload{TaskID: tk.TaskID, Hash: wantHash, OK: false})
+	if err != nil {
+		t.Fatalf("envelope: %v", err)
+	}
+	c.handleContextAck(ctx, env)
+
+	got, err := c.store.Get(ctx, tk.TaskID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.State != StateFailed {
+		t.Fatalf("matching fetch decline did not settle: state=%s", got.State)
+	}
+}

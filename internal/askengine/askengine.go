@@ -1126,12 +1126,14 @@ func (e *Engine) initSchedulerLocked(cardPath string) error {
 		sched.TaskStore().SetOnReview(fn)
 	}
 
-	// Clean up stale leases from interrupted runs so tasks aren't stranded in running.
+	// Clean up stale leases from interrupted runs so tasks aren't stranded in
+	// running: with retry budget left they re-queue for another execution
+	// rather than dying on a lease their previous process stopped renewing.
 	if sched.TaskStore() != nil {
-		if expired, err := sched.TaskStore().ExpireTasks(context.Background()); err != nil {
+		if expired, err := sched.TaskStore().ExpireTasks(context.Background(), sched.NodeID()); err != nil {
 			e.logger.Debug("expire stale tasks at startup", "err", err)
 		} else if len(expired) > 0 {
-			e.logger.Info("expired stale tasks from previous run", "count", len(expired), "tasks", expired)
+			e.logger.Info("settled stale tasks from previous run", "count", len(expired), "tasks", expired)
 		}
 	}
 
@@ -2307,6 +2309,22 @@ func (e *Engine) submitTask(ctx context.Context, spec *entry.TaskSpec, prompt st
 		}
 		if workDir == "" && projectDir != "" {
 			workDir = projectDir
+		}
+	}
+	// Canonicalize the name against the registry regardless of who supplied
+	// it: the classifier emits spec.project in the casing it inferred from
+	// the tree ("Needlen" for a "needlen" row), and an unnormalized variant
+	// misses this project's approval policy, lands a different lock key, and
+	// — when the scope carried no directory — leaves workDir on the caller's
+	// cwd so the agent reads one tree while its footprint is judged on
+	// another (observed live: a Needlen-scoped ask ran in the panda repo and
+	// tripped scope-drift on files the agent never touched).
+	if in.Project != "" && e.projStore != nil {
+		if p, perr := e.projStore.GetFold(in.Project); perr == nil {
+			in.Project = p.Name
+			if workDir == "" && p.WorkDir != "" {
+				workDir = p.WorkDir
+			}
 		}
 	}
 	if workDir == "" {

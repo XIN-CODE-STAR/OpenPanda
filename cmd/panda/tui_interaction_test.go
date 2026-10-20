@@ -169,8 +169,8 @@ func TestTUIListCommands(t *testing.T) {
 	if !strings.Contains(view, "1. ") {
 		t.Fatalf("sessions view should contain index 1.: %s", view)
 	}
-	if !strings.Contains(view, "turns") {
-		t.Fatalf("sessions view should contain turns: %s", view)
+	if want := i18n.Tf(i18n.ChineseSimp, "tui.list.turns", "n", "2"); !strings.Contains(view, want) {
+		t.Fatalf("sessions view should contain %q: %s", want, view)
 	}
 	if !strings.Contains(view, "请优化系统TUI交互") {
 		t.Fatalf("sessions view should contain first message snippet: %s", view)

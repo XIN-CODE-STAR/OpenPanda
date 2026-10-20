@@ -500,6 +500,10 @@ type TaskDeclinePayload struct {
 	// empty for every refusal that predates the trust zones (drain, capacity,
 	// chain loop), which is itself meaningful: reroute handles them alike.
 	ReasonCode string `json:"reason_code,omitempty"`
+	// AttemptID is the dispensation declining — a refusal from a superseded
+	// attempt arriving after a re-route must not bounce the fresh copy back
+	// to queued. Empty is legacy (pre-fence peers) and always processes.
+	AttemptID string `json:"attempt_id,omitempty"`
 }
 
 // TaskResultPayload is the completion result.
@@ -667,6 +671,13 @@ type TaskProgressPayload struct {
 type TaskCancelPayload struct {
 	TaskID string `json:"task_id"`
 	Reason string `json:"reason,omitempty"`
+	// AttemptID bounds a dispensation-scoped cancel — a lease-expiry or
+	// supersede kill order — to the attempt that lapsed: a copy the
+	// delegator already moved past it (a newer delegate landed first on a
+	// reordered link) must not die with the dispensation it replaced.
+	// Empty means tree-scoped: a human cancel/reject kills whatever the
+	// row currently is.
+	AttemptID string `json:"attempt_id,omitempty"`
 }
 
 // TaskResumePayload carries an approved re-run across the wire: the delegator's

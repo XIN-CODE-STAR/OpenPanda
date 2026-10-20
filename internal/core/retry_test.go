@@ -260,3 +260,96 @@ func TestRetryThenSuccess(t *testing.T) {
 		t.Fatalf("result not ok: %+v", result)
 	}
 }
+
+// TestDelegatedRunSettlesThroughRetryLoop pins the executor-side gap found in
+// production: a peer-run task whose agent stalled with a live session used to
+// report failed after exactly one attempt — proceedLocalDelegate called
+// execute once and the shared retry/checkpoint machinery never saw it.
+// settleDelegated must checkpoint-resume the row exactly as a local failure
+// would, and the payload it hands back must carry the settled outcome.
+func TestDelegatedRunSettlesThroughRetryLoop(t *testing.T) {
+	ctx := context.Background()
+	c := newCoreWithAgent(t, "exec-node")
+	c.SetWorkDir(t.TempDir())
+	c.sleep = func(time.Duration) {}
+
+	attempts := 0
+	c.router.SetAdapterRunner(func(ctx context.Context, adapter, prompt, cwd string) commander.AgentResult {
+		attempts++
+		if attempts == 1 {
+			return commander.AgentResult{OK: false, Result: "adapter stalled: silence timeout", ExitCode: 124, SessionID: "ses_exec"}
+		}
+		return commander.AgentResult{OK: true, Result: "resumed and done", ExitCode: 0}
+	})
+
+	// Executor-side row exactly as handleDelegate persists it: the delegator
+	// named this node, owner = self, chain ends at this node.
+	tk, err := c.store.CreateWithID(ctx, "01delegatedsettle", "", "proj", "delegated work",
+		c.nodeID, []string{"origin-node", c.nodeID}, true)
+	if err != nil {
+		t.Fatalf("create delegated row: %v", err)
+	}
+
+	result, err := c.execute(ctx, tk.TaskID, "delegated work", []string{"code:modify"}, nil)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.OK {
+		t.Fatalf("first attempt unexpectedly succeeded")
+	}
+
+	final, payload, serr := c.settleDelegated(ctx, tk.TaskID, "delegated work", []string{"code:modify"}, result)
+	if serr != nil {
+		t.Fatalf("settleDelegated: %v", serr)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 1 initial + 1 checkpoint resume", attempts)
+	}
+	if final.State != StateDone {
+		t.Fatalf("state = %s, want done after checkpoint resume", final.State)
+	}
+	if !payload.OK || payload.State == StateFailed {
+		t.Fatalf("reply payload = %+v — the delegator must see the resumed outcome, not the first stall", payload)
+	}
+}
+
+// TestDelegatedRunReviewMirrorsUpstream pins the second half of the settle
+// contract: when the executor's retry budget is spent the park reports
+// State:review, so the delegator mirrors the park (ReviewFromRemote) and its
+// operator can approve the resume — instead of a terminal failure upstream
+// while the executor copy waits in a review queue nobody can reach.
+func TestDelegatedRunReviewMirrorsUpstream(t *testing.T) {
+	ctx := context.Background()
+	c := newCoreWithAgent(t, "exec-node-review")
+	c.SetWorkDir(t.TempDir())
+	c.sleep = func(time.Duration) {}
+
+	c.router.SetAdapterRunner(func(ctx context.Context, adapter, prompt, cwd string) commander.AgentResult {
+		return commander.AgentResult{OK: false, Result: "deterministically broken", ExitCode: 1}
+	})
+
+	tk, err := c.store.CreateWithID(ctx, "01delegatedreview", "", "proj", "delegated work",
+		c.nodeID, []string{"origin-node", c.nodeID}, true)
+	if err != nil {
+		t.Fatalf("create delegated row: %v", err)
+	}
+
+	result, err := c.execute(ctx, tk.TaskID, "delegated work", []string{"code:modify"}, nil)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	final, payload, serr := c.settleDelegated(ctx, tk.TaskID, "delegated work", []string{"code:modify"}, result)
+	if serr != nil {
+		t.Fatalf("settleDelegated: %v", serr)
+	}
+	if final.State != StateReview {
+		t.Fatalf("state = %s, want review after the retry budget is spent", final.State)
+	}
+	if payload.State != StateReview {
+		t.Fatalf("payload state = %q, want review — a bare failure parks the executor copy where the delegator cannot reach it", payload.State)
+	}
+	if payload.ApprovalDisposition == "" {
+		t.Fatalf("payload carries no approval disposition — the delegator cannot tell what approving would do")
+	}
+}

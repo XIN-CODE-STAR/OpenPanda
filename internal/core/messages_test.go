@@ -219,33 +219,61 @@ func TestResolveMsgRcpt(t *testing.T) {
 	}
 }
 
-// TestMsgBoardOwner: plan boards belong to the chain root; children boards
-// belong to the parent's executor — also the chain root, NOT the immediate
-// delegator: a sub-scheduler relay mid-chain holds no roster it could
-// resolve members against.
+// TestMsgBoardOwner: plan boards belong to the chain root — the node that
+// ran StartPlan holds every stage row. Children boards belong to the
+// parent's EXECUTOR — the node that holds the Children roster — which is
+// the chain root only when the parent runs there. A child executing under
+// a delegated parent resolves its owner through the parent row's
+// owner_node where the row is held, and toward its chain predecessor —
+// the direction the roster lives behind — where it is not.
 func TestMsgBoardOwner(t *testing.T) {
-	c := &Core{nodeID: "node-c", logger: testLogger()}
+	c := msgCore(t)
+	ctx := context.Background()
+	c.nodeID = "node-c"
+	// The parent executes on node-c (its row names us owner): a relay or a
+	// downstream node holding this copy resolves the board owner straight
+	// to the executor, whatever the member's chain root is.
+	parent := createTask(t, c.store, "", "parent", "node-b")
+	if _, err := c.store.db.ExecContext(ctx,
+		`UPDATE tasks SET owner_node=?, state='running' WHERE task_id=?`,
+		c.nodeID, parent.TaskID); err != nil {
+		t.Fatal(err)
+	}
+	// An upstream copy answers with the next hop toward the executor (the
+	// accept's sender as it climbed), so forwarding lands a hop closer.
+	upstream := createTask(t, c.store, "", "up-parent", c.nodeID)
+	if _, err := c.store.db.ExecContext(ctx,
+		`UPDATE tasks SET owner_node='node-b', state='running' WHERE task_id=?`,
+		upstream.TaskID); err != nil {
+		t.Fatal(err)
+	}
+
 	cases := []struct {
-		name  string
-		scope string
-		task  Task
-		want  string
+		name     string
+		scope    string
+		task     Task
+		want     string
+		resolved bool
 	}{
-		{name: "plan origin", scope: "plan:p1", task: Task{Chain: []string{"node-a", "node-c"}}, want: "node-a"},
-		{name: "plan local", scope: "plan:p1", task: Task{Chain: []string{"node-c"}}, want: "node-c"},
-		{name: "own children board", scope: "task:t1", task: Task{TaskID: "t1"}, want: "node-c"},
-		// The parent spawned this child on node-a; node-b is only a
-		// sub-scheduler relay. The children board lives with the roster —
-		// on the chain root, not the previous hop.
-		{name: "remote child deep chain", scope: "task:p9", task: Task{TaskID: "t2", ParentID: "p9", Remote: true, Chain: []string{"node-a", "node-b", "node-c"}}, want: "node-a"},
-		{name: "relay view of member row", scope: "task:p9", task: Task{TaskID: "t2", ParentID: "p9", Remote: true, Chain: []string{"node-a", "node-c"}}, want: "node-a"},
-		{name: "local child", scope: "task:p9", task: Task{TaskID: "t2", ParentID: "p9", Chain: []string{"node-c"}}, want: "node-c"},
-		{name: "root chain fallback", scope: "task:p9", task: Task{TaskID: "t2", ParentID: "p9", Remote: true, Chain: []string{"node-c"}}, want: "node-c"},
+		{name: "plan origin", scope: "plan:p1", task: Task{Chain: []string{"node-a", "node-c"}}, want: "node-a", resolved: true},
+		{name: "plan local", scope: "plan:p1", task: Task{Chain: []string{"node-c"}}, want: "node-c", resolved: true},
+		{name: "own children board", scope: "task:t1", task: Task{TaskID: "t1"}, want: "node-c", resolved: true},
+		// The member's chain roots at node-a, but the parent executes HERE —
+		// the roster is local, so the owner is us, not the chain root.
+		{name: "parent executor beats chain root", scope: "task:" + parent.TaskID, task: Task{TaskID: "t2", ParentID: parent.TaskID, Remote: true, Chain: []string{"node-a", "node-b", "node-c"}}, want: "node-c", resolved: true},
+		// This copy's owner is the next hop toward the executor — routing to
+		// it re-resolves one hop closer on arrival.
+		{name: "upstream copy answers next hop", scope: "task:" + upstream.TaskID, task: Task{TaskID: "t2", ParentID: upstream.TaskID, Remote: true, Chain: []string{"node-a", "node-b", "node-c"}}, want: "node-b", resolved: true},
+		// No parent row held: the chain predecessor is the direction the
+		// roster lives behind — reported unresolved, not as a verdict.
+		{name: "member without parent row", scope: "task:p9", task: Task{TaskID: "t2", ParentID: "p9", Remote: true, Chain: []string{"node-a", "node-b", "node-c"}}, want: "node-b", resolved: false},
+		{name: "member at chain tail", scope: "task:p9", task: Task{TaskID: "t2", ParentID: "p9", Remote: true, Chain: []string{"node-c"}}, want: "node-c", resolved: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := c.msgBoardOwner(tc.scope, tc.task); got != tc.want {
-				t.Fatalf("owner = %q, want %q", got, tc.want)
+			got, resolved := c.msgBoardOwner(ctx, tc.scope, tc.task)
+			if got != tc.want || resolved != tc.resolved {
+				t.Fatalf("owner = %q resolved=%v, want %q resolved=%v", got, resolved, tc.want, tc.resolved)
 			}
 		})
 	}
@@ -368,9 +396,12 @@ func TestSendAgentMessagesBudget(t *testing.T) {
 func TestHandleTaskMessageFanout(t *testing.T) {
 	c := msgCore(t)
 	ctx := context.Background()
-	parent := createTask(t, c.store, "", "parent", c.nodeID)
+	// The parent executes on node-b — our copy of its row names node-b as
+	// owner, so the board owner resolves there regardless of the member's
+	// chain root.
+	parent := createTask(t, c.store, "", "parent", "node-b")
 	// The member executes here but its delegation chain is rooted at the
-	// owner node-b — the row's chain[0] is what the src check binds.
+	// owner node-b — the parent row's owner_node is what the src check binds.
 	if _, err := c.store.CreateWithID(ctx, "child-remote", parent.TaskID, "proj", "child",
 		"node-b", []string{"node-b", c.nodeID}, true); err != nil {
 		t.Fatalf("create member row: %v", err)
@@ -423,6 +454,55 @@ func TestHandleTaskMessageFanout(t *testing.T) {
 	c.handleTaskMessage(ctx, relayEnv)
 	if msgs, _ := c.store.TaskMessages(ctx, "task:"+parent.TaskID); len(msgs) != 1 || msgs[0].Body != "via a relay" {
 		t.Fatalf("relayed fanout not stored: %+v", msgs)
+	}
+}
+
+// TestHandleTaskMessageFanoutUnresolvedOwner covers the member's own
+// executor: it holds no parent row, so it cannot name the board owner — the
+// copy must instead arrive through the member's own delegation chain, the
+// corridor every real fanout copy travels. An origin outside that chain is
+// a forged slot, and so is the member's own executor pretending to own it.
+func TestHandleTaskMessageFanoutUnresolvedOwner(t *testing.T) {
+	c := msgCore(t)
+	ctx := context.Background()
+	c.nodeID = "node-d" // the member's executor sits at the chain tail
+	// The member's parent executes on node-c, mid-chain: a row for it does
+	// not exist here, so owner resolution falls back to the chain itself.
+	if _, err := c.store.CreateWithID(ctx, "child-x", "p9", "proj", "child",
+		c.nodeID, []string{"node-a", "node-b", "node-c", c.nodeID}, true); err != nil {
+		t.Fatalf("create member row: %v", err)
+	}
+
+	env := func(p bus.TaskMessagePayload) bus.Envelope {
+		e, err := bus.NewEnvelope(bus.MsgTaskMessage, "node-c", "m1", p)
+		if err != nil {
+			t.Fatalf("envelope: %v", err)
+		}
+		e.To = c.nodeID
+		return e
+	}
+	base := bus.TaskMessagePayload{
+		Scope: "task:p9", Sender: "child-other", Member: "child-x",
+		Src: "node-c", Grade: MsgGradeStatus, Body: "board line", Seq: 1,
+		SentAt: time.Now().Unix(), Fanout: true,
+	}
+	c.handleTaskMessage(ctx, env(base))
+	if msgs, _ := c.store.TaskMessages(ctx, "task:p9"); len(msgs) != 1 {
+		t.Fatalf("owner's fanout copy dropped: %+v", msgs)
+	}
+	// An origin nowhere on the member's chain is a forged slot.
+	forged := base
+	forged.Src, forged.Seq, forged.Body = "node-evil", 7, "forged"
+	c.handleTaskMessage(ctx, env(forged))
+	if msgs, _ := c.store.TaskMessages(ctx, "task:p9"); len(msgs) != 1 || msgs[0].Body != "board line" {
+		t.Fatalf("off-chain fanout stored: %+v", msgs)
+	}
+	// The member's own executor can never be its own board owner.
+	selfish := base
+	selfish.Src, selfish.Seq, selfish.Body = c.nodeID, 8, "self"
+	c.handleTaskMessage(ctx, env(selfish))
+	if msgs, _ := c.store.TaskMessages(ctx, "task:p9"); len(msgs) != 1 || msgs[0].Body != "board line" {
+		t.Fatalf("self-claimed fanout stored: %+v", msgs)
 	}
 }
 

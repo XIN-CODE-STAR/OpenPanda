@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Xustalis/OpenPanda/internal/i18n"
 	"github.com/Xustalis/OpenPanda/internal/memory"
@@ -137,6 +138,11 @@ func (c *Core) compactRunNotes(ctx context.Context, notes []string) []string {
 	// what the digest needs; cut on a note boundary when possible.
 	if len(joined) > 96000 {
 		joined = joined[len(joined)-96000:]
+		// A raw byte cut can land mid-rune; leading continuation bytes would
+		// feed mojibake to the supervisor. Advance to a rune boundary first.
+		for len(joined) > 0 && !utf8.RuneStart(joined[0]) {
+			joined = joined[1:]
+		}
 		if i := strings.IndexByte(joined, '\n'); i >= 0 {
 			joined = joined[i+1:]
 		}

@@ -339,7 +339,7 @@ func TestOutboxFlushAfterPeerRestart(t *testing.T) {
 	}
 
 	a.outboxPersist(ctx, "b-inst-1", bus.TaskResultPayload{TaskID: "t-restart", OK: true})
-	a.outboxCancelPersist(ctx, "b-inst-1", "t-restart-cancel", "user aborted")
+	a.outboxCancelPersist(ctx, "b-inst-1", "t-restart-cancel", "", "user aborted")
 
 	// Custody is keyed by the stable identity, not the instance name.
 	var storedKey string
@@ -370,5 +370,36 @@ func TestOutboxFlushAfterPeerRestart(t *testing.T) {
 			t.Fatalf("restarted instance never claimed its custody (left=%d)", left)
 		}
 		time.Sleep(30 * time.Millisecond)
+	}
+}
+
+// TestCancelOutboxDropKeepsTreeCancel pins the delegate-park drop's scope:
+// parking a fresh delegate removes only dispensation-scoped kill orders
+// (the delegate's newer attempt itself supersedes them) — a tree cancel is
+// a human's decision and must ride through regardless.
+func TestCancelOutboxDropKeepsTreeCancel(t *testing.T) {
+	ctx := context.Background()
+	c := newCore(t, "cancel-drop", "")
+
+	c.outboxCancelPersist(ctx, "peer-x", "t-disp", "attempt-a", "lease expired")
+	c.outboxCancelPersist(ctx, "peer-x", "t-tree", "", "user cancelled")
+
+	c.cancelOutboxDropDispensation(ctx, "peer-x", "t-disp")
+	c.cancelOutboxDropDispensation(ctx, "peer-x", "t-tree")
+
+	var disp, tree int
+	if err := c.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM cancel_outbox WHERE task_id='t-disp'`).Scan(&disp); err != nil {
+		t.Fatalf("query disp: %v", err)
+	}
+	if err := c.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM cancel_outbox WHERE task_id='t-tree'`).Scan(&tree); err != nil {
+		t.Fatalf("query tree: %v", err)
+	}
+	if disp != 0 {
+		t.Fatal("dispensation-scoped cancel survived the delegate park drop")
+	}
+	if tree != 1 {
+		t.Fatal("tree cancel was dropped — a human decision must outrank any dispensation")
 	}
 }

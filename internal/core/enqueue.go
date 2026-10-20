@@ -99,7 +99,10 @@ func deriveResourceKeys(in TaskInput) []string {
 		// The scope root joins the legacy project key: a task that never
 		// narrowed its claim must exclude scoped children (whose leaf keys
 		// sit under this root) as well as other whole-project writers.
-		keys = append(keys, "project:"+in.Project, queue.ScopeRootKey(in.Project))
+		// queue.ProjectKey folds the name's case — ask-emitted spec.project
+		// arrives in the model's casing while --project is verbatim, and
+		// the two spellings of one tree must collide, not parallel-write.
+		keys = append(keys, queue.ProjectKey(in.Project), queue.ScopeRootKey(in.Project))
 	} else {
 		if in.TargetNode != "" {
 			keys = append(keys, "node:"+in.TargetNode)
@@ -198,7 +201,10 @@ func (c *Core) StartQueueScheduler(ctx context.Context) *queue.Scheduler {
 	if max < 1 {
 		max = 1
 	}
-	s := queue.New(queueStoreAdapter{c: c}, queueRunnerAdapter{c: c}, max, c.logger)
+	s := queue.New(queueStoreAdapter{c: c}, queueRunnerAdapter{c: c}, max, c.logger).
+		WithSelfPin(func(ctx context.Context, ref string) bool {
+			return c.resolvePin(ctx, ref).self
+		})
 	c.mu.Lock()
 	c.queueSched = s
 	c.mu.Unlock()
@@ -286,7 +292,13 @@ func (c *Core) runScheduled(ctx context.Context, taskID string) {
 		c.logger.Warn("queue: task run error", "task", taskID, "err", rerr)
 		return
 	}
-	c.logger.Info("queue: task finished", "task", taskID, "state", final.State)
+	if Terminal(final.State) {
+		c.logger.Info("queue: task finished", "task", taskID, "state", final.State)
+	} else {
+		// A non-terminal row means a sibling runner took the outcome over
+		// (ErrAlreadyRunning stand-down) — calling it "finished" would lie.
+		c.logger.Info("queue: task run yielded", "task", taskID, "state", final.State)
+	}
 	// A delegated row that ran here — e.g. released from a trust-zone
 	// admission park by `panda approve` — owes its verdict to the delegator,
 	// whose copy still sits in dispatched waiting on this node. Relay it up
@@ -374,6 +386,11 @@ func (c *Core) forwardScheduled(ctx context.Context, t Task) bool {
 	// task bypasses scoring entirely — the pin names the only acceptable
 	// destination and resolvePin decides where the task is allowed to land.
 	var decision scheduler.Decision
+	// awaitRevival marks a re-route whose only remaining destination is the
+	// executor whose custody just lapsed: it cannot be online (the sweep that
+	// evicted it proved the link dead), so the send path must park the
+	// delegate for the peer's next hello instead of attempting the socket.
+	var awaitRevival bool
 	if pinned {
 		decision = c.routePinned(ctx, pinRef, seenChain, t.Requires, resourceRequirement(t.ResourceJSON))
 		switch decision.Action {
@@ -383,7 +400,7 @@ func (c *Core) forwardScheduled(ctx context.Context, t Task) bool {
 			// Honest terminal failure — a pin that resolves nowhere (or to a
 			// node that already declined, or to an ambiguous name) must not
 			// degrade into "whoever scored best".
-			c.failLocal(ctx, t.TaskID, fmt.Errorf("%s", decision.Reason))
+			c.failLocal(ctx, t.TaskID, fmt.Errorf("%s", decision.Reason), t.AttemptID)
 			c.signalResult(t.TaskID, bus.TaskResultPayload{
 				TaskID: t.TaskID, AttemptID: t.AttemptID,
 				State: StateFailed, Stderr: decision.Reason,
@@ -391,10 +408,44 @@ func (c *Core) forwardScheduled(ctx context.Context, t Task) bool {
 			return true
 		}
 	} else {
-		decision = scheduler.RouteP(c.nodeID, seenChain,
-			c.eligibleForSend(ctx, needsForTask(t), c.onlineEmployees(ctx)),
-			c.localMatch(), t.Requires,
-			resourceRequirement(t.ResourceJSON), preferredNodeOf(t), t.Project)
+		// An executor whose custody lapsed mid-run is excluded from the
+		// re-route too — handing the task straight back to a node that just
+		// went silent re-parks it on the same dead link. Pinned tasks above
+		// never take this path: a pin is a fixed destination, not a candidacy.
+		evicted, err := c.store.EvictedExecutors(ctx, t.TaskID)
+		if err != nil {
+			c.logger.Warn("queue forward: evicted executors", "task", t.TaskID, "err", err)
+		}
+		eligible := c.eligibleForSend(ctx, needsForTask(t), c.onlineEmployees(ctx))
+		resReq := resourceRequirement(t.ResourceJSON)
+		if len(evicted) > 0 {
+			decision = scheduler.RouteP(c.nodeID, append(slices.Clone(seenChain), evicted...),
+				eligible, c.localMatch(), t.Requires, resReq, preferredNodeOf(t), t.Project)
+			if decision.Action == scheduler.ActionDecline {
+				// The eviction emptied the route entirely — e.g. the lapsed
+				// executor is the only capable peer. Refusing then turns a
+				// transient silence into an instant terminal failure, when the
+				// outbox could park the re-delivery and the node might revive.
+				// Re-route with the exclusion lifted; the deadline remains the
+				// real bound on how long a task may wait for a dead executor.
+				decision = scheduler.RouteP(c.nodeID, seenChain,
+					eligible, c.localMatch(), t.Requires, resReq, preferredNodeOf(t), t.Project)
+				if decision.Action == scheduler.ActionDecline {
+					// No ONLINE node can serve it either — Route only sees
+					// live links, and the lapsed executor is down by
+					// definition of the sweep that brought us here. Parking
+					// the re-delivery for its last custodian is the
+					// store-and-forward answer (§8.2): the flush on its next
+					// hello hands the task back, and the deadline — not a
+					// verdict — bounds the wait.
+					decision = scheduler.Decision{Action: scheduler.ActionForward, Target: evicted[len(evicted)-1]}
+					awaitRevival = true
+				}
+			}
+		} else {
+			decision = scheduler.RouteP(c.nodeID, seenChain,
+				eligible, c.localMatch(), t.Requires, resReq, preferredNodeOf(t), t.Project)
+		}
 	}
 	if decision.Action != scheduler.ActionForward {
 		// ActionDecline means neither this node nor any known peer can serve
@@ -405,7 +456,7 @@ func (c *Core) forwardScheduled(ctx context.Context, t Task) bool {
 		// busy node refused, not that nobody has the ability.
 		if decision.Action == scheduler.ActionDecline {
 			reason := c.enrichDeclineReason(ctx, t.TaskID, decision.Reason)
-			c.failLocal(ctx, t.TaskID, fmt.Errorf("%s", reason))
+			c.failLocal(ctx, t.TaskID, fmt.Errorf("%s", reason), t.AttemptID)
 			c.signalResult(t.TaskID, bus.TaskResultPayload{
 				TaskID: t.TaskID, AttemptID: t.AttemptID,
 				State: StateFailed, Stderr: reason,
@@ -485,7 +536,7 @@ func (c *Core) forwardScheduled(ctx context.Context, t Task) bool {
 			// running the blind copy here instead would be the silent
 			// substitution the pin forbids. Fail with the reason.
 			reason := fmt.Sprintf("pinned node %q cannot receive the task's work tree", pinRef)
-			c.failLocal(ctx, t.TaskID, fmt.Errorf("%s", reason))
+			c.failLocal(ctx, t.TaskID, fmt.Errorf("%s", reason), t.AttemptID)
 			c.signalResult(t.TaskID, bus.TaskResultPayload{
 				TaskID: t.TaskID, AttemptID: t.AttemptID,
 				State: StateFailed, Stderr: reason,
@@ -504,7 +555,7 @@ func (c *Core) forwardScheduled(ctx context.Context, t Task) bool {
 		p.AuthHops = 1
 		c.grantConsentFor(t, &p)
 	}
-	if err := c.sendClaimedDelegate(ctx, t.TaskID, decision.Target, p); err != nil {
+	if err := c.sendClaimedDelegate(ctx, t.TaskID, decision.Target, p, awaitRevival); err != nil {
 		c.logger.Warn("queue: forward to peer failed", "task", t.TaskID,
 			"target", decision.Target, "err", err)
 		if pinned {
@@ -512,7 +563,7 @@ func (c *Core) forwardScheduled(ctx context.Context, t Task) bool {
 			// retarget conflict, envelope error) is an honest terminal failure
 			// — returning false would run the task here, the silent
 			// local-fallback the pin forbids.
-			c.failLocal(ctx, t.TaskID, fmt.Errorf("pinned forward to %s failed: %w", decision.Target, err))
+			c.failLocal(ctx, t.TaskID, fmt.Errorf("pinned forward to %s failed: %w", decision.Target, err), t.AttemptID)
 			c.signalResult(t.TaskID, bus.TaskResultPayload{
 				TaskID: t.TaskID, AttemptID: t.AttemptID,
 				State:  StateFailed,
@@ -532,7 +583,7 @@ func (c *Core) forwardScheduled(ctx context.Context, t Task) bool {
 // it records the new delegation target on the audit trail (so isCurrentExecutor
 // authenticates the peer's result/decline) and stamps a lease so a dead
 // executor is detected (D3).
-func (c *Core) sendClaimedDelegate(ctx context.Context, taskID, target string, p bus.TaskDelegatePayload) error {
+func (c *Core) sendClaimedDelegate(ctx context.Context, taskID, target string, p bus.TaskDelegatePayload, awaitRevival ...bool) error {
 	// Trust-zone send ceiling (experimental): the queue forward is a second
 	// wire path beside dispatchDelegated, so the same clamp applies here —
 	// refuse a target whose tier strips a need rather than ship the lobotomized
@@ -561,9 +612,12 @@ func (c *Core) sendClaimedDelegate(ctx context.Context, taskID, target string, p
 	dtn := p.Transport == "dtn"
 	// A hard-pinned task shares DTN's delivery contract: the named peer is the
 	// only acceptable destination, so a dead link means park-and-wait, never
-	// the unpinned fall-back-to-local corrective path.
+	// the unpinned fall-back-to-local corrective path. awaitRevival extends
+	// the same contract to a re-route aimed at the just-evicted executor:
+	// its silence is measured, not permanent, and the parked bundle — bounded
+	// by the task deadline — is the only path that survives a revival.
 	pinned := p.TargetNode != ""
-	parkable := dtn || pinned
+	parkable := dtn || pinned || (len(awaitRevival) > 0 && awaitRevival[0])
 	pushDeadline := p.DeadlineUnix
 	if pushDeadline <= 0 {
 		pushDeadline = time.Now().Add(defaultDTNTTL).Unix()
@@ -615,7 +669,16 @@ func (c *Core) sendClaimedDelegate(ctx context.Context, taskID, target string, p
 				kind := "dtn"
 				if pinned && !dtn {
 					kind = "pin"
+				} else if len(awaitRevival) > 0 && awaitRevival[0] {
+					kind = "revive"
 				}
+				// A parked cancel for this pair stood down the task's
+				// PREVIOUS dispensation — the delegate being parked carries
+				// a newer attempt that itself supersedes that custody, so a
+				// cancel landing after it would kill the fresh run. Only
+				// dispensation-scoped rows go: a parked tree cancel is a
+				// human's decision no delegate supersedes.
+				c.cancelOutboxDropDispensation(ctx, target, taskID)
 				if err := c.store.ClearLease(ctx, taskID); err != nil {
 					c.logger.Warn("queue: clear lease for parked task", "task", taskID, "err", err)
 				}
@@ -657,7 +720,12 @@ func (c *Core) sendClaimedDelegate(ctx context.Context, taskID, target string, p
 		kind := "dtn"
 		if pinned && !dtn {
 			kind = "pin"
+		} else if len(awaitRevival) > 0 && awaitRevival[0] {
+			kind = "revive"
 		}
+		// Same stale-cancel drop as the send-failure park above —
+		// dispensation-scoped only; a parked tree cancel survives.
+		c.cancelOutboxDropDispensation(ctx, target, taskID)
 		// A parked task holds no executor, so no lease may expire on it:
 		// whatever a previous attempt stamped would otherwise fire mid-wait
 		// and fail a task that is legitimately holding for its peer.

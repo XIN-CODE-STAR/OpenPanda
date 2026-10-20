@@ -6,8 +6,8 @@ package main
 
 // Update: the model's event loop. It routes keystrokes by mode and folds engine
 // events (delta/reasoning/progress/done) into the in-flight turn. Committed
-// output is pushed to scrollback with tea.Println; the ephemeral View holds only
-// the live region and the input box.
+// output lands in chatHistory; View repaints the whole frame in the alternate
+// screen.
 
 import (
 	"context"
@@ -210,16 +210,6 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ta.SetWidth(max(1, msg.Width-4))
 		if first {
 			m.refreshProject()
-			if m.mode != modeSplash {
-				prints := m.startupPrints()
-				cmds := make([]tea.Cmd, len(prints))
-				for i, p := range prints {
-					text := p
-					cmds[i] = func() tea.Msg { return blockCommitMsg{text: text} }
-				}
-				return m, tea.Batch(cmds...)
-			}
-			return m, nil
 		}
 		return m, nil
 
@@ -1617,9 +1607,9 @@ func (m tuiModel) askTurn(text, mode string) (tea.Model, tea.Cmd) {
 
 	m.turnMode = mode
 
-	// Echo the prompt into scrollback so the committed transcript reads as a
-	// dialogue, then start the ask. The mode banner rides ahead of the echo so
-	// scrollback records which lens the answer was produced under.
+	// Echo the prompt into the transcript so the committed conversation reads as
+	// a dialogue, then start the ask. The mode banner rides ahead of the echo so
+	// the transcript records which lens the answer was produced under.
 	cmds := []tea.Cmd{}
 	if mode != "" {
 		cmds = append(cmds, m.printBlock(block{kind: blockNote, body: i18n.Tf(m.loc, "tui.mode.banner", "mode", mode)}))

@@ -362,6 +362,66 @@ response is re-routing, not retrying). An empty code is an ordinary
 pre-trust-zone refusal (drain, capacity, anti-loop), handled by
 re-routing as before.
 
+Both frames carry `attempt_id` and land under the same **directional
+gate**: a wire attempt strictly older than the row's attempt is the
+late echo of a dispensation already replaced — dropped, since a
+decline/accept landing after rotation would bounce a live dispensation
+back to queued or mark it running on a dead run's word. Equal or newer
+wire attempts pass — sibling copies legitimately diverge in attempt
+order (each side rotates independently and adopts lazily), so a verdict
+tracks the work, not one particular execution. The write behind the
+gate is attempt-CAS'd too (`Accept`/`Decline` expected-attempt
+predicates), closing the read-check-to-store TOCTOU; an accept whose
+CAS fails is not relayed upstream as though our copy accepted it.
+
+### `task_cancel`
+
+`TaskCancelPayload.attempt_id` splits cancellation into two semantics
+matching its two classes of sender:
+
+- **Tree cancel** (`attempt_id` empty): a human decision — `panda
+  cancel`, console reject, approval denial. Unconditionally cascades
+  the whole task tree: the local cascade kills the row and all its
+  descendants, `cancel_outbox` carries the order to downstream
+  executors under store-and-forward custody, and the receiver's
+  `handleCancel` re-cascades hop by hop to the leaves.
+- **Dispensation cancel** (`attempt_id` set): the lifecycle
+  subsystem's stand-down order for **one specific dispensation** —
+  lease-expiry reroute, supersede replacement, absolute-deadline
+  verdict. It may only land on the dispensation it named: a receiver
+  whose row already moved strictly newer (a fresh delegate arrived
+  first, or a rotation was adopted) drops the frame outright and
+  writes an audit line instead of killing the live attempt.
+  Authorization precedes every task-level verdict: the sender must be
+  the row's owner or its immediate chain predecessor, compared by
+  runtime identity so a bounced daemon's fresh instance id still
+  binds — a peer outside the task's path cannot even write its audit
+  trail.
+
+Parked `cancel_outbox` rows follow the same scope rules: parking a
+fresh delegate clears only dispensation-scoped cancels for the task
+(the stand-down of the dispensation the new delivery replaces), while
+a human tree cancel is never lost to a park; on flush cancels are
+delivered before delegates, and a live-delivered dispensation cancel
+also clears only its own kind.
+
+### `task_delegate` supersede semantics
+
+A re-delivered `task_delegate` is not inherently idempotent: when the
+row still exists and the wire attempt is strictly newer, the frame is
+a re-route's replacement order. But the right to replace is not proven
+by the chain-tail signature alone — the sender must be **a node that
+legitimately held the task upstream of us in the stored chain** (when
+a mid-chain link lapses, an ancestor may re-route straight past it).
+A delegate from outside the path minting a fresh attempt id cannot
+delete or replace any row — without the bind, the same frame is a
+remote task-kill primitive. Before replacement lands, a live copy is
+cascaded down first (`CancelCascade` + `finishCancel`: kill the
+runner, free its context reservation, forward the stand-down
+downstream); a terminal/failed copy is deleted and recreated; and a
+stale delegate carrying an older attempt is always dropped, never
+allowed to resurrect a settled copy.
+
 ### `task_result`
 `task_id` / `attempt_id` / `chain` (the executor's real delegation
 chain, letting a receiver that lost its local row rebuild the upstream

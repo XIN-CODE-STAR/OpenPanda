@@ -18,14 +18,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Xustalis/OpenPanda/internal/askengine"
 	"github.com/Xustalis/OpenPanda/internal/i18n"
 )
 
-// taskStage is one lifecycle milestone. label is already localised (progressNote
-// taskStage is one lifecycle milestone. label is already localised (progressNote
+// taskStage is one lifecycle milestone. kind is the engine's stable milestone
+// id, used by the pipeline visualizer; label is already localised (progressNote
 // phrases it); at is the offset from the task's start, so the trail can show how
 // long each stage took without storing wall-clock times.
 type taskStage struct {
+	kind      askengine.ProgressKind
 	label     string
 	at        time.Duration
 	toolCount int
@@ -33,7 +35,7 @@ type taskStage struct {
 
 // taskProgress is the in-flight delegated task. It is created when the engine
 // reports it submitting a task and closed when the turn commits; the committed
-// block keeps the finished trail so scrollback records what actually happened.
+// block keeps the finished trail so the transcript records what actually happened.
 type taskProgress struct {
 	title      string
 	started    time.Time
@@ -52,7 +54,7 @@ func newTaskProgress(title string, now time.Time, loc i18n.Locale) *taskProgress
 // advance records a new stage. A repeat of the current stage's label is dropped
 // so a chatty executor (several exec events for one run) does not pad the trail
 // with duplicates.
-func (tp *taskProgress) advance(label string, now time.Time) {
+func (tp *taskProgress) advance(kind askengine.ProgressKind, label string, now time.Time) {
 	label = strings.TrimSpace(label)
 	if label == "" {
 		return
@@ -65,7 +67,7 @@ func (tp *taskProgress) advance(label string, now time.Time) {
 	}
 	tp.curTools = 0
 	tp.activeTool = ""
-	tp.stages = append(tp.stages, taskStage{label: label, at: now.Sub(tp.started)})
+	tp.stages = append(tp.stages, taskStage{kind: kind, label: label, at: now.Sub(tp.started)})
 }
 
 // recordTool records a micro-tool execution under the current stage, updating the
@@ -82,7 +84,7 @@ func (tp *taskProgress) recordTool(label string, now time.Time) {
 
 // trail renders the finished stages as transcript lines, each with the time it
 // took (the next stage's offset, or the total for the last one). These go into
-// the committed block, so the scrollback keeps the timing evidence.
+// the committed block, so the transcript keeps the timing evidence.
 func (tp *taskProgress) trail(total time.Duration) []string {
 	if tp == nil || len(tp.stages) == 0 {
 		return nil
@@ -110,6 +112,31 @@ func (tp *taskProgress) trail(total time.Duration) []string {
 	return out
 }
 
+// taskPipeline is which of the coarse pipeline steps the run has reached. It is
+// derived from the engine's stable ProgressKind, never from the localised stage
+// label: labels differ per locale, and matching on them left the visualizer
+// stuck on triage everywhere outside English and Chinese.
+type taskPipeline struct {
+	route bool
+	exec  bool
+	judge bool
+}
+
+func (tp *taskProgress) pipeline() taskPipeline {
+	var p taskPipeline
+	for _, st := range tp.stages {
+		switch st.kind {
+		case askengine.ProgressRoute:
+			p.route = true
+		case askengine.ProgressExec:
+			p.exec = true
+		case askengine.ProgressJudge:
+			p.judge = true
+		}
+	}
+	return p
+}
+
 // renderLive draws the card while the task runs: the header, every completed
 // stage with its duration, the current stage carrying the spinner, and a footer
 // with the total clock and the interrupt hint. It owns the only animation on
@@ -121,23 +148,7 @@ func (tp *taskProgress) renderLive(t theme, loc i18n.Locale, spin string, now ti
 	}
 	arm := t.glyph("⎿", "\\_")
 	tick := t.glyph("✓", "v")
-
-	// Determine milestone progress for pipeline visualizer
-	hasRoute := false
-	hasExec := false
-	hasJudge := false
-	for _, st := range tp.stages {
-		l := strings.ToLower(st.label)
-		if strings.Contains(l, "rout") || strings.Contains(l, "路由") {
-			hasRoute = true
-		}
-		if strings.Contains(l, "run") || strings.Contains(l, "exec") || strings.Contains(l, "运行") {
-			hasExec = true
-		}
-		if strings.Contains(l, "review") || strings.Contains(l, "judge") || strings.Contains(l, "评审") {
-			hasJudge = true
-		}
-	}
+	pipe := tp.pipeline()
 
 	var s1, s2, s3, s4 string
 	circle := t.glyph("○", "-")
@@ -149,17 +160,17 @@ func (tp *taskProgress) renderLive(t theme, loc i18n.Locale, spin string, now ti
 	l3 := " " + i18n.T(loc, "tui.pipeline.exec")
 	l4 := " " + i18n.T(loc, "tui.pipeline.judge")
 
-	if hasJudge {
+	if pipe.judge {
 		s1 = t.success.Render(tick + l1)
 		s2 = t.success.Render(tick + l2)
 		s3 = t.success.Render(tick + l3)
 		s4 = t.accent.Render(dot + l4)
-	} else if hasExec {
+	} else if pipe.exec {
 		s1 = t.success.Render(tick + l1)
 		s2 = t.success.Render(tick + l2)
 		s3 = t.accent.Render(dot + l3)
 		s4 = t.muted.Render(circle + l4)
-	} else if hasRoute {
+	} else if pipe.route {
 		s1 = t.success.Render(tick + l1)
 		s2 = t.accent.Render(dot + l2)
 		s3 = t.muted.Render(circle + l3)

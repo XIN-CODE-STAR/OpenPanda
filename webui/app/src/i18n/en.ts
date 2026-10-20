@@ -19,6 +19,8 @@ const en: Messages = {
   'nav.system': 'System',
   'nav.settings': 'Settings',
   'nav.aria': 'Primary navigation',
+  'nav.menuOpen': 'Open navigation',
+  'nav.menuClose': 'Close navigation',
   'nav.fleet': 'Fleet',
   'nav.workspace': 'Workspace',
 
@@ -100,6 +102,7 @@ const en: Messages = {
   'queue.empty': 'No tasks. Say something in Chat to create one.',
   'queue.title': 'Title',
   'queue.project': 'Project',
+  'queue.filterProject': 'Filter by project',
   'queue.state': 'State',
   'queue.owner': 'Owner',
   'queue.updated': 'Updated',

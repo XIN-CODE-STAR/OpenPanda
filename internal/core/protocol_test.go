@@ -500,6 +500,76 @@ func TestRemoteAcceptWorkReviewStillRejectsLateVerdict(t *testing.T) {
 	}
 }
 
+// TestRemoteResultFencesStaleAttempt pins the split-brain fence on the wire
+// path: a result stamped with an attempt_id the row no longer carries — the
+// lease expired and a reroute rotated attempt_id while the result was in
+// flight — must not transition the live copy, even though the Get inside
+// FromRemote saw a non-terminal state. The CAS on attempt_id is what turns
+// the handler's "drop stale results" check into a guarantee rather than a
+// best-effort filter: a rotation landing between that check and the UPDATE
+// is caught by the database, not silently applied to the fresh attempt.
+func TestRemoteResultFencesStaleAttempt(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name      string
+		apply     func(s *TaskStore, tk Task, attempt string) error
+		wantState string
+	}{
+		{"complete", func(s *TaskStore, tk Task, a string) error {
+			return s.CompleteFromRemote(ctx, tk.TaskID, "entry", map[string]any{"state": StateDone}, a)
+		}, StateDone},
+		{"fail", func(s *TaskStore, tk Task, a string) error {
+			return s.FailFromRemote(ctx, tk.TaskID, "entry", "worker died", a)
+		}, StateFailed},
+		{"review", func(s *TaskStore, tk Task, a string) error {
+			return s.ReviewFromRemote(ctx, tk.TaskID, "entry",
+				map[string]any{"state": StateReview, "stderr": "approve?"}, ApprovalResumeExecution, a)
+		}, StateReview},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			tk := createTask(t, s, "", "fenced-"+tc.name, "entry")
+			if err := s.Queue(ctx, tk.TaskID, "entry"); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Dispatch(ctx, tk.TaskID, "entry", "worker"); err != nil {
+				t.Fatal(err)
+			}
+			cur, err := s.Get(ctx, tk.TaskID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dispatched := cur.State
+
+			// A rotation landed between dispatch and this stale frame: the
+			// wire attempt no longer matches the row. The CAS must refuse it.
+			if err := tc.apply(s, tk, cur.AttemptID+"-stale"); err != nil {
+				t.Fatalf("stale wire attempt returned err=%v (conflict must be swallowed)", err)
+			}
+			got, err := s.Get(ctx, tk.TaskID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.State != dispatched {
+				t.Fatalf("stale wire attempt transitioned %s → %s", dispatched, got.State)
+			}
+
+			// The live attempt's own result still lands.
+			if err := tc.apply(s, tk, cur.AttemptID); err != nil {
+				t.Fatal(err)
+			}
+			got, err = s.Get(ctx, tk.TaskID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.State != tc.wantState {
+				t.Fatalf("fresh wire attempt state = %s, want %s", got.State, tc.wantState)
+			}
+		})
+	}
+}
+
 func TestCapabilitySummaryCarriesNodeIdentity(t *testing.T) {
 	c := newCore(t, "vm-node", "127.0.0.1:17986")
 	c.card.NodeKind = "vm"

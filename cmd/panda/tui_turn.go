@@ -5,8 +5,8 @@
 package main
 
 // Turn handlers: how the model folds streamed events into the in-flight turn and
-// commits the finished turn to scrollback. Kept apart from the keystroke routing
-// in tui_update.go so each file reads as one concern.
+// commits the finished turn to the transcript. Kept apart from the keystroke
+// routing in tui_update.go so each file reads as one concern.
 
 import (
 	"context"
@@ -28,8 +28,8 @@ import (
 
 // onDelta appends one streamed answer chunk. The first answer text also closes
 // the thought: reasoning precedes the answer on reasoning models, so once prose
-// starts, the thought block is committed to scrollback (folded or expanded per
-// the current Ctrl+O state) and the answer streams live below it.
+// starts, the thought block is committed to the transcript (folded or expanded
+// per the current Ctrl+O state) and the answer streams live below it.
 func (m tuiModel) onDelta(msg deltaMsg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	if !m.thoughtDone {
@@ -78,7 +78,7 @@ func (m tuiModel) onProgress(msg progressMsg) (tea.Model, tea.Cmd) {
 		// the delegated-task card's trail would masquerade as a lifecycle stage.
 	default:
 		if m.liveTask != nil {
-			m.liveTask.advance(label, now)
+			m.liveTask.advance(p.Kind, label, now)
 		}
 	}
 	cmds = append(cmds, waitForActivity(msg.stream))
@@ -86,9 +86,9 @@ func (m tuiModel) onProgress(msg progressMsg) (tea.Model, tea.Cmd) {
 }
 
 // onDone commits the finished turn. It records the exchange into conversation
-// memory, then pushes the answer / task / plan / error block to scrollback and
-// clears the live region. A tier-2 task parked for approval switches the model
-// into approving mode instead of committing.
+// memory, then pushes the answer / task / plan / error block into the transcript
+// and clears the live region. A tier-2 task parked for approval switches the
+// model into approving mode instead of committing.
 func (m tuiModel) onDone(msg doneMsg) (tea.Model, tea.Cmd) {
 	// An ask the user stopped waiting on still finishes — releasing the front
 	// end never stopped the work. The watcher announces that outcome, since
@@ -190,7 +190,7 @@ func (m tuiModel) turnEnded() tea.Cmd {
 }
 
 // commit records the turn into conversation memory and pushes its result block
-// to scrollback, clearing the live region. Persistence goes through the shared
+// into the transcript, clearing the live region. Persistence goes through the shared
 // repl helper, so a turn taken inside a /resume'd session lands in that thread
 // (and a spawned task is bound to it) exactly as the classic loop would.
 func (m tuiModel) commit(out *askengine.Result) (tea.Model, tea.Cmd) {
@@ -203,9 +203,9 @@ func (m tuiModel) commit(out *askengine.Result) (tea.Model, tea.Cmd) {
 		m.r.recordOutcome(context.Background(), m.pendingPrompt, out)
 	}
 	blk := resultBlock(out, m.liveAnswerText(), m.loc)
-	// A delegated turn carries its card's title and stage trail into scrollback,
-	// so the committed block records the same route/exec/judge evidence the live
-	// card showed rather than just the final output.
+	// A delegated turn carries its card's title and stage trail into the
+	// transcript, so the committed block records the same route/exec/judge
+	// evidence the live card showed rather than just the final output.
 	if blk.kind == blockTask && m.liveTask != nil {
 		blk.title = m.liveTask.title
 		blk.stages = m.liveTask.trail(time.Since(m.liveTask.started))

@@ -1656,7 +1656,10 @@
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(250px, 100%), 1fr));
   gap: var(--sp-4);
-  align-items: stretch;
+  /* Empty lanes are short; populated ones keep the six-card working set.
+     Stretching every lane to the tallest made three blank columns full-height
+     slabs and pushed the populated lane below the fold on 1024px screens. */
+  align-items: start;
 }
 
 .kanban-col {
@@ -1728,6 +1731,22 @@
   margin-right: calc(-1 * var(--sp-1));
 }
 
+/* An empty lane has nothing to scroll and should not reserve six card slots.
+   The column's own min-height keeps it a usable drop target. */
+.kanban-list[data-empty='true'] {
+  height: auto;
+  min-height: 0;
+}
+
+/* Phones stack the four lanes, so every empty lane pushes the populated one
+   further down. Keep a drop target, but stop three blank cells from eating
+   most of the first screen. */
+@media (max-width: 720px) {
+  .kanban-col:has(.kanban-list[data-empty='true']) {
+    min-height: 96px;
+  }
+}
+
 /* Same split as the global rule in tokens.css: declaring the standard pair on
    the element would disable the 6px webkit styling below in Chromium, so it is
    kept for the engines that have no ::-webkit-scrollbar to style. */
@@ -1782,10 +1801,12 @@
 .kanban-count {
   font-size: var(--fs-caption);
   font-weight: var(--fw-bold);
+  /* Secondary, not the heading's tertiary tone: the count sits on the
+     translucent pill, and the lighter ink fell below 4.5:1 there. */
+  color: var(--text-secondary);
   background: var(--surface-alpha-md);
   border-radius: var(--radius-pill);
   padding: 2px var(--sp-3);
-  opacity: 0.95;
   min-width: 24px;
   text-align: center;
   transition: all var(--dur-fast) var(--ease-standard);
@@ -1867,12 +1888,21 @@
 }
 
 .kanban-card.finished {
-  opacity: 0.75;
+  /* De-emphasise the surface, not the text. A 75% card opacity dimmed every
+     string inside it — the cancelled badge fell to 3.25:1 and the metadata to
+     3.2:1. The grey surface and secondary title give the same "done" read
+     while keeping the card's copy readable. */
+  background: var(--bg-chrome);
   background-image: none;
+  border-color: var(--border-soft);
 }
 
 .kanban-card.finished:hover {
-  opacity: 0.9;
+  background: var(--bg-raised);
+}
+
+.kanban-card.finished .kanban-title {
+  color: var(--text-secondary);
 }
 
 .kanban-card-top {
@@ -1893,8 +1923,8 @@
   position: absolute;
   right: 4px;
   bottom: 4px;
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1911,7 +1941,7 @@
 }
 
 .kanban-card.has-del .kanban-meta {
-  padding-right: 14px;
+  padding-right: 18px;
 }
 
 .kanban-del:hover:not(:disabled) {

@@ -85,6 +85,7 @@ var migrations = []Migration{
 	// machine columns present but spawn_depth missing — migrateV54 repairs
 	// that row too, since 50 will never run again on it.
 	{Version: 54, Name: "add_employee_machine_class", Apply: migrateV54},
+	{Version: 55, Name: "add_cancel_outbox_attempt", Apply: migrateV55},
 }
 
 // migrateV44 adds task_messages: the per-scope message board sibling tasks
@@ -1328,4 +1329,18 @@ func migrateV54(tx MigrationExec) error {
 		return err
 	}
 	return addColumnIfMissingTx(tx, "employee_cache", "device_class", "TEXT NOT NULL DEFAULT ''")
+}
+
+// migrateV55 adds cancel_outbox.attempt_id: the dispensation a parked cancel
+// stands down. Dispensation-scoped cancels (lease expiry, reroute supersede)
+// carry the lapsed attempt so a copy already superseded by a newer delegate
+// survives the kill order; rows parked before this column existed carry an
+// empty attempt_id and stay tree-scoped, matching the wire payload's
+// empty-attempt contract.
+func migrateV55(tx MigrationExec) error {
+	exists, err := tableExistsTx(tx, "cancel_outbox")
+	if err != nil || !exists {
+		return err
+	}
+	return addColumnIfMissingTx(tx, "cancel_outbox", "attempt_id", "TEXT NOT NULL DEFAULT ''")
 }

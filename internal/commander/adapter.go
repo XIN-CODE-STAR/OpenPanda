@@ -379,6 +379,11 @@ type AgentEvent struct {
 	Content  string          `json:"content,omitempty"`
 	Input    json.RawMessage `json:"input,omitempty"`
 	IsError  bool            `json:"is_error,omitempty"`
+	// Adapter names the adapter file that produced the event — stamped by
+	// the process wrapper, never parsed off the wire, so control-plane
+	// consumers (session-checkpoint persistence) can attribute a minted
+	// handle to the adapter that must later resume it.
+	Adapter string `json:"adapter,omitempty"`
 }
 
 // AgentEventFunc receives one structured agent-activity event. It is the
@@ -432,6 +437,10 @@ type progressWriter struct {
 	sink       ProgressFunc
 	evSink     AgentEventFunc
 	onActivity func() // set before Start; read-only afterwards
+	// adapterName is the adapter file this process runs — stamped onto
+	// session events so the persisting consumer attributes the minted
+	// handle to the adapter that must resume it.
+	adapterName string
 	// mu guards partial and capture: a session-mode caller snapshots
 	// diagnostics mid-stream (await) while the copier goroutine is still
 	// writing, and bytes.Buffer is not concurrent-safe.
@@ -560,10 +569,20 @@ func (w *progressWriter) event(b []byte) {
 	// is resuming under). Latch it regardless of whether a transcript sink
 	// is attached: the kill paths below read it to turn a dead run into a
 	// resumable checkpoint. It is control-plane metadata, not agent output —
-	// it never reaches the transcript.
+	// the sink copy is stamped Adapter so consumers persist it as a
+	// checkpoint rather than rendering it as transcript chatter.
 	if ev.Ev == "session" {
 		if ev.ID != "" {
 			w.lastSession = ev.ID
+			// Surface the checkpoint to the structured sink too: the run
+			// loop persists it the moment it is minted, so a mid-round kill
+			// still leaves a resumable session on the task row instead of
+			// losing the whole interrupted exploration. Redaction is a
+			// no-op on an opaque session id, but the event is control-plane
+			// metadata that never carries secrets regardless.
+			if w.evSink != nil {
+				w.evSink(AgentEvent{Ev: "session", ID: ev.ID, Adapter: w.adapterName})
+			}
 		}
 		return
 	}
@@ -939,6 +958,14 @@ var (
 	// disabled: a note every interval keeps a stalled run visibly alive (or
 	// visibly stalled) instead of a frozen card. Var for tests.
 	silenceHeartbeat = 45 * time.Second
+	// adapterStartupGrace bounds the pre-first-output window separately from
+	// silenceTimeout. A CLI's first model call can legitimately emit nothing
+	// for a minute or two — deepseek-class adapters buffer until the first
+	// token — and killing at the silence limit just respawns into the same
+	// wait. Once any byte arrives the ordinary silence limit applies, so a
+	// mid-run wedge is still caught on the tight bound; a process that never
+	// produces anything is bounded by the hard timeout regardless.
+	adapterStartupGrace = 3 * time.Minute
 )
 
 const (
@@ -1148,12 +1175,15 @@ func runAdapterProcess(ctx context.Context, name string, prompt string, cwd stri
 	var (
 		actMu        sync.Mutex
 		lastActivity = time.Now()
+		sawOutput    bool
 		stalled      bool
+		startupStall bool
 		cappedCalls  bool
 	)
 	touch := func() {
 		actMu.Lock()
 		lastActivity = time.Now()
+		sawOutput = true
 		actMu.Unlock()
 	}
 
@@ -1171,6 +1201,7 @@ func runAdapterProcess(ctx context.Context, name string, prompt string, cwd stri
 	// tests that retune it.
 	{
 		heartbeat := silenceHeartbeat
+		startupGrace := adapterStartupGrace
 		stopWatchdog := make(chan struct{})
 		defer close(stopWatchdog)
 		guard.Go(nil, "commander: silence watchdog", nil, func() {
@@ -1193,10 +1224,20 @@ func runAdapterProcess(ctx context.Context, name string, prompt string, cwd stri
 				case <-t.C:
 					actMu.Lock()
 					silentFor := time.Since(lastActivity)
+					started := sawOutput
 					actMu.Unlock()
-					if silenceLimit > 0 && silentFor >= silenceLimit {
+					// Before the first byte the CLI is inside its first model
+					// call — a slow think, not a wedge — so the wider startup
+					// grace applies. Anything after the first byte is held to
+					// the ordinary silence limit.
+					limit := silenceLimit
+					if !started && startupGrace > limit {
+						limit = startupGrace
+					}
+					if limit > 0 && silentFor >= limit {
 						actMu.Lock()
 						stalled = true
+						startupStall = !started
 						actMu.Unlock()
 						cancel()
 						return
@@ -1230,6 +1271,7 @@ func runAdapterProcess(ctx context.Context, name string, prompt string, cwd stri
 	stderr.onActivity = touch
 	stderr.sink = progressSink
 	stderr.evSink = AgentEvents(ctx)
+	stderr.adapterName = name
 	// Tool-call fuse (P0): adapters that ignore req.MaxTurns have no other
 	// turn bound — a model that never converges would otherwise loop tool
 	// calls until the wall-clock timeout, spending tokens the whole time.
@@ -1270,6 +1312,7 @@ func runAdapterProcess(ctx context.Context, name string, prompt string, cwd stri
 	if err := cmd.Run(); err != nil {
 		actMu.Lock()
 		wasStalled := stalled
+		wasStartup := startupStall
 		wasCapped := cappedCalls
 		actMu.Unlock()
 		// The process died before its result envelope — any session it
@@ -1278,6 +1321,9 @@ func runAdapterProcess(ctx context.Context, name string, prompt string, cwd stri
 		// interruptions rather than dead ends.
 		checkpoint := stderr.session()
 		if wasStalled {
+			if wasStartup {
+				return AgentResult{OK: false, Result: fmt.Sprintf("adapter stalled: no output ever received for %v (startup grace)", adapterStartupGrace), ExitCode: 124, SessionID: checkpoint}
+			}
 			return AgentResult{OK: false, Result: fmt.Sprintf("adapter stalled: no progress or output received for %v (silence timeout)", silenceLimit), ExitCode: 124, SessionID: checkpoint}
 		}
 		if wasCapped {
@@ -1500,6 +1546,15 @@ func (p *AgentSessions) turn(ctx context.Context, key, adapter string, req Adapt
 	// and a second send must not interleave between this turn's envelope.
 	s.turnMu.Lock()
 	defer s.turnMu.Unlock()
+	// The silence watchdog only guards an in-flight turn: between rounds a
+	// session is meant to sit idle, and each turn's pre-first-byte window is
+	// its first model call — the slow-think case the startup grace exists
+	// for. lastAct resets at the turn boundary: silence measures this turn's
+	// quiet, not however long the pool held the session idle.
+	s.inTurn.Store(true)
+	s.turnSeen.Store(false)
+	s.lastAct.Store(time.Now().UnixNano())
+	defer s.inTurn.Store(false)
 	if !fresh {
 		if s.isDead() {
 			// A dead session's agent conversation still exists on the CLI's
@@ -1570,6 +1625,13 @@ type agentSession struct {
 	cancel  context.CancelFunc
 	dead    atomic.Bool
 	lastAct atomic.Int64 // unixnano; the silence watchdog's clock
+	// inTurn marks the send→await window: the silence kill applies only while
+	// a turn is in flight — a session idling between rounds is resting, not
+	// stalled. turnSeen records whether this turn has emitted any stderr
+	// byte yet; a turn still inside its first model call gets the wider
+	// startup grace instead of the tight silence limit.
+	inTurn   atomic.Bool
+	turnSeen atomic.Bool
 	// turnMu serializes send+await: a session serves one turn at a time and
 	// the stdout decoder must never be driven by two readers at once.
 	turnMu sync.Mutex
@@ -1608,7 +1670,7 @@ func startAgentSession(spawnCtx, turnCtx context.Context, name string, req Adapt
 		cancel()
 		return nil, err
 	}
-	stderr := &progressWriter{}
+	stderr := &progressWriter{adapterName: name}
 	if sink, ok := turnCtx.Value(progressKey{}).(ProgressFunc); ok {
 		stderr.sink = sink
 	}
@@ -1621,7 +1683,10 @@ func startAgentSession(spawnCtx, turnCtx context.Context, name string, req Adapt
 	// onActivity must be bound before Start: the stderr copier goroutine
 	// starts with the process, so an assignment afterwards would race its
 	// Write reads.
-	stderr.onActivity = func() { s.lastAct.Store(time.Now().UnixNano()) }
+	stderr.onActivity = func() {
+		s.lastAct.Store(time.Now().UnixNano())
+		s.turnSeen.Store(true)
+	}
 	cmd.Stderr = stderr
 	// WaitDelay matches the one-shot path: a detached grandchild inheriting
 	// the pipes must not wedge Wait (and with it the dead marker) forever.
@@ -1652,15 +1717,18 @@ func startAgentSession(spawnCtx, turnCtx context.Context, name string, req Adapt
 	// The tuning vars are read here, synchronously — inside the goroutine
 	// they would race the test knobs that retune them.
 	guard.Go(nil, "commander: session silence watch", nil, func() {
-		s.watchSilence(sessCtx, silenceTimeout, silenceHeartbeat)
+		s.watchSilence(sessCtx, silenceTimeout, silenceHeartbeat, adapterStartupGrace)
 	})
 	return s, nil
 }
 
 // watchSilence kills the session when no stderr activity is observed for the
 // configured silence limit, and posts heartbeat progress notes while the
-// session stays silent — a stalled run must look stalled, not dead.
-func (s *agentSession) watchSilence(ctx context.Context, limit, heartbeat time.Duration) {
+// session stays silent — a stalled run must look stalled, not dead. The kill
+// only applies while a turn is in flight: a session idle between rounds is
+// resting, not stalled, and a turn that has emitted nothing yet is inside
+// its first model call where the wider startup grace applies.
+func (s *agentSession) watchSilence(ctx context.Context, limit, heartbeat, startupGrace time.Duration) {
 	tick := heartbeat / 4
 	if limit > 0 && limit/4 < tick {
 		tick = limit / 4
@@ -1676,12 +1744,19 @@ func (s *agentSession) watchSilence(ctx context.Context, limit, heartbeat time.D
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			last := time.Unix(0, s.lastAct.Load())
-			silentFor := time.Since(last)
 			if s.isDead() {
 				return
 			}
-			if limit > 0 && silentFor >= limit {
+			if !s.inTurn.Load() {
+				continue
+			}
+			last := time.Unix(0, s.lastAct.Load())
+			silentFor := time.Since(last)
+			lim := limit
+			if !s.turnSeen.Load() && startupGrace > lim {
+				lim = startupGrace
+			}
+			if lim > 0 && silentFor >= lim {
 				s.kill()
 				return
 			}

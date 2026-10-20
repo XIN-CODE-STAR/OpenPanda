@@ -27,8 +27,16 @@ import (
 // the keystroke/layout logic that does not touch the ask engine.
 func newTestTUI(t *testing.T) tuiModel {
 	t.Helper()
+	return newTestTUIWithConvo(t, nil)
+}
+
+// newTestTUIWithConvo builds the model over a repl whose bare conversation is
+// already populated, so the constructor's replay path runs against it.
+func newTestTUIWithConvo(t *testing.T, turns []entry.Turn) tuiModel {
+	t.Helper()
 	r := &repl{loc: i18n.Locale("en"), cfg: &config.Config{}, interactive: true}
 	r.cfg.Storage.SkillsPath = t.TempDir() // skills hub writes must stay in the sandbox
+	r.convo = turns
 	m := newTUIModel(r)
 	m.mode = modeIdle
 	return m
@@ -376,21 +384,23 @@ func TestTUIApprovalResumeKeepsCardAndDropsStaleCompletion(t *testing.T) {
 	}
 }
 
-// TestTUIWelcomeWaitsForTheTerminalSize pins the fix for a banner that used to be
-// drawn from a guess: Init must not print it (no size is known yet), and the
-// first WindowSizeMsg must.
+// TestTUIWelcomeWaitsForTheTerminalSize pins the fix for a banner that used to
+// be drawn from a guess: the model does not build it before WindowSizeMsg
+// arrives, and the first sized frame renders it at the reported width.
 func TestTUIWelcomeWaitsForTheTerminalSize(t *testing.T) {
 	m := newTestTUI(t)
 	if m.ready {
 		t.Fatal("a fresh model must not claim to know its size")
 	}
-	// The first size report is what prints the banner, and only the first.
-	_, cmd := m.Update(tea.WindowSizeMsg{Width: 52, Height: 30})
-	if cmd == nil {
-		t.Fatal("first WindowSizeMsg should print the welcome banner")
-	}
 	m = step(m, tea.WindowSizeMsg{Width: 52, Height: 30})
-	if _, cmd := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40}); cmd != nil {
+	if !m.ready {
+		t.Fatal("first WindowSizeMsg must mark the model ready")
+	}
+	if view := m.View(); !strings.Contains(view, m.welcome()) {
+		t.Fatal("the first sized frame should render the welcome banner")
+	}
+	m = step(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	if view := m.View(); strings.Count(view, m.welcome()) != 1 {
 		t.Fatal("a resize must not reprint the welcome banner")
 	}
 }
@@ -499,8 +509,8 @@ func TestAnswerTextMarksAndHangs(t *testing.T) {
 			t.Errorf("continuation line is not hung under the marker: %q", l)
 		}
 	}
-	// A committed block lands in the terminal's own scrollback, so the wrapper's
-	// block padding must not travel with it into anything the user copies out.
+	// A committed block is rendered into the frame and can be selected and
+	// copied, so the wrapper's block padding must not travel with it.
 	for _, l := range lines {
 		if strings.HasSuffix(l, " ") {
 			t.Errorf("wrapped line kept trailing padding: %q", l)
@@ -993,48 +1003,33 @@ done:
 	}
 }
 
-// TestTUIStartupIsNotBottomPadded pins the layout fix: the welcome banner is
-// committed where the cursor already is — the top of a fresh terminal — and
-// the transcript grows downward from it. The banner used to be preceded by
-// blank lines computed to push it to the bottom edge, which stranded the
-// greeting under a screenful of dead space on anything taller than the banner
-// and put the only interactive row where the eye is not.
-func TestTUIStartupIsNotBottomPadded(t *testing.T) {
-	m := newTestTUI(t)
-	prints := m.startupPrints()
-	if len(prints) == 0 {
-		t.Fatal("startup must print the welcome banner")
-	}
-	if strings.HasPrefix(prints[0], "\n") {
-		t.Fatal("the welcome banner must print at the cursor, not be padded down to the bottom edge")
-	}
-}
-
 // TestTUIStartupReplaysRestoredConversation pins the visibility fix for a
-// resumed bare chat: runTUI restores r.convo silently, and the replay has to
-// re-commit those turns to scrollback — otherwise the previous context exists
-// nowhere the user can read, because the wheel belongs to the terminal and
-// nothing was printed above the banner this run. Three banked pairs must come
-// back as three ❯/⏺ block pairs behind the banner, and the first
-// WindowSizeMsg must hand Bubble Tea exactly that many Println commands.
+// resumed bare chat: the model constructor seeds chatHistory from the persisted
+// conversation, so the first idle frame shows the previous turns above the
+// prompt instead of an empty transcript.
 func TestTUIStartupReplaysRestoredConversation(t *testing.T) {
-	m := newTestTUI(t)
-	m.r.convo = []entry.Turn{
+	m := newTestTUIWithConvo(t, []entry.Turn{
 		{Role: "user", Content: "what port does the daemon use?"},
 		{Role: "assistant", Content: "8787 by default."},
 		{Role: "user", Content: "and the web console?"},
 		{Role: "assistant", Content: "Same port, /web path."},
 		{Role: "user", Content: "thanks"},
 		{Role: "assistant", Content: "Any time."},
+	})
+	blocks := m.chatHistory.blocks
+	if len(blocks) != 6 {
+		t.Fatalf("expected 6 replayed blocks, got %d", len(blocks))
 	}
-	prints := m.startupPrints()
-	if len(prints) != 1+6 {
-		t.Fatalf("expected banner + 6 replayed blocks, got %d prints", len(prints))
+	wantKinds := []blockKind{blockUser, blockAnswer, blockUser, blockAnswer, blockUser, blockAnswer}
+	for i, want := range wantKinds {
+		if blocks[i].kind != want {
+			t.Errorf("block[%d] kind = %v, want %v", i, blocks[i].kind, want)
+		}
 	}
-	if prints[0] != m.welcome() {
-		t.Fatal("the banner must come first, unpadded")
+	joined := ""
+	for _, b := range blocks {
+		joined += b.body + "\n"
 	}
-	joined := strings.Join(prints, "\n")
 	for _, want := range []string{
 		"what port does the daemon use?",
 		"8787 by default.",
@@ -1044,25 +1039,13 @@ func TestTUIStartupReplaysRestoredConversation(t *testing.T) {
 			t.Fatalf("replay lost a restored turn: %q not in transcript", want)
 		}
 	}
-
-	next, cmd := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
-	if !next.(tuiModel).ready {
-		t.Fatal("first WindowSizeMsg must mark the model ready")
-	}
-	batch, ok := cmd().(tea.BatchMsg)
-	if !ok {
-		t.Fatalf("first WindowSizeMsg must batch the startup prints, got %T", cmd())
-	}
-	if len(batch) != 1+6 {
-		t.Fatalf("expected %d Println commands, got %d", 1+6, len(batch))
-	}
 }
 
 // TestTUIStartupReplayFoldsOldTurns bounds the replay: its job is orientation,
-// not a verbatim wall, so a long banked conversation shows only the most
-// recent ten pairs, behind a note counting what was folded away.
+// not a verbatim wall, so a long banked conversation seeds only the most recent
+// ten pairs, behind a note counting what was folded away.
 func TestTUIStartupReplayFoldsOldTurns(t *testing.T) {
-	m := newTestTUI(t)
+	var turns []entry.Turn
 	for i := 0; i < 12; i++ {
 		// Zero-padded labels so no kept turn ("question 10", "question 11")
 		// contains a folded turn's text as a substring.
@@ -1070,21 +1053,27 @@ func TestTUIStartupReplayFoldsOldTurns(t *testing.T) {
 		if len(label) < 2 {
 			label = "0" + label
 		}
-		m.r.convo = append(m.r.convo,
+		turns = append(turns,
 			entry.Turn{Role: "user", Content: "question " + label},
 			entry.Turn{Role: "assistant", Content: "answer " + label},
 		)
 	}
-	prints := m.startupPrints()
-	// Banner + fold note + 10 pairs.
-	if len(prints) != 1+1+20 {
-		t.Fatalf("expected banner + fold note + 20 blocks, got %d prints", len(prints))
+	m := newTestTUIWithConvo(t, turns)
+	blocks := m.chatHistory.blocks
+	// Fold note + 10 pairs.
+	if len(blocks) != 1+20 {
+		t.Fatalf("expected fold note + 20 blocks, got %d", len(blocks))
 	}
-	note := prints[1]
-	if strings.Contains(note, "question") || strings.Contains(note, "answer") {
-		t.Fatalf("prints[1] must be the fold note, got %q", note)
+	if blocks[0].kind != blockNote {
+		t.Fatalf("first block must be the fold note, got kind %v", blocks[0].kind)
 	}
-	joined := strings.Join(prints, "\n")
+	if strings.Contains(blocks[0].body, "question") || strings.Contains(blocks[0].body, "answer") {
+		t.Fatalf("fold note leaked a turn: %q", blocks[0].body)
+	}
+	joined := ""
+	for _, b := range blocks {
+		joined += b.body + "\n"
+	}
 	for _, gone := range []string{"question 00", "answer 00", "question 01"} {
 		if strings.Contains(joined, gone) {
 			t.Fatalf("folded turn leaked into the replay: %q", gone)

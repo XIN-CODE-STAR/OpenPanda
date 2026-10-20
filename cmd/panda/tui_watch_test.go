@@ -18,7 +18,7 @@ import (
 )
 
 // collectPrinted flattens a command (possibly a batch) into the text its
-// tea.Println members would print. Commands that return nil contribute nothing.
+// commit messages carry. Commands that return nil contribute nothing.
 func collectPrinted(cmd tea.Cmd) string {
 	if cmd == nil {
 		return ""
@@ -37,8 +37,9 @@ func collectPrinted(cmd tea.Cmd) string {
 	return fmt.Sprintf("%v", msg)
 }
 
-// TestOnWatchCommitsNotes checks an out-of-band completion lands in scrollback as
-// a transcript note — the TUI's stand-in for the classic watcher's printed line.
+// TestOnWatchCommitsNotes checks an out-of-band completion lands in the
+// transcript as a block note — the TUI's stand-in for the classic watcher's
+// printed line.
 func TestOnWatchCommitsNotes(t *testing.T) {
 	m := newTestTUI(t) // no store: the re-arm command is nil, so the batch is inspectable
 	_, cmd := m.onWatch(watchMsg{notes: []string{"✓ build docs (done)", "✗ deploy (failed)"}})
@@ -95,7 +96,7 @@ func TestPollCompletionsReportsTerminalTransitions(t *testing.T) {
 // TestOnWatchRaisesApprovalCardForReview is the out-of-band half of the "no
 // silent approval" rule: a task that parks in review while no ask is running
 // must be put in front of the user as the same foreground approval card an
-// inline task raises — not merely mentioned in scrollback. The note is still
+// inline task raises — not merely mentioned in the transcript. The note is still
 // committed (it names /approve and /reject), and a second review task in the
 // same poll keeps its note rather than stealing the card.
 func TestOnWatchRaisesApprovalCardForReview(t *testing.T) {

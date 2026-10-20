@@ -52,8 +52,9 @@ export const primaryNavGroups: NavGroup[] = [
     items: [['control', 'nav.control']],
   },
   {
+    // No heading: the group has one row, and "节点网络" above "节点网络"
+    // named the same destination twice. Spacing already separates the group.
     id: 'fleet',
-    head: 'nav.group.fleet',
     items: [['fleet', 'nav.fleet']],
   },
 ]

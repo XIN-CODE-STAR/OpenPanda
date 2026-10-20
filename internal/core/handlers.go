@@ -19,6 +19,7 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/plan"
 	"github.com/Xustalis/OpenPanda/internal/scheduler"
 	"github.com/Xustalis/OpenPanda/internal/trust"
+	"github.com/Xustalis/OpenPanda/internal/util"
 )
 
 // handleDelegate processes an incoming task_delegate. It decides where the
@@ -29,7 +30,7 @@ func (c *Core) handleDelegate(ctx context.Context, env bus.Envelope) {
 	if err := env.PayloadInto(&p); err != nil {
 		c.logger.Warn("bad task_delegate", "err", err, "from", env.From)
 		c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{
-			TaskID: p.TaskID, Reason: "bad payload",
+			TaskID: p.TaskID, AttemptID: p.AttemptID, Reason: "bad payload",
 		})
 		return
 	}
@@ -46,14 +47,8 @@ func (c *Core) handleDelegate(ctx context.Context, env bus.Envelope) {
 		c.logger.Warn("task_delegate with unsafe stage identity", "task", p.TaskID,
 			"plan", p.PlanID, "stage", p.StageID, "from", env.From)
 		c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{
-			TaskID: p.TaskID, Reason: "invalid plan/stage id",
+			TaskID: p.TaskID, AttemptID: p.AttemptID, Reason: "invalid plan/stage id",
 		})
-		return
-	}
-
-	// Idempotency: if we already know this task, do not re-create.
-	if _, err := c.store.Get(ctx, p.TaskID); err == nil {
-		c.logger.Info("duplicate task_delegate ignored", "task", p.TaskID, "msg", env.MsgID)
 		return
 	}
 
@@ -74,7 +69,7 @@ func (c *Core) handleDelegate(ctx context.Context, env bus.Envelope) {
 		c.logger.Warn("delegation chain last hop mismatch", "task", p.TaskID,
 			"from", env.From, "last", chain[len(chain)-1])
 		c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{
-			TaskID: p.TaskID, Reason: "delegation chain does not end at sender",
+			TaskID: p.TaskID, AttemptID: p.AttemptID, Reason: "delegation chain does not end at sender",
 		})
 		return
 	}
@@ -86,7 +81,7 @@ func (c *Core) handleDelegate(ctx context.Context, env bus.Envelope) {
 		}
 		c.logger.Warn("delegation refused", "task", p.TaskID, "from", env.From, "reason", reason)
 		c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{
-			TaskID: p.TaskID, Reason: reason,
+			TaskID: p.TaskID, AttemptID: p.AttemptID, Reason: reason,
 		})
 		return
 	}
@@ -98,7 +93,7 @@ func (c *Core) handleDelegate(ctx context.Context, env bus.Envelope) {
 		c.logger.Warn("task_delegate arrived past deadline", "task", p.TaskID,
 			"from", env.From, "deadline", p.DeadlineUnix)
 		c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{
-			TaskID: p.TaskID, Reason: "bundle expired in transit",
+			TaskID: p.TaskID, AttemptID: p.AttemptID, Reason: "bundle expired in transit",
 		})
 		return
 	}
@@ -111,9 +106,83 @@ func (c *Core) handleDelegate(ctx context.Context, env bus.Envelope) {
 		c.logger.Warn("task_delegate arrived with exhausted token budget",
 			"task", p.TaskID, "from", env.From)
 		c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{
-			TaskID: p.TaskID, Reason: "token budget exhausted",
+			TaskID: p.TaskID, AttemptID: p.AttemptID, Reason: "token budget exhausted",
 		})
 		return
+	}
+
+	// Idempotency, AFTER the envelope has earned trust (a forged-chain
+	// delegate must not evict a live copy — supersession below kills work):
+	// if we already know this task, do not re-create. The exceptions are
+	// attempt-ordered — only a strictly NEWER attempt may evict a prior copy:
+	//
+	//   - a CLOSED copy (done/failed/cancelled/expired) is deleted outright:
+	//     the delegator's expiry re-route can land back on a node whose copy
+	//     of an older attempt already settled; a stale verdict must not
+	//     dead-end a fresh attempt. The event log keeps both attempts'
+	//     history under the same task id.
+	//   - a LIVE copy (submitted/queued/dispatched/running/waiting/review)
+	//     is cancelled first, then deleted: a re-delivered newer attempt
+	//     means the delegator already rotated the attempt and considers this
+	//     node's custody dead — the standalone cancel may have been lost in
+	//     a dying socket, so the delegate itself carries the stand-down
+	//     order. Its own attempt fencing keeps the killed runner's deferred
+	//     writes from touching the replacement row.
+	//
+	// A stale delivery carrying an older attempt id — a re-sent delegate
+	// that wandered in after the reroute already landed — must not resurrect
+	// abandoned work. Unordered stored ids (legacy rows without UUIDv7
+	// lineage) have no order to defend and stay replaceable.
+	if cur, err := c.store.Get(ctx, p.TaskID); err == nil {
+		newer := p.AttemptID != "" && cur.AttemptID != p.AttemptID &&
+			(!util.IsUUIDv7(cur.AttemptID) || attemptIsNewer(p.AttemptID, cur.AttemptID))
+		if !newer {
+			c.logger.Info("duplicate task_delegate ignored", "task", p.TaskID, "msg", env.MsgID)
+			return
+		}
+		// Replacement kills or deletes the row we already hold — power that
+		// belongs only to a node that legitimately held the task upstream of
+		// us: any element of the stored chain before our own position. (Not
+		// just the immediate predecessor — when a mid-chain link lapsed, an
+		// ancestor may re-route straight past it.) Without the bind, any
+		// peer could mint a fresh attempt id, frame a delegate for someone
+		// else's task id, and wipe live work or resurrect a settled verdict.
+		upstream := false
+		for _, n := range cur.Chain {
+			if n == c.nodeID {
+				break // only elements strictly before self are upstream
+			}
+			if scheduler.SameRuntimeIdentity(env.From, n) {
+				upstream = true
+				break
+			}
+		}
+		if !upstream {
+			c.logger.Warn("supersede delegate from non-upstream peer refused",
+				"task", p.TaskID, "from", env.From, "chain", cur.Chain,
+				"prev_state", cur.State)
+			return
+		}
+		if !Terminal(cur.State) && cur.State != StateFailed {
+			// A live copy must die before the fresh row replaces it —
+			// cascade the cancel (runner kill + pendingCtx + downstream
+			// fan-out) first so nothing of the old dispensation outlives it.
+			cancelled, cerr := c.store.CancelCascade(ctx, p.TaskID)
+			if cerr != nil {
+				c.logger.Warn("supersede cancel failed; delegate refused",
+					"task", p.TaskID, "err", cerr)
+				return
+			}
+			c.finishCancel(ctx, cancelled)
+		}
+		if derr := c.store.DeleteTerminal(ctx, p.TaskID); derr == nil {
+			c.logger.Info("replaced task copy for re-routed attempt",
+				"task", p.TaskID, "prev_attempt", cur.AttemptID, "prev_state", cur.State)
+		} else {
+			c.logger.Info("duplicate task_delegate ignored", "task", p.TaskID,
+				"msg", env.MsgID, "state", cur.State)
+			return
+		}
 	}
 
 	// remote=true: the intent text came off the wire. Persisted because the
@@ -131,7 +200,7 @@ func (c *Core) handleDelegate(ctx context.Context, env bus.Envelope) {
 	}
 	// Adopt the upstream attempt so every copy of this task reports the same
 	// attempt_id, and a result relayed along the chain is not flagged stale.
-	if err := c.store.AdoptAttempt(ctx, t.TaskID, p.AttemptID); err != nil {
+	if err := c.store.AdoptAttempt(ctx, t.TaskID, t.AttemptID, p.AttemptID); err != nil {
 		c.logger.Warn("adopt attempt", "task", t.TaskID, "err", err)
 	}
 	// Resume hint (§5.2): the delegator only sends ResumeSessionID when it
@@ -370,13 +439,13 @@ func (c *Core) handleDelegate(ctx context.Context, env bus.Envelope) {
 		if err := c.forwardDelegated(ctx, t.TaskID, decision.Target, forward, chain); err != nil {
 			c.logger.Warn("forward delegated", "task", t.TaskID, "target", decision.Target, "err", err)
 			c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{
-				TaskID: t.TaskID, Reason: err.Error(),
+				TaskID: t.TaskID, AttemptID: p.AttemptID, Reason: err.Error(),
 			})
 			c.terminalizeDeclined(ctx, t.TaskID, err.Error())
 		}
 	case scheduler.ActionDecline:
 		c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{
-			TaskID: t.TaskID, Reason: decision.Reason,
+			TaskID: t.TaskID, AttemptID: p.AttemptID, Reason: decision.Reason,
 		})
 		c.terminalizeDeclined(ctx, t.TaskID, decision.Reason)
 	}
@@ -406,7 +475,7 @@ func (c *Core) handleLocalDelegate(ctx context.Context, env bus.Envelope, taskID
 		// Maintenance drain (Track 2): decline new work so the delegator
 		// re-routes, while tasks already in flight finish undisturbed.
 		c.logger.Info("declining delegated task: node draining", "task", taskID)
-		c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{TaskID: taskID, Reason: "node draining"})
+		c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{TaskID: taskID, AttemptID: p.AttemptID, Reason: "node draining"})
 		c.terminalizeDeclined(ctx, taskID, "node draining")
 		return
 	}
@@ -417,13 +486,13 @@ func (c *Core) handleLocalDelegate(ctx context.Context, env bus.Envelope, taskID
 	// unconditionally, exactly as before.
 	if adm := c.admitDelegate(ctx, taskID, p, chain, env.From); !adm.admit {
 		if adm.review {
-			c.parkDelegateReview(ctx, env, taskID, adm.reason)
+			c.parkDelegateReview(ctx, env, taskID, adm.reason, p.AttemptID)
 			return
 		}
 		c.logger.Info("declining delegated task: trust admission", "task", taskID,
 			"reason", adm.reason, "code", adm.code, "from", env.From)
 		c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{
-			TaskID: taskID, Reason: adm.reason, ReasonCode: adm.code,
+			TaskID: taskID, AttemptID: p.AttemptID, Reason: adm.reason, ReasonCode: adm.code,
 		})
 		c.terminalizeDeclined(ctx, taskID, adm.reason)
 		return
@@ -431,7 +500,7 @@ func (c *Core) handleLocalDelegate(ctx context.Context, env bus.Envelope, taskID
 	release, ok := c.reserveCapacity(ctx)
 	if !ok {
 		c.logger.Info("declining delegated task: capacity full", "task", taskID)
-		c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{TaskID: taskID, Reason: "capacity full"})
+		c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{TaskID: taskID, AttemptID: p.AttemptID, Reason: "capacity full"})
 		c.terminalizeDeclined(ctx, taskID, "capacity full")
 		return
 	}
@@ -446,7 +515,7 @@ func (c *Core) handleLocalDelegate(ctx context.Context, env bus.Envelope, taskID
 // held task — holdReviewUpstream renews its lease with progress beats and
 // marks the first beat "held for operator admission review", so its copy
 // waits rather than expiring into a misdiagnosed re-route.
-func (c *Core) parkDelegateReview(ctx context.Context, env bus.Envelope, taskID string, reason string) {
+func (c *Core) parkDelegateReview(ctx context.Context, env bus.Envelope, taskID string, reason, attemptID string) {
 	err := c.store.transitionToReview(ctx, taskID, StateSubmitted, StateReview,
 		c.nodeID, EvReview, map[string]any{"reason": reason}, ApprovalAdmissionReview)
 	if err == nil {
@@ -459,7 +528,7 @@ func (c *Core) parkDelegateReview(ctx context.Context, env bus.Envelope, taskID 
 	c.logger.Warn("delegate admission park failed; declining instead",
 		"task", taskID, "err", err)
 	c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{
-		TaskID: taskID, Reason: "admission review park failed", ReasonCode: bus.DeclineCodeTrustRefused,
+		TaskID: taskID, AttemptID: attemptID, Reason: "admission review park failed", ReasonCode: bus.DeclineCodeTrustRefused,
 	})
 	c.terminalizeDeclined(ctx, taskID, "admission review park failed")
 }
@@ -551,7 +620,7 @@ func (c *Core) proceedLocalDelegate(ctx context.Context, env bus.Envelope, taskI
 		if hash == "" || ctxstore.Hash(p.ContextData) != hash {
 			c.logger.Warn("inline context hash mismatch", "task", taskID, "hash", hash)
 			c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{
-				TaskID: taskID, Reason: "inline context hash mismatch",
+				TaskID: taskID, AttemptID: p.AttemptID, Reason: "inline context hash mismatch",
 			})
 			c.terminalizeDeclined(ctx, taskID, "inline context hash mismatch")
 			release()
@@ -577,7 +646,7 @@ func (c *Core) proceedLocalDelegate(ctx context.Context, env bus.Envelope, taskI
 	if level == "pointer" && hash != "" {
 		if ok, _ := c.ctx.Contains(ctx, hash); !ok {
 			if err := c.prepare(ctx, taskID); err != nil {
-				c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{TaskID: taskID, Reason: err.Error()})
+				c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{TaskID: taskID, AttemptID: p.AttemptID, Reason: err.Error()})
 				release()
 				return
 			}
@@ -598,7 +667,7 @@ func (c *Core) proceedLocalDelegate(ctx context.Context, env bus.Envelope, taskI
 				c.logger.Warn("lease waiting-context task", "task", taskID, "err", err)
 			}
 			if err := c.store.SetWaitingContext(ctx, taskID, c.nodeID); err != nil {
-				c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{TaskID: taskID, Reason: err.Error()})
+				c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{TaskID: taskID, AttemptID: p.AttemptID, Reason: err.Error()})
 				release()
 				return
 			}
@@ -613,7 +682,7 @@ func (c *Core) proceedLocalDelegate(ctx context.Context, env bus.Envelope, taskI
 			if src == "" {
 				src = chain[0]
 			}
-			c.pendingCtx.Store(taskID, &pendingContext{intent: p.Intent, required: required, ctxType: p.ContextType, source: src, release: release})
+			c.pendingCtx.Store(taskID, &pendingContext{intent: p.Intent, required: required, ctxType: p.ContextType, source: src, hash: hash, attempt: p.AttemptID, release: release})
 			c.sendContextFetch(ctx, src, taskID, hash, p.ContextType)
 			return
 		}
@@ -638,10 +707,30 @@ func (c *Core) proceedLocalDelegate(ctx context.Context, env bus.Envelope, taskI
 				return
 			}
 			c.logger.Warn("route delegated task", "err", err, "task", taskID)
-			c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{TaskID: taskID, Reason: err.Error()})
+			c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{TaskID: taskID, AttemptID: p.AttemptID, Reason: err.Error()})
 			// The decline tells the parent to re-route, but the local row must
 			// not linger in submitted/queued: Recover would resurrect it on
 			// restart as an orphan nobody dispatches (P1-9).
+			c.terminalizeDeclined(ctx, taskID, err.Error())
+			return
+		}
+		// One execute call is one attempt; without the shared retry/review
+		// loop a resumable watchdog stall (exit 124 + live session) reported
+		// failure upstream where the identical local failure would have
+		// checkpoint-resumed (observed: a peer-run task died on a 4-minute
+		// silence kill holding a minted session). settleDelegated also maps
+		// an exhausted-retry park to State:review so the delegator mirrors it.
+		_, result, err = c.settleDelegated(ctx, taskID, p.Intent, required, result)
+		if err != nil {
+			// ErrConflict means the row left the failed state under us — a
+			// task_resume or a sibling runner claimed it: that runner owns the
+			// reply now, and declining would race it. Same for ErrCancelled.
+			if errors.Is(err, ErrCancelled) || errors.Is(err, ErrConflict) {
+				c.logger.Info("task moved on during retry settlement", "task", taskID)
+				return
+			}
+			c.logger.Warn("settle delegated task", "err", err, "task", taskID)
+			c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{TaskID: taskID, AttemptID: p.AttemptID, Reason: err.Error()})
 			c.terminalizeDeclined(ctx, taskID, err.Error())
 			return
 		}
@@ -840,7 +929,7 @@ func (c *Core) forwardDelegated(ctx context.Context, taskID, target string, p bu
 	if err := c.store.Queue(ctx, taskID, c.nodeID); err != nil {
 		return fmt.Errorf("queue: %w", err)
 	}
-	return c.dispatchDelegated(ctx, taskID, target, p, chain)
+	return c.dispatchDelegated(ctx, taskID, target, p, chain, false)
 }
 
 // defaultDTNTTL bounds how long a parked DTN task stays deliverable when the
@@ -896,7 +985,7 @@ func (c *Core) tokenBudgetWire(ctx context.Context, taskID string, wireBudget in
 // dispatchDelegated is forwardDelegated for a task already in queued state —
 // e.g. a declined task being re-routed (P1-5), where Decline already moved it
 // dispatched -> queued and a second queue transition would conflict.
-func (c *Core) dispatchDelegated(ctx context.Context, taskID, target string, p bus.TaskDelegatePayload, chain []string) error {
+func (c *Core) dispatchDelegated(ctx context.Context, taskID, target string, p bus.TaskDelegatePayload, chain []string, awaitRevival bool) error {
 	// Trust-zone send ceiling (experimental): clamp the payload to what this
 	// next hop's tier may receive, BEFORE any budget is spent or the dispatch
 	// is recorded. A target whose ceiling strips a need the task cannot run
@@ -932,7 +1021,11 @@ func (c *Core) dispatchDelegated(ctx context.Context, taskID, target string, p b
 	// intends delivery would fail the local row, and the real result would
 	// land on a terminal task after the peer's reconnect.
 	pinned := p.TargetNode != ""
-	parkable := dtn || pinned
+	// awaitRevival extends the park contract to the one-executor mesh: when
+	// the only capable node is the one whose custody just lapsed, a dead
+	// link parks the delivery for its next hello instead of failing work
+	// that has nowhere else to go.
+	parkable := dtn || pinned || awaitRevival
 	// The deadline a parked bundle or a deferred push lives under: the wire's
 	// absolute TTL, else the default DTN lifetime. Computed once here because
 	// both the fat-bundle attachment below and the send-failure park use it.
@@ -992,14 +1085,25 @@ func (c *Core) dispatchDelegated(ctx context.Context, taskID, target string, p b
 		kind := "dtn"
 		if pinned && !dtn {
 			kind = "pin"
-			if !park {
-				// The link died between the sendable check and the send: take
-				// the lease stamped above back off before custody takes over.
-				if cerr := c.store.ClearLease(ctx, taskID); cerr != nil {
-					c.logger.Warn("clear lease for parked pinned task", "task", taskID, "err", cerr)
-				}
+		} else if awaitRevival {
+			kind = "revive"
+		}
+		if (pinned || awaitRevival) && !dtn {
+			// A pinned/revival copy holds no executor for the whole wait, so
+			// no lease may burn down against it: either the link died between
+			// the sendable check and the send (the lease stamped above comes
+			// back off) or the row still carries the previous dispensation's.
+			// Custody's deadline, not a verdict, bounds the wait.
+			if cerr := c.store.ClearLease(ctx, taskID); cerr != nil {
+				c.logger.Warn("clear lease for parked task", "task", taskID, "err", cerr)
 			}
 		}
+		// A parked cancel for this pair stood down the task's PREVIOUS
+		// dispensation — the delegate being parked carries a newer attempt
+		// that itself supersedes that custody, so a cancel landing after it
+		// would kill the fresh run. Only dispensation-scoped rows go: a
+		// parked tree cancel is a human's decision no delegate supersedes.
+		c.cancelOutboxDropDispensation(ctx, target, taskID)
 		c.logger.Info("delegation undeliverable; parked in task_outbox for the peer's next contact",
 			"target", target, "task", taskID, "kind", kind, "err", sendErr)
 		c.taskOutboxPersist(ctx, target, p, kind, pushDeadline)

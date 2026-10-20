@@ -185,7 +185,7 @@ func TestReleaseDuringWaitLetsChildStart(t *testing.T) {
 
 	s.tick(context.Background())
 	waitForStarted(t, runner, 1)
-	if got := s.Registry().HeldBy("project:X"); got != "parent" {
+	if got := s.Registry().HeldBy(ProjectKey("X")); got != "parent" {
 		t.Fatalf("holder = %q, want parent", got)
 	}
 	// The child cannot start while the parent holds the key.
@@ -205,13 +205,13 @@ func TestReleaseDuringWaitLetsChildStart(t *testing.T) {
 	runner.release <- "child"
 	<-runner.done
 	s.registry.Release("child")
-	keys := []string{"project:X"}
+	keys := []string{ProjectKey("X")}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if !s.AcquireTask(ctx, "parent", keys) {
 		t.Fatal("re-acquire failed")
 	}
-	if got := s.Registry().HeldBy("project:X"); got != "parent" {
+	if got := s.Registry().HeldBy(ProjectKey("X")); got != "parent" {
 		t.Fatalf("holder = %q, want parent after re-acquire", got)
 	}
 	// An unheld task owes no re-acquire.
@@ -380,4 +380,52 @@ func TestPollDelayBacksOffWhenIdle(t *testing.T) {
 			t.Fatalf("pollDelay(%d) = %v, want relaxed %v", q, d, queueIdlePoll)
 		}
 	}
+}
+
+// TestForeignPinSkipsLocalResources pins the cross-node parallel case: a task
+// hard-pinned to another node must not queue behind a local holder of the same
+// project key — it never runs locally (the pin forbids fallback), so local
+// locks are pure serialization of remote work. A pin naming THIS node (or no
+// resolver at all) keeps the conservative behavior.
+func TestForeignPinSkipsLocalResources(t *testing.T) {
+	store := &fakeStore{ready: []ReadyTask{
+		{ID: "local-a", Project: "needlen", CreatedAt: 1},
+		{ID: "pinned-b", Project: "needlen", Pin: "macbook-m1-b", CreatedAt: 2},
+		{ID: "pinned-self", Project: "needlen", Pin: "macbook-m1", CreatedAt: 3},
+	}}
+	runner := newGateRunner()
+	s := New(store, runner, 4, nil).WithSelfPin(func(_ context.Context, ref string) bool {
+		return ref == "macbook-m1"
+	})
+
+	s.tick(context.Background())
+	// local-a takes project:needlen; pinned-b starts anyway (foreign pin →
+	// no local keys); pinned-self stays queued behind the same project.
+	waitForStarted(t, runner, 2)
+	started := runner.startedIDs()
+	got := map[string]bool{started[0]: true, started[1]: true}
+	if !got["local-a"] || !got["pinned-b"] {
+		t.Fatalf("started = %v, want exactly {local-a pinned-b}", started)
+	}
+	if got := s.Registry().HeldBy(ProjectKey("needlen")); got != "local-a" {
+		t.Fatalf("holder = %q, want local-a", got)
+	}
+
+	// A nil resolver treats every pin as local — the pre-feature behavior.
+	runner.release <- "local-a"
+	<-runner.done
+	s.registry.Release("local-a")
+	s2 := New(&fakeStore{ready: []ReadyTask{
+		{ID: "pinned-x", Project: "needlen", Pin: "node-x", CreatedAt: 1},
+		{ID: "holder", Project: "needlen", CreatedAt: 2},
+	}}, newGateRunner(), 4, nil)
+	s2.tick(context.Background())
+	waitForStarted(t, s2Runner(s2), 1)
+	runner.release <- "pinned-b"
+}
+
+// s2Runner digs the gate runner back out of a scheduler built inline — the
+// tests' fakeStore/runner plumbing only, not production surface.
+func s2Runner(s *Scheduler) *gateRunner {
+	return s.runner.(*gateRunner)
 }

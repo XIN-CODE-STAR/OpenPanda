@@ -9,12 +9,12 @@ package main
 // same unified entry as `panda ask` and POST /api/ask. All user-facing
 // strings come from internal/i18n (five languages, English fallback).
 //
-// TUI model (zero new dependencies, hand-rolled on x/sys termios): a startup
-// banner box, a status footer before every prompt, raw-mode line editing
-// with Tab completion of slash commands, Esc/Ctrl-C to interrupt a running
-// ask (double Ctrl-C exits), and a paged /help. A Bubble Tea stack was
-// weighed and rejected: the surface is a prompt + status line, and x/sys is
-// already a dependency.
+// This file also carries the classic line loop: a startup banner box, a status
+// footer before every prompt, raw-mode line editing (hand-rolled on x/sys
+// termios) with Tab completion of slash commands, Esc/Ctrl-C to interrupt a
+// running ask (double Ctrl-C exits), and a paged /help. The default interactive
+// front end is the Bubble Tea TUI in cmd/panda/tui*.go; PANDA_CLASSIC_REPL=1, a
+// non-TTY stdin/stdout, or a lite build selects this loop instead.
 
 import (
 	"bufio"

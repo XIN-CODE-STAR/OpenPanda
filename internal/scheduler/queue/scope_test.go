@@ -3,6 +3,7 @@
 package queue
 
 import (
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -88,5 +89,56 @@ func TestRegistryScopePrefixConflict(t *testing.T) {
 	}
 	if !r3.TryAcquire([]string{"scope:p"}, "t2") {
 		t.Fatal("scope root must not conflict with the legacy project key alone")
+	}
+}
+
+// TestScopeKeysFoldCase pins the case-insensitive filesystem contract: on
+// APFS/NTFS "Docs" and "docs" are the same directory, so the lock keys must
+// collapse to one identity or two same-tree writers claim disjoint locks.
+// Folding is conservative — on a case-sensitive volume a colliding pair
+// merely serializes where it could have run in parallel.
+func TestScopeKeysFoldCase(t *testing.T) {
+	if got := ScopeLeafKey("Proj", "Docs/Sub"); got != "scope:proj/docs/sub" {
+		t.Fatalf("leaf key = %q, want folded scope:proj/docs/sub", got)
+	}
+	if got := ScopeRootKey("Proj"); got != "scope:proj" {
+		t.Fatalf("root key = %q, want folded scope:proj", got)
+	}
+	// A leaf declared in one case blocks the same leaf in another — the
+	// whole point of folding.
+	r := NewResourceRegistry()
+	if !r.TryAcquire([]string{ScopeLeafKey("p", "Docs")}, "child-upper") {
+		t.Fatal("first claim must succeed")
+	}
+	if r.TryAcquire([]string{ScopeLeafKey("p", "docs")}, "child-lower") {
+		t.Fatal("same directory in a different case must conflict")
+	}
+	// And the folded identity composes with ancestor rules both ways.
+	if r.TryAcquire([]string{ScopeLeafKey("p", "DOCS/deep")}, "child-deep") {
+		t.Fatal("descendant of a held folded leaf must conflict")
+	}
+	// Pinned work dirs fold the same way: two spellings of one directory
+	// must land on one key.
+	a := WorkDirKey(filepath.Join(string(filepath.Separator), "NonExist", "CaseDir"))
+	b := WorkDirKey(filepath.Join(string(filepath.Separator), "nonexist", "casedir"))
+	if a != b {
+		t.Fatalf("workdir keys differ by case: %q vs %q", a, b)
+	}
+}
+
+// TestProjectKeyFoldsCase: the project lock must collide across casings —
+// spec.project arrives in whatever casing the classifier inferred from the
+// directory ("Needlen") while --project is verbatim ("needlen"). Live
+// evidence: two whole-project tasks on one tree landed project:Needlen and
+// project:needlen in the same queue, parallel writers the lock exists to
+// exclude.
+func TestProjectKeyFoldsCase(t *testing.T) {
+	if ProjectKey("Needlen") != ProjectKey("needlen") {
+		t.Fatalf("ProjectKey casing differs: %q vs %q", ProjectKey("Needlen"), ProjectKey("needlen"))
+	}
+	a := DefaultKeys(nil, "Needlen", "", "t1")
+	b := DefaultKeys(nil, "needlen", "", "t2")
+	if a[0] != b[0] {
+		t.Fatalf("default project keys diverged: %q vs %q", a[0], b[0])
 	}
 }

@@ -5,6 +5,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 
@@ -254,12 +255,13 @@ func TestAgentSessionAdapterAffinity(t *testing.T) {
 	}
 }
 
-// TestAgentSessionResumesOnFallback: a checkpoint retry can fail over
-// mid-round — the plan's adapter is unavailable, the chain runs the next
-// candidate, and that candidate may be the adapter that minted the persisted
-// session. Attaching the resume hint per round (gated on plan.Adapter) used
-// to drop it before the fallback could see it, so every timeout slice of a
-// long task re-ran from zero; the handle must reach the attempt that owns it.
+// TestAgentSessionResumesOnFallback: a persisted checkpoint makes the minting
+// adapter the round's primary — session affinity promotes opencode over the
+// card's claude_code primary BEFORE the first attempt, so the resume lands on
+// the conversation that owns the transcript instead of burning a doomed
+// primary attempt first (observed live: a timeout retry relaunched claude_code
+// against an opencode session it could not consume — 13 minutes re-exploring
+// what the live session already held).
 func TestAgentSessionResumesOnFallback(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
@@ -306,8 +308,8 @@ func TestAgentSessionResumesOnFallback(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 
-	if len(adapters) != 2 || adapters[0] != "claude_code.py" || adapters[1] != "opencode.py" {
-		t.Fatalf("attempt adapters = %v, want claude_code.py then opencode.py", adapters)
+	if len(adapters) != 1 || adapters[0] != "opencode.py" {
+		t.Fatalf("attempt adapters = %v, want [opencode.py] — the minting adapter runs first under session affinity", adapters)
 	}
 	if len(resumes) != 1 || resumes[0] != "sess-mine" {
 		t.Fatalf("fallback attempt saw resume %v, want [sess-mine]", resumes)
@@ -347,5 +349,73 @@ func TestResultRecordsRemoteSessionAdapter(t *testing.T) {
 		row.AgentSessionAdapter != "opencode.py" {
 		t.Fatalf("recorded session = %q@%q adapter %q, want ses_remotexyz@node-b opencode.py",
 			row.AgentSessionID, row.AgentSessionNode, row.AgentSessionAdapter)
+	}
+}
+
+// TestSessionAffinityPromotesMintingAdapter pins the checkpoint-resume
+// contract at the routing boundary: Route scores each attempt from scratch
+// and can name a primary whose adapter cannot read the persisted session —
+// the affinity gate then drops the handle and the retry cold-starts,
+// re-paying the whole orientation the checkpoint exists to save. When an
+// alternate owns the minting adapter the plan must promote it, so a
+// timed-out opencode run resumes on opencode instead of re-reading a repo
+// from zero under a different harness.
+func TestSessionAffinityPromotesMintingAdapter(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	card := ledger.Card{
+		Device:        "affinity-node",
+		ResourceClass: "Standard",
+		Agents: map[string]ledger.Agent{
+			"claude_code": {Adapter: "claude_code.py", Capabilities: []string{"code:modify"}, Tier: 1},
+			"opencode":    {Adapter: "opencode.py", Capabilities: []string{"code:modify"}, Tier: 1},
+		},
+		Capacity: ledger.Capacity{CPUCores: 8, RAMGB: 16, MaxConcurrent: 3},
+	}
+	c := NewCore(db, "affinity-node", card, 5, testLogger(), config.ModelConfig{})
+	c.router.SetAgentProber(func(string, ledger.Agent) bool { return true })
+
+	tk := createTask(t, c.store, "", "affinity", c.nodeID)
+	if err := c.store.Queue(ctx, tk.TaskID, c.nodeID); err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	if err := c.store.Dispatch(ctx, tk.TaskID, c.nodeID, c.nodeID); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if err := c.store.SetAgentSession(ctx, tk.TaskID, "ses_live", c.nodeID, "opencode.py"); err != nil {
+		t.Fatalf("set session: %v", err)
+	}
+
+	// The tie routes to the alphabetical primary (claude_code) with opencode
+	// as its alternate; the opencode session must flip that order.
+	plan, _, _, err := c.resolveRunPlan(ctx, tk.TaskID, []string{"code:modify"})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if plan.Agent != "opencode" || plan.Adapter != "opencode.py" {
+		t.Fatalf("plan = %+v, want session-affine opencode primary", plan)
+	}
+	if !slices.Contains(plan.Alternates, "claude_code") {
+		t.Fatalf("demoted primary must remain a fallback: alternates=%v", plan.Alternates)
+	}
+
+	// A session minted by an adapter no candidate owns changes nothing —
+	// a stale handle cannot resurrect a dead adapter.
+	tk2 := createTask(t, c.store, "", "affinity-none", c.nodeID)
+	if err := c.store.Queue(ctx, tk2.TaskID, c.nodeID); err != nil {
+		t.Fatalf("queue2: %v", err)
+	}
+	if err := c.store.Dispatch(ctx, tk2.TaskID, c.nodeID, c.nodeID); err != nil {
+		t.Fatalf("dispatch2: %v", err)
+	}
+	if err := c.store.SetAgentSession(ctx, tk2.TaskID, "ghost", c.nodeID, "gone.py"); err != nil {
+		t.Fatalf("set session2: %v", err)
+	}
+	plan2, _, _, err := c.resolveRunPlan(ctx, tk2.TaskID, []string{"code:modify"})
+	if err != nil {
+		t.Fatalf("resolve2: %v", err)
+	}
+	if plan2.Agent != "claude_code" {
+		t.Fatalf("plan2.Agent = %q, want scored primary kept (no candidate owns gone.py)", plan2.Agent)
 	}
 }

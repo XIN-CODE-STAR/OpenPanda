@@ -214,6 +214,7 @@ export function QueueView({
       <div class="filters">
         <select
           class="input"
+          aria-label={t('queue.filterProject')}
           value={projectFilter}
           onChange={(e) => setProjectFilter((e.target as HTMLSelectElement).value)}
         >
@@ -520,6 +521,7 @@ function KanbanColumn({
         class={`kanban-list${
           colKey === 'done' && expanded ? ' kanban-list--dense' : ''
         }`}
+        data-empty={shown.length === 0}
       >
         {/* An empty column is just its own tinted panel — no "nothing here"
             placeholder. The board is already four labelled lanes, so a dashed

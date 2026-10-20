@@ -502,7 +502,7 @@ func (c *Core) missingPushInputs(p bus.TaskDelegatePayload) []string {
 // deadline — and wakes the moment every missing hash is verified in the pool.
 func (c *Core) parkForArtifactPush(ctx context.Context, env bus.Envelope, taskID string, p bus.TaskDelegatePayload, required []string, missing []string, release func()) {
 	if err := c.prepare(ctx, taskID); err != nil {
-		c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{TaskID: taskID, Reason: err.Error()})
+		c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{TaskID: taskID, AttemptID: p.AttemptID, Reason: err.Error()})
 		c.terminalizeDeclined(ctx, taskID, err.Error())
 		release()
 		return
@@ -524,14 +524,14 @@ func (c *Core) parkForArtifactPush(ctx context.Context, env bus.Envelope, taskID
 		c.logger.Warn("lease artifact-push wait", "task", taskID, "err", err)
 	}
 	if err := c.store.SetWaitingContext(ctx, taskID, c.nodeID); err != nil {
-		c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{TaskID: taskID, Reason: err.Error()})
+		c.reply(ctx, env, bus.MsgTaskDecline, bus.TaskDeclinePayload{TaskID: taskID, AttemptID: p.AttemptID, Reason: err.Error()})
 		c.terminalizeDeclined(ctx, taskID, err.Error())
 		release()
 		return
 	}
 	pc := &pendingContext{
 		intent: p.Intent, required: required, ctxType: p.ContextType,
-		source: env.From, release: release, waitHashes: missing,
+		source: env.From, attempt: p.AttemptID, release: release, waitHashes: missing,
 	}
 	runCtx := context.WithoutCancel(ctx)
 	pc.resume = func() { c.resumePushedTask(runCtx, taskID, p, required) }
@@ -573,13 +573,29 @@ func (c *Core) resumePushedTask(ctx context.Context, taskID string, p bus.TaskDe
 			c.logger.Warn("run pushed-input task", "task", taskID, "err", err)
 			if t, gerr := c.store.Get(ctx, taskID); gerr == nil {
 				c.relayToParent(ctx, bus.MsgTaskDecline, t.Chain, bus.TaskDeclinePayload{
-					TaskID: taskID, Reason: err.Error(),
+					TaskID: taskID, AttemptID: p.AttemptID, Reason: err.Error(),
 				})
 			}
 			c.terminalizeDeclined(ctx, taskID, err.Error())
 			return
 		}
-		if t, gerr := c.store.Get(ctx, taskID); gerr == nil {
+		// Same gap as proceedLocalDelegate: a parked-then-resumed run used to
+		// be a single attempt — a resumable stall died upstream while a local
+		// run checkpoint-resumed.
+		if _, result, serr := c.settleDelegated(ctx, taskID, p.Intent, required, result); serr != nil {
+			// Cancelled or lost the row to a sibling transition (a resume's
+			// fresh runner): its owner reports; declining would race it.
+			if !errors.Is(serr, ErrCancelled) && !errors.Is(serr, ErrConflict) {
+				c.logger.Warn("settle pushed-input task", "task", taskID, "err", serr)
+				if t, gerr := c.store.Get(ctx, taskID); gerr == nil {
+					c.relayToParent(ctx, bus.MsgTaskDecline, t.Chain, bus.TaskDeclinePayload{
+						TaskID: taskID, AttemptID: p.AttemptID, Reason: serr.Error(),
+					})
+				}
+				c.terminalizeDeclined(ctx, taskID, serr.Error())
+			}
+			return
+		} else if t, gerr := c.store.Get(ctx, taskID); gerr == nil {
 			c.relayToParent(ctx, bus.MsgTaskResult, t.Chain, result)
 		}
 	})

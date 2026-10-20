@@ -109,7 +109,7 @@ func (c *Core) rescueOrphanedForwards(ctx context.Context) {
 			c.logger.Info("orphaned forward rescued by re-route", "task", t.TaskID)
 			continue
 		}
-		c.orphanExpired(ctx, t.TaskID)
+		c.orphanExpired(ctx, t.TaskID, t.AttemptID)
 	}
 	// Drop sightings for tasks that are no longer orphaned (rescued by the
 	// queue scheduler, completed, cancelled) so the map cannot leak.
@@ -123,8 +123,10 @@ func (c *Core) rescueOrphanedForwards(ctx context.Context) {
 }
 
 // orphanExpired records when a task was first seen orphaned and, once the
-// grace window has passed, fails it and propagates the failure upstream.
-func (c *Core) orphanExpired(ctx context.Context, taskID string) {
+// grace window has passed, fails it and propagates the failure upstream. The
+// verdict binds the sighted attempt: a delegate that landed mid-grace rotated
+// the row into fresh custody, and that copy is not ours to kill.
+func (c *Core) orphanExpired(ctx context.Context, taskID, attemptID string) {
 	c.mu.Lock()
 	first, seen := c.orphanSeen[taskID]
 	if !seen {
@@ -132,7 +134,7 @@ func (c *Core) orphanExpired(ctx context.Context, taskID string) {
 	}
 	c.mu.Unlock()
 	if seen && time.Since(first) >= orphanedForwardGrace {
-		c.failOrphanedForward(ctx, taskID)
+		c.failOrphanedForward(ctx, taskID, attemptID)
 	}
 }
 
@@ -147,15 +149,20 @@ func (c *Core) dropOrphan(taskID string) {
 // failure up the chain, so a root scheduler blocked in Submit (or a parent
 // relay) learns the forwarded work is dead instead of waiting on a lease
 // that nothing renews.
-func (c *Core) failOrphanedForward(ctx context.Context, taskID string) {
+func (c *Core) failOrphanedForward(ctx context.Context, taskID, attemptID string) {
 	const reason = "relay restarted: no route for re-forward"
-	if err := c.store.ForceFail(ctx, taskID, reason); err != nil {
+	if err := c.store.ForceFailAttempt(ctx, taskID, attemptID, reason); err != nil {
 		c.logger.Warn("orphan: force fail", "task", taskID, "err", err)
 		return
 	}
 	c.dropOrphan(taskID)
 	tk, err := c.store.Get(ctx, taskID)
 	if err != nil {
+		return
+	}
+	// ForceFailAttempt no-ops when the row rotated past the sighted attempt —
+	// the fresh custody is alive, so there is no failure to report.
+	if tk.State != StateFailed || (attemptID != "" && tk.AttemptID != attemptID) {
 		return
 	}
 	res := bus.TaskResultPayload{

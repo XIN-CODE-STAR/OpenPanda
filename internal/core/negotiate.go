@@ -308,8 +308,10 @@ func (c *Core) negoInterruptLocal(ctx context.Context, holder, scopeFile string)
 	c.negoMu.Unlock()
 	if taskID != "" {
 		c.shadowForYield(ctx, taskID)
-		if cancel, ok := c.running.Load(taskID); ok {
-			cancel.(context.CancelFunc)()
+		if v, ok := c.running.Load(taskID); ok {
+			if h, ok := v.(*runningHandle); ok {
+				h.cancel()
+			}
 		}
 		// Drop only the interrupted task's remaining locks: a sibling task of
 		// the same agent keeps its own grants.

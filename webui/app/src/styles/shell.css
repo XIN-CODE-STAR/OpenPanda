@@ -24,6 +24,12 @@
   border-right: 1px solid var(--border-soft);
   min-height: 0;
 }
+/* Desktop keeps the rail as one column: the panel wrapper has no box of its
+   own, so its children remain the sidebar's flex items. The narrow layout
+   gives the wrapper a real surface and makes it the disclosure panel. */
+.sidebar-panel {
+  display: contents;
+}
 .wordmark {
   display: inline-flex;
   align-items: center;
@@ -106,6 +112,11 @@
 }
 .sidebar-head .icon-btn:hover:not(:disabled) {
   color: var(--text);
+}
+/* Narrow layouts replace the permanent rail with a disclosure panel. The
+   button only exists there; desktop never pays for it. */
+.mobile-menu-btn {
+  display: none;
 }
 
 .primary-nav {
@@ -257,12 +268,24 @@ a.sidebar-node:hover {
   background: var(--bg-hover);
 }
 .sidebar-node .sidebar-node-name {
-  flex: 1;
-  min-width: 0;
+  flex: 1 1 auto;
+  min-width: 72px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+/* The version is the row's secondary fact. It used to be `flex: none`, so a
+   long codename (v0.0.12-preview Constellation) claimed the whole 255px row
+   and squeezed the node name to zero width. Let it truncate instead; the full
+   string stays available in the span's title. */
 .sidebar-node .ver {
   margin-left: auto;
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 52%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--text-tertiary);
 }
 
@@ -293,57 +316,95 @@ a.sidebar-node:hover {
   margin: var(--sp-3) var(--sp-4) 0;
 }
 
-/* Narrow layout: sidebar collapses into a top bar. */
+/* Narrow layout: a compact top bar opens the rail as a disclosure panel.
+   The old rule put every destination, the history and the footer into one
+   horizontal strip; the history's column height then set the strip's height
+   (about 610px with a normal history) and pushed everything useful off the
+   right edge. The disclosure keeps the bar one row tall and lets the full
+   navigation scroll inside a bounded surface. */
 @media (max-width: 720px) {
   .shell {
     grid-template-columns: 1fr;
     grid-template-rows: auto minmax(0, 1fr);
   }
   .sidebar {
+    position: relative;
+    z-index: 40;
     flex-direction: row;
     align-items: center;
+    gap: var(--sp-2);
     border-right: 0;
     border-bottom: 1px solid var(--border-soft);
     padding: var(--sp-2) var(--sp-3);
-    overflow-x: auto;
+    overflow: visible;
   }
-  .primary-nav {
-    flex-direction: row;
-    overflow-x: auto;
-    gap: 4px;
-  }
-  .nav-group {
-    display: contents;
-  }
-  /* The head keeps its own row inside the strip: name on the left, the two
-     ambient buttons after it. `flex: none` because a shrinking item would
-     ellipsize the name to make room for the nav rows. */
   .sidebar-head {
-    flex: none;
+    flex: 1;
+    min-width: 0;
+    padding-left: 0;
   }
-  .nav-group-head {
+  .sidebar-head-actions {
+    margin-right: 0;
+  }
+  .sidebar-head .icon-btn {
+    width: 34px;
+    height: 34px;
+  }
+  .mobile-menu-btn {
+    display: inline-grid;
+    place-items: center;
+  }
+  .sidebar-panel {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    left: 0;
     display: none;
+    flex-direction: column;
+    gap: var(--sp-2);
+    max-height: calc(100dvh - 52px);
+    padding: var(--sp-3);
+    overflow-y: auto;
+    background: var(--bg-chrome);
+    border-bottom: 1px solid var(--border);
+    box-shadow: var(--shadow-lg);
   }
-  .nav-item {
-    width: auto;
-    white-space: nowrap;
+  .sidebar.mobile-open .sidebar-panel {
+    display: flex;
   }
-  /* The top bar is a row of destinations; the quick block dissolves so 新对话
-     and 工作空间 ride along as two more pills rather than a stacked block. */
   .nav-quick {
-    display: contents;
-  }
-  .nav-new-chat {
-    width: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
     margin-bottom: 0;
   }
-  .sidebar-node {
-    display: none;
+  .primary-nav {
+    display: flex;
+    flex: none;
+    flex-direction: column;
+    gap: 2px;
+    min-height: 0;
+    overflow: visible;
+  }
+  .nav-group {
+    margin-top: var(--sp-2);
+  }
+  .nav-item {
+    width: 100%;
+    white-space: normal;
+  }
+  .nav-new-chat {
+    width: 100%;
+    margin-bottom: 0;
   }
   .sidebar-footer {
-    flex-direction: row;
-    border-top: 0;
-    padding-top: 0;
+    flex-direction: column;
+    gap: 2px;
+    padding-top: var(--sp-2);
+    border-top: 1px solid var(--border-soft);
+  }
+  .sidebar-node {
+    display: flex;
   }
   .main {
     padding: var(--sp-4);

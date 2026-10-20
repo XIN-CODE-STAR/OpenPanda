@@ -93,13 +93,28 @@ func (w *Worktrees) EnsureFrom(ctx context.Context, id, base string) (string, er
 	if base == "" {
 		base = "HEAD"
 	}
-	cmd := executil.CommandContext(ctx, "git", "-C", w.repo, "worktree", "add", "-b", Branch(id), path, base)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		// The branch may already exist from an earlier session run — attach a
-		// worktree to it instead of failing.
-		retry := executil.CommandContext(ctx, "git", "-C", w.repo, "worktree", "add", path, Branch(id))
-		if out2, err2 := retry.CombinedOutput(); err2 != nil {
-			return "", fmt.Errorf("sessions: git worktree add: %v / %s / %v", err, strings.TrimSpace(string(out)), wrapErr(err2, out2))
+	// add is one creation attempt: branch-new first, then attach to a branch
+	// an earlier session run may already have created.
+	add := func() error {
+		cmd := executil.CommandContext(ctx, "git", "-C", w.repo, "worktree", "add", "-b", Branch(id), path, base)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			retry := executil.CommandContext(ctx, "git", "-C", w.repo, "worktree", "add", path, Branch(id))
+			if out2, err2 := retry.CombinedOutput(); err2 != nil {
+				return fmt.Errorf("sessions: git worktree add: %v / %s / %v", err, strings.TrimSpace(string(out)), wrapErr(err2, out2))
+			}
+		}
+		return nil
+	}
+	if err := add(); err != nil {
+		// A crashed earlier attempt can leave a .git/worktrees/<id>
+		// registration whose directory is half-deleted, or a residue dir git
+		// refuses to adopt — reaching here means path/.git is gone, so what
+		// is left is debris, not a live worktree: drop it, prune the stale
+		// registration, and retry once.
+		_ = os.RemoveAll(path)
+		_ = executil.CommandContext(ctx, "git", "-C", w.repo, "worktree", "prune").Run()
+		if err2 := add(); err2 != nil {
+			return "", err2
 		}
 	}
 	return path, nil
