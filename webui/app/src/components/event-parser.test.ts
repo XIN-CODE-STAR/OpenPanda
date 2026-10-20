@@ -237,4 +237,23 @@ describe('buildRows pipeline grouping', () => {
     const r = rows[0]
     if (r?.kind === 'event') assert.ok(!r.formatted.quiet)
   })
+
+  it('folds a retry storm into one counted row, keeping the newest note', () => {
+    const events = [
+      { ts: 1, type: 'progress', data: '{"note":"Claude: API retry 1 (429)…"}' },
+      { ts: 2, type: 'progress', data: '{"note":"Claude: API retry 2 (429)…"}' },
+      { ts: 3, type: 'progress', data: '{"note":"Claude: API retry 3 (429)…"}' },
+    ]
+    const rows = buildRows(events as never)
+    assert.equal(rows.length, 1)
+    const row = rows[0]
+    assert.equal(row?.kind, 'event')
+    if (row?.kind === 'event') {
+      assert.equal(row.count, 3)
+      assert.match(row.formatted.summary ?? '', /retry 3/)
+      // A folded row is still an ordinary row: it keeps its badge and its raw
+      // payload, unlike the thin quiet lines.
+      assert.ok(!row.formatted.quiet)
+    }
+  })
 })
