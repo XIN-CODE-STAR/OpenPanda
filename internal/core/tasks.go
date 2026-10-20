@@ -336,7 +336,7 @@ func (s *TaskStore) transition(ctx context.Context, taskID, from, to, owner, eve
 // transitionToReview is transition with an explicit review disposition. Every
 // new transition into review must provide one; an empty value remains reserved
 // for legacy rows that predate the typed review protocol.
-func (s *TaskStore) transitionToReview(ctx context.Context, taskID, from, to, owner, event string, data any, disposition ApprovalDisposition) error {
+func (s *TaskStore) transitionToReview(ctx context.Context, taskID, from, to, owner, event string, data any, disposition ApprovalDisposition, expectAttempt ...string) error {
 	cur, err := s.Get(ctx, taskID)
 	if err != nil {
 		return err
@@ -350,14 +350,21 @@ func (s *TaskStore) transitionToReview(ctx context.Context, taskID, from, to, ow
 	if !CanTransition(from, to) {
 		return fmt.Errorf("%w: %s -> %s", ErrIllegal, from, to)
 	}
+	attemptID := cur.AttemptID
+	if len(expectAttempt) > 0 && expectAttempt[0] != "" {
+		if cur.AttemptID != expectAttempt[0] {
+			return fmt.Errorf("%w: task %s attempt superseded (%s -> %s)", ErrConflict, taskID, expectAttempt[0], cur.AttemptID)
+		}
+		attemptID = expectAttempt[0]
+	}
 	if to == StateReview {
 		if !validApprovalDisposition(disposition) {
 			return fmt.Errorf("invalid approval disposition %q", disposition)
 		}
-		if err := s.applyReviewCAS(ctx, taskID, from, owner, cur.AttemptID, event, data, nil, disposition); err != nil {
+		if err := s.applyReviewCAS(ctx, taskID, from, owner, attemptID, event, data, nil, disposition); err != nil {
 			return err
 		}
-	} else if err := s.applyCAS(ctx, taskID, from, to, owner, cur.AttemptID, event, data, nil); err != nil {
+	} else if err := s.applyCAS(ctx, taskID, from, to, owner, attemptID, event, data, nil); err != nil {
 		return err
 	}
 	s.logger.Debug("task transition", "task", taskID, "from", from, "to", to, "owner", owner)
@@ -527,6 +534,15 @@ func (s *TaskStore) applyTransition(ctx context.Context, taskID, from, to, owner
 			query += " AND owner_node=?"
 			args = append(args, owner)
 		}
+		// Attempt fencing (lease-reroute split-brain): every caller passes the
+		// CURRENT attempt, so requiring it here closes the Get→UPDATE gap —
+		// without it, a lease-expired task's killed runner could defer-fail
+		// the row after a requeue already rotated attempt_id and a fresh run
+		// re-entered the same state under the new attempt.
+		if attemptID != "" {
+			query += " AND attempt_id=?"
+			args = append(args, attemptID)
+		}
 		res, err := tx.ExecContext(ctx, query, args...)
 		if err != nil {
 			return fmt.Errorf("update task state: %w", err)
@@ -585,6 +601,10 @@ func (s *TaskStore) applyReview(ctx context.Context, taskID, from, owner, attemp
 		if checkOwner {
 			query += " AND owner_node=?"
 			args = append(args, owner)
+		}
+		if attemptID != "" {
+			query += " AND attempt_id=?"
+			args = append(args, attemptID)
 		}
 		res, err := tx.ExecContext(ctx, query, args...)
 		if err != nil {
@@ -836,7 +856,7 @@ func (s *TaskStore) QueuedDelegatedRemotely(ctx context.Context, self string) ([
 // concurrent cancel/timeout between the pre-check and the write could be
 // overwritten, resurrecting a closed task. The wire handler additionally
 // authenticates the sender against the recorded dispatch target.
-func (s *TaskStore) Accept(ctx context.Context, taskID, owner string) error {
+func (s *TaskStore) Accept(ctx context.Context, taskID, owner string, expectAttempt ...string) error {
 	cur, err := s.Get(ctx, taskID)
 	if err != nil {
 		return err
@@ -844,13 +864,31 @@ func (s *TaskStore) Accept(ctx context.Context, taskID, owner string) error {
 	if cur.State != StateDispatched {
 		return fmt.Errorf("%w: task %s state=%s, want %s", ErrConflict, taskID, cur.State, StateDispatched)
 	}
+	// A wire accept pins the dispensation it claims: a stale accept for an
+	// attempt the row already rotated past must not mark the fresh
+	// dispensation running — the executor it names is running OLD work.
+	exp := ""
+	if len(expectAttempt) > 0 {
+		exp = expectAttempt[0]
+	}
+	if exp != "" && cur.AttemptID != exp {
+		return fmt.Errorf("%w: task %s attempt=%s, want %s", ErrConflict, taskID, cur.AttemptID, exp)
+	}
 	// Acceptance is the moment the lease transfers from the delegator to the
-	// executor. The state guard ensures a concurrent cancel/expire wins.
+	// executor. The state guard ensures a concurrent cancel/expire wins; the
+	// optional attempt predicate closes the read-then-write window for a
+	// re-route that landed between the two.
+	where := "task_id=? AND state=?"
+	args := []any{taskID, StateDispatched}
+	if exp != "" {
+		where += " AND attempt_id=?"
+		args = append(args, exp)
+	}
 	return s.withTx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, `
-			UPDATE tasks SET state=?, owner_node=?, state_version=state_version+1, updated_at=?
-			WHERE task_id=? AND state=?`,
-			StateRunning, owner, s.now(), taskID, StateDispatched)
+		execArgs := append([]any{StateRunning, owner, s.now()}, args...)
+		res, err := tx.ExecContext(ctx,
+			`UPDATE tasks SET state=?, owner_node=?, state_version=state_version+1, updated_at=? WHERE `+where,
+			execArgs...)
 		if err != nil {
 			return fmt.Errorf("accept task: %w", err)
 		}
@@ -867,7 +905,7 @@ func (s *TaskStore) Accept(ctx context.Context, taskID, owner string) error {
 // by is the declining executor (the wire sender): while the task is
 // dispatched the stored owner is still the delegator, so the decliner must be
 // passed explicitly — the re-router (P1-5) excludes it from future candidacy.
-func (s *TaskStore) Decline(ctx context.Context, taskID, parent, reason, code, by string) error {
+func (s *TaskStore) Decline(ctx context.Context, taskID, parent, reason, code, by string, expectAttempt ...string) error {
 	cur, err := s.Get(ctx, taskID)
 	if err != nil {
 		return err
@@ -875,14 +913,31 @@ func (s *TaskStore) Decline(ctx context.Context, taskID, parent, reason, code, b
 	if cur.State != StateDispatched {
 		return fmt.Errorf("%w: task %s state=%s, want %s", ErrConflict, taskID, cur.State, StateDispatched)
 	}
+	// A caller that pins the decline to a dispensation (the wire's attempt_id)
+	// must see that attempt still standing — a row rotated between the fence
+	// check and this write belongs to the newer dispensation.
+	exp := ""
+	if len(expectAttempt) > 0 {
+		exp = expectAttempt[0]
+	}
+	if exp != "" && cur.AttemptID != exp {
+		return fmt.Errorf("%w: task %s attempt=%s, want %s", ErrConflict, taskID, cur.AttemptID, exp)
+	}
 	// Guarded UPDATE because the lease changes hands (executor -> parent): the
-	// state/owner guard ensures a concurrent accept/decline cannot both win.
+	// state/owner guard ensures a concurrent accept/decline cannot both win,
+	// and the optional attempt predicate closes the read-then-write window.
 	dataJSON, _ := json.Marshal(map[string]any{"reason": reason, "by": by, "code": code})
+	where := "task_id=? AND state=? AND owner_node=?"
+	args := []any{taskID, StateDispatched, cur.OwnerNode}
+	if exp != "" {
+		where += " AND attempt_id=?"
+		args = append(args, exp)
+	}
 	return s.withTx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, `
-			UPDATE tasks SET state=?, owner_node=?, state_version=state_version+1, updated_at=?
-			WHERE task_id=? AND state=? AND owner_node=?`,
-			StateQueued, parent, s.now(), taskID, StateDispatched, cur.OwnerNode)
+		execArgs := append([]any{StateQueued, parent, s.now()}, args...)
+		res, err := tx.ExecContext(ctx,
+			`UPDATE tasks SET state=?, owner_node=?, state_version=state_version+1, updated_at=? WHERE `+where,
+			execArgs...)
 		if err != nil {
 			return fmt.Errorf("decline task: %w", err)
 		}
@@ -918,6 +973,25 @@ func (s *TaskStore) Complete(ctx context.Context, taskID, owner string, result a
 	return s.applyCAS(ctx, taskID, StateRunning, StateDone, owner, cur.AttemptID, EvResult, result, result)
 }
 
+// CompleteAttempt is Complete scoped to one attempt — the split-brain fence
+// for runner-side verdicts. A runner whose row was rotated (lease-expiry
+// reroute -> requeue -> re-run) still holds its old attempt id; without the
+// check its deferred Complete would read state=running on the FRESH attempt's
+// row and stamp the stale run's result onto work it no longer owns.
+func (s *TaskStore) CompleteAttempt(ctx context.Context, taskID, owner, attemptID string, result any) error {
+	cur, err := s.Get(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if cur.State != StateRunning {
+		return fmt.Errorf("%w: task %s state=%s, want %s", ErrConflict, taskID, cur.State, StateRunning)
+	}
+	if cur.AttemptID != attemptID {
+		return fmt.Errorf("%w: task %s attempt superseded (%s -> %s)", ErrConflict, taskID, attemptID, cur.AttemptID)
+	}
+	return s.applyCAS(ctx, taskID, StateRunning, StateDone, owner, attemptID, EvResult, result, result)
+}
+
 // reviewProtected reports whether a parked review row must ignore a late
 // remote verdict. An accept-work park holds a human verdict on FINISHED
 // output — a wire result arriving while that verdict is pending must not
@@ -936,7 +1010,7 @@ func reviewProtected(t Task) bool {
 // running — or parked in a consent/question review, which the remote verdict
 // resolves. An accept-work review stays protected (reviewProtected), and the
 // owner is moved to the delegator (who holds the parent-side lease).
-func (s *TaskStore) CompleteFromRemote(ctx context.Context, taskID, owner string, result any) error {
+func (s *TaskStore) CompleteFromRemote(ctx context.Context, taskID, owner string, result any, wireAttempt ...string) error {
 	cur, err := s.Get(ctx, taskID)
 	if err != nil {
 		return err
@@ -947,7 +1021,14 @@ func (s *TaskStore) CompleteFromRemote(ctx context.Context, taskID, owner string
 	if reviewProtected(cur) {
 		return nil // accept-work verdict still pending; a wire result must not close it
 	}
-	if err := s.applyState(ctx, taskID, cur.State, StateDone, owner, cur.AttemptID, EvResult, result, result); err != nil {
+	// The CAS attempt is the one the wire reported, not a reflexive re-read:
+	// a rotation landing between Get and UPDATE is caught, not silently
+	// adopted into the guard.
+	attemptID := cur.AttemptID
+	if len(wireAttempt) > 0 && wireAttempt[0] != "" {
+		attemptID = wireAttempt[0]
+	}
+	if err := s.applyState(ctx, taskID, cur.State, StateDone, owner, attemptID, EvResult, result, result); err != nil {
 		if errors.Is(err, ErrConflict) {
 			return nil // a concurrent transition closed it first; keep that outcome
 		}
@@ -962,7 +1043,7 @@ func (s *TaskStore) CompleteFromRemote(ctx context.Context, taskID, owner string
 // a remote result may arrive while the delegator's copy is submitted, queued,
 // dispatched, or running. The state is still guarded so a concurrent terminal
 // transition wins and cannot be overwritten by a late result.
-func (s *TaskStore) ReviewFromRemote(ctx context.Context, taskID, owner string, result any, disposition ApprovalDisposition) error {
+func (s *TaskStore) ReviewFromRemote(ctx context.Context, taskID, owner string, result any, disposition ApprovalDisposition, wireAttempt ...string) error {
 	cur, err := s.Get(ctx, taskID)
 	if err != nil {
 		return err
@@ -985,7 +1066,11 @@ func (s *TaskStore) ReviewFromRemote(ctx context.Context, taskID, owner string, 
 			disposition = ApprovalResumeExecution
 		}
 	}
-	if err := s.applyReviewState(ctx, taskID, cur.State, owner, cur.AttemptID, EvReview, result, result, disposition); err != nil {
+	attemptID := cur.AttemptID
+	if len(wireAttempt) > 0 && wireAttempt[0] != "" {
+		attemptID = wireAttempt[0]
+	}
+	if err := s.applyReviewState(ctx, taskID, cur.State, owner, attemptID, EvReview, result, result, disposition); err != nil {
 		if errors.Is(err, ErrConflict) {
 			return nil
 		}
@@ -1032,6 +1117,28 @@ func (s *TaskStore) Fail(ctx context.Context, taskID, owner, reason string) erro
 		map[string]any{"failed": reason})
 }
 
+// FailAttempt is Fail scoped to one attempt — see CompleteAttempt. Runner
+// verdict paths use it so a superseded attempt's late write returns
+// ErrConflict instead of failing the fresh attempt's live row.
+func (s *TaskStore) FailAttempt(ctx context.Context, taskID, owner, attemptID, reason string) error {
+	cur, err := s.Get(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	var from string
+	switch cur.State {
+	case StateRunning, StateDispatched, StateWaitingCtx, StateReview:
+		from = cur.State
+	default:
+		return fmt.Errorf("%w: cannot fail from %s", ErrIllegal, cur.State)
+	}
+	if cur.AttemptID != attemptID {
+		return fmt.Errorf("%w: task %s attempt superseded (%s -> %s)", ErrConflict, taskID, attemptID, cur.AttemptID)
+	}
+	return s.applyCAS(ctx, taskID, from, StateFailed, owner, attemptID, EvResult,
+		map[string]any{"failed": reason}, nil)
+}
+
 // RequeueForRetry is the atomic form of the retry loop's three-step move
 // (RotateAttempt -> Requeue -> Dispatch to self): mint a fresh attempt_id, move
 // the task failed -> dispatched, and append both the EvRetry and EvDelegate
@@ -1041,7 +1148,7 @@ func (s *TaskStore) Fail(ctx context.Context, taskID, owner, reason string) erro
 // distinguish from a completed one. The state+owner guard keeps the same
 // exactly-once semantics as the separate calls; on conflict nothing is written.
 // Returns the new attempt id.
-func (s *TaskStore) RequeueForRetry(ctx context.Context, taskID, owner string, checkpoint bool) (string, error) {
+func (s *TaskStore) RequeueForRetry(ctx context.Context, taskID, owner string, checkpoint bool, expectAttempt ...string) (string, error) {
 	aid, err := util.UUIDv7()
 	if err != nil {
 		return "", fmt.Errorf("uuid: %w", err)
@@ -1053,11 +1160,23 @@ func (s *TaskStore) RequeueForRetry(ctx context.Context, taskID, owner string, c
 	if checkpoint {
 		retryData = map[string]any{"checkpoint": true}
 	}
+	exp := ""
+	if len(expectAttempt) > 0 {
+		exp = expectAttempt[0]
+	}
 	if err := s.withTx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, `
+		query := `
 			UPDATE tasks SET state=?, attempt_id=?, state_version=state_version+1, updated_at=?
-			WHERE task_id=? AND state=? AND owner_node=?`,
-			StateDispatched, aid, s.now(), taskID, StateFailed, owner)
+			WHERE task_id=? AND state=? AND owner_node=?`
+		args := []any{StateDispatched, aid, s.now(), taskID, StateFailed, owner}
+		if exp != "" {
+			// The retry loop's read-check can stale between verdict and
+			// requeue: a concurrent rotation (lease settle, adopt) then
+			// would have us rotating someone else's failed attempt.
+			query += ` AND attempt_id=?`
+			args = append(args, exp)
+		}
+		res, err := tx.ExecContext(ctx, query, args...)
 		if err != nil {
 			return fmt.Errorf("requeue for retry: %w", err)
 		}
@@ -1086,6 +1205,18 @@ func (s *TaskStore) ReviewWithDisposition(ctx context.Context, taskID, owner, re
 		map[string]any{"reason": reason}, disposition)
 }
 
+// ReviewWithDispositionAttempt is ReviewWithDisposition scoped to one attempt:
+// the run loop's verdict paths carry the runner's captured attempt_id so a
+// superseded run parks nothing on the fresh attempt's row.
+func (s *TaskStore) ReviewWithDispositionAttempt(ctx context.Context, taskID, owner, attemptID, reason string, disposition ApprovalDisposition) error {
+	return s.transitionToReview(ctx, taskID, StateFailed, StateReview, owner, EvReview,
+		map[string]any{"reason": reason}, disposition, attemptID)
+}
+
+func (s *TaskStore) ReviewAttempt(ctx context.Context, taskID, owner, attemptID, reason string) error {
+	return s.ReviewWithDispositionAttempt(ctx, taskID, owner, attemptID, reason, ApprovalNeedsChangedInput)
+}
+
 // Pause transitions a running task to review, pausing it for human analysis
 // after a deterministic intercept such as scope drift (design §14.2 "拦截 →
 // 暂停 → 分析"). It is the running-state counterpart of Review (which pauses a
@@ -1098,6 +1229,17 @@ func (s *TaskStore) Pause(ctx context.Context, taskID, owner, reason string) err
 func (s *TaskStore) PauseWithDisposition(ctx context.Context, taskID, owner, reason string, disposition ApprovalDisposition) error {
 	return s.transitionToReview(ctx, taskID, StateRunning, StateReview, owner, EvReview,
 		map[string]any{"reason": reason}, disposition)
+}
+
+// PauseWithDispositionAttempt is PauseWithDisposition scoped to one attempt —
+// see ReviewWithDispositionAttempt.
+func (s *TaskStore) PauseWithDispositionAttempt(ctx context.Context, taskID, owner, attemptID, reason string, disposition ApprovalDisposition) error {
+	return s.transitionToReview(ctx, taskID, StateRunning, StateReview, owner, EvReview,
+		map[string]any{"reason": reason}, disposition, attemptID)
+}
+
+func (s *TaskStore) PauseAttempt(ctx context.Context, taskID, owner, attemptID, reason string) error {
+	return s.PauseWithDispositionAttempt(ctx, taskID, owner, attemptID, reason, ApprovalNeedsChangedInput)
 }
 
 // PauseWithResult transitions a running task to review while preserving the
@@ -1134,7 +1276,24 @@ func (s *TaskStore) PauseForAnswer(ctx context.Context, taskID, owner string, re
 	return s.pauseWithResultDisposition(ctx, taskID, owner, result, ApprovalResumeExecution, "awaiting approval")
 }
 
-func (s *TaskStore) pauseWithResultDisposition(ctx context.Context, taskID, owner string, result any, disposition ApprovalDisposition, reason string) error {
+// Attempt-scoped runner variants — see CompleteAttempt.
+func (s *TaskStore) PauseWithResultAttempt(ctx context.Context, taskID, owner, attemptID string, result any) error {
+	return s.pauseWithResultDisposition(ctx, taskID, owner, result, ApprovalAcceptWork, "awaiting approval", attemptID)
+}
+
+func (s *TaskStore) PauseDriftAttempt(ctx context.Context, taskID, owner, attemptID, reason string, files []string) error {
+	result := map[string]any{"drift": true, "ok": true, "stderr": reason}
+	if len(files) > 0 {
+		result["files_changed"] = files
+	}
+	return s.pauseWithResultDisposition(ctx, taskID, owner, result, ApprovalAcceptWork, reason, attemptID)
+}
+
+func (s *TaskStore) PauseForAnswerAttempt(ctx context.Context, taskID, owner, attemptID string, result any) error {
+	return s.pauseWithResultDisposition(ctx, taskID, owner, result, ApprovalResumeExecution, "awaiting approval", attemptID)
+}
+
+func (s *TaskStore) pauseWithResultDisposition(ctx context.Context, taskID, owner string, result any, disposition ApprovalDisposition, reason string, expectAttempt ...string) error {
 	cur, err := s.Get(ctx, taskID)
 	if err != nil {
 		return err
@@ -1142,7 +1301,14 @@ func (s *TaskStore) pauseWithResultDisposition(ctx context.Context, taskID, owne
 	if cur.State != StateRunning {
 		return fmt.Errorf("%w: task %s state=%s, want %s", ErrConflict, taskID, cur.State, StateRunning)
 	}
-	if err := s.applyReviewCAS(ctx, taskID, StateRunning, owner, cur.AttemptID, EvReview,
+	attemptID := cur.AttemptID
+	if len(expectAttempt) > 0 && expectAttempt[0] != "" {
+		if cur.AttemptID != expectAttempt[0] {
+			return fmt.Errorf("%w: task %s attempt superseded (%s -> %s)", ErrConflict, taskID, expectAttempt[0], cur.AttemptID)
+		}
+		attemptID = expectAttempt[0]
+	}
+	if err := s.applyReviewCAS(ctx, taskID, StateRunning, owner, attemptID, EvReview,
 		map[string]any{"reason": reason}, result, disposition); err != nil {
 		return err
 	}
@@ -1428,7 +1594,7 @@ func (s *TaskStore) failureWasRejected(ctx context.Context, taskID string) bool 
 // Mirrors CompleteFromRemote — including the same review rule: an accept-work
 // park keeps its pending human verdict, while a consent/question park
 // converges on the executor's actual outcome.
-func (s *TaskStore) FailFromRemote(ctx context.Context, taskID, owner, reason string) error {
+func (s *TaskStore) FailFromRemote(ctx context.Context, taskID, owner, reason string, wireAttempt ...string) error {
 	cur, err := s.Get(ctx, taskID)
 	if err != nil {
 		return err
@@ -1439,7 +1605,11 @@ func (s *TaskStore) FailFromRemote(ctx context.Context, taskID, owner, reason st
 	if reviewProtected(cur) {
 		return nil
 	}
-	if err := s.applyState(ctx, taskID, cur.State, StateFailed, owner, cur.AttemptID, EvResult,
+	attemptID := cur.AttemptID
+	if len(wireAttempt) > 0 && wireAttempt[0] != "" {
+		attemptID = wireAttempt[0]
+	}
+	if err := s.applyState(ctx, taskID, cur.State, StateFailed, owner, attemptID, EvResult,
 		map[string]any{"failed": reason}, map[string]any{"failed": reason}); err != nil {
 		if errors.Is(err, ErrConflict) {
 			return nil // a concurrent transition closed it first; keep that outcome
@@ -1476,14 +1646,22 @@ func (s *TaskStore) CreateFromRemote(ctx context.Context, taskID, title, owner s
 // AdoptAttempt stamps taskID with an attempt_id minted upstream. A delegated
 // task carries its attempt along the chain so every node's copy reports the
 // same attempt; downstream nodes adopt it instead of minting their own.
-func (s *TaskStore) AdoptAttempt(ctx context.Context, taskID, attemptID string) error {
+// The write is fenced on expectAttempt: the blind UPDATE it replaces could
+// overwrite a rotation that landed between the caller's read and its write —
+// a lease-rerouted row back in queue would silently wear the wire-reported
+// (older) attempt over the fresh one and then authenticate stale results.
+func (s *TaskStore) AdoptAttempt(ctx context.Context, taskID, expectAttempt, attemptID string) error {
 	if attemptID == "" {
 		return nil
 	}
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE tasks SET attempt_id=? WHERE task_id=?`, attemptID, taskID)
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE tasks SET attempt_id=? WHERE task_id=? AND attempt_id=?`,
+		attemptID, taskID, expectAttempt)
 	if err != nil {
 		return fmt.Errorf("adopt attempt: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("%w: task %s attempt moved past %s", ErrConflict, taskID, expectAttempt)
 	}
 	return nil
 }
@@ -1493,12 +1671,24 @@ func (s *TaskStore) AdoptAttempt(ctx context.Context, taskID, attemptID string) 
 // non-positive duration is a no-op. The duration is rounded up to a whole
 // second so a sub-second lease does not collapse to zero and expire instantly.
 func (s *TaskStore) SetLease(ctx context.Context, taskID string, durationMS int64) error {
+	return s.SetLeaseAttempt(ctx, taskID, durationMS, "")
+}
+
+// SetLeaseAttempt is SetLease fenced on the row's attempt: a progress beat
+// from a superseded dispensation — the gate checked attempt, but a rotation
+// landed before this write — must not extend the fresh attempt's lease and
+// keep a dead run alive for another lease period.
+func (s *TaskStore) SetLeaseAttempt(ctx context.Context, taskID string, durationMS int64, attemptID string) error {
 	if durationMS <= 0 {
 		return nil
 	}
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE tasks SET lease_expires_at=?, updated_at=? WHERE task_id=?`,
-		s.now()+(durationMS+999)/1000, s.now(), taskID)
+	query := `UPDATE tasks SET lease_expires_at=?, updated_at=? WHERE task_id=?`
+	args := []any{s.now() + (durationMS+999)/1000, s.now(), taskID}
+	if attemptID != "" {
+		query += ` AND attempt_id=?`
+		args = append(args, attemptID)
+	}
+	_, err := s.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("set lease: %w", err)
 	}
@@ -2032,6 +2222,10 @@ type ExpiredRow struct {
 	TaskID string
 	State  string
 	Owner  string
+	// AttemptID is the dispensation whose lease lapsed — the settle-time
+	// downstream cancel carries it so a copy already superseded by a newer
+	// delegation survives the kill order.
+	AttemptID string
 	// Deadline marks an absolute-lifetime expiry (§8.2 DTN bound): those
 	// settle terminally regardless of retry budget — the bundle outlived
 	// its lifetime and re-running cannot extend it.
@@ -2054,14 +2248,19 @@ const (
 // from under the reviewer (P1-8).
 func (s *TaskStore) ScanExpired(ctx context.Context) ([]ExpiredRow, error) {
 	now := s.now()
+	// A row whose lease AND deadline both lapsed appears twice — once per
+	// arm. Deadline rows sort first so the absolute bound always settles
+	// before the recoverable lease path can re-queue the task past its own
+	// lifetime; the surviving lease entry then skips on the moved state.
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT task_id, state, owner_node, 0 FROM tasks
+		`SELECT task_id, state, owner_node, attempt_id, 0 AS is_deadline FROM tasks
 		 WHERE lease_expires_at > 0 AND lease_expires_at < ?
 		   AND state IN ('dispatched','waiting_context','running')
 		 UNION ALL
-		 SELECT task_id, state, owner_node, 1 FROM tasks
+		 SELECT task_id, state, owner_node, attempt_id, 1 FROM tasks
 		 WHERE deadline_unix > 0 AND deadline_unix < ?
-		   AND state IN ('submitted','queued','dispatched','waiting_context','running')`,
+		   AND state IN ('submitted','queued','dispatched','waiting_context','running')
+		 ORDER BY is_deadline DESC`,
 		now, now)
 	if err != nil {
 		return nil, fmt.Errorf("scan expired: %w", err)
@@ -2070,7 +2269,7 @@ func (s *TaskStore) ScanExpired(ctx context.Context) ([]ExpiredRow, error) {
 	for rows.Next() {
 		var r ExpiredRow
 		var deadline int
-		if err := rows.Scan(&r.TaskID, &r.State, &r.Owner, &deadline); err != nil {
+		if err := rows.Scan(&r.TaskID, &r.State, &r.Owner, &r.AttemptID, &deadline); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -2103,7 +2302,13 @@ func (s *TaskStore) SettleExpired(ctx context.Context, r ExpiredRow, selfNode st
 	if t.State != r.State || Terminal(t.State) {
 		return ExpirySkipped, nil // a concurrent transition moved it on
 	}
-	if r.Deadline {
+	// The deadline wins over the lease whenever it is past — a lease-only
+	// scan entry must not re-queue a task whose absolute lifetime already
+	// ran out, and a deadline stamped between scan and settle binds anyway.
+	// It is also task-scoped: the fresh row's own column is re-evaluated, so
+	// an attempt that rotated after the scan still dies when its time ran out.
+	deadline := r.Deadline || (t.DeadlineUnix > 0 && t.DeadlineUnix < s.now())
+	if deadline {
 		if r.State == StateRunning {
 			if err := s.ForceFail(ctx, r.TaskID, "deadline exceeded"); err != nil {
 				return ExpirySkipped, err
@@ -2112,6 +2317,14 @@ func (s *TaskStore) SettleExpired(ctx context.Context, r ExpiredRow, selfNode st
 			return ExpirySkipped, err
 		}
 		return ExpiryFailed, nil
+	}
+	// The lease evidence, by contrast, is dispensation-scoped: it convicts
+	// the scanned attempt only. A row that rotated between scan and settle
+	// holds a fresh custody whose own lease is alive — re-queueing or
+	// failing it on A's verdict would kill a run we never proved dead; its
+	// own scan row will judge it.
+	if r.AttemptID != "" && t.AttemptID != r.AttemptID {
+		return ExpirySkipped, nil
 	}
 	hard, herr := s.HardRetries(ctx, r.TaskID)
 	if herr != nil {
@@ -2128,8 +2341,9 @@ func (s *TaskStore) SettleExpired(ctx context.Context, r ExpiredRow, selfNode st
 		return ExpiryRerouted, nil
 	}
 	// The monitor acts on behalf of the lease holder regardless of the stored
-	// owner (a crashed process may no longer hold it).
-	if err := s.ForceFail(ctx, r.TaskID, s.leaseExpiredReason(ctx, r.TaskID)); err != nil {
+	// owner (a crashed process may no longer hold it). The verdict still binds
+	// the scanned attempt — a row rotated in the Get→fail gap is fresh custody.
+	if err := s.ForceFailAttempt(ctx, r.TaskID, r.AttemptID, s.leaseExpiredReason(ctx, r.TaskID)); err != nil {
 		return ExpirySkipped, err
 	}
 	s.logger.Info("task failed by timeout", "task", r.TaskID)
@@ -2294,10 +2508,22 @@ func (s *TaskStore) DeleteTerminal(ctx context.Context, taskID string) error {
 // not a failure of the work, it is the bundle's lifetime ending — the
 // distinction the 'expired' state exists to carry.
 func (s *TaskStore) MarkExpired(ctx context.Context, taskID, reason string) error {
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE tasks SET state='expired', lease_expires_at=NULL, updated_at=?
-		 WHERE task_id=? AND state NOT IN ('done','failed','cancelled','expired')`,
-		s.now(), taskID)
+	return s.MarkExpiredAttempt(ctx, taskID, "", reason)
+}
+
+// MarkExpiredAttempt is MarkExpired bound to one dispensation: a parked-custody
+// expiry (outbox TTL, a bundle that fails verification) convicts the attempt
+// that custody was taken on — a row that rotated since is a fresh custody the
+// stale verdict must not kill. An empty attempt degenerates to MarkExpired.
+func (s *TaskStore) MarkExpiredAttempt(ctx context.Context, taskID, attemptID, reason string) error {
+	q := `UPDATE tasks SET state='expired', lease_expires_at=NULL, updated_at=?
+		 WHERE task_id=? AND state NOT IN ('done','failed','cancelled','expired')`
+	args := []any{s.now(), taskID}
+	if attemptID != "" {
+		q += ` AND attempt_id=?`
+		args = append(args, attemptID)
+	}
+	res, err := s.db.ExecContext(ctx, q, args...)
 	if err != nil {
 		return err
 	}
@@ -2326,6 +2552,34 @@ func (s *TaskStore) ForceFail(ctx context.Context, taskID, reason string) error 
 		if errors.Is(err, ErrConflict) {
 			if after, gerr := s.Get(ctx, taskID); gerr == nil && Terminal(after.State) {
 				return nil // already closed concurrently; nothing to force
+			}
+		}
+		return err
+	}
+	return nil
+}
+
+// ForceFailAttempt is the dispensation-scoped form of ForceFail: the admin
+// verdict (a context fetch declined, an artifact push gone bad) stands down
+// only the attempt it was raised against. A row that rotated past that
+// attempt mid-wait keeps its fresh dispensation; an empty attemptID
+// degenerates to ordinary ForceFail semantics for pre-attempt rows.
+func (s *TaskStore) ForceFailAttempt(ctx context.Context, taskID, attemptID, reason string) error {
+	cur, err := s.Get(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if Terminal(cur.State) {
+		return nil
+	}
+	if attemptID != "" && cur.AttemptID != attemptID {
+		return nil // the dispensation this verdict belonged to is already gone
+	}
+	if err := s.applyCAS(ctx, taskID, cur.State, StateFailed, cur.OwnerNode, cur.AttemptID, EvResult,
+		map[string]any{"failed": reason}, map[string]any{"failed": reason}); err != nil {
+		if errors.Is(err, ErrConflict) {
+			if after, gerr := s.Get(ctx, taskID); gerr == nil && Terminal(after.State) {
+				return nil
 			}
 		}
 		return err

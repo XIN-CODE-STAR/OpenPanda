@@ -40,6 +40,17 @@ OpenPanda（**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **
 
 ## [Unreleased]
 
+### Fixed
+
+- **执行方租约过期的委派任务改为重路由而非死路** —— 派发任务的执行方租约失效过去直接判死；现在行携新 attempt 回到队列，被逐出的执行方从候选中排除，而没有可替代路由时，重投递会泊进 `task_outbox` 等该节点复活，而不是伪造终态裁决。绝对死线仍优先于重试预算：越过 `deadline_unix` 的行无论剩多少重试都按过期结算，pin 住的任务也绝不会被悄悄改投替身（bf34652）。
+- **所有线上裁决按 dispensation attempt 上栅栏** —— `task_accept`/`task_decline`/`task_cancel`/`task_resume`/`task_result` 端到端携带 `attempt_id`：严格旧于行内当前 dispensation 的帧是委派方自己已取代的旧派遣的迟到回声，一律丢弃（过去一个 accept 能认领、decline 能弹回、dispensation-cancel 能杀死新 attempt）。人工取消保持树级语义（`attempt_id` 为空，杀行所持有的任何东西），过期/顶替类停机令则点名自己的 attempt，停泊的 `cancel_outbox` 行跨重启保持其作用域（migration v55）。
+- **重复送达的 delegate 只能顶替发送方真正在上游持有过的副本** —— 顶替帧现在要求发送方出现在存储行链路中本节点之前，堵住「任意 peer 造一个新 attempt id 就能抹掉（或复活）他人任务行」的洞。被顶替的活跃副本先经级联收尸——杀 runner、释放 context 预留、向下游转发停机令——而不是在新行底下被悄悄丢弃。
+- **搁浅与被顶替的 run 不能再把裁决写进已轮转的行** —— runner 侧的完成/失败/暂停/送审写全部带 attempt CAS（`CompleteAttempt`/`FailAttempt`/`Pause*`/`Review*`），retry loop 在行 attempt 越过自己时主动让位，搁浅清理也只碰本 run 自己认领的 running 行。
+- **托管过期与清扫类裁决只作用于它们判罪的那个 dispensation** —— 租约监控的过期结算现在会跳过在扫描与结算之间已轮转的行（失效的租约定罪的只是被扫到的那个 attempt；绝对死线则在最新行上重查，依然生效），停泊的 `task_outbox`/`resume_outbox` TTL 与 bundle 校验失败的过期只作用于托管建立时的 attempt（`MarkExpiredAttempt`），陈旧 context 拉取的拒绝/哈希不符/存储失败不再判死取代它的新 dispensation，孤儿清扫与派发错误的 `failLocal` 路径也都携带它们观察到的 attempt，而不是杀行后来持有的任何东西。
+- **存储转发托管在链路闪断间按正确顺序投递** —— 停泊的 cancel 先于停泊的 delegate flush（停机令永远赶在它所针对的重投递之前送达），人工树级取消绝不因新投递泊车而被清掉，task_outbox 行不再复活终态/失败的任务，重启的 daemon 按稳定身份而非崩溃前的实例号收回自己的停泊托管。
+- **委派 run 走统一的 settle 路径，回传包大幅瘦身** —— 执行侧三条执行路径的结果现在统一汇入 `settleDelegated`，checkpoint 续跑、预算内重试、向上游 decline 对委派任务与本地任务行为一致；context 续跑与工件续跑的 decline 盖泊车时的 attempt 而非行当前的；输出包跳过可再生目录（实测 389 MB 结果包缩到 84.6 MB）（f53ddcf）。
+- **重启恢复续跑幸存任务并指名阻塞者** —— 被打断的 run 续跑而非从零重启，agent 切换进度提前可见，项目键匹配折叠大小写，重启恢复不再回收 peer 执行的行，外节点 pin 的队列任务被正确解除，exec-lock 等待报告是谁占着车道，adapter 的畸形 JSON 加了守卫（e0c7bec、5044f4a）。
+
 ## [0.0.12-preview] - 2026-10-19
 
 v0.0.12 预览版——代号 **Constellation**（星座）：把整片机队画成一片天空。本版让同一项目的任务编队飞行——委派子任务与手动派发的任务借声明的路径作用域与隔离 worktree 并行落地，委派边界随转发逐跳收紧、不会被宽松的中继洗白——控制台同时收拢成指挥这片星座的唯一地点：队列、计划与项目合并为「总控」页，工作空间页把整片网络画成实时拓扑图、直接把任务发进选中的对话，个人资料页回答这台节点是谁、最近有多忙。给运行中的任务递话成为一等能力——排队一条便签、或扭转正在进行的一轮——预算耗尽停在复核的任务可以「继续」而不只是接受/拒绝，上下文溢出经自适应回放预算恢复，执行租约跨进程生效，模型目录整体换代并带上按模型的 token 策略——另有一轮加固把节点密钥挡在产物之外、用户数据收紧为仅所有者可读、被取消的 agent 不再比任务活得久。

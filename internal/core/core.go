@@ -1705,78 +1705,109 @@ func (c *Core) expireLeases(ctx context.Context) {
 	}
 	var failedN, reroutedN int
 	for _, r := range expired {
-		// Order matters: settle the row BEFORE killing the process. The
-		// run's deferred cleanup writes 'failed' while the row still says
-		// running — cancelling first would let that write land ahead of the
-		// settle and turn a recoverable lease expiry into a terminal failure.
-		// Settled first (queued under a fresh attempt, or closed), the
-		// dying runner's read sees the row moved on and its write no-ops.
-		//
-		// Snapshot the execution handle now so the post-settle cancel hits
-		// exactly the run that held the expired lease: the re-queued row
-		// may already be re-claimed and re-registered under a fresh attempt,
-		// and that new execution must survive.
-		snap, wasRunning := c.running.Load(r.TaskID)
+		switch c.settleExpired(ctx, r) {
+		case ExpiryRerouted:
+			reroutedN++
+		case ExpiryFailed:
+			failedN++
+		}
+	}
+	c.logger.Info("monitor expired tasks", "count", failedN+reroutedN, "failed", failedN, "rerouted", reroutedN)
+	if reroutedN > 0 && c.queueSched != nil {
+		// Re-queued rows are scheduled-ready now; without the nudge the
+		// idle-backoff poll (up to 2s) is the only thing that picks them up.
+		c.queueSched.Wake()
+	}
+}
+
+// settleExpired gives one scanned row its expiry verdict and cleans up
+// everything attached to the run it ends: the downstream cancel rides the
+// delegate target while it is still on the record, the row settles (re-queue
+// with a fresh attempt while budget lasts, terminal when spent or past the
+// deadline), and only then does the local process die — settling first means
+// the dying runner's deferred 'failed' write sees the row moved on and
+// no-ops instead of beating the re-queue to it.
+//
+// The process kill is handle-precise: the snapshot taken before settling can
+// cancel only the run that held the lapsed lease — a fresh attempt that
+// already re-registered under the same task id survives. A skipped settle is
+// the exception: the row moved under a concurrent transition, so the kill
+// only follows a verdict already closed (or the row deleted) — a row that
+// re-entered an active state on a fresh lease is a live run and is left
+// alone.
+func (c *Core) settleExpired(ctx context.Context, r ExpiredRow) string {
+	snap, wasRunning := c.running.Load(r.TaskID)
+	// Capture the lapsed attempt's dispatch target BEFORE settling: a settle
+	// re-queues and the re-dispatch rewrites the target record, so the
+	// executor holding the dead attempt is unfindable by the time its
+	// stand-down order would go out (review P1-4).
+	target, terr := c.store.DispatchTarget(ctx, r.TaskID)
+	if terr != nil {
+		c.logger.Debug("expire: dispatch target lookup", "task", r.TaskID, "err", terr)
+	}
+
+	outcome, err := c.store.SettleExpired(ctx, r, c.nodeID)
+	if err != nil {
+		c.logger.Warn("expire task", "task", r.TaskID, "err", err)
+		return ""
+	}
+	// Whether the scanned attempt is actually dead decides both cleanups
+	// below. A settled outcome says so outright; a skipped settle means a
+	// concurrent transition owns the row, so read it: a rotated attempt, a
+	// non-executing state, or a vanished row all leave the executor's copy
+	// a zombie that must stand down — but a row still AT the scanned
+	// attempt is live custody (its lease merely renewed against the scan)
+	// and a stand-down order there would kill a run we just agreed to keep.
+	tk, gerr := c.store.Get(ctx, r.TaskID)
+	attemptDead := outcome == ExpiryRerouted || outcome == ExpiryFailed ||
+		gerr != nil || !execAlive(tk.State) ||
+		(r.AttemptID != "" && tk.AttemptID != r.AttemptID)
+	if attemptDead {
+		// Without this the remote agent keeps burning tokens and writing
+		// files under a task this node has already replaced — work that the
+		// re-route would duplicate.
+		c.forwardCancelTo(ctx, target, r.TaskID, r.AttemptID, "lease expired")
+	}
+	if attemptDead {
 		// A task that timed out while paused in waiting_context would
 		// otherwise leak its entry in pendingCtx (P2-7) — and with the
-		// entry, the capacity reservation it carries.
-		c.dropPendingContext(r.TaskID)
-		// The lease expired on a task this node dispatched to a remote
-		// executor: tell that executor to stop (review P1-4). Without
-		// this the remote agent keeps burning tokens and writing files
-		// under a task this node has already replaced — work that the
-		// re-route would duplicate. This must ride the delegate target
-		// BEFORE SettleExpired clears it. forwardCancelDownstream no-ops
-		// when the task never left this node.
-		c.forwardCancelDownstream(ctx, r.TaskID, "lease expired")
-
-		outcome, err := c.store.SettleExpired(ctx, r, c.nodeID)
-		if err != nil {
-			c.logger.Warn("expire task", "task", r.TaskID, "err", err)
-			continue
-		}
-		// Kill the expired run's process — still writing files, still
-		// committing — now that the verdict it would have overwritten is
-		// durably settled. CompareAndDelete refuses if the slot was already
-		// released or re-registered: a stale handle never cancels the
-		// re-routed attempt that replaced it.
+		// entry, the capacity reservation it carries. The drop is
+		// attempt-scoped: a row that already rotated re-created its park
+		// under the fresh dispensation, and that entry is not ours to free.
+		c.dropPendingContextAttempt(r.TaskID, r.AttemptID)
 		if wasRunning {
 			if h, ok := snap.(*runningHandle); ok && c.running.CompareAndDelete(r.TaskID, snap) {
 				h.cancel()
 				c.logger.Info("aborted expired local execution", "task", r.TaskID)
 			}
 		}
-		if outcome == ExpiryRerouted {
-			reroutedN++
-			// The task lives on under a fresh attempt — tell the upstream
-			// copy so its own lapsed lease renews instead of cascading the
-			// same expiry one hop up. relayToParent no-ops for a root task.
-			if tk, err := c.store.Get(ctx, r.TaskID); err == nil {
-				note := "executor lease expired — re-queued for re-route"
-				if rerr := c.store.RecordEvent(ctx, r.TaskID, EvProgress,
-					map[string]any{"note": note}); rerr == nil {
-					c.relayToParent(ctx, bus.MsgTaskProgress, tk.Chain,
-						bus.TaskProgressPayload{TaskID: r.TaskID, AttemptID: tk.AttemptID, Note: note})
-				}
-			}
-			continue
-		}
-		if outcome != ExpiryFailed {
-			continue // ExpirySkipped: a concurrent transition owns it
-		}
-		failedN++
-		// Propagate the terminal verdict up the delegation chain so a root
-		// scheduler blocked in Submit unblocks (D3). relayToParent is
-		// a no-op for a root task; signalResult no-ops without a waiter.
+	}
+	switch outcome {
+	case ExpiryRerouted:
+		// The task lives on under a fresh attempt — tell the upstream copy
+		// so its own lapsed lease renews instead of cascading the same expiry
+		// one hop up. relayToParent no-ops for a root task.
 		if tk, err := c.store.Get(ctx, r.TaskID); err == nil {
-			// Report the state the row actually reached: a lease
-			// expiry is a failure, a deadline is 'expired' — the
-			// delegator renders them differently and only the row
-			// knows which sweep fired.
+			note := "executor lease expired — re-queued for re-route"
+			if rerr := c.store.RecordEvent(ctx, r.TaskID, EvProgress,
+				map[string]any{"note": note}); rerr == nil {
+				c.relayToParent(ctx, bus.MsgTaskProgress, tk.Chain,
+					bus.TaskProgressPayload{TaskID: r.TaskID, AttemptID: tk.AttemptID, Note: note})
+			}
+		}
+	case ExpiryFailed:
+		// Propagate the terminal verdict up the delegation chain so a root
+		// scheduler blocked in Submit unblocks (D3). relayToParent is a no-op
+		// for a root task; signalResult no-ops without a waiter.
+		if tk, err := c.store.Get(ctx, r.TaskID); err == nil {
+			// The wire state mirrors the row; the reason follows the expired
+			// arm, not the final state — a running row killed by its deadline
+			// lands on 'failed' but its verdict is still the deadline.
 			state, stderr := tk.State, "lease expired"
-			if state == StateExpired {
+			if state == StateExpired || r.Deadline {
 				stderr = "deadline exceeded"
-			} else {
+			}
+			if state != StateExpired {
 				state = StateFailed
 			}
 			res := bus.TaskResultPayload{
@@ -1788,7 +1819,7 @@ func (c *Core) expireLeases(ctx context.Context) {
 			c.reportLateChildResult(ctx, r.TaskID)
 		}
 	}
-	c.logger.Info("monitor expired tasks", "count", failedN+reroutedN, "failed", failedN, "rerouted", reroutedN)
+	return outcome
 }
 
 // reconcileLocalWork stops this process's own executions whose task rows left
@@ -1798,28 +1829,36 @@ func (c *Core) expireLeases(ctx context.Context) {
 // executing, the subprocess here is a zombie still burning tokens and writing
 // files under a verdict nobody will read.
 //
-// dispatched/waiting_context/running count as alive — the registerRunning
-// window spans dispatch through run — and a parked-context entry survives
-// while its row is dispatched or waiting_context; anything else means the
-// row moved on without this process.
-func (c *Core) reconcileLocalWork(ctx context.Context) {
-	alive := func(state string) bool {
-		switch state {
-		case StateDispatched, StateWaitingCtx, StateRunning:
-			return true
-		}
-		return false
+// execAlive reports whether the row's state means an execution can be live:
+// the registerRunning window spans dispatch through run, so dispatched and
+// waiting_context count alongside running. Anything else — queued, parked,
+// every closed verdict — means the row moved on without this process.
+func execAlive(state string) bool {
+	switch state {
+	case StateDispatched, StateWaitingCtx, StateRunning:
+		return true
 	}
-	c.running.Range(func(k, _ any) bool {
+	return false
+}
+
+func (c *Core) reconcileLocalWork(ctx context.Context) {
+	c.running.Range(func(k, v any) bool {
 		id, ok := k.(string)
 		if !ok {
 			return true
 		}
 		t, err := c.store.Get(ctx, id)
-		if err == nil && !alive(t.State) {
+		if err == nil && !execAlive(t.State) {
 			c.logger.Info("reconcile: stopping orphaned execution", "task", id, "state", t.State)
-			c.cancelRunning(id)
-			c.dropPendingContext(id)
+			// Compare-and-delete the ranged handle, not a blind cancelRunning:
+			// a rerouted row may have re-registered a fresh run between our
+			// Get and here — that run's verdict is not ours to take.
+			if c.running.CompareAndDelete(id, v) {
+				if h, ok := v.(*runningHandle); ok {
+					h.cancel()
+				}
+				c.dropPendingContext(id)
+			}
 		}
 		return true
 	})
@@ -1829,7 +1868,7 @@ func (c *Core) reconcileLocalWork(ctx context.Context) {
 			return true
 		}
 		t, err := c.store.Get(ctx, id)
-		if err == nil && !alive(t.State) {
+		if err == nil && !execAlive(t.State) {
 			c.dropPendingContext(id)
 		}
 		return true

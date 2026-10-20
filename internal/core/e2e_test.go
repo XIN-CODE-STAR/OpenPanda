@@ -146,6 +146,343 @@ func TestDelegateReplacesTerminalCopy(t *testing.T) {
 	}
 }
 
+// TestDelegateSupersedesLiveAttempt covers the other half of the re-route
+// landing case: the delegator rotated the attempt and its re-route landed on
+// a node whose copy is still ACTIVE (running/queued/review) — the stand-down
+// cancel the delegator sent first can be lost in a dying socket, so the
+// delegate itself carries the order. The live copy is cancelled and replaced;
+// ignoring it would leave a zombie running a verdict the origin rejects as
+// stale while the fresh attempt never starts.
+func TestDelegateSupersedesLiveAttempt(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	card := ledger.Card{
+		Device:        "supersede",
+		ResourceClass: "Standard",
+		Native:        []ledger.NativeAbility{{ID: "sys:info", Command: "uname"}},
+		Capacity:      ledger.Capacity{CPUCores: 2, RAMGB: 4, MaxConcurrent: 2},
+	}
+	c := NewCore(db, "supersede", card, 5, testLogger(), config.ModelConfig{})
+	c.SetWorkDir(t.TempDir())
+	c.SetSharedSecret(testSharedSecret)
+
+	// The live copy: attempt A is running here, with a real registered run.
+	stale := createTask(t, c.store, "", "rr-live", "origin")
+	if err := c.store.Queue(ctx, stale.TaskID, "origin"); err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	if err := c.store.Dispatch(ctx, stale.TaskID, "origin", "supersede"); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if err := c.store.Accept(ctx, stale.TaskID, "supersede"); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	killed := make(chan struct{})
+	rel := c.registerRunning(stale.TaskID, func() { close(killed) })
+	defer rel()
+
+	time.Sleep(3 * time.Millisecond)
+	newAttempt, err := util.UUIDv7()
+	if err != nil {
+		t.Fatalf("mint attempt: %v", err)
+	}
+	env, err := bus.NewEnvelope(bus.MsgTaskDelegate, "origin", "m-sd", bus.TaskDelegatePayload{
+		TaskID: stale.TaskID, Title: "t", Intent: "x",
+		Requires: []string{"sys:info"}, Chain: []string{"origin"},
+		AttemptID: newAttempt,
+	})
+	if err != nil {
+		t.Fatalf("envelope: %v", err)
+	}
+	c.handleDelegate(ctx, env)
+
+	select {
+	case <-killed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the superseded attempt's run was not cancelled")
+	}
+	got, err := c.store.Get(ctx, stale.TaskID)
+	if err != nil {
+		t.Fatalf("replaced row missing: %v", err)
+	}
+	if got.AttemptID != newAttempt {
+		t.Fatalf("attempt = %s, want the re-routed attempt adopted", got.AttemptID)
+	}
+	if got.State == StateCancelled {
+		t.Fatalf("the live copy's cancel leaked onto the fresh row")
+	}
+	waitLocalTasksSettled(t, c)
+	final, err := c.store.Get(ctx, stale.TaskID)
+	if err != nil {
+		t.Fatalf("row missing: %v", err)
+	}
+	if final.State != StateDone {
+		t.Fatalf("superseded re-route ended %s, want done", final.State)
+	}
+}
+
+// TestDelegateSupersedeRequiresUpstream pins the replacement bind: a wire
+// delegate that mints a fresher attempt id may only replace the copy we hold
+// when the sender actually sat upstream of us on that task's chain. A peer
+// outside the delegation path must not be able to kill live work (or
+// resurrect a settled verdict) by re-delivering somebody else's task id —
+// without the check the same frame that re-routes legitimately is also a
+// remote task-kill primitive.
+func TestDelegateSupersedeRequiresUpstream(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	card := ledger.Card{
+		Device:        "guarded",
+		ResourceClass: "Standard",
+		Native:        []ledger.NativeAbility{{ID: "sys:info", Command: "uname"}},
+		Capacity:      ledger.Capacity{CPUCores: 2, RAMGB: 4, MaxConcurrent: 2},
+	}
+	c := NewCore(db, "guarded", card, 5, testLogger(), config.ModelConfig{})
+	c.SetWorkDir(t.TempDir())
+	c.SetSharedSecret(testSharedSecret)
+
+	live := createTask(t, c.store, "", "guarded-task", "origin")
+	if err := c.store.Queue(ctx, live.TaskID, "origin"); err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	if err := c.store.Dispatch(ctx, live.TaskID, "origin", "guarded"); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if err := c.store.Accept(ctx, live.TaskID, "guarded"); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	killed := make(chan struct{})
+	rel := c.registerRunning(live.TaskID, func() { close(killed) })
+	defer rel()
+
+	time.Sleep(3 * time.Millisecond)
+	forged, err := util.UUIDv7()
+	if err != nil {
+		t.Fatalf("mint attempt: %v", err)
+	}
+	env, err := bus.NewEnvelope(bus.MsgTaskDelegate, "stranger", "m-forge", bus.TaskDelegatePayload{
+		TaskID: live.TaskID, Title: "t", Intent: "x",
+		Requires: []string{"sys:info"}, Chain: []string{"stranger"},
+		AttemptID: forged,
+	})
+	if err != nil {
+		t.Fatalf("envelope: %v", err)
+	}
+	c.handleDelegate(ctx, env)
+
+	select {
+	case <-killed:
+		t.Fatal("a non-upstream delegate cancelled the live run")
+	case <-time.After(300 * time.Millisecond):
+	}
+	got, err := c.store.Get(ctx, live.TaskID)
+	if err != nil {
+		t.Fatalf("row gone: %v", err)
+	}
+	if got.AttemptID != live.AttemptID || got.State != StateRunning {
+		t.Fatalf("forged supersede mutated the row: state=%s attempt=%s", got.State, got.AttemptID)
+	}
+}
+
+// TestDispensationCancelIgnoresNewerAttempt pins the cancel-scope fence: a
+// dispensation kill order (lease expiry, reroute supersede) stamped with
+// attempt A lands after the row already moved to a newer dispensation —
+// the live cancel and the parked re-delivery can reorder across connections
+// — and must stand down only the attempt it named, not the fresh copy.
+// A tree cancel (human reject/cancel, empty attempt) still kills whatever
+// dispensation is current.
+func TestDispensationCancelIgnoresNewerAttempt(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	c := NewCore(db, "cancel-scope", ledger.Card{
+		Device:        "cancel-scope",
+		ResourceClass: "Standard",
+		Native:        []ledger.NativeAbility{{ID: "sys:info", Command: "uname"}},
+		Capacity:      ledger.Capacity{CPUCores: 2, RAMGB: 4, MaxConcurrent: 2},
+	}, 5, testLogger(), config.ModelConfig{})
+	c.SetWorkDir(t.TempDir())
+	c.SetSharedSecret(testSharedSecret)
+
+	// The executor's delegated copy: remote-authored, chain ends at this
+	// node so "origin" authenticates as the delegator predecessor.
+	tk, err := c.store.CreateWithID(ctx, "scoped-cancel", "", "proj", "t",
+		"cancel-scope", []string{"origin", "cancel-scope"}, true)
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+	}
+	must(err)
+	must(c.store.Queue(ctx, tk.TaskID, "cancel-scope"))
+	must(c.store.Dispatch(ctx, tk.TaskID, "cancel-scope", "cancel-scope"))
+	must(c.store.Accept(ctx, tk.TaskID, "cancel-scope"))
+	tk, _ = c.store.Get(ctx, tk.TaskID)
+	oldAttempt := tk.AttemptID
+
+	time.Sleep(3 * time.Millisecond)
+	newAttempt, err := util.UUIDv7()
+	if err != nil {
+		t.Fatalf("mint attempt: %v", err)
+	}
+	// The delegator's re-route already landed: the row runs the fresh
+	// dispensation while the old attempt's kill order is still in flight.
+	must(c.store.AdoptAttempt(ctx, tk.TaskID, oldAttempt, newAttempt))
+
+	env, err := bus.NewEnvelope(bus.MsgTaskCancel, "origin", "m-dc", bus.TaskCancelPayload{
+		TaskID: tk.TaskID, AttemptID: oldAttempt, Reason: "lease expired",
+	})
+	if err != nil {
+		t.Fatalf("envelope: %v", err)
+	}
+	c.handleCancel(ctx, env)
+	got, err := c.store.Get(ctx, tk.TaskID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.State != StateRunning || got.AttemptID != newAttempt {
+		t.Fatalf("stale dispensation cancel touched the fresh copy: state=%s attempt=%s",
+			got.State, got.AttemptID)
+	}
+
+	// The same frame naming the CURRENT attempt still lands — the scope
+	// narrows a kill order, it does not disarm it.
+	env2, _ := bus.NewEnvelope(bus.MsgTaskCancel, "origin", "m-dc2", bus.TaskCancelPayload{
+		TaskID: tk.TaskID, AttemptID: newAttempt, Reason: "lease expired",
+	})
+	c.handleCancel(ctx, env2)
+	got, err = c.store.Get(ctx, tk.TaskID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.State != StateCancelled {
+		t.Fatalf("matching dispensation cancel left state=%s, want cancelled", got.State)
+	}
+}
+
+// TestDeclineFencesStaleAttempt pins the decline gate: a refusal stamped
+// with attempt A arriving after the row rotated to a newer dispensation (a
+// re-route landed back on the same node, or a declined copy that moved on)
+// must not bounce the fresh attempt's dispatched row back to queued. A
+// decline naming the current attempt still re-queues.
+func TestDeclineFencesStaleAttempt(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	c := NewCore(db, "decline-scope", ledger.Card{
+		Device:        "decline-scope",
+		ResourceClass: "Standard",
+		Native:        []ledger.NativeAbility{{ID: "sys:info", Command: "uname"}},
+		Capacity:      ledger.Capacity{CPUCores: 2, RAMGB: 4, MaxConcurrent: 2},
+	}, 5, testLogger(), config.ModelConfig{})
+	c.SetWorkDir(t.TempDir())
+	c.SetSharedSecret(testSharedSecret)
+
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+	}
+	tk := createTask(t, c.store, "", "decl-task", "decline-scope")
+	must(c.store.Queue(ctx, tk.TaskID, "decline-scope"))
+	must(c.store.Dispatch(ctx, tk.TaskID, "decline-scope", "exec-node"))
+	tk, err := c.store.Get(ctx, tk.TaskID)
+	must(err)
+	oldAttempt := tk.AttemptID
+
+	time.Sleep(3 * time.Millisecond)
+	newAttempt, err := util.UUIDv7()
+	must(err)
+	must(c.store.AdoptAttempt(ctx, tk.TaskID, oldAttempt, newAttempt))
+
+	// The stale refusal: the dispatch target answers for the attempt the row
+	// already replaced — the fresh dispensation must stay dispatched.
+	env, err := bus.NewEnvelope(bus.MsgTaskDecline, "exec-node", "m-ds", bus.TaskDeclinePayload{
+		TaskID: tk.TaskID, AttemptID: oldAttempt, Reason: "capacity full",
+	})
+	must(err)
+	c.handleDecline(ctx, env)
+	got, err := c.store.Get(ctx, tk.TaskID)
+	must(err)
+	if got.State != StateDispatched || got.AttemptID != newAttempt {
+		t.Fatalf("stale decline bounced the fresh copy: state=%s attempt=%s",
+			got.State, got.AttemptID)
+	}
+
+	// The matching decline requeues and feeds the re-router's seen set.
+	env2, _ := bus.NewEnvelope(bus.MsgTaskDecline, "exec-node", "m-ds2", bus.TaskDeclinePayload{
+		TaskID: tk.TaskID, AttemptID: newAttempt, Reason: "capacity full",
+	})
+	c.handleDecline(ctx, env2)
+	got, err = c.store.Get(ctx, tk.TaskID)
+	must(err)
+	if got.State != StateQueued && got.State != StateDispatched {
+		t.Fatalf("matching decline left state=%s, want queued or re-dispatched", got.State)
+	}
+}
+
+// TestAcceptFencesStaleAttempt pins the accept gate: a delayed task_accept
+// for a superseded dispensation must not mark the fresh attempt's row
+// running — the executor it names is claiming OLD work.
+func TestAcceptFencesStaleAttempt(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	c := NewCore(db, "accept-scope", ledger.Card{
+		Device:        "accept-scope",
+		ResourceClass: "Standard",
+		Native:        []ledger.NativeAbility{{ID: "sys:info", Command: "uname"}},
+		Capacity:      ledger.Capacity{CPUCores: 2, RAMGB: 4, MaxConcurrent: 2},
+	}, 5, testLogger(), config.ModelConfig{})
+	c.SetWorkDir(t.TempDir())
+	c.SetSharedSecret(testSharedSecret)
+
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+	}
+	tk := createTask(t, c.store, "", "acc-task", "accept-scope")
+	must(c.store.Queue(ctx, tk.TaskID, "accept-scope"))
+	must(c.store.Dispatch(ctx, tk.TaskID, "accept-scope", "exec-node"))
+	tk, err := c.store.Get(ctx, tk.TaskID)
+	must(err)
+	oldAttempt := tk.AttemptID
+
+	time.Sleep(3 * time.Millisecond)
+	newAttempt, err := util.UUIDv7()
+	must(err)
+	must(c.store.AdoptAttempt(ctx, tk.TaskID, oldAttempt, newAttempt))
+
+	env, err := bus.NewEnvelope(bus.MsgTaskAccept, "exec-node", "m-as", bus.TaskAcceptPayload{
+		TaskID: tk.TaskID, AttemptID: oldAttempt,
+	})
+	must(err)
+	c.handleAccept(ctx, env)
+	got, err := c.store.Get(ctx, tk.TaskID)
+	must(err)
+	if got.State != StateDispatched || got.AttemptID != newAttempt {
+		t.Fatalf("stale accept claimed the fresh copy: state=%s attempt=%s",
+			got.State, got.AttemptID)
+	}
+
+	// A store-level CAS on a stale expected attempt must conflict too —
+	// the wire gate and the write share the same fence.
+	if err := c.store.Accept(ctx, tk.TaskID, "exec-node", oldAttempt); !errors.Is(err, ErrConflict) {
+		t.Fatalf("Accept with stale attempt = %v, want ErrConflict", err)
+	}
+	env2, _ := bus.NewEnvelope(bus.MsgTaskAccept, "exec-node", "m-as2", bus.TaskAcceptPayload{
+		TaskID: tk.TaskID, AttemptID: newAttempt,
+	})
+	c.handleAccept(ctx, env2)
+	got, err = c.store.Get(ctx, tk.TaskID)
+	must(err)
+	if got.State != StateRunning || got.OwnerNode != "exec-node" {
+		t.Fatalf("matching accept left state=%s owner=%s, want running/exec-node",
+			got.State, got.OwnerNode)
+	}
+}
+
 // TestTaskTimeoutFails verifies the lease-expiry lifecycle: a running task
 // whose lease lapses re-queues under a fresh attempt while retry budget
 // remains — an expired lease means the supervisor died, not that the work
@@ -775,9 +1112,9 @@ func TestResumeRaceAlreadyRunningDoesNotFailOrigin(t *testing.T) {
 	// dropped as stale before any of this logic runs.
 	wt, err := worker.store.Get(ctx, taskID)
 	must(err)
-	_, err = entry.store.CreateWithID(ctx, taskID, "", "proj", "t", entry.nodeID, nil, false)
+	et, err := entry.store.CreateWithID(ctx, taskID, "", "proj", "t", entry.nodeID, nil, false)
 	must(err)
-	must(entry.store.AdoptAttempt(ctx, taskID, wt.AttemptID))
+	must(entry.store.AdoptAttempt(ctx, taskID, et.AttemptID, wt.AttemptID))
 	must(entry.store.Queue(ctx, taskID, entry.nodeID))
 	must(entry.store.Dispatch(ctx, taskID, entry.nodeID, worker.nodeID))
 
@@ -837,9 +1174,9 @@ func TestResumeRaceTerminalEchoesVerdict(t *testing.T) {
 	wt, err := worker.store.Get(ctx, taskID)
 	must(err)
 
-	_, err = entry.store.CreateWithID(ctx, taskID, "", "proj", "t", entry.nodeID, nil, false)
+	et, err := entry.store.CreateWithID(ctx, taskID, "", "proj", "t", entry.nodeID, nil, false)
 	must(err)
-	must(entry.store.AdoptAttempt(ctx, taskID, wt.AttemptID))
+	must(entry.store.AdoptAttempt(ctx, taskID, et.AttemptID, wt.AttemptID))
 	must(entry.store.Queue(ctx, taskID, entry.nodeID))
 	must(entry.store.Dispatch(ctx, taskID, entry.nodeID, worker.nodeID))
 

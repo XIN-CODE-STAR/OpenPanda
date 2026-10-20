@@ -262,11 +262,51 @@ hello 校验失败时服务端回 `hello_reject`（`reason`：`auth` 签名/密�
 钥不符、畸形一律丢弃）。同意说「什么可以跑」，签名接受说「谁同意跑」
 ——转发任意一侧都无法伪造另一侧；无签名的旧节点帧仍兼容。
 
+两帧都携带 `attempt_id` 并按同一**方向门**落地：线上 attempt 严格旧于行
+内 attempt 的帧是已被取代的 dispensation 的迟到回声，丢弃（行已轮转后
+再 decline/accept，会把活 dispensation 弹回队列或标成运行中）；线上
+attempt 相同或更新则照常——镜像副本之间 attempt 合法分化（各自轮转、
+惰性 adopt），裁决语义跟着工作走而非跟着某次执行走。门之后的写路径
+同样带 attempt CAS（`Accept`/`Decline` 的期望谓词），关掉读检与落库
+之间的 TOCTOU；CAS 失败的 accept 不再向上游转播。
+
 `task_decline` 在人读 `reason` 之外可带机器稳定 `reason_code`：
 `trust_open_origin`（源档为 open，推送态起源被拒）、`trust_policy_refused`
 （接收方准入策略拒绝）、`trust_send_ceiling`（发送侧钳制剥掉了任务跑不了
 的依赖——正确响应是重路由而非重试）。空 code 是信任分区前的普通拒绝
 （drain、容量、防环），重路由处理不变。
+
+### `task_cancel`
+
+`TaskCancelPayload` 的 `attempt_id` 把取消分成两种语义，对应两类发起者：
+
+- **树级取消**（`attempt_id` 为空）：人工取消/驳回——`panda cancel`、
+  控制台 reject、审批否决。无条件级联整棵任务树：本地 cascade 杀掉
+  行与其全部子代，`cancel_outbox` 托管转发下游执行方，接收端的
+  `handleCancel` 递归再级联，直到末梢。
+- **dispensation 取消**（`attempt_id` 非空）：生命周期子系统对**某次
+  具体派遣**的停机令——租约过期重路由、supersede 顶替、绝对死线
+  判定。它只该落在它点名的那次派遣上：接收端行内 attempt 已严格
+  更新（新 delegate 先到、或对端 accept/轮转 adopt 过）则整帧丢弃，
+  并记审计而非误杀现役 attempt。授权先于一切任务级判定：发送方必须
+  是行的 owner 或链上直接前驱（按运行时身份比对，容忍 daemon 重启
+  换实例号），行外 peer 连审计都写不进。
+
+`cancel_outbox` 的停泊行按同一 scope 规则管理：新 delegate 泊车时只清
+掉同任务的 dispensation-cancel（旧派遣的停机令被新派遣取代），人工
+树级 cancel 永不因泊车而丢；flush 时 cancel 先于 delegate 投递，live
+送达的 dispensation-cancel 也只清同类停泊行。
+
+### `task_delegate` 的顶替语义
+
+重复送达的 `task_delegate` 不是天然幂等：行还在且线上 attempt 严格更新
+时，它是重路由的顶替令——但顶替权的认证不只看链尾签名：发送方必须是
+**存储行链路中 self 之前任一上游持有者**（多跳链路里中间节点失联时，
+更上游的 delegator 可越级直派）。行外 peer 伪造的新 attempt delegate
+不能删除/顶替任何行——没有这条绑定，同一帧就是远程任务清除原语。
+顶替落地前活跃副本先经 `CancelCascade`+`finishCancel` 级联收尸（杀
+runner、清 context 预留、向下游转发停机令），终态/失败副本直接删除
+重建；旧 attempt 的迟到 delegate 一律丢弃，绝不复活已结案的副本。
 
 ### `task_result`
 `task_id` / `attempt_id` / `chain`（执行方的真实委派链，供丢失本地行的

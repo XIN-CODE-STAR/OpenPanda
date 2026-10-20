@@ -125,6 +125,13 @@ func (c *Core) run(ctx context.Context, taskID, intent string, required []string
 	// every result on the way out so the delegator can see WHERE the work
 	// happened, not just who reported it (set after prepareRunDir below).
 	var execWorkDir string
+	// attemptID is bound once claimForRun succeeds; the stranded-run cleanup
+	// below scopes its verdict to it so a superseded attempt's late write can
+	// never land on a rotated row. claimed records that the running state —
+	// if the row shows one — belongs to THIS run: a failure before the claim
+	// must never touch a row someone else legitimately runs.
+	var attemptID string
+	var claimed bool
 	defer func() {
 		if out.TaskID != "" {
 			out.DurationMS = time.Since(start).Milliseconds()
@@ -133,7 +140,7 @@ func (c *Core) run(ctx context.Context, taskID, intent string, required []string
 			if len(out.Chain) == 0 {
 				out.Chain = taskChain
 			}
-		} else if rerr != nil && !errors.Is(rerr, ErrAlreadyRunning) {
+		} else if rerr != nil && !errors.Is(rerr, ErrAlreadyRunning) && claimed {
 			// If run failed or cancelled before reaching a terminal state,
 			// fail the task in the store so it never lingers stranded in
 			// 'running'. ErrAlreadyRunning is excluded: the row is legitimately
@@ -141,8 +148,12 @@ func (c *Core) run(ctx context.Context, taskID, intent string, required []string
 			// that owner's work mid-flight.
 			wCtx, cancel := c.storeWriteCtx(ctx)
 			defer cancel()
-			if t, err := c.store.Get(wCtx, taskID); err == nil && t.State == StateRunning {
-				if ferr := c.store.Fail(wCtx, taskID, c.nodeID, rerr.Error()); ferr != nil {
+			// Attempt-scoped: if the row was lease-rerouted and already
+			// re-ran to running under a rotated attempt_id, this stranded-run
+			// cleanup must not touch it — the fresh runner owns the verdict.
+			if t, err := c.store.Get(wCtx, taskID); err == nil && t.State == StateRunning &&
+				t.AttemptID == attemptID {
+				if ferr := c.store.FailAttempt(wCtx, taskID, c.nodeID, attemptID, rerr.Error()); ferr != nil {
 					c.logger.Error("fail stranded run", "task", taskID, "err", ferr)
 				}
 			}
@@ -157,6 +168,11 @@ func (c *Core) run(ctx context.Context, taskID, intent string, required []string
 	if err != nil {
 		return bus.TaskResultPayload{}, err
 	}
+	claimed = true
+	// Bind the attempt at claim time — before any fallible step — so the
+	// stranded-run cleanup above and every verdict write below stay scoped
+	// to exactly the dispensation this run owns.
+	attemptID = task.AttemptID
 	defer unlockActuator()
 	taskChain = task.Chain
 
@@ -195,9 +211,8 @@ func (c *Core) run(ctx context.Context, taskID, intent string, required []string
 	}
 	c.relayToParent(ctx, bus.MsgTaskAccept, task.Chain, accept)
 
-	// Capture the current attempt id so the result carries it; the delegator
-	// uses it to reject stale results after a transfer/retry.
-	attemptID := task.AttemptID
+	// The result payload stamps this attempt id; the delegator uses it to
+	// reject stale results after a transfer/retry. (Bound at claim above.)
 
 	// Execution lifetime (P0-1). Two things must hold for a long stage — a
 	// training run, a multi-minute agent session — to survive:
@@ -1172,7 +1187,7 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 			c.logger.Warn("token budget check failed, allowing round", "task", taskID, "err", serr)
 		} else if left < 0 {
 			msg := "token budget exhausted"
-			if err := c.store.Pause(ctx, taskID, c.nodeID, msg); err != nil {
+			if err := c.store.PauseAttempt(ctx, taskID, c.nodeID, attemptID, msg); err != nil {
 				if errors.Is(err, ErrConflict) || errors.Is(err, ErrIllegal) {
 					return roundOutcome{}, ErrCancelled
 				}
@@ -1557,7 +1572,7 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 					// (which re-runs with consent) is the fix.
 					park["restricted"] = true
 				}
-				if err := c.store.PauseForAnswer(ctx, taskID, c.nodeID, park); err != nil {
+				if err := c.store.PauseForAnswerAttempt(ctx, taskID, c.nodeID, attemptID, park); err != nil {
 					if errors.Is(err, ErrConflict) || errors.Is(err, ErrIllegal) {
 						return roundOutcome{}, ErrCancelled
 					}
@@ -1785,7 +1800,7 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 			if drift := scope.DriftUnder(workDir, lastChanged); len(drift) > 0 {
 				msg := "scope drift: agent changed files outside declared scope: " + strings.Join(drift, ", ")
 				c.audit(ctx, taskID, "scope:drift", plan.Agent, "denied", msg)
-				if err := c.store.PauseDrift(ctx, taskID, c.nodeID, msg, drift); err != nil {
+				if err := c.store.PauseDriftAttempt(ctx, taskID, c.nodeID, attemptID, msg, drift); err != nil {
 					if errors.Is(err, ErrConflict) || errors.Is(err, ErrIllegal) {
 						return roundOutcome{}, ErrCancelled
 					}
@@ -1807,7 +1822,7 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 			// and only a task meeting its success definition may enter done. The
 			// notify text is preserved as the result so whoever picks it up sees
 			// what is being asked of them; Approve/Reject moves it on from there.
-			if err := c.store.PauseWithResult(ctx, taskID, c.nodeID, map[string]any{
+			if err := c.store.PauseWithResultAttempt(ctx, taskID, c.nodeID, attemptID, map[string]any{
 				"manual": true, "notify": res.Stdout,
 			}); err != nil {
 				if errors.Is(err, ErrConflict) || errors.Is(err, ErrIllegal) {
@@ -1839,13 +1854,13 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 				})
 				wCtx, cancel := c.storeWriteCtx(ctx)
 				defer cancel()
-				if err := c.store.Fail(wCtx, taskID, c.nodeID, msg); err != nil {
+				if err := c.store.FailAttempt(wCtx, taskID, c.nodeID, attemptID, msg); err != nil {
 					if errors.Is(err, ErrConflict) || errors.Is(err, ErrIllegal) {
 						return roundOutcome{}, ErrCancelled
 					}
 					return roundOutcome{}, fmt.Errorf("fail: %w", err)
 				}
-				if err := c.store.Review(wCtx, taskID, c.nodeID, msg); err != nil {
+				if err := c.store.ReviewAttempt(wCtx, taskID, c.nodeID, attemptID, msg); err != nil {
 					if errors.Is(err, ErrConflict) || errors.Is(err, ErrIllegal) {
 						return roundOutcome{}, ErrCancelled
 					}
@@ -1870,13 +1885,13 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 			if commander.IsAuthorizationRefusal(res.Stderr) {
 				wCtx, cancel := c.storeWriteCtx(ctx)
 				defer cancel()
-				if err := c.store.Fail(wCtx, taskID, c.nodeID, res.Stderr); err != nil {
+				if err := c.store.FailAttempt(wCtx, taskID, c.nodeID, attemptID, res.Stderr); err != nil {
 					if errors.Is(err, ErrConflict) || errors.Is(err, ErrIllegal) {
 						return roundOutcome{}, ErrCancelled
 					}
 					return roundOutcome{}, fmt.Errorf("fail: %w", err)
 				}
-				if err := c.store.ReviewWithDisposition(wCtx, taskID, c.nodeID, res.Stderr, ApprovalResumeExecution); err != nil {
+				if err := c.store.ReviewWithDispositionAttempt(wCtx, taskID, c.nodeID, attemptID, res.Stderr, ApprovalResumeExecution); err != nil {
 					if errors.Is(err, ErrConflict) || errors.Is(err, ErrIllegal) {
 						return roundOutcome{}, ErrCancelled
 					}
@@ -1893,7 +1908,7 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 			}
 			wCtx, cancel := c.storeWriteCtx(ctx)
 			defer cancel()
-			if err := c.store.Fail(wCtx, taskID, c.nodeID, res.Stderr); err != nil {
+			if err := c.store.FailAttempt(wCtx, taskID, c.nodeID, attemptID, res.Stderr); err != nil {
 				if errors.Is(err, ErrConflict) || errors.Is(err, ErrIllegal) {
 					return roundOutcome{}, ErrCancelled
 				}
@@ -2161,7 +2176,7 @@ func (c *Core) finalizeRun(ctx context.Context, taskID string, task Task, plan c
 		(verdict.Status == entry.VerdictContinue || verdict.Status == entry.VerdictReview) {
 		wCtx, cancel := c.storeWriteCtx(ctx)
 		defer cancel()
-		if err := c.store.PauseWithResult(wCtx, taskID, c.nodeID, map[string]any{
+		if err := c.store.PauseWithResultAttempt(wCtx, taskID, c.nodeID, attemptID, map[string]any{
 			"ok": true, "exit_code": res.ExitCode, "stdout": res.Stdout, "agent": res.Agent,
 			"needs_followup": verdict.Status == entry.VerdictContinue,
 			"verdict":        verdict.Status, "verdict_reason": verdict.Reason,
@@ -2205,7 +2220,7 @@ func (c *Core) finalizeRun(ctx context.Context, taskID string, task Task, plan c
 		if parked {
 			wCtx, cancel := c.storeWriteCtx(ctx)
 			defer cancel()
-			if err := c.store.PauseWithResult(wCtx, taskID, c.nodeID, map[string]any{
+			if err := c.store.PauseWithResultAttempt(wCtx, taskID, c.nodeID, attemptID, map[string]any{
 				"ok": true, "exit_code": res.ExitCode, "stdout": res.Stdout, "agent": res.Agent,
 				"files_changed": filesChanged,
 			}); err != nil {
@@ -2248,7 +2263,7 @@ func (c *Core) finalizeRun(ctx context.Context, taskID string, task Task, plan c
 
 	wCtx, cancel := c.storeWriteCtx(ctx)
 	defer cancel()
-	if err := c.store.Complete(wCtx, taskID, c.nodeID, map[string]any{
+	if err := c.store.CompleteAttempt(wCtx, taskID, c.nodeID, attemptID, map[string]any{
 		"ok": true, "exit_code": res.ExitCode, "stdout": res.Stdout, "files_changed": filesChanged,
 	}); err != nil {
 		if errors.Is(err, ErrConflict) || errors.Is(err, ErrIllegal) {

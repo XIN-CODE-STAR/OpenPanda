@@ -279,17 +279,17 @@ func (c *Core) outboxFlush(ctx context.Context, peer string) {
 		return
 	}
 	type cancelEntry struct {
-		taskID, reason, peer string
+		taskID, reason, peer, attempt string
 	}
 	var cancels []cancelEntry
 	crows, err := c.db.QueryContext(ctx,
-		`SELECT task_id, reason, peer FROM cancel_outbox WHERE peer IN (`+ph+`)`, dargs()...)
+		`SELECT task_id, reason, peer, attempt_id FROM cancel_outbox WHERE peer IN (`+ph+`)`, dargs()...)
 	if err != nil {
 		c.logger.Warn("outbox: query cancels", "peer", peer, "err", err)
 	} else {
 		for crows.Next() {
 			var e cancelEntry
-			if err := crows.Scan(&e.taskID, &e.reason, &e.peer); err != nil {
+			if err := crows.Scan(&e.taskID, &e.reason, &e.peer, &e.attempt); err != nil {
 				crows.Close()
 				c.logger.Warn("outbox: scan cancels", "peer", peer, "err", err)
 				fail()
@@ -372,11 +372,26 @@ func (c *Core) outboxFlush(ctx context.Context, peer string) {
 	c.goGuarded("outbox reconcile "+key, func() {
 		defer c.outboxFlushDone(key)
 		flushCtx := context.WithoutCancel(ctx)
+		// Cancels go FIRST: a parked cancel always stands down the task's
+		// previous dispensation, so it must land before any parked delegate
+		// for the same task or the flush would deliver work and then kill
+		// it. handleCancel is idempotent — a cancel for a task the peer
+		// never received, or one already terminal, is a no-op.
+		for _, e := range cancels {
+			if !c.deliverCancel(flushCtx, peer, e.taskID, e.attempt, e.reason) {
+				continue // still parked; retry on next reconnect
+			}
+			c.cancelOutboxDropKey(flushCtx, e.peer, e.taskID)
+			c.logger.Info("outbox: redelivered cancel", "task", e.taskID, "peer", peer)
+		}
 		for _, e := range taskEntries {
 			// The local row died while the task was parked — a user cancel, a
 			// decline, an orphan rescue. Custody must not resurrect it:
 			// delivering now would run work the mesh already declared dead.
-			if lt, lerr := c.store.Get(flushCtx, e.taskID); lerr == nil && Terminal(lt.State) {
+			// "failed" counts too: Terminal() reserves the word for the
+			// three states no transition ever leaves, but a failed row is
+			// still a closed verdict whose parked bundle must not run.
+			if lt, lerr := c.store.Get(flushCtx, e.taskID); lerr == nil && (Terminal(lt.State) || lt.State == StateFailed) {
 				c.logger.Info("outbox: local task is terminal, dropping parked delivery",
 					"task", e.taskID, "peer", e.peer, "state", lt.State)
 				c.taskOutboxDropKey(flushCtx, e.peer, e.taskID)
@@ -398,7 +413,7 @@ func (c *Core) outboxFlush(ctx context.Context, peer string) {
 				// in DeclinedBy so re-routing cannot pick this peer again.
 				if derr := c.store.Decline(flushCtx, e.taskID, c.nodeID,
 					"peer trust tier no longer admits the task",
-					bus.DeclineCodeTrustCeiling, peer); derr != nil {
+					bus.DeclineCodeTrustCeiling, peer, parked.AttemptID); derr != nil {
 					// The row already moved on (a raced accept/expire, or the
 					// park predated the dispatched stamp) — still record the
 					// refusal so re-routing excludes this peer.
@@ -419,7 +434,7 @@ func (c *Core) outboxFlush(ctx context.Context, peer string) {
 			if e.ttl > 0 && time.Now().Unix() > e.ttl {
 				c.logger.Info("outbox: parked task past TTL, expiring", "task", e.taskID, "peer", e.peer)
 				c.taskOutboxDropKey(flushCtx, e.peer, e.taskID)
-				if err := c.store.MarkExpired(flushCtx, e.taskID, "dtn TTL expired"); err != nil {
+				if err := c.store.MarkExpiredAttempt(flushCtx, e.taskID, parkedAttempt(e.raw), "dtn TTL expired"); err != nil {
 					c.logger.Warn("outbox: mark expired", "task", e.taskID, "err", err)
 				}
 				continue
@@ -439,7 +454,7 @@ func (c *Core) outboxFlush(ctx context.Context, peer string) {
 				if verr := bnd.Verify([]byte(c.sharedSecretValue()), time.Now().Unix()); verr != nil {
 					c.logger.Warn("outbox: bundle verify failed, dropping", "task", e.taskID, "peer", e.peer, "err", verr)
 					c.taskOutboxDropKey(flushCtx, e.peer, e.taskID)
-					if err := c.store.MarkExpired(flushCtx, e.taskID, "bundle verify failed"); err != nil {
+					if err := c.store.MarkExpiredAttempt(flushCtx, e.taskID, parkedAttempt(e.raw), "bundle verify failed"); err != nil {
 						c.logger.Warn("outbox: mark expired", "task", e.taskID, "err", err)
 					}
 					continue
@@ -488,13 +503,6 @@ func (c *Core) outboxFlush(ctx context.Context, peer string) {
 			c.resultOutboxDropKey(flushCtx, e.peer, e.taskID)
 			c.logger.Info("outbox: redelivered result", "task", e.taskID, "peer", peer)
 		}
-		for _, e := range cancels {
-			if !c.deliverCancel(flushCtx, peer, e.taskID, e.reason) {
-				continue // still parked; retry on next reconnect
-			}
-			c.cancelOutboxDropKey(flushCtx, e.peer, e.taskID)
-			c.logger.Info("outbox: redelivered cancel", "task", e.taskID, "peer", peer)
-		}
 		// Approvals last: a resume that raced its own cancel must never
 		// arrive after the cancel delivered (the cancel wins by ordering).
 		for _, e := range resumes {
@@ -505,6 +513,22 @@ func (c *Core) outboxFlush(ctx context.Context, peer string) {
 				continue
 			}
 			if !p.Accept {
+				// A parked re-run consent is dispensation-scoped: if this
+				// copy's row rotated (a re-route, a retry) after the verdict
+				// was parked, the consent spoke for a dead attempt and must
+				// not re-run whatever the fresh attempt is parked on. Accept
+				// frames skip the check deliberately — the verdict they carry
+				// applies to the finished work, and a row legitimately adopts
+				// the sibling's newer attempt after the accept was parked.
+				if lt, lerr := c.store.Get(flushCtx, e.taskID); lerr == nil &&
+					p.AttemptID != "" && lt.AttemptID != "" && lt.AttemptID != p.AttemptID &&
+					attemptIsNewer(lt.AttemptID, p.AttemptID) {
+					c.logger.Info("outbox: parked resume superseded by attempt rotation, dropping",
+						"task", e.taskID, "peer", e.peer,
+						"stored_attempt", lt.AttemptID, "parked_attempt", p.AttemptID)
+					c.resumeOutboxDropKey(flushCtx, e.peer, e.taskID)
+					continue
+				}
 				// A re-run consent must not revive a dead task: the local copy
 				// already closed (a lapsed approval window, a user cancel).
 				// An accept is the opposite case — the local copy is done
@@ -524,7 +548,7 @@ func (c *Core) outboxFlush(ctx context.Context, peer string) {
 				// copy, so an expired accept only drops its custody row.
 				c.logger.Info("outbox: parked resume past TTL, expiring", "task", e.taskID, "peer", e.peer)
 				c.resumeOutboxDropKey(flushCtx, e.peer, e.taskID)
-				if err := c.store.MarkExpired(flushCtx, e.taskID, "resume TTL expired"); err != nil {
+				if err := c.store.MarkExpiredAttempt(flushCtx, e.taskID, p.AttemptID, "resume TTL expired"); err != nil {
 					c.logger.Warn("outbox: mark expired", "task", e.taskID, "err", err)
 				}
 				continue
@@ -703,16 +727,16 @@ func (c *Core) deliverResult(ctx context.Context, peer string, p bus.TaskResultP
 // upserting on (peer, task_id). A persistence failure is logged, not fatal:
 // the downstream lease monitor still bounds the worst case, it just costs the
 // executor extra work on an abandoned task (S2-7).
-func (c *Core) outboxCancelPersist(ctx context.Context, peer, taskID, reason string) {
+func (c *Core) outboxCancelPersist(ctx context.Context, peer, taskID, attemptID, reason string) {
 	if c.db == nil || peer == "" || taskID == "" {
 		return
 	}
 	peer = c.stablePeerID(ctx, peer)
 	_, err := c.db.ExecContext(ctx,
-		`INSERT INTO cancel_outbox (peer, task_id, reason, created_at)
-		 VALUES (?, ?, ?, ?)
-		 ON CONFLICT(peer, task_id) DO UPDATE SET reason = excluded.reason, created_at = excluded.created_at`,
-		peer, taskID, reason, storage.Now())
+		`INSERT INTO cancel_outbox (peer, task_id, attempt_id, reason, created_at)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(peer, task_id) DO UPDATE SET attempt_id = excluded.attempt_id, reason = excluded.reason, created_at = excluded.created_at`,
+		peer, taskID, attemptID, reason, storage.Now())
 	if err != nil {
 		c.logger.Warn("outbox: persist cancel", "task", taskID, "peer", peer, "err", err)
 		return
@@ -737,6 +761,24 @@ func (c *Core) cancelOutboxDropKey(ctx context.Context, key, taskID string) {
 	}
 }
 
+// cancelOutboxDropDispensation removes a parked cancel only when it is
+// dispensation-scoped (a non-empty attempt_id — a lease-expiry or supersede
+// kill order). A parked delegate for the same pair always carries a newer
+// attempt that itself supersedes that old custody, so the stale kill order
+// must not land behind it. A TREE-scoped cancel (empty attempt — a human's
+// decision) is never touched: no dispensation outranks it.
+func (c *Core) cancelOutboxDropDispensation(ctx context.Context, peer, taskID string) {
+	if c.db == nil || peer == "" || taskID == "" {
+		return
+	}
+	key := c.stablePeerID(ctx, peer)
+	if _, err := c.db.ExecContext(ctx,
+		`DELETE FROM cancel_outbox WHERE peer = ? AND task_id = ? AND attempt_id != ''`,
+		key, taskID); err != nil {
+		c.logger.Warn("outbox: drop stale dispensation cancel", "task", taskID, "peer", key, "err", err)
+	}
+}
+
 // supersedeTarget stands down whoever held taskID's delegation before the
 // current retarget. A re-route after lease expiry leaves the stale executor
 // holding a live copy that keeps burning budget on work this node no longer
@@ -755,8 +797,19 @@ func (c *Core) supersedeTarget(ctx context.Context, taskID, newTarget string) {
 		return // never dispatched, same executor, or the prior copy is local
 	}
 	const reason = "superseded by reroute"
-	if !c.deliverCancel(ctx, prev, taskID, reason) {
-		c.outboxCancelPersist(ctx, prev, taskID, reason)
+	// The cancel carries the row's CURRENT attempt: the previous executor's
+	// stale copy is always on something older, so the receiver's dispensation
+	// gate lets it through, while a copy that somehow moved to a NEWER
+	// attempt survives untouched. The same-attempt live-kill case cannot
+	// arise because ordering does the work — this cancel is sent (or parked)
+	// before the delegate that would mint that attempt on the receiver,
+	// and the outbox flush keeps the same cancels-first order.
+	var attemptID string
+	if t, terr := c.store.Get(ctx, taskID); terr == nil {
+		attemptID = t.AttemptID
+	}
+	if !c.deliverCancel(ctx, prev, taskID, attemptID, reason) {
+		c.outboxCancelPersist(ctx, prev, taskID, attemptID, reason)
 	}
 	c.logger.Info("superseded prior dispatch target", "task", taskID,
 		"prev", prev, "new", newTarget)
@@ -765,14 +818,14 @@ func (c *Core) supersedeTarget(ctx context.Context, taskID, newTarget string) {
 // deliverCancel places a task_cancel envelope on the wire to peer, returning
 // whether it was accepted by the connection. Shared by the initial send path
 // (forwardCancelDownstream) and the flush path.
-func (c *Core) deliverCancel(ctx context.Context, peer, taskID, reason string) bool {
+func (c *Core) deliverCancel(ctx context.Context, peer, taskID, attemptID, reason string) bool {
 	msgID, err := newUUID()
 	if err != nil {
 		c.logger.Warn("outbox: mint cancel id", "task", taskID, "err", err)
 		return false
 	}
 	env, err := bus.NewEnvelope(bus.MsgTaskCancel, c.nodeID, msgID, bus.TaskCancelPayload{
-		TaskID: taskID, Reason: reason,
+		TaskID: taskID, Reason: reason, AttemptID: attemptID,
 	})
 	if err != nil {
 		c.logger.Warn("outbox: build cancel envelope", "task", taskID, "err", err)
@@ -837,6 +890,17 @@ func (c *Core) taskOutboxPersist(ctx context.Context, peer string, p bus.TaskDel
 		return
 	}
 	c.logger.Info("task_outbox: task parked for DTN redelivery", "task", p.TaskID, "peer", peer)
+}
+
+// parkedAttempt decodes just the attempt stamp from a parked outbox payload.
+// Custody-expiry verdicts bind it so a row rotated since the park — a fresh
+// dispensation delivered by another path — is not expired on stale evidence.
+func parkedAttempt(raw string) string {
+	var probe struct {
+		AttemptID string `json:"attempt_id"`
+	}
+	_ = json.Unmarshal([]byte(raw), &probe)
+	return probe.AttemptID
 }
 
 // taskOutboxPending reports whether a parked forward for taskID still sits in
@@ -1017,20 +1081,20 @@ func (c *Core) relayParked(ctx context.Context, onlyHop string) {
 	// can run to megabytes. The second pass fetches the blob only for a row
 	// that survived everything checkable without it.
 	rows, err := c.db.QueryContext(ctx,
-		`SELECT peer, task_id, ttl, via FROM task_outbox WHERE payload_blob IS NOT NULL`)
+		`SELECT peer, task_id, ttl, via, payload_json FROM task_outbox WHERE payload_blob IS NOT NULL`)
 	if err != nil {
 		c.logger.Warn("outbox: relay scan", "err", err)
 		return
 	}
 	type parked struct {
-		peer, taskID, via string
-		blob              []byte
-		ttl               int64
+		peer, taskID, via, raw string
+		blob                   []byte
+		ttl                    int64
 	}
 	var entries []parked
 	for rows.Next() {
 		var e parked
-		if err := rows.Scan(&e.peer, &e.taskID, &e.ttl, &e.via); err != nil {
+		if err := rows.Scan(&e.peer, &e.taskID, &e.ttl, &e.via, &e.raw); err != nil {
 			rows.Close()
 			c.logger.Warn("outbox: relay scan row", "err", err)
 			return
@@ -1065,7 +1129,7 @@ func (c *Core) relayParked(ctx context.Context, onlyHop string) {
 		if e.ttl > 0 && now > e.ttl {
 			c.logger.Info("outbox: parked bundle past TTL, expiring", "task", e.taskID, "peer", e.peer)
 			c.taskOutboxDrop(ctx, e.peer, e.taskID)
-			if err := c.store.MarkExpired(ctx, e.taskID, "dtn TTL expired"); err != nil {
+			if err := c.store.MarkExpiredAttempt(ctx, e.taskID, parkedAttempt(e.raw), "dtn TTL expired"); err != nil {
 				c.logger.Warn("outbox: mark expired", "task", e.taskID, "err", err)
 			}
 			continue
@@ -1088,7 +1152,7 @@ func (c *Core) relayParked(ctx context.Context, onlyHop string) {
 		if verr := bnd.Verify([]byte(c.sharedSecretValue()), now); verr != nil {
 			c.logger.Warn("outbox: parked bundle verify failed, dropping", "task", e.taskID, "peer", e.peer, "err", verr)
 			c.taskOutboxDrop(ctx, e.peer, e.taskID)
-			if err := c.store.MarkExpired(ctx, e.taskID, "bundle verify failed"); err != nil {
+			if err := c.store.MarkExpiredAttempt(ctx, e.taskID, parkedAttempt(e.raw), "bundle verify failed"); err != nil {
 				c.logger.Warn("outbox: mark expired", "task", e.taskID, "err", err)
 			}
 			continue
