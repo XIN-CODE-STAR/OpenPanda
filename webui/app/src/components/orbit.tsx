@@ -164,6 +164,16 @@ export default function DecisionOrbit(props: DecisionOrbitProps) {
   })
   const hasReview = tier2?.parked_in_review || task?.state === 'review'
 
+  // Run outcome. A terminal task used to keep reading "执行中" over a 100%
+  // bar — a failed run that looked finished and still in flight at once. The
+  // step now says what actually happened, and the bar only exists while there
+  // is something left to fill.
+  const state = task?.state
+  const running = state === 'running' || state === 'dispatched' || state === 'waiting_context'
+  const ended = state === 'done' || state === 'failed' || state === 'cancelled' || state === 'expired'
+  const failedRun = state === 'failed' || state === 'cancelled' || state === 'expired'
+  const execTitle = ended ? t('orbit.step.execEnded') : t('orbit.step.exec')
+
   // The collapsed bar's live pill — the TUI's rolling status line. Only for
   // work still moving; finished tasks keep the quiet summary pills.
   const liveLine = useMemo(() => {
@@ -190,6 +200,10 @@ export default function DecisionOrbit(props: DecisionOrbitProps) {
     task,
   }), [classify, planMeta, planStage, task])
 
+  // One-shot runs have exactly one "stage"; a badge for it only repeated the
+  // state chip two elements later, so the badge strip is for plans only.
+  const planBadges = (classify?.kind ?? classify?.class) === 'plan' ? stageBadges : []
+
   // --- Fade-in placeholders per-new-trace-type ------------------------------
   const seenRef = useRef<Set<string>>(new Set())
   const [flashTypes, setFlashTypes] = useState<Record<string, number>>({})
@@ -209,12 +223,8 @@ export default function DecisionOrbit(props: DecisionOrbitProps) {
   }, [traces])
 
   return (
-    <div
-      class="orbit"
-      role="region"
-      aria-label={t('orbit.brandScheduling')}
-    >
-      {/* — Collapsed summary row: 🛰️ 【大总管】 摘要1 · 摘要2 · 进度  ▾ — */}
+    <div class="orbit" role="region" aria-label={t('orbit.brandScheduling')}>
+      {/* — One quiet row: brand, the facts worth repeating, chevron — */}
       <div class="orbit-head">
         <button
           type="button"
@@ -222,7 +232,7 @@ export default function DecisionOrbit(props: DecisionOrbitProps) {
           onClick={() => setOpen(!open)}
           aria-expanded={open}
         >
-          <Icon name="orbit" class="orbit-brand-ico" />
+          <Icon name="orbit" class="orbit-brand-ico" size={14} />
           <span class="orbit-brand-title">
             {classify ? t('orbit.brandTitle') : t('orbit.brandShort')}
           </span>
@@ -236,10 +246,14 @@ export default function DecisionOrbit(props: DecisionOrbitProps) {
             )}
             {classifyLine && <span class="orbit-sum-pill">{classifyLine}</span>}
             {routeSummary && <span class="orbit-sum-pill">{routeSummary}</span>}
-            {progress > 0 && (
-              <span class="orbit-sum-pill">
-                {t('orbit.summary.progress', { pct: progress })}
-              </span>
+            {failedRun ? (
+              <span class="orbit-sum-pill pill-fail">{t(`state.${state}`)}</span>
+            ) : (
+              progress > 0 && (
+                <span class="orbit-sum-pill">
+                  {t('orbit.summary.progress', { pct: progress })}
+                </span>
+              )
             )}
             {hasReview && (
               <span class="orbit-sum-pill pill-review" role="status">
@@ -248,65 +262,68 @@ export default function DecisionOrbit(props: DecisionOrbitProps) {
             )}
           </span>
 
-          <span class="orbit-toggle-ico" aria-hidden>
-            {open ? '▴' : '▾'}
-          </span>
+          <Icon
+            name="chevron-down"
+            class={'orbit-toggle-ico' + (open ? ' is-open' : '')}
+            size={14}
+          />
         </button>
       </div>
 
-      {/* — Expanded Steps 1/2/3 + ActionRail — */}
+      {/* — Steps 1/2/3 + ActionRail — */}
       {open && (
         <div class="orbit-body">
-          <OrbitStep
-            no={1}
-            title={t('orbit.step.classify')}
-            flashTs={flashTypes.classify_result}
-          >
-            <ClassifyLine classify={classify} skipped={Boolean(execStart) && !classify} />
-          </OrbitStep>
+          <ol class="orbit-steps">
+            <OrbitStep
+              no={1}
+              title={t('orbit.step.classify')}
+              flashTs={flashTypes.classify_result}
+            >
+              <ClassifyLine classify={classify} skipped={Boolean(execStart) && !classify} />
+            </OrbitStep>
 
-          <OrbitStep
-            no={2}
-            title={t('orbit.step.route')}
-            flashTs={flashTypes.route_decision}
-          >
-            {singleNode ? (
-              <div class="orbit-single">
-                <div class="line1">{t('orbit.singleNode.line1')}</div>
-                <div class="line2">{t('orbit.singleNode.line2')}</div>
-                {onAddDevice && (
-                  <button
-                    type="button"
-                    class="btn btn-link orbit-cta"
-                    onClick={onAddDevice}
-                  >
-                    {t('orbit.singleNode.cta')}
-                  </button>
-                )}
-              </div>
-            ) : (
-              <RouteBlock
-                rows={routeRows}
-                selfNodeId={selfNodeId}
-                chosen={route?.target ?? route?.chosen}
-                skipped={Boolean(execStart) && !route}
+            <OrbitStep
+              no={2}
+              title={t('orbit.step.route')}
+              flashTs={flashTypes.route_decision}
+            >
+              {singleNode ? (
+                <span class="orbit-single">
+                  <span class="orbit-note">
+                    {t('orbit.singleNode.line1')} · {t('orbit.singleNode.line2')}
+                  </span>
+                  {onAddDevice && (
+                    <button type="button" class="orbit-link" onClick={onAddDevice}>
+                      {t('orbit.singleNode.cta')}
+                    </button>
+                  )}
+                </span>
+              ) : (
+                <RouteBlock
+                  rows={routeRows}
+                  selfNodeId={selfNodeId}
+                  chosen={route?.target ?? route?.chosen}
+                  skipped={Boolean(execStart) && !route}
+                />
+              )}
+            </OrbitStep>
+
+            <OrbitStep
+              no={3}
+              title={execTitle}
+              flashTs={flashTypes.exec_agent_start ?? flashTypes.plan_stage_changed}
+            >
+              <ExecLine
+                progress={progress}
+                badges={planBadges}
+                supervision={supervision}
+                exec={execStart}
+                phase={phase}
+                state={state}
+                running={running}
               />
-            )}
-          </OrbitStep>
-
-          <OrbitStep
-            no={3}
-            title={t('orbit.step.exec')}
-            flashTs={flashTypes.exec_agent_start ?? flashTypes.plan_stage_changed}
-          >
-            <ExecLine
-              progress={progress}
-              badges={stageBadges}
-              supervision={supervision}
-              exec={execStart}
-              phase={phase}
-            />
-          </OrbitStep>
+            </OrbitStep>
+          </ol>
 
           {/* ActionRail — only for task/plan messages */}
           {task?.id && (
@@ -347,25 +364,27 @@ function OrbitStep(props: {
     return () => clearTimeout(id)
   }, [props.flashTs])
   return (
-    <div class={'orbit-step' + (loading ? ' flash' : '')} aria-busy={loading}>
-      <div class="orbit-step-head">
-        {/* The bare digit, not "Step {n}": the title beside it already names the
-            step, so a translated word in front of the number only pushed the
-            title away from the marker it belongs to. */}
-        <span class="orbit-step-no">{props.no}</span>
-        <span class="orbit-step-title">:</span>
-        <span class="orbit-step-title">{props.title}</span>
-        {loading && <span class="orbit-step-skel">▫</span>}
-      </div>
-      <div class="orbit-step-body">{props.children}</div>
-    </div>
+    <li class={'orbit-step' + (loading ? ' flash' : '')} aria-busy={loading}>
+      {/* One row per step: marker, name, and the fact itself. The old
+          head-over-body stack gave three one-line facts three full-width
+          grey panels and turned a 3-step trace into a 400px card. */}
+      <span class="orbit-step-no" aria-hidden>
+        {props.no}
+      </span>
+      <span class="orbit-step-title">{props.title}</span>
+      <span class="orbit-step-body">{props.children}</span>
+    </li>
   )
 }
 
 function ClassifyLine({ classify, skipped }: { classify: ClassifySlot | null; skipped?: boolean }) {
   if (!classify) {
     // Direct dispatch never classified — say "skipped", not "awaiting".
-    return <div class="orbit-skipped muted">{skipped ? t('orbit.stepSkipped') : t('orbit.declined.classify')}</div>
+    return (
+      <span class="orbit-note">
+        {skipped ? t('orbit.stepSkipped') : t('orbit.declined.classify')}
+      </span>
+    )
   }
   const kind = classify.kind ?? classify.class
   switch (kind) {
@@ -373,47 +392,42 @@ function ClassifyLine({ classify, skipped }: { classify: ClassifySlot | null; sk
       const n = classify.stages_count ?? classify.stage_count ?? 1
       const goal = classify.plan_goal ?? classify.note ?? classify.label ?? ''
       return (
-        <div class="orbit-classify-row">
-          <span class="orbit-classify-kind">→</span>
-          <span class="pill-plan pill">
-            {t('orbit.classify.plan', { n })}
-          </span>
-          {goal && <span class="muted goal">· {goal}</span>}
-        </div>
+        <>
+          <span class="orbit-tag">{t('orbit.classify.plan', { n })}</span>
+          {goal && (
+            <span class="orbit-note" title={goal}>
+              {goal}
+            </span>
+          )}
+        </>
       )
     }
     case 'task': {
-      const label = classify.note ?? classify.label ?? t('orbit.classify.task')
+      // The bar above the steps already carries a "任务" pill (see
+      // `classifyLine`); repeating it here put the same bubble twice in one
+      // card. The intent's own words are the fact Step 1 has to add, so the tag
+      // only comes back when there is nothing else to say.
+      const label = classify.note ?? classify.label ?? ''
+      if (!label) return <span class="orbit-tag">{t('orbit.classify.task')}</span>
       return (
-        <div class="orbit-classify-row">
-          <span class="orbit-classify-kind">→</span>
-          <span class="pill-task pill">{t('orbit.classify.task')}</span>
-          <span class="muted goal">· {label}</span>
-        </div>
+        <span class="orbit-note" title={label}>
+          {label}
+        </span>
       )
     }
     case 'tool':
     case 'tool_call': {
       const n = classify.tool_count ?? (Array.isArray(classify.tools) ? classify.tools.length : 0)
-      const label = n > 0
-        ? t('orbit.classify.toolN', { n })
-        : t('orbit.classify.tool')
       return (
-        <div class="orbit-classify-row">
-          <span class="orbit-classify-kind">→</span>
-          <span class="pill-tool pill">{label}</span>
-        </div>
+        <span class="orbit-tag">
+          {n > 0 ? t('orbit.classify.toolN', { n }) : t('orbit.classify.tool')}
+        </span>
       )
     }
     case 'answer':
-      return (
-        <div class="orbit-classify-row">
-          <span class="orbit-classify-kind">→</span>
-          <span class="pill-answer pill">{t('orbit.classify.answer')}</span>
-        </div>
-      )
+      return <span class="orbit-tag">{t('orbit.classify.answer')}</span>
     default:
-      return <div class="muted">—</div>
+      return <span class="orbit-note">—</span>
   }
 }
 
@@ -437,38 +451,31 @@ function RouteBlock(props: {
   const { rows, selfNodeId, chosen, skipped } = props
   if (!rows.length) {
     return (
-      <div class="orbit-skipped muted">
+      <span class="orbit-note">
         {skipped ? t('orbit.stepSkipped') : t('orbit.route.declined')}
-      </div>
+      </span>
     )
   }
   return (
-    <ul class="orbit-route-list" role="list">
+    <span class="orbit-route-list" role="list">
       {rows.map((r, i) => (
-        <li
+        <span
           key={i}
+          role="listitem"
           class={
             'orbit-route-line' +
             ((r.chosen && (r.chosen === chosen || r.chosen === selfNodeId)) ? ' chosen' : '')
           }
         >
-          <span class="bullet">·</span>
-          {r.stageLabel && (
-            <span class="stage-name">{r.stageLabel}{t('orbit.route.stageSep')}</span>
-          )}
-          <span class="node">
-            {r.note
-              ? t('orbit.route.nodeWithNote', { note: r.note })
-              : t('orbit.route.nodePlain', { name: r.chosen ?? '—' })}
-          </span>
+          {r.stageLabel && <span class="stage-name">{r.stageLabel}</span>}
+          <span class="node">{r.chosen ?? '—'}</span>
+          {r.note && <span class="orbit-note">（{r.note}）</span>}
           {typeof r.score === 'number' && (
-            <span class="score">
-              {t('orbit.route.scoreFmt', { score: r.score.toFixed(2) })}
-            </span>
+            <span class="score">{t('orbit.route.scoreFmt', { score: r.score.toFixed(2) })}</span>
           )}
-        </li>
+        </span>
       ))}
-    </ul>
+    </span>
   )
 }
 
@@ -483,17 +490,36 @@ function ExecLine(props: {
   supervision: SupervisionSlot | null
   exec: ExecSlot | null
   phase: number | null
+  state?: string
+  running?: boolean
 }) {
-  const { progress, badges, supervision, exec } = props
+  const { progress, badges, supervision, exec, running, state } = props
+  const outcome = state === 'done' ? 'done' : state === 'failed' ? 'failed' : state === 'cancelled' || state === 'expired' ? 'failed' : 'idle'
   return (
-    <div class="orbit-exec">
-      <div class="orbit-progress" aria-label={t('orbit.summary.progress', { pct: progress })}>
-        <div class="orbit-progress-fill" style={`--prog:${progress}%`} />
-        <span class="orbit-progress-label">{progress}%</span>
-      </div>
+    <span class="orbit-exec">
+      {running ? (
+        <>
+          <span
+            class="orbit-bar"
+            role="img"
+            aria-label={t('orbit.summary.progress', { pct: progress })}
+          >
+            <span class="orbit-bar-fill" style={`--prog:${progress}%`} />
+          </span>
+          <span class="orbit-exec-state">{progress}%</span>
+        </>
+      ) : (
+        <span class={`orbit-exec-state is-${outcome}`}>
+          {outcome === 'done' ? (
+            <Icon name="check" size={11} />
+          ) : outcome === 'failed' ? (
+            <Icon name="x" size={11} />
+          ) : null}
+          {state ? t(`state.${state}`) : '—'}
+        </span>
+      )}
       {badges.length > 0 && (
-        <div class="orbit-stage-badges" aria-label={t('orbit.exec.stages', { stages: badges.length })}>
-          [
+        <span class="orbit-stage-badges" aria-label={t('orbit.exec.stages', { stages: badges.length })}>
           {badges.map((b, i) => (
             <span
               key={i}
@@ -510,19 +536,16 @@ function ExecLine(props: {
               </span>
             </span>
           ))}
-          ]
-        </div>
+        </span>
       )}
-      <div class="orbit-exec-meta muted">
-        {exec?.agent && (
-          <span>{t('orbit.exec.agent', { name: exec.agent })}</span>
-        )}
+      <span class="orbit-exec-meta">
+        {exec?.agent && <span>{exec.agent}</span>}
         {supervision?.round !== undefined && supervision?.budget !== undefined && (
           <span>{t('orbit.exec.round', { round: String(supervision.round), budget: String(supervision.budget) })}</span>
         )}
-        {exec?.node_name && <span>@ {exec.node_name}</span>}
-      </div>
-    </div>
+        {exec?.node_name && <span>@{exec.node_name}</span>}
+      </span>
+    </span>
   )
 }
 
@@ -541,15 +564,15 @@ function ActionRail(props: {
   const openTrail = onOpenTrail ?? ((id?: string) => { if (id) navigate({ view: 'detail', id }) })
   return (
     <div class="orbit-action-rail" role="toolbar" aria-label={t('orbit.actions')}>
-      <button type="button" class="orbit-action-btn" onClick={openQueue}>
+      <button type="button" class="orbit-link" onClick={openQueue}>
         {t('orbit.actions.openQueue')} →
       </button>
       {isPlan && (
-        <button type="button" class="orbit-action-btn" onClick={() => openPlan(task.plan_meta?.plan_id)}>
+        <button type="button" class="orbit-link" onClick={() => openPlan(task.plan_meta?.plan_id)}>
           {t('orbit.actions.openPlan')} →
         </button>
       )}
-      <button type="button" class="orbit-action-btn" onClick={() => openTrail(task.id)}>
+      <button type="button" class="orbit-link" onClick={() => openTrail(task.id)}>
         {t('orbit.actions.openTrail')} →
       </button>
     </div>

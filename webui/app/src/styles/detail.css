@@ -1,0 +1,928 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+
+/* Task detail page.
+   The page reads as a document rather than a stack of cards: one header line
+   with the identity of the run, one line of trace, then two columns — what
+   happened (result / brief / timeline) beside what the run is (ids,
+   delegation, children). Sections are separated by hairlines, not by nested
+   plates, which is what kept the old page three screens tall for a run that
+   produced nothing. */
+
+.dt {
+  /* One column, so the cap is a reading measure rather than a grid width:
+     980px keeps prose and tool output on one screen at 1600 without the
+     line length a 1240px band would give. */
+  max-width: 980px;
+  /* auto margins, not justify-content: a page taller than the viewport must
+     start at the top and scroll, and auto margins collapse to 0 there. */
+  margin-inline: auto;
+}
+
+.dt-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 12px;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--text-tertiary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease);
+}
+.dt-back:hover {
+  color: var(--text);
+}
+.dt-back svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* ---- Header ------------------------------------------------------------- */
+
+.dt-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-5);
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.dt-head-text {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.dt-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 650;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.dt-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin-top: 7px;
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+}
+
+/* A dot between facts instead of a box around each one: the identity line
+   carries seven values and seven chips read as a toolbar. */
+.dt-meta-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.dt-meta-item + .dt-meta-item::before {
+  content: '';
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--text-disabled);
+  flex: none;
+}
+.dt-meta-item.mono {
+  font-family: var(--ff-mono, ui-monospace, monospace);
+  font-size: var(--text-xs);
+}
+
+.dt-meta-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-tertiary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.dt-meta-link:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+.dt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  flex: none;
+}
+
+/* ---- Trace strip -------------------------------------------------------- */
+
+.tt {
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  overflow: hidden;
+}
+
+.tt-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 40px;
+  padding: 8px 10px 8px 14px;
+}
+
+.tt-label {
+  flex: none;
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.tt-steps {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow: hidden;
+}
+
+.tt-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.tt-link {
+  flex: none;
+  width: 18px;
+  height: 1px;
+  margin: 0 9px;
+  background: var(--border);
+}
+
+.tt-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 15px;
+  height: 15px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--bg-raised);
+}
+.tt-step.is-done .tt-dot {
+  border-color: var(--text-tertiary);
+  background: var(--text-tertiary);
+  color: var(--bg);
+}
+.tt-step.is-failed .tt-dot {
+  border-color: var(--semantic-danger);
+  background: var(--semantic-danger);
+}
+.tt-step.is-active .tt-dot {
+  border-color: var(--text);
+  background: transparent;
+}
+.tt-step.is-active .tt-dot::after {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--text);
+  animation: tt-pulse 1.4s ease-in-out infinite;
+}
+.tt-step.is-idle .tt-dot {
+  border-style: dashed;
+}
+@keyframes tt-pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.tt-name {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+.tt-step.is-active .tt-name {
+  color: var(--text);
+}
+
+.tt-fact {
+  font-family: var(--ff-mono, ui-monospace, monospace);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  max-width: 24ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tt-step.is-failed .tt-fact {
+  color: var(--semantic-danger);
+}
+
+.tt-tail {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  margin-left: auto;
+}
+
+.tt-meta {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+.tt-pct {
+  font-family: var(--ff-mono, ui-monospace, monospace);
+  color: var(--text-secondary);
+}
+
+.tt-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 26ch;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.tt-live-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tt-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.tt-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.tt-toggle svg {
+  transition: transform var(--dur-fast) var(--ease);
+}
+.tt-toggle.is-open svg {
+  transform: rotate(180deg);
+}
+
+.tt-progress {
+  display: block;
+  height: 2px;
+  background: var(--border-soft);
+}
+.tt-progress-fill {
+  display: block;
+  height: 100%;
+  width: var(--prog, 0%);
+  background: var(--text-tertiary);
+  transition: width var(--dur-slow) var(--ease);
+}
+
+.tt-detail {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+  padding: 12px 14px 13px;
+  border-top: 1px solid var(--border-soft);
+  background: var(--bg-chrome);
+}
+
+.tt-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.tt-cell-label {
+  margin-bottom: 2px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.tt-cand {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.tt-cand.is-chosen {
+  color: var(--text);
+}
+.tt-judge {
+  overflow-wrap: anywhere;
+}
+
+/* ---- Body --------------------------------------------------------------- */
+
+/* One measure, top to bottom. The page used to split into a 636px reading
+   column beside a 272px facts rail; the facts are seven short values, so the
+   rail ran out ~240px in while the log kept going for another thousand, and
+   the right half of the page was empty for the whole scroll. A single column
+   answers the same questions in the same order without the gutter — the log
+   is the only section long enough to want width, and it now has all of it. */
+.dt-body {
+  margin-top: 22px;
+}
+
+.dt-sec {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-soft);
+}
+.dt-sec:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.dt-sec-title {
+  margin: 0 0 10px;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+/* Section header with an action on the right (the log's expand toggle). */
+.dt-sec-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.dt-sec-head .dt-sec-title {
+  margin: 0;
+}
+.dt-sec-hint {
+  margin-left: auto;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+.dt-sec-action {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.dt-sec-action:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+/* ---- Facts band --------------------------------------------------------- */
+
+/* Label over value, auto-fitting across the measure. A two-column label/value
+   table read well at 202px of value width but only by being a rail; laid out
+   across the page the stacked form fits four to five facts per row and the
+   UUID gets a line of its own to wrap on. */
+.dt-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 12px 28px;
+  margin: 0;
+}
+.dt-fact {
+  display: grid;
+  gap: 3px;
+  align-content: start;
+  min-width: 0;
+}
+.dt-fact dt {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+.dt-fact dd {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+.dt-fact dd.mono {
+  font-family: var(--ff-mono, ui-monospace, monospace);
+  font-size: var(--text-xs);
+  /* A UUID is 36 characters: wrapped over two lines it stays readable and
+     copyable, where an ellipsis only preserved the first 24 of them. */
+  line-height: 1.45;
+}
+.dt-fact .linklike {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.dt-fact .linklike:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+.dt-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--text-sm);
+}
+
+/* ---- Brief -------------------------------------------------------------- */
+
+.dt-spec-target {
+  margin: 0;
+  font-size: var(--text-md);
+  line-height: 1.65;
+  color: var(--text-secondary);
+}
+
+.dt-spec-list {
+  display: grid;
+  gap: 4px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+.dt-spec-list li {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+.dt-spec-ico {
+  flex: none;
+  margin-top: 4px;
+  color: var(--text-tertiary);
+}
+
+.dt-spec-foot {
+  display: grid;
+  grid-template-columns: 62px minmax(0, 1fr);
+  gap: 6px 8px;
+  margin: 12px 0 0;
+  font-size: var(--text-sm);
+}
+.dt-spec-foot dt {
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+.dt-spec-foot dd {
+  margin: 0;
+  color: var(--text-secondary);
+}
+.dt-spec-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* ---- Board -------------------------------------------------------------- */
+
+.dt-board {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.dt-board-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  font-size: var(--text-sm);
+}
+.dt-board-sender {
+  font-weight: 500;
+  color: var(--text);
+}
+.dt-board-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-secondary);
+}
+.dt-board-time {
+  font-size: var(--text-xs);
+}
+
+/* ---- Message composer (running tasks) ----------------------------------- */
+
+.dt-msg {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: 12px;
+}
+.dt-msg .input {
+  flex: 1 1 240px;
+  width: auto;
+}
+.dt-msg-hint {
+  flex-basis: 100%;
+  font-size: var(--text-xs);
+}
+
+/* ---- Blocked review ----------------------------------------------------- */
+
+.dt-blocked {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--semantic-warn-border);
+  border-radius: var(--radius-md);
+  background: var(--semantic-warn-soft);
+}
+.dt-blocked-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--text-sm);
+}
+.dt-blocked .detail-raw {
+  margin-top: 0;
+}
+
+/* ---- Chain / children --------------------------------------------------- */
+
+.dt-chain {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-sm);
+}
+.dt-children {
+  display: grid;
+  gap: 3px;
+}
+.dt-child {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  text-align: left;
+  cursor: pointer;
+}
+.dt-child:hover {
+  background: var(--bg-hover);
+}
+.dt-child-title {
+  min-width: 0;
+  font-size: var(--text-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- Density overrides for the shared blocks inside the page ------------ */
+
+.dt .result-view {
+  gap: 10px;
+}
+.dt .result-meta {
+  gap: 10px;
+  font-size: var(--text-sm);
+}
+.dt .result-block {
+  gap: 6px;
+}
+.dt .result-out {
+  font-size: var(--text-md);
+}
+.result-failure {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  color: var(--semantic-danger);
+  overflow-wrap: anywhere;
+}
+
+/* Event rows: the timeline is the longest thing on the page, and every row
+   used to sit in its own inset plate — a one-line "API retry 1 (429)" became a
+   bordered box with a raw-JSON toggle inside it. In the detail column the
+   plate goes away and the words carry the row; only real payloads (tool
+   output, thoughts, the result card) keep a surface of their own. */
+.dt .step-body {
+  margin-top: 2px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.dt .step-summary {
+  margin-bottom: 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+.dt .agent-text {
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+.dt .agent-text h1,
+.dt .agent-text h2,
+.dt .agent-text h3,
+.dt .agent-text h4 {
+  font-size: var(--text-md);
+  margin: 2px 0 4px;
+}
+.dt .agent-text p {
+  margin: 0 0 4px;
+}
+.dt .step-tag {
+  font-size: 10.5px;
+  padding: 1px 5px;
+}
+.dt .agent-result {
+  max-height: 200px;
+}
+
+/* Markers hang in the left margin: the row's text then starts on the same
+   vertical line as every section title above it, instead of every event
+   being indented 22px past the rest of the page. */
+.dt .timeline-steps {
+  margin-left: -22px;
+}
+
+.dt .timeline-step-item {
+  gap: 10px;
+  padding-bottom: 10px;
+}
+.dt .timeline-step-item:before {
+  left: 5px;
+  top: 15px;
+  width: 1px;
+}
+.dt .step-marker {
+  width: 12px;
+  height: 12px;
+  border-width: 1.5px;
+  margin-top: 3px;
+}
+.dt .timeline-step-item.agent-child .step-marker {
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+}
+.dt .step-header {
+  gap: 6px;
+  margin-bottom: 2px;
+}
+.dt .step-time {
+  font-size: var(--text-xs);
+}
+.dt .badge {
+  font-size: 10.5px;
+  padding: 0 6px;
+}
+
+/* ---- Verdict ------------------------------------------------------------ */
+
+/* The block the page opens on: what happened, in one sentence, then what it
+   cost. Tinted, with a 3px tone rail, because it is the only section that is
+   an *answer* rather than evidence — before it existed the page's first band
+   was five columns of grey ids and the reason a run failed sat 300px down
+   inside a JSON blob. The tint is the tone, not a decoration: a failed run
+   should be recognizable from across the room. */
+.dt-verdict {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 13px 16px;
+  border: 1px solid var(--border-soft);
+  border-left: 3px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+}
+.dt-verdict.is-bad {
+  border-color: var(--semantic-danger-border);
+  border-left-color: var(--semantic-danger);
+  background: var(--semantic-danger-soft);
+}
+.dt-verdict.is-warn {
+  border-color: var(--semantic-warn-border);
+  border-left-color: var(--semantic-warn);
+  background: var(--semantic-warn-soft);
+}
+.dt-verdict.is-info {
+  border-color: var(--semantic-info-border);
+  border-left-color: var(--semantic-info);
+  background: var(--semantic-info-soft);
+}
+.dt-verdict.is-ok {
+  border-left-color: var(--semantic-good);
+}
+
+.dt-verdict-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  min-width: 0;
+}
+.dt-verdict-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-top: 8px;
+  border-radius: 50%;
+  background: var(--text-disabled);
+}
+.dt-verdict.is-bad .dt-verdict-dot {
+  background: var(--semantic-danger);
+}
+.dt-verdict.is-warn .dt-verdict-dot {
+  background: var(--semantic-warn);
+}
+.dt-verdict.is-info .dt-verdict-dot {
+  background: var(--semantic-info);
+}
+.dt-verdict.is-ok .dt-verdict-dot {
+  background: var(--semantic-good);
+}
+
+/* One sentence, set larger than body copy: this is the page's thesis, and at
+   `--text-sm` it read like another metadata row. `anywhere` because the text
+   is often a URL plus a timeout reason with no spaces to break on. */
+.dt-verdict-text {
+  margin: 0;
+  min-width: 0;
+  font-size: 14.5px;
+  line-height: 1.6;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.dt-verdict-more {
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+.dt-verdict-more:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+/* The cost of the answer, separated by a dashed rule so it never competes
+   with the sentence above it. */
+.dt-verdict-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 22px;
+  margin: 0;
+  padding-top: 9px;
+  border-top: 1px dashed var(--border-soft);
+}
+.dt-verdict-metric {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.dt-verdict-metric dt {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+.dt-verdict-metric dd {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- Foldable section header ------------------------------------------- */
+
+/* A section whose body is reference material. The whole header is the hit
+   target, and the collapsed state keeps a summary on the right, so folding
+   costs the reader nothing they were reading for. */
+.dt-fold {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.dt-fold .dt-sec-title {
+  margin: 0;
+}
+.dt-fold-summary {
+  margin-left: auto;
+  min-width: 0;
+  max-width: 62%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.dt-fold:hover .dt-fold-summary {
+  color: var(--text-secondary);
+}
+.dt-fold-ico {
+  flex: none;
+  align-self: center;
+  color: var(--text-tertiary);
+}
+
+/* The brief's collapsed state: first line of the target, clamped. Folding it
+   away entirely would leave the page unable to say what the task was for. */
+.dt-spec-preview {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  font-size: var(--text-sm);
+  line-height: 1.65;
+  color: var(--text-secondary);
+}
+
+/* The per-row raw-JSON toggles are debugging affordances, not reading
+   material: on an eighteen-event log they were eighteen buttons of equal
+   weight. Present, but quiet until asked for. */
+.dt .raw-json-btn {
+  opacity: 0.5;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+.dt .raw-json-btn:hover,
+.dt .raw-json-btn:focus-visible {
+  opacity: 1;
+}
+
+/* ---- Narrow screens ----------------------------------------------------- */
+
+@media (max-width: 720px) {
+  .dt-head {
+    flex-direction: column;
+    gap: 12px;
+  }
+  .dt-actions {
+    justify-content: flex-start;
+  }
+  .dt-facts {
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 10px 20px;
+  }
+  .tt-row {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .tt-steps {
+    flex-basis: 100%;
+    overflow-x: auto;
+  }
+  .tt-tail {
+    margin-left: 0;
+  }
+}

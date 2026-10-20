@@ -4,17 +4,17 @@ import { useEffect, useRef, useState } from 'preact/hooks'
 import { api, type Task } from '../api/client'
 import { useAsync, useChangeSignal } from '../hooks'
 import { t } from '../i18n'
-import { navigate } from '../nav'
 import { layerAboveOwnsEscape } from './card-dismiss'
 import { confirmDialog } from './confirm'
 import { Icon } from './icons'
 import DecisionOrbit from './orbit'
 import { StateBadge } from './state-badge'
+import { bindStripDrag } from './strip-drag'
 import { fmtElapsed, isActiveState } from './task-activity'
 import { toast, toastError } from './toast'
 
-/** The tasks this conversation started — the card behind the header's
- *  orchestration button.
+/** The tasks this conversation started — the card behind the header's task
+ *  button.
  *
  *  Same shell as the node card beside it: ghost icon button, card hanging off
  *  the bar, the button toggles it and Escape closes it, and the pane reserves a
@@ -24,36 +24,42 @@ import { toast, toastError } from './toast'
  *  leaving the transcript. Neither closes on an outside click: reading the
  *  thread under the card is the point, not a dismissal.
  *
- *  Three strips now: work that is moving (进行中), work parked on the human
+ *  Three strips: work that is moving (进行中), work parked on the human
  *  (待审核), and the archive (已完成 — done, failed and cancelled all landed
  *  somewhere, and none of them wants a decision). The card is tall enough for
  *  all three to be on screen at once, so the state of the thread is one glance
  *  rather than one scroll. A row's own actions (取消 / 执行) sit on the task,
  *  not behind a detail trip.
  *
- *  Above the strips sits the DecisionOrbit trace — the same card that used to
- *  ride above every task reply in the transcript. There it repeated itself for
- *  each task and pushed the answer down; here it is one rail, read when the
- *  question "how did this get routed / how far along is it" is actually asked,
- *  and it belongs to the task you are reading. It owns no click of its own:
- *  picking a task stays the chip's job, so the trace and the detail pane can
- *  never disagree about which task is on screen — one selection drives both.
+ *  The card is a task list first. It used to carry a DecisionOrbit rail above
+ *  the strips, always pointed at the newest task whether or not that was the
+ *  task you were reading; the rail said "how is this turn going" before you had
+ *  asked. It is gone from there. Picking a task now opens the trace in a card
+ *  of its own, to the *left* of this one: the list says what the thread
+ *  produced, the card beside it says how that one task was classified, routed
+ *  and run. Two cards, one selection — the trace never describes a task the
+ *  list is not pointing at.
  *
- *  The card reads top-down in the order the questions come: how is this turn
- *  being routed (trace), what has this thread produced (strips), what is in
- *  this one task (detail). The trace sits at the top because it is the one
- *  block whose height the reader controls: expanding it pushes the list down
- *  and the card scrolls, instead of squeezing the strips into a sliver the way
- *  it did when it sat between them and the detail pane. Every section keeps
- *  its full height whether or not it has rows in it (see `.orch-sec-slot`),
- *  so the three strips read as one table and the card does not jump when a
- *  task arrives or leaves.
+ *  The trace is a sibling rather than a section inside this card because it is
+ *  read in a different direction: the list is scanned top-down (and a strip
+ *  that outgrows its four tiles continues downwards), the trace is a
+ *  three-step column. Stacked in one card, the
+ *  steps either pushed the strips down or had to live in a scroller inside a
+ *  scroller. Side by side each keeps its own height and its own scroll, and the
+ *  8px gap is the whole relationship. Narrow panes wrap the trace back under
+ *  the list — it never floats over the transcript on a phone.
+ *
+ *  The card reads top-down in the order the questions come: what has this
+ *  thread produced (strips), what is in this one task (detail). Every section
+ *  keeps its full height whether or not it has rows in it (see
+ *  `.orch-sec-slot`), so the three strips read as one table and the card does
+ *  not jump when a task arrives or leaves.
  *
  *  A task opens *under the strips*, in the same card, and the strips stay where
  *  they are: the detail is a reading pane, not a page. Trading the rows for a
  *  detail view meant a back arrow for every look, and the whole point of
  *  reading tasks from here is that nothing has to be left behind. Clicking the
- *  same task again (or the × on the detail) puts it away. */
+ *  same task again (or the × on the detail) puts both panes away. */
 export function OrchestrateCard(props: {
   /** The thread whose tasks are shown; null before a new chat is saved. */
   sessionId?: string | null
@@ -74,11 +80,6 @@ export function OrchestrateCard(props: {
   selfNodeId?: string
 }) {
   const [picked, setPicked] = useState<string | null>(null)
-  // The trace's steps. The reader owns this one: opening a task's detail no
-  // longer folds it back. The two panes used to take turns because the card
-  // had one slot of height for both of them; the card scrolls now, so folding
-  // on a pick only made the layout jump under the cursor.
-  const [traceOpen, setTraceOpen] = useState(false)
   // Local nudge after an action: the shared change feed usually arrives a beat
   // later, and the row the user just cancelled should not sit there looking
   // alive while they wait for it.
@@ -133,37 +134,13 @@ export function OrchestrateCard(props: {
       ? detail.data
       : tasks.find((x) => x.id === focusedId) ?? null
     : null
-  // A task that never went through the dispatcher has no classification, no
-  // route and no execution trace to draw — the rail would be three empty steps
-  // saying nothing at all. It shows up once the task has something to report.
-  const traceTask = focused && hasTrace(focused) ? focused : null
 
-  // Reopening starts at the top of the card: nothing picked, steps folded —
-  // not with whatever was open last time.
+  // Reopening starts at the top of the card: nothing picked — not with
+  // whatever was open last time.
   useEffect(() => {
     if (props.open) return
     setPicked(null)
-    setTraceOpen(false)
   }, [props.open])
-
-  // Opening a detail is a reading move, and the pane lands under the strips —
-  // at the bottom of a card that scrolls as a whole, which is off screen
-  // whenever the chip you clicked sits near the top. When the pane would not
-  // fit under its chip, park the chip at the top of the viewport instead: the
-  // chip and the pane then share one screen, and the selection stays marked
-  // right above the text it opened.
-  useEffect(() => {
-    if (!picked) return
-    const panel = box.current?.querySelector<HTMLElement>('.orch-panel')
-    const chip = box.current?.querySelector<HTMLElement>('.orch-chip[data-picked]')
-    const pane = box.current?.querySelector<HTMLElement>('.orch-detail')
-    if (!panel || !chip || !pane) return
-    const view = panel.getBoundingClientRect()
-    // The panel's own padding — the top of the scrollport, not of the border.
-    const top = view.top + 6
-    if (pane.getBoundingClientRect().bottom <= view.bottom - 6) return
-    panel.scrollTop += chip.getBoundingClientRect().top - top
-  }, [picked])
 
   // Escape puts the detail away first, so one key undoes one step. It is the
   // card's only way out besides the header trigger: an outside click used to
@@ -219,9 +196,7 @@ export function OrchestrateCard(props: {
     busy: busy.startsWith(`${task.id}:`),
     picked: picked === task.id,
     // Toggling on the same chip closes the pane: with the strips still up, the
-    // chip is both the way in and the way out. The trace is left alone — it is
-    // the reader's own control now that the card scrolls instead of trading
-    // one pane for the other.
+    // chip is both the way in and the way out.
     onOpen: () => {
       setPicked((cur) => (cur === task.id ? null : task.id))
     },
@@ -244,79 +219,67 @@ export function OrchestrateCard(props: {
         <Icon name="route" size={19} />
       </button>
       {props.open && (
-        <div class="orch-panel" role="dialog" aria-label={t('sessions.orchestrate')}>
-          {/* The trace first: it explains the task this card is focused on,
-              and it is the one block whose height the reader controls — on top
-              it pushes the list down (and the card scrolls) instead of eating
-              the strips' room, which is what it did from between the strips
-              and the detail pane. Collapsed by default: at 360px the summary
-              line is what fits beside three strips, and the steps are one
-              click away. It is a rail rather than a card in a card, so it
-              drops its own plate inside the panel (see `.orch-trace .orbit`). */}
-          {traceTask && (
-            <section class="orch-trace" aria-label={t('orch.trace')}>
-              <p class="orch-trace-head">
-                <span class="orch-trace-label">{t('orch.trace')}</span>
-                <span class="orch-trace-task" title={traceTask.title || traceTask.id}>
-                  {traceTask.title || traceTask.id}
-                </span>
+        /* One row of cards hanging off the bar: the picked task on the left,
+           the list on the right. The row is the positioning context — each card
+           keeps its own height and scroll, and the gap between them is the only
+           thing tying the two together. */
+        <div class="orch-flyout">
+          <div
+            class="orch-panel"
+            role="dialog"
+            /* The visible label is the card's name; "任务" alone would say less
+               than the heading two pixels under it. */
+            aria-label={props.sessionId ? t('orch.title') : t('orch.projectTitle')}
+          >
+            {/* The strips, and nothing else: this card is the list. The picked
+                task — its brief, its result and how it was routed — is read in
+                the card beside it, so nothing here grows when a chip is
+                clicked. */}
+            <div class="orch-body">
+              <p class="orch-panel-label">
+                {props.sessionId ? t('orch.title') : t('orch.projectTitle')}
               </p>
-              <DecisionOrbit
-                /* Remounted per task: the orbit keeps its own open/closed
-                   state, and steps left expanded for the previous task must not
-                   open the next one's. */
-                key={traceTask.id}
-                task={traceTask}
-                onlineNodeCount={props.onlineNodeCount}
-                selfNodeId={props.selfNodeId}
-                open={traceOpen}
-                onOpenChange={setTraceOpen}
-              />
-            </section>
-          )}
-          {/* The strips, under the trace. They keep their natural height —
-              every section reserves a tile row even when it is empty, so the
-              three read as one table — and the card scrolls as a whole when
-              the trace and a detail pane are open at the same time. */}
-          <div class="orch-body">
-            <p class="orch-panel-label">
-              {props.sessionId ? t('orch.title') : t('orch.projectTitle')}
-            </p>
-            {error ? (
-              <p class="orch-sec-empty">{t('common.loadFail')}</p>
-            ) : !props.sessionId && !props.project ? (
-              <p class="orch-sec-empty">{t('orch.noSession')}</p>
-            ) : (
-              <>
-                <OrchRow
-                  title={t('orch.doing')}
-                  tasks={doing}
-                  empty={t('orch.emptyDoing')}
-                  chipProps={chipProps}
-                />
-                <OrchRow
-                  title={t('orch.review')}
-                  tasks={review}
-                  empty={t('orch.emptyReview')}
-                  chipProps={chipProps}
-                />
-                <OrchRow
-                  title={t('orch.done')}
-                  tasks={finished}
-                  empty={t('orch.emptyDone')}
-                  chipProps={chipProps}
-                />
-              </>
-            )}
+              {error ? (
+                <p class="orch-sec-empty">{t('common.loadFail')}</p>
+              ) : !props.sessionId && !props.project ? (
+                <p class="orch-sec-empty">{t('orch.noSession')}</p>
+              ) : (
+                <>
+                  <OrchRow
+                    title={t('orch.doing')}
+                    tasks={doing}
+                    empty={t('orch.emptyDoing')}
+                    chipProps={chipProps}
+                  />
+                  <OrchRow
+                    title={t('orch.review')}
+                    tasks={review}
+                    empty={t('orch.emptyReview')}
+                    chipProps={chipProps}
+                  />
+                  <OrchRow
+                    title={t('orch.done')}
+                    tasks={finished}
+                    empty={t('orch.emptyDone')}
+                    chipProps={chipProps}
+                  />
+                </>
+              )}
+            </div>
           </div>
+          {/* Second in the DOM, first on screen: the row is `row-reverse`, so
+              the picked task sits to the left of the list and a narrow pane
+              wraps it *under* the list rather than off the left edge. */}
           {picked && focused && (
-            <OrchDetail
-              /* Keyed by task: switching tasks remounts the pane, so its
-                 scroll starts at the top instead of at the last task's
-                 offset. */
-              key={focused.id}
+            <OrchTask
+              /* Keyed by task: switching tasks remounts the card, so its scroll
+                 starts at the top and the orbit starts expanded for this task
+                 rather than inheriting the previous one's state. */
+              key={`task-${focused.id}`}
               task={focused}
               busy={busy.startsWith(`${focused.id}:`)}
+              onlineNodeCount={props.onlineNodeCount}
+              selfNodeId={props.selfNodeId}
               onClose={() => setPicked(null)}
               onCancel={() => void act(focused, 'cancel')}
               onRun={() => void act(focused, 'run')}
@@ -328,10 +291,17 @@ export function OrchestrateCard(props: {
   )
 }
 
-/** One horizontal strip: a label with its count, then the tasks side by side.
- *  An empty strip keeps a tile-sized slot rather than collapsing to a line of
+/** One strip: a label with its count, then the tasks in a two-column grid —
+ *  four tiles in view (two rows of two), the rest one wheel-notch below. An
+ *  empty strip keeps a tile-sized slot rather than collapsing to a line of
  *  text: the three strips are read as one table, and a section that shrank to
- *  its placeholder made the card jump every time a task arrived or left. */
+ *  its placeholder made the card jump every time a task arrived or left.
+ *
+ *  The grid scrolls itself, not the card: a thread can hold twenty finished
+ *  tasks and none of them should push 待审核 off the bottom of the popover. The
+ *  tiles are tall enough for a three-line title, so the four on screen say what
+ *  they are; the count on the label says how many are below the fold, and the
+ *  wheel and a press-drag both move the grid (see `strip-drag.ts`). */
 function OrchRow(props: {
   title: string
   tasks: Task[]
@@ -345,6 +315,16 @@ function OrchRow(props: {
     onRun(): void
   }
 }) {
+  // Re-bound when the row goes from empty to filled: the strip element only
+  // exists in the filled branch, so a listener attached on mount would never
+  // have had anything to attach to.
+  const strip = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const el = strip.current
+    if (!el) return
+    // The grid runs downwards: two tiles wide, four in view.
+    return bindStripDrag(el, 'y')
+  }, [props.tasks.length])
   return (
     <section class="orch-sec">
       <p class="orch-sec-head">
@@ -354,7 +334,7 @@ function OrchRow(props: {
       {props.tasks.length === 0 ? (
         <p class="orch-sec-slot">{props.empty}</p>
       ) : (
-        <div class="orch-row">
+        <div class="orch-grid" ref={strip}>
           {props.tasks.map((task) => (
             <OrchChip key={task.id} {...props.chipProps(task)} />
           ))}
@@ -420,11 +400,26 @@ function OrchChip(props: {
   )
 }
 
-/** The picked task, in a pane under the strips. Same actions as the row plus
- *  the way out to the full task page for anything this card cannot show. */
-function OrchDetail(props: {
+/** The picked task, in the card to the left of the list — everything about it
+ *  in one place: what it is (title, state, owner, age), how it was classified,
+ *  routed and run (the orbit), what it was asked to do (brief), and what came
+ *  back (result), with the actions that still apply.
+ *
+ *  This used to be two things in two places: a trace card on the left and a
+ *  detail pane stacked under the strips on the right. That split the same task
+ *  across the width of the screen — you read "识别图片内容…" on the right and
+ *  the steps that produced it on the left, and had to keep both in your head.
+ *  One card, one task: the list on the right stays a list (it never grows when
+ *  a chip is clicked), and the reading happens here.
+ *
+ *  The orbit starts expanded — clicking a task already said you wanted to look
+ *  — and the card scrolls as a whole, so a long trace and a long result never
+ *  fight over the same height. */
+function OrchTask(props: {
   task: Task
   busy: boolean
+  onlineNodeCount?: number
+  selfNodeId?: string
   onClose(): void
   onCancel(): void
   onRun(): void
@@ -435,7 +430,7 @@ function OrchDetail(props: {
   const blocked = task.approval_disposition === 'needs_changed_input'
   const brief = task.spec || task.intent || ''
   return (
-    <div class="orch-detail" id="orch-detail" role="region" aria-label={t('orch.detail')}>
+    <aside class="orch-orch-card" id="orch-detail" role="region" aria-label={t('orch.detail')}>
       <div class="orch-detail-head">
         <p class="orch-detail-title">{task.title || task.id}</p>
         <button
@@ -459,6 +454,20 @@ function OrchDetail(props: {
           {t(`detail.reviewKind.${task.approval_disposition}`)}
         </p>
       )}
+      {/* A task that never went through the dispatcher has no classification,
+          no route and no execution trace — the orbit would be three empty steps
+          under a "大总管" bar that did nothing, so the section is skipped. */}
+      {hasTrace(task) && (
+        <section class="orch-orch-trace" aria-label={t('orch.trace')}>
+          <p class="orch-detail-label">{t('orch.trace')}</p>
+          <DecisionOrbit
+            task={task}
+            onlineNodeCount={props.onlineNodeCount}
+            selfNodeId={props.selfNodeId}
+            defaultOpen
+          />
+        </section>
+      )}
       {brief && (
         <div class="orch-detail-sec">
           <p class="orch-detail-label">{t('orch.brief')}</p>
@@ -473,30 +482,31 @@ function OrchDetail(props: {
           <p class="orch-detail-text dim">{t('orch.noResult')}</p>
         )}
       </div>
-      <div class="orch-detail-foot">
-        {active && (
-          <button class="btn small" disabled={props.busy} onClick={props.onCancel}>
-            {t('orch.cancel')}
-          </button>
-        )}
-        {review && (
-          <button
-            class="btn primary small"
-            disabled={props.busy || blocked}
-            title={blocked ? t('detail.needsChangedInputHint') : undefined}
-            onClick={props.onRun}
-          >
-            {t('orch.run')}
-          </button>
-        )}
-        <button
-          class="btn ghost small"
-          onClick={() => navigate({ view: 'detail', id: task.id })}
-        >
-          {t('orch.openTask')}
-        </button>
-      </div>
-    </div>
+      {/* Only the actions that still apply: a finished task has none, and an
+          empty footer row was just a strip of padding under the result. The
+          link out to the full task page is gone with it — this card already
+          shows the brief, the result and the trace, so "go read it elsewhere"
+          was a detour, not an action. */}
+      {(active || review) && (
+        <div class="orch-detail-foot">
+          {active && (
+            <button class="btn small" disabled={props.busy} onClick={props.onCancel}>
+              {t('orch.cancel')}
+            </button>
+          )}
+          {review && (
+            <button
+              class="btn primary small"
+              disabled={props.busy || blocked}
+              title={blocked ? t('detail.needsChangedInputHint') : undefined}
+              onClick={props.onRun}
+            >
+              {t('orch.run')}
+            </button>
+          )}
+        </div>
+      )}
+    </aside>
   )
 }
 

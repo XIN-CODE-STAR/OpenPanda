@@ -1426,43 +1426,173 @@
   font-family: var(--mono);
 }
 
-/* ---- Reminders ---- */
+/* ---- Reminders ---------------------------------------------------------
+   提醒 is a bell in the rail's head (components/reminders.tsx), and its card
+   hangs off the rail's right edge. The card is `position: fixed` rather than
+   absolute inside the head because the narrow layout turns the rail into a
+   horizontally scrolling strip, and an absolutely positioned card inside a
+   scroll container is clipped by it. */
 
-.reminder-form {
+.reminder-bell {
+  position: relative;
+  display: flex;
+}
+
+/* Open, the bell keeps the tinted square the card below extends from: the
+   control has to look pressed while its card is up. */
+.reminder-bell .icon-btn.open {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* The count rides the bell's corner as a number, not a dot: "2 pending" and
+   "9 pending" are different reasons to open the card. Amber is the tone the
+   rail's review badge already uses, so the head gains one warm speck and no
+   new colour. */
+.reminder-bell-dot {
+  position: absolute;
+  top: -1px;
+  right: -3px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: var(--radius-pill);
+  background: var(--semantic-warn-soft);
+  color: var(--semantic-warn);
+  font-size: 9.5px;
+  font-weight: 650;
+  line-height: 15px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.reminder-pop {
+  position: fixed;
+  top: 10px;
+  /* Beside the rail, not over it: the nav stays clickable while the card is
+     up, which is what "glance at what is pending" has to allow for. */
+  left: calc(var(--sidebar-w) + 8px);
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  width: 356px;
+  max-height: calc(100dvh - 20px);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  animation: reminder-pop-in var(--dur-fast) var(--ease-enter);
+}
+
+@keyframes reminder-pop-in {
+  from {
+    opacity: 0;
+    transform: translateX(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.reminder-pop-head {
   display: flex;
   align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin-bottom: 16px;
+  gap: 8px;
+  padding: 8px 8px 8px 14px;
+  border-bottom: 1px solid var(--border-soft);
 }
 
-.reminder-form .reminder-message {
+.reminder-pop-title {
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.reminder-pop-close {
+  width: 24px;
+  height: 24px;
+  margin-left: auto;
+  color: var(--text-tertiary);
+}
+
+/* The compose block. Three stacked rows instead of the page's one wrapping
+   line: 356px is not enough for a message field and three time controls side
+   by side, and a form that re-wraps at a different place every locale reads as
+   broken rather than dense. */
+.reminder-pop .reminder-form {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  margin: 0;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.reminder-pop .reminder-message {
+  width: 100%;
+  min-width: 0;
+}
+
+.reminder-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.reminder-pop .reminder-minutes {
+  width: 76px;
+  flex: none;
+}
+
+.reminder-pop .reminder-at,
+.reminder-pop .reminder-every {
+  width: auto;
   flex: 1;
-  min-width: 220px;
-}
-
-.reminder-form .reminder-minutes {
-  width: 90px;
-}
-
-.reminder-form .reminder-every {
-  width: 150px;
+  min-width: 0;
 }
 
 .reminder-or {
-  font-size: 13px;
+  font-size: var(--text-xs);
 }
 
-.reminder-form .reminder-at {
-  width: 210px;
+.reminder-add {
+  flex: none;
+}
+
+.reminder-pop-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 14px 8px;
+}
+
+.reminder-pop-label {
+  margin: 10px 0 2px;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text-tertiary);
+}
+
+.reminder-pop-empty {
+  margin: 2px 0 6px;
+  font-size: var(--text-sm);
+}
+
+.reminder-pop-err {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0;
 }
 
 .reminder-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
-  padding: 10px 0;
+  gap: 10px;
+  padding: 8px 0;
   border-bottom: 1px solid var(--border-soft);
 }
 
@@ -1477,27 +1607,40 @@
 .reminder-info {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
   min-width: 0;
 }
 
 .reminder-msg {
-  font-weight: 600;
-  font-size: 14px;
+  font-weight: 550;
+  font-size: var(--text-md);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .reminder-meta {
-  font-size: 12px;
+  font-size: var(--text-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .reminder-side {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 4px;
   flex-shrink: 0;
+}
+
+.reminder-x {
+  width: 22px;
+  height: 22px;
+  color: var(--text-tertiary);
+}
+
+.reminder-x:hover:not(:disabled) {
+  color: var(--semantic-danger);
 }
 
 .badge.dim {
@@ -1505,14 +1648,30 @@
   border-color: var(--border);
 }
 
-.notify-card {
+/* Push is a switch about *this* browser, so it lives at the card's foot as a
+   line of status rather than as a card of its own — it is either already on
+   (a sentence) or one click away (a link). */
+.reminder-pop-foot {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 16px;
-  font-size: 13px;
-  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--border-soft);
+  background: var(--bg-chrome);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+@media (max-width: 720px) {
+  /* The rail is a top bar here, so the card drops under it instead of hanging
+     off its right edge. */
+  .reminder-pop {
+    top: 52px;
+    left: 8px;
+    right: 8px;
+    width: auto;
+    max-height: calc(100dvh - 60px);
+  }
 }
 
 /* ---- Memory ---- */
@@ -1616,7 +1775,7 @@
   margin-left: auto;
 }
 
-/* ---- 总控: merged page header ------------------------------------------- */
+/* ---- 队列·任务·项目: merged page header --------------------------------- */
 
 /* Title on the left, tab strip on the right, one row. The strip is NOT
    stacked under the subtitle on purpose: the board below is height-locked to
@@ -3172,6 +3331,13 @@
   0%, 100% { box-shadow: 0 0 0 0 transparent; }
   50% { box-shadow: 0 0 0 3px var(--semantic-warn-soft); }
 }
+/* A finished run that did not succeed says so in the summary row; before
+   this it kept the "进度 100%" pill and read as done. */
+.orbit-sum-pill.pill-fail {
+  color: var(--semantic-danger);
+  border-color: var(--semantic-danger-border);
+  background: var(--semantic-danger-soft);
+}
 .orbit-toggle-ico {
   color: var(--text-tertiary);
   font-size: var(--fs-small);
@@ -3182,15 +3348,27 @@
 .orbit-head-btn:hover .orbit-toggle-ico {
   color: var(--text-secondary);
 }
-.orbit-head-btn[aria-expanded="true"] .orbit-toggle-ico {
+.orbit-head-btn[aria-expanded="true"] .orbit-toggle-ico,
+.orbit-toggle-ico.is-open {
   transform: rotate(180deg);
 }
 
+.orbit-steps {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+/* One row per step: marker, name, fact. Three stacked full-width plates for
+   three one-line facts is what turned a 3-step trace into a 400px card. */
 .orbit-step {
   display: grid;
-  gap: var(--sp-2);
-  padding: var(--sp-2);
-  border-radius: var(--radius-md);
+  grid-template-columns: 22px minmax(58px, auto) minmax(0, 1fr);
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
   transition: background-color var(--dur-normal) var(--ease-standard);
 }
 .orbit-step.flash {
@@ -3255,14 +3433,35 @@
   50% { opacity: 0.3; }
 }
 .orbit-step-body {
-  padding: var(--sp-3) var(--sp-4);
-  border-left: 2px solid var(--border);
-  margin-left: 9px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
   font-size: var(--fs-small);
   color: var(--text-secondary);
-  background: var(--surface-alpha-xs);
-  border-radius: 0 var(--radius-md) var(--radius-md) 0;
-  position: relative;
+}
+
+/* The fact itself, next to its step name. */
+.orbit-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-active);
+  color: var(--text-secondary);
+  font-size: var(--fs-caption);
+  white-space: nowrap;
+}
+.orbit-note {
+  min-width: 0;
+  max-width: 60ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-tertiary);
+  font-size: var(--fs-small);
 }
 /* The node marker that used to sit on this border is gone: a 12px ring in
    --accent-2 with a soft glow, which was the last saturated blue left in the
@@ -3395,8 +3594,58 @@
 }
 
 .orbit-exec {
-  display: grid;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: var(--sp-3);
+  min-width: 0;
+}
+
+/* Hairline progress for a run in flight: 4px, no track chrome, no label —
+   the step row already carries the percentage. */
+.orbit-bar {
+  position: relative;
+  flex: 1 1 120px;
+  min-width: 72px;
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-active);
+  overflow: hidden;
+}
+.orbit-bar-fill {
+  position: absolute;
+  inset: 0;
+  width: var(--prog, 0%);
+  background: var(--border-strong);
+  transition: width var(--dur-slow) var(--ease-emphasized);
+}
+.orbit-exec-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.orbit-exec-state.is-failed {
+  color: var(--semantic-danger);
+}
+
+/* The rail's links: text, not pills. Three bordered buttons under a trace
+   read as the card's primary actions, which they are not. */
+.orbit-link {
+  appearance: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.orbit-link:hover {
+  color: var(--text);
+  text-decoration: underline;
 }
 .orbit-progress {
   position: relative;
@@ -4311,6 +4560,13 @@ pre,
 .agent-result.is-error {
   border-left-color: var(--danger);
   color: var(--danger);
+}
+
+/* The expander under a folded tool result sits in the same column as the
+   output, not stretched across it. */
+.result-expand {
+  align-self: flex-start;
+  margin-top: 4px;
 }
 
 .step-body {

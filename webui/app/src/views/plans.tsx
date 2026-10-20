@@ -10,7 +10,7 @@ import { Icon } from '../components/icons'
 /** The plan board — web parity with `/plans`. A plan is the set of tasks
  *  sharing a plan_id; the board summarizes each pipeline (stages, progress,
  *  failures) and drills into the stage list with artifacts and owners. It is
- *  the second tab of 总控, so it can drop its own heading. */
+ *  the second tab of 队列·任务·项目, so it can drop its own heading. */
 export function PlansView({ head = true }: { head?: boolean }) {
   useLocaleRerender()
   const change = useChangeSignal()

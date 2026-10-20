@@ -1875,6 +1875,11 @@ export interface SessionTurn {
    *  live `result` object no longer exists. Absent on user turns, on task
    *  turns (their card names the executor) and on older transcripts. */
   model?: string
+  /** When the turn was written, in Unix seconds (the store stamps every turn).
+   *  The console prints it beside the copy affordance under a question, so a
+   *  long thread can be read against the clock. Absent on transcripts written
+   *  before the field existed. */
+  ts?: number
 }
 
 export interface SessionOperation {

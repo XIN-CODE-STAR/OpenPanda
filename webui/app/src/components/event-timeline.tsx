@@ -12,12 +12,19 @@ export interface EventTimelineProps {
   events: TaskEvent[]
   className?: string
   defaultOpenThought?: boolean
+  /** Drop the body of the *last* result row. The task detail page renders the
+   *  same output in its own 执行结果 section directly above the log, and
+   *  printing it twice — once as a section, once as the log's final row — was
+   *  half a screen of identical text. The row itself stays, so the log still
+   *  says how the run ended. */
+  suppressResultBody?: boolean
 }
 
 export function EventTimeline({
   events,
   className = '',
   defaultOpenThought = false,
+  suppressResultBody = false,
 }: EventTimelineProps) {
   if (!events || events.length === 0) {
     return <p class="dim chain-empty">{t('sessions.chainEmpty')}</p>
@@ -102,6 +109,11 @@ export function EventTimeline({
                   {formatted.label === ev.type && (
                     <code class="step-raw-type dim">{ev.type}</code>
                   )}
+                  {(row.count ?? 0) > 1 && (
+                    <span class="quiet-count" title={t('events.quietRepeatHint')}>
+                      ×{row.count}
+                    </span>
+                  )}
                 </div>
 
                 {formatted.thought ? (
@@ -112,7 +124,9 @@ export function EventTimeline({
                 ) : block ? (
                   <AgentBlockBody block={block} rawJson={formatted.rawJson} />
                 ) : formatted.result ? (
-                  <ResultCard result={formatted.result} rawJson={formatted.rawJson} />
+                  suppressResultBody && i === rows.length - 1 ? null : (
+                    <ResultCard result={formatted.result} rawJson={formatted.rawJson} />
+                  )
                 ) : (
                   <div class="step-body">
                     {formatted.summary && (
@@ -176,18 +190,8 @@ function AgentBlockBody({ block, rawJson }: { block: AgentBlock; rawJson?: strin
         </div>
       )
     }
-    case 'tool_result': {
-      const content = block.content ?? ''
-      const clipped = content.length > 600 ? content.slice(0, 600) + '…' : content
-      return (
-        <div class="step-body">
-          {clipped && (
-            <pre class={`agent-result ${block.isError ? 'is-error' : ''}`}>{clipped}</pre>
-          )}
-          {content.length > 600 && <RawJsonToggle raw={content} />}
-        </div>
-      )
-    }
+    case 'tool_result':
+      return <ToolResultBody block={block} rawJson={rawJson} />
     case 'transcript_truncated':
       return (
         <div class="step-body">
@@ -202,6 +206,35 @@ function AgentBlockBody({ block, rawJson }: { block: AgentBlock; rawJson?: strin
       ) : null
   }
 }
+
+/** A tool result is the agent's own output, and a shell or test run can be a
+ *  screenful per call. Ten of those turned one task's log into 8,000px of
+ *  transcript, so the row shows a few lines and keeps the rest one click
+ *  away — same bargain the thought card and the result card already make.
+ *  The fold counts lines, not characters: shell output is mostly short lines,
+ *  and 300 characters of `git status` is still twenty rows of text. */
+function ToolResultBody({ block, rawJson }: { block: AgentBlock; rawJson?: string }) {
+  const [open, setOpen] = useState(false)
+  const content = block.content ?? ''
+  const lines = content.split('\n')
+  const long = lines.length > PREVIEW_LINES || content.length > 320
+  const preview = lines.slice(0, PREVIEW_LINES).join('\n')
+  const shown = open || !long ? content : preview + '…'
+  return (
+    <div class="step-body">
+      {shown && <pre class={`agent-result ${block.isError ? 'is-error' : ''}`}>{shown}</pre>}
+      {long && (
+        <button type="button" class="btn small result-expand" onClick={() => setOpen((v) => !v)}>
+          {open ? t('events.collapse') : t('events.expand')}
+        </button>
+      )}
+      {open && content.length > 600 && <RawJsonToggle raw={rawJson ?? content} />}
+    </div>
+  )
+}
+
+/** Lines of tool output a collapsed row shows. */
+const PREVIEW_LINES = 4
 
 function ThoughtCard({
   text,

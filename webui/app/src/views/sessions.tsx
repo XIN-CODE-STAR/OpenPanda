@@ -22,7 +22,8 @@ import {
 } from '../api/client'
 import { Icon } from '../components/icons'
 import { useAsync, useChangeSignal, useLocaleRerender, useVisibleInterval, busSubscribeChange } from '../hooks'
-import { t } from '../i18n'
+import { t, locale } from '../i18n'
+import { clockStamp, clockTime } from '../format/time'
 import { navigate, navigateView } from '../nav'
 import { Markdown } from '../md/render'
 import { toast, toastError } from '../components/toast'
@@ -1181,7 +1182,16 @@ export function SessionsView({
         setLiveFrom(turnStartRef.current)
         setMsgs((ms) => [
           ...ms,
-          { role: 'user', text: raw, files: attached.length ? attached : undefined, k: localMsgId() },
+          {
+            role: 'user',
+            text: raw,
+            files: attached.length ? attached : undefined,
+            // Stamped here as well as server-side: the bubble is on screen
+            // before the turn is filed, and its clock should not pop in on the
+            // refetch that follows.
+            ts: Math.floor(Date.now() / 1000),
+            k: localMsgId(),
+          },
           { role: 'assistant', text: '', streaming: true, k: localMsgId() },
         ])
         announced = true
@@ -2700,8 +2710,20 @@ function ChatBubble(props: {
         </div>
         {/* Copy sits under the bubble, on the side it hugs — the same place a
             reply's copy takes under the prose, so the affordance is in one
-            spot per side of the column. */}
+            spot per side of the column. The wall clock rides beside it, and
+            both arrive on the message's own hover: the transcript is what the
+            user reads, so a stamp per question would be a column of numbers
+            until the moment it is actually wanted. */}
         <div class="msg-actions">
+          {msg.ts ? (
+            <time
+              class="msg-time"
+              dateTime={new Date(msg.ts * 1000).toISOString()}
+              title={clockStamp(msg.ts, locale())}
+            >
+              {clockTime(msg.ts, locale())}
+            </time>
+          ) : null}
           <MessageCopyButton text={msg.text} />
         </div>
       </div>

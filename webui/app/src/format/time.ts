@@ -41,3 +41,44 @@ function spell(value: number, unit: Unit, locale: string): string {
     return ''
   }
 }
+
+/** The wall clock on one turn ("08:31"), from its Unix-seconds stamp.
+ *
+ *  Hour and minute only: the question already sits in its thread, so the day
+ *  is context rather than content, and seconds would be noise on a message
+ *  the user wrote once. The locale decides 12- or 24-hour form, the same way
+ *  every other clock string in the console does — a hand-rolled "HH:mm" would
+ *  read as 24-hour time to a reader whose locale never shows it.
+ *
+ *  Returns an empty string for a missing stamp (transcripts written before the
+ *  store filed one), so the caller draws nothing instead of a placeholder. */
+export function clockTime(ts: number | undefined, locale: string): string {
+  const at = stampDate(ts)
+  if (!at) return ''
+  try {
+    return new Intl.DateTimeFormat(locale, { hour: '2-digit', minute: '2-digit' }).format(at)
+  } catch {
+    return ''
+  }
+}
+
+/** The same stamp spelled out for a tooltip ("2026年10月20日 08:31"), so a
+ *  thread that spans days is not read as one morning. Empty when there is no
+ *  stamp, matching `clockTime`. */
+export function clockStamp(ts: number | undefined, locale: string): string {
+  const at = stampDate(ts)
+  if (!at) return ''
+  try {
+    return new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short' }).format(at)
+  } catch {
+    return ''
+  }
+}
+
+/** Unix seconds → Date, or null when the stamp is absent/unusable. A turn
+ *  stored without one (older transcripts) must not print 1970. */
+function stampDate(ts: number | undefined): Date | null {
+  if (!ts || ts <= 0) return null
+  const at = new Date(ts * 1000)
+  return Number.isFinite(at.getTime()) ? at : null
+}

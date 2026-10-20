@@ -41,6 +41,25 @@ export function buildRows(events: TaskEvent[]): TimelineRow[] {
       quietRun.count = (quietRun.count ?? 1) + 1
       continue
     }
+    // A retry storm — the adapter reporting the same 429 over and over — is
+    // one fact with a moving counter. Folding those keeps the newest message
+    // (and its raw payload) behind a ×N chip instead of painting eight
+    // identical rows. Ordinary progress notes are NOT folded: two different
+    // notes ("bash: inspect…", "write: plans/…") are two different facts even
+    // though they share the 执行进度 label.
+    const tail = rows[rows.length - 1]
+    if (
+      isRetryNote(formatted) &&
+      tail?.kind === 'event' &&
+      tail.event.type === ev.type &&
+      isRetryNote(tail.formatted)
+    ) {
+      tail.event = ev
+      tail.formatted = formatted
+      tail.count = (tail.count ?? 1) + 1
+      quietRun = null
+      continue
+    }
     flush()
     const row: Extract<TimelineRow, { kind: 'event' }> = { kind: 'event', event: ev, formatted }
     rows.push(row)
@@ -48,4 +67,10 @@ export function buildRows(events: TaskEvent[]): TimelineRow[] {
   }
   flush()
   return rows
+}
+
+/** Retry notices from the adapter ("Claude: API retry 3 (429)…"). Only these
+ *  fold by repetition. */
+function isRetryNote(f: ReturnType<typeof formatTaskEvent>): boolean {
+  return /\bretry\b/i.test(f.summary ?? '') || /\bretry\b/i.test(f.label ?? '')
 }

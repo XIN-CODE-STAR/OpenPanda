@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { useEffect, useRef, useState } from 'preact/hooks'
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { api, type DirectoryListing } from '../api/client'
 import { t } from '../i18n'
 import { Icon } from './icons'
@@ -118,17 +118,40 @@ export function DirPicker({
   )
 }
 
+/** One directory the console has already used. A directory only means
+ *  something to the panel once a project points at it (`projectForDir` makes
+ *  that row on send), so "already opened" and "has a project" are the same
+ *  set — and the project's name is the label the rail already shows it under. */
+interface WorkdirRow {
+  name: string
+  dir: string
+}
+
+/** Windows and POSIX both: a trailing separator is not a different directory,
+ *  and the compare is the console's own (see `projectForDir`). */
+const normDir = (p: string) => p.replace(/[\\/]+$/, '').toLowerCase()
+
 /** The compact pick: a folder glyph and the chosen path set in the same small
  *  print as the composer's keyboard legend. The projects page needs a form
  *  field; a new thread only needs to say where it will run, so this one is a
  *  footnote that happens to be clickable.
  *
- *  A chosen directory is also undoable, and the bubble is where that lives:
- *  under the pointer the glyph turns into a cross, and the cross drops the
- *  pick back to "choose a directory". The glyph is the cross's slot rather
- *  than a second control beside the name — the chip is one line of small
- *  print, and an × parked next to a long folder name would either crowd it or
- *  be pushed out of the clamp. */
+ *  Clicking it opens a card, not the OS dialog. The dialog was the wrong first
+ *  answer for the common case: a directory you have used before is one you are
+ *  about to use again, and making the user walk the tree to find `panda` when
+ *  the console already knows where `panda` lives is the slow path through a
+ *  control that has all the answers. So the card lists the directories this
+ *  node has filed work under — newest first, the current one ticked, a search
+ *  field on top for the day the list outgrows the card — and the native
+ *  chooser moves to the bottom row, where "a directory I have never used" now
+ *  lives. The card is the same shape as the thread pick beside it on 工作空间:
+ *  search, rows, one footer of actions.
+ *
+ *  A chosen directory is still undoable in place: under the pointer the glyph
+ *  turns into a cross, and the cross drops the pick back to "choose a
+ *  directory". The glyph is the cross's slot rather than a second control
+ *  beside the name — the chip is one line of small print, and an × parked next
+ *  to a long folder name would either crowd it or be pushed out of the clamp. */
 export function DirButton({
   value = '',
   onChange,
@@ -142,15 +165,112 @@ export function DirButton({
   disabled?: boolean
 }) {
   const pick = useDirPick(onChange, disabled)
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  /** null while the list is in flight: an empty menu and a loading menu must
+   *  not look alike, or "no workspaces yet" flashes on every open. */
+  const [spaces, setSpaces] = useState<WorkdirRow[] | null>(null)
+  const box = useRef<HTMLDivElement>(null)
   const clearable = !!value && !disabled
+
+  // Read on every open rather than cached at mount: filing work under a
+  // project touches its row, which is what orders this list, and the endpoint
+  // is local — a stale menu that hides the directory you just used is worse
+  // than one extra round-trip.
+  useEffect(() => {
+    if (!open) return
+    let alive = true
+    setSpaces(null)
+    api
+      .projects()
+      .then((pl) => {
+        if (!alive) return
+        setSpaces(
+          (pl.detail ?? [])
+            .filter((d) => !!d.work_dir)
+            .map((d) => ({ name: d.name, dir: d.work_dir as string })),
+        )
+      })
+      .catch(() => {
+        if (alive) setSpaces([])
+      })
+    return () => {
+      alive = false
+    }
+  }, [open])
+
+  // Escape and a click elsewhere close it. The header cards refuse outside
+  // clicks so that reading the transcript cannot dismiss them; this card hangs
+  // over the composer, where a click in the text box means the user has moved
+  // on, not that they are reading behind it.
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (box.current && !box.current.contains(e.target as Node)) {
+        setOpen(false)
+        setQuery('')
+      }
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      e.stopPropagation()
+      setOpen(false)
+      setQuery('')
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey, true)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey, true)
+    }
+  }, [open])
+
+  // A pick no project owns yet (a folder chosen but not sent into) still
+  // deserves a row: otherwise the card opens with nothing ticked and the pill's
+  // answer nowhere in its own list.
+  const all = useMemo(() => {
+    const rows = spaces ?? []
+    if (!value || rows.some((r) => normDir(r.dir) === normDir(value))) return rows
+    return [{ name: lastPathSegment(value), dir: value }, ...rows]
+  }, [spaces, value])
+
+  const rows = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return all
+    return all.filter(
+      (r) => r.name.toLowerCase().includes(q) || r.dir.toLowerCase().includes(q),
+    )
+  }, [all, query])
+
+  /** Closing always forgets the search: a card reopened a minute later must not
+   *  open onto the filter typed before, with half the list missing. */
+  function close() {
+    setOpen(false)
+    setQuery('')
+  }
+
+  function choose(dir: string) {
+    onChange(dir)
+    close()
+  }
+
+  /** The pill used to be this action outright; it is now the card's last row,
+   *  and the native chooser still falls back to the in-page browser when no
+   *  window can be raised (see `useDirPick`). */
+  function browse() {
+    close()
+    void pick.open(value)
+  }
+
   return (
-    <>
+    <div class="workdir-pick" ref={box}>
       <div
         class={`workdir-btn${value ? ' has-value' : ''}${disabled ? ' is-disabled' : ''}`}
         /* The bubble is where the whole path lives: the label shows the folder
            on its own, so hovering is how you check *which* folder. Nothing to
-           reveal while the pick is still empty — the label already says it. */
-        data-tip={value || undefined}
+           reveal while the pick is still empty — the label already says it,
+           and nothing while the card is up: the card lists every path. */
+        data-tip={!open && value ? value : undefined}
         /* The bubble is also the only place the cross can be announced: it is
            invisible until the pointer is on the chip, so hovering is the one
            moment the affordance needs a name. */
@@ -159,14 +279,20 @@ export function DirButton({
         <button
           type="button"
           class="workdir-open"
+          aria-haspopup="dialog"
+          aria-expanded={open}
           aria-label={value ? `${label}: ${value}` : label}
-          disabled={disabled || pick.loading}
-          onClick={() => void pick.open(value)}
+          disabled={disabled}
+          onClick={() => (open ? close() : setOpen(true))}
         >
           {/* The rail's working-directory mark, at the rail's own size: the
               header's closed folder would read as a second title down here. */}
           <Icon name="folder-open" size={13} class="workdir-glyph" />
           <span class="workdir-path">{value ? lastPathSegment(value) : label}</span>
+          {/* The caret is the whole difference between "opens a dialog" and
+              "opens a card", and it costs 12px of a chip that already ends in
+              a hairline. */}
+          <Icon name="chevron-down" size={12} class="workdir-caret" />
         </button>
         {clearable && (
           <button
@@ -179,6 +305,88 @@ export function DirButton({
           </button>
         )}
       </div>
+      {open && (
+        <div class="wd-panel" role="dialog" aria-label={label}>
+          <div class="wd-search-wrap">
+            <Icon name="search" size={14} class="wd-search-icon" />
+            <input
+              class="input wd-search"
+              type="search"
+              value={query}
+              placeholder={t('sessions.workdirSearch')}
+              aria-label={t('sessions.workdirSearch')}
+              autoFocus
+              onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter') return
+                // Enter belongs to the card, never to the form around it: the
+                // composer is a `<form>` whose submit is "send", so an Enter
+                // that fell through would post the draft because the search
+                // found nothing.
+                e.preventDefault()
+                // With a match it takes the first one — the list is already the
+                // answer to what was typed, and reaching for the mouse would be
+                // the slow path through a control built to be fast.
+                const first = rows[0]
+                if (first) choose(first.dir)
+              }}
+            />
+          </div>
+          <div class="wd-list" role="listbox" aria-label={label}>
+            {spaces === null ? (
+              <p class="wd-empty">{t('common.loading')}</p>
+            ) : rows.length === 0 ? (
+              <p class="wd-empty">
+                {all.length === 0 ? t('sessions.workdirEmpty') : t('sessions.workdirNoMatch')}
+              </p>
+            ) : (
+              rows.map((r) => {
+                const on = !!value && normDir(r.dir) === normDir(value)
+                return (
+                  <button
+                    key={r.dir}
+                    type="button"
+                    class={`wd-row${on ? ' sel' : ''}`}
+                    role="option"
+                    aria-selected={on}
+                    title={r.dir}
+                    onClick={() => choose(r.dir)}
+                  >
+                    <Icon name="folder" size={15} class="wd-row-icon" />
+                    <span class="wd-row-text">
+                      <span class="wd-row-name">{r.name}</span>
+                      {/* The name is usually the folder's own name, which is
+                          exactly why the path earns the second line: two
+                          `panda` folders on two drives are one name. */}
+                      <span class="wd-row-path">{r.dir}</span>
+                    </span>
+                    {on && <Icon name="check" size={14} class="wd-row-check" />}
+                  </button>
+                )
+              })
+            )}
+          </div>
+          <div class="wd-actions">
+            <button type="button" class="wd-action" onClick={browse}>
+              <Icon name="folder-plus" size={15} />
+              {t('sessions.workdirNew')}
+            </button>
+            {clearable && (
+              <button
+                type="button"
+                class="wd-action"
+                onClick={() => {
+                  onChange('')
+                  close()
+                }}
+              >
+                <Icon name="x" size={15} />
+                {t('sessions.workdirNone')}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
       {pick.modalOpen && (
         <DirBrowserModal
           initialPath={value}
@@ -189,7 +397,7 @@ export function DirButton({
           onClose={() => pick.setModalOpen(false)}
         />
       )}
-    </>
+    </div>
   )
 }
 
