@@ -374,7 +374,7 @@
   font-weight: 600;
   letter-spacing: 0.07em;
   text-transform: uppercase;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
 }
 
 /* Section header with an action on the right (the log's expand toggle). */
@@ -392,7 +392,12 @@
   font-size: var(--text-xs);
   color: var(--text-tertiary);
 }
+/* The action owns the right edge whether or not a hint precedes it. Without
+   the auto margin, "任务简报 展开简报" sat shoulder to shoulder while the
+   fold header one section below pushed its summary right — two section
+   headers, two different rules, on the same screen. */
 .dt-sec-action {
+  margin-left: auto;
   padding: 0;
   border: 0;
   background: none;
@@ -483,12 +488,15 @@
 .dt-spec-list li {
   display: flex;
   align-items: flex-start;
-  gap: 6px;
+  gap: 8px;
 }
-.dt-spec-ico {
+.dt-spec-dot {
   flex: none;
-  margin-top: 4px;
-  color: var(--text-tertiary);
+  width: 4px;
+  height: 4px;
+  margin-top: 8px;
+  border-radius: 50%;
+  background: var(--text-disabled);
 }
 
 .dt-spec-foot {
@@ -618,21 +626,176 @@
   white-space: nowrap;
 }
 
-/* ---- Density overrides for the shared blocks inside the page ------------ */
+/* ---- Result ------------------------------------------------------------- */
+
+/* The section used to open on three grey lines — "exit 0", "Output", then the
+   prose — with a full-width bordered button under it that read as a stray
+   input field. The facts are chips (the exit code carrying the tone), the
+   output sits in a panel with a head bar, and the fold is a footer band that
+   says how much is behind it. */
 
 .dt .result-view {
   gap: 10px;
 }
-.dt .result-meta {
-  gap: 10px;
-  font-size: var(--text-sm);
-}
-.dt .result-block {
+
+.result-chips {
+  display: flex;
+  flex-wrap: wrap;
   gap: 6px;
 }
-.dt .result-out {
-  font-size: var(--text-md);
+
+.result-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  height: 21px;
+  padding: 0 9px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: var(--bg-chrome);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
+.result-chip.mono {
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+/* The one fact that answers "did it work" — a dot plus the tone, so it reads
+   before the label does. */
+.result-chip.is-ok,
+.result-chip.is-bad {
+  gap: 7px;
+}
+.result-chip.is-ok::before,
+.result-chip.is-bad::before {
+  content: '';
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.result-chip.is-ok {
+  border-color: var(--semantic-good-border);
+  background: var(--semantic-good-soft);
+  color: var(--semantic-good);
+}
+.result-chip.is-bad {
+  border-color: var(--semantic-danger-border);
+  background: var(--semantic-danger-soft);
+  color: var(--semantic-danger);
+}
+
+.dt .result-files {
+  margin: 0;
+}
+
+.result-panel {
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  overflow: hidden;
+}
+.result-panel + .result-panel {
+  margin-top: 8px;
+}
+
+.result-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-chrome);
+}
+.result-panel-label {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.result-panel-size {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.result-panel-copy {
+  margin-left: auto;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+.result-panel-copy:hover {
+  border-color: var(--border-soft);
+  background: var(--bg-raised);
+  color: var(--text);
+}
+
+.result-panel-body {
+  padding: 13px 15px 15px;
+  font-size: var(--text-md);
+  line-height: 1.62;
+}
+/* The fold is a height, not a character count: a hard cut at 600 characters
+   landed mid-word ("改经 Bash（Gi…") and the reader could not tell a clamped
+   line from a broken one. The fade says "there is more" without lying about
+   the text, and it runs far enough to swallow the half-line the height
+   boundary would otherwise slice through. */
+.result-panel-body.is-clamped {
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(180deg, #000 80%, rgba(0, 0, 0, 0.45) 94%, transparent 100%);
+  mask-image: linear-gradient(180deg, #000 80%, rgba(0, 0, 0, 0.45) 94%, transparent 100%);
+}
+
+.result-panel-body .result-err {
+  margin: 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  color: var(--semantic-danger);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.result-panel-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  height: 30px;
+  padding: 0 12px;
+  border: 0;
+  border-top: 1px solid var(--border-soft);
+  background: var(--bg-chrome);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.result-panel-more:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.result-panel-more svg {
+  transition: transform var(--dur-fast) var(--ease);
+}
+.result-panel-more[aria-expanded='true'] svg {
+  transform: rotate(180deg);
+}
+
 .result-failure {
   margin: 0;
   font-size: var(--text-sm);
@@ -657,6 +820,12 @@
   font-size: var(--text-sm);
   color: var(--text-secondary);
 }
+/* The log's final result row no longer reprints the output the section above
+   already shows; it keeps the moment and points at the section. */
+.dt .step-muted-result {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
 .dt .agent-text {
   font-size: var(--text-sm);
   line-height: 1.6;
@@ -679,11 +848,12 @@
   max-height: 200px;
 }
 
-/* Markers hang in the left margin: the row's text then starts on the same
-   vertical line as every section title above it, instead of every event
-   being indented 22px past the rest of the page. */
+/* The dot column opens on the section's own left edge, not in the gutter:
+   a marker pulled out to -22px read as a stray bullet floating left of every
+   section title, so the whole timeline now starts where the page's text
+   column does and the rows indent from the dots. */
 .dt .timeline-steps {
-  margin-left: -22px;
+  margin-left: 0;
 }
 
 .dt .timeline-step-item {
@@ -875,16 +1045,17 @@
   color: var(--text-tertiary);
 }
 
-/* The brief's collapsed state: first line of the target, clamped. Folding it
-   away entirely would leave the page unable to say what the task was for. */
+/* The brief's collapsed state: the opening of the target, two lines deep.
+   One line cut it mid-sentence ("…然后用 gcc…") and read as a broken
+   paragraph rather than a preview. */
 .dt-spec-preview {
   display: -webkit-box;
   margin: 0;
   overflow: hidden;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 1;
+  -webkit-line-clamp: 2;
   font-size: var(--text-sm);
-  line-height: 1.65;
+  line-height: 1.6;
   color: var(--text-secondary);
 }
 

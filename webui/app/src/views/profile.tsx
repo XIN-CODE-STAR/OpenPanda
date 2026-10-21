@@ -14,6 +14,7 @@ import { locale, t } from '../i18n'
 import { ErrorState, LoadingState } from '../components/page'
 import { HEATMAP_DAYS, dayKey, heatGrid, heatLevel, heatShade } from '../components/heatmap'
 import { compactNumber, groupNumber } from '../format/number'
+import { isSelfNodeUp } from '../format/node-status'
 import { toast, toastError } from '../components/toast'
 
 /** The profile page: who this node is, what it is running, and what it has
@@ -106,9 +107,9 @@ function IdentityCard({ self }: { self: SelfInfo }) {
           <span class="profile-name">{name}</span>
           <span class="profile-host mono">{self.hostname}</span>
         </div>
-        <span class={`profile-state${self.node_running ? ' on' : ''}`}>
+        <span class={`profile-state${isSelfNodeUp(self) ? ' on' : ''}`}>
           <span class="profile-state-dot" aria-hidden="true" />
-          {t(self.node_running ? 'profile.state.running' : 'profile.state.stopped')}
+          {t(isSelfNodeUp(self) ? 'profile.state.running' : 'profile.state.stopped')}
         </span>
       </div>
       <dl class="profile-facts">

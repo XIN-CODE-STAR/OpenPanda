@@ -7,7 +7,7 @@
 
 import type { Task, TraceEvent } from '../api/client'
 import { t } from '../i18n/index.ts'
-import { toolArgSummary } from './event-parser.ts'
+import { toolArgSummary, silenceNote } from './event-parser.ts'
 
 /** Relative clock for the elapsed column — "3m" / "2h" / "5d". */
 export function fmtElapsed(iso: string | undefined, now = Date.now()): string {
@@ -133,11 +133,12 @@ export function latestActivity(
           return t('queue.live.execStart')
       }
     }
-    case 'progress':
-      return (
-        clipLine(str(data.note) || str(data.msg) || str(data.message)) ||
-        t('queue.live.execStart')
-      )
+    case 'progress': {
+      const note = str(data.note) || str(data.msg) || str(data.message)
+      // The watchdog's heartbeat is English on the wire; say it in the UI's
+      // language rather than pasting it into a Chinese card.
+      return silenceNote(note) ?? clipLine(note) ?? t('queue.live.execStart')
+    }
     case 'agent_usage': {
       const n =
         num(data.input_tokens) +

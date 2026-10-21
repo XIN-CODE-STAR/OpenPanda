@@ -400,6 +400,11 @@ export interface AgentInfo {
   version?: string
   install_hint?: string
   install_url?: string
+  /** What this agent is good at, from the registry's own defaults. The team
+   *  picker reads these as the person's role. */
+  best_at?: string[]
+  /** Routing cost tier ("low" … "high") — how expensive this hire is. */
+  cost_tier?: string
 }
 
 export type AgentTestResult = {
@@ -1311,8 +1316,12 @@ export const api = {
     return request('GET', `/api/sessions${q}`)
   },
 
-  createSession(title?: string, project?: string): Promise<Session> {
-    return request('POST', '/api/sessions', { title, project })
+  createSession(title?: string, project?: string, team?: string[]): Promise<Session> {
+    return request('POST', '/api/sessions', {
+      title,
+      project,
+      team: team && team.length > 0 ? team : undefined,
+    })
   },
 
   session(id: string): Promise<Session> {
@@ -1341,7 +1350,10 @@ export const api = {
     return request('POST', `/api/tasks/${encodeURIComponent(id)}/revert`, {})
   },
 
-  patchSession(id: string, body: { title?: string; project?: string; pinned?: boolean }): Promise<Session> {
+  patchSession(
+    id: string,
+    body: { title?: string; project?: string; pinned?: boolean; team?: string[] },
+  ): Promise<Session> {
     return request('PATCH', `/api/sessions/${encodeURIComponent(id)}`, body)
   },
 
@@ -1396,6 +1408,41 @@ export const api = {
 
   deleteReminder(id: number): Promise<{ deleted: number }> {
     return request('DELETE', `/api/reminders/${id}`)
+  },
+
+  // ---- 待办 (the user's own board) ----
+
+  /** The whole board in one read; the page paints every lane from it. */
+  todos(params?: { status?: string; project?: string; q?: string }): Promise<Todo[]> {
+    const q = new URLSearchParams()
+    if (params?.status) q.set('status', params.status)
+    if (params?.project) q.set('project', params.project)
+    if (params?.q) q.set('q', params.q)
+    const suffix = q.size > 0 ? `?${q}` : ''
+    return request('GET', `/api/todos${suffix}`)
+  },
+
+  createTodo(body: TodoInput): Promise<Todo> {
+    return request('POST', '/api/todos', body)
+  },
+
+  /** Partial update: only the fields present are touched. `due_at` takes
+   *  "" (clear), "YYYY-MM-DD", or an RFC3339 stamp. */
+  patchTodo(id: number, body: TodoPatch): Promise<Todo> {
+    return request('PATCH', `/api/todos/${id}`, body)
+  },
+
+  deleteTodo(id: number): Promise<{ deleted: number }> {
+    return request('DELETE', `/api/todos/${id}`)
+  },
+
+  reorderTodos(ids: number[]): Promise<{ reordered: number }> {
+    return request('POST', '/api/todos/reorder', { ids })
+  },
+
+  /** 交给熊猫: enqueue a task from this todo and link the two rows. */
+  startTodo(id: number): Promise<TodoStartResult> {
+    return request('POST', `/api/todos/${id}/start`, {})
   },
 
   // ---- Memory (USER.md / MEMORY.md / DREAMS.md) ----
@@ -1921,6 +1968,58 @@ export interface Reminder {
   repeat_seconds: number // >0 = recurring; the row stays pending between fires
 }
 
+/** 待办 lanes. `paused` is a todo the owner parked; `cancelled` is one they
+ *  gave up on — both stay on the board rather than being deleted, so the
+ *  history of "I decided not to" survives. */
+export type TodoStatus = 'pending' | 'running' | 'paused' | 'done' | 'cancelled'
+
+/** One row of the to-do board. Times are Unix seconds, 0 = unset. */
+export interface Todo {
+  id: number
+  title: string
+  description: string
+  status: TodoStatus
+  priority: 'high' | 'normal' | 'low'
+  due_at: number
+  started_at: number
+  done_at: number
+  tags: string[] | null
+  project: string
+  task_id: string // the task started from this todo; "" until 开始
+  seq: number // manual lane order; 0 = never dragged
+  created_at: number
+  updated_at: number
+}
+
+export interface TodoInput {
+  title: string
+  description?: string
+  status?: TodoStatus
+  priority?: 'high' | 'normal' | 'low'
+  due_at?: string
+  tags?: string[]
+  project?: string
+}
+
+export interface TodoPatch {
+  title?: string
+  description?: string
+  status?: TodoStatus
+  priority?: 'high' | 'normal' | 'low'
+  due_at?: string
+  tags?: string[]
+  project?: string
+  seq?: number
+}
+
+export interface TodoStartResult {
+  todo?: Todo
+  task_id: string
+  session_id: string
+  state: string
+  warning?: string
+}
+
 export interface MemoryFiles {
   user: string
   memory: string
@@ -1975,7 +2074,11 @@ export interface MemoryGraph {
 export interface SessionTurn {
   role: 'user' | 'assistant'
   text: string
-  kind?: 'answer' | 'task' | 'error'
+  /** `plan` is the multi-stage receipt the panel files when the ask started a
+   *  plan instead of a single task (sessions.go, `case "plan"`); its `ref` is
+   *  the plan id, so the thread can draw the stages the panda cut the job
+   *  into. */
+  kind?: 'answer' | 'task' | 'plan' | 'error'
   ref?: string
   /** Machine reason on an error-kind turn (e.g. "model_config") — the panel
    *  stamps it so a replayed transcript keeps the matching fix-it CTA. */
@@ -2020,6 +2123,9 @@ export interface Session {
   turns: SessionTurn[]
   operation?: SessionOperation
   pinned?: boolean
+  /** The thread's agent roster — who may take this conversation's work.
+   *  Empty/absent means no restriction. */
+  team?: string[]
 }
 
 export interface SessionBulkDeleteResult {
@@ -2204,10 +2310,13 @@ export async function askSessionStream(
   h: AskStreamHandlers,
   signal?: AbortSignal,
   node?: string,
+  /** The thread's roster as the composer shows it. Undefined keeps whatever
+   *  the session already carries; an empty array clears the restriction. */
+  agents?: string[],
 ): Promise<void> {
   await openSSE(`/api/sessions/${encodeURIComponent(id)}/ask`, {
     method: 'POST',
-    body: { prompt, authorize, node: node || undefined },
+    body: { prompt, authorize, node: node || undefined, agents },
     signal,
     onEvent: (event, data) => {
       let payload: any

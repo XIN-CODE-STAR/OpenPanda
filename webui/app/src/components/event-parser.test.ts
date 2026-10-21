@@ -2,7 +2,7 @@
 
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { blockDepth, extractThought, formatTaskEvent, toolArgSummary, type AgentBlock } from './event-parser.ts'
+import { blockDepth, extractThought, formatTaskEvent, imageRefOf, toolArgSummary, type AgentBlock } from './event-parser.ts'
 import { buildRows } from './event-rows.ts'
 import { setLocale } from '../i18n/index.ts'
 
@@ -293,5 +293,54 @@ describe('buildRows pipeline grouping', () => {
     const read = formatTaskEvent('user_msg_consumed', JSON.stringify({ mode: 'inject', seq: 2, text: 'stop editing' }))
     assert.equal(read.label, 'user message read')
     assert.equal(read.badgeClass, 'accent')
+  })
+
+  it('finds the picture a Read row is about', () => {
+    // The adapter drops the image bytes, so the input path is the only
+    // handle the transcript has on the screenshot.
+    const shot = imageRefOf({
+      ev: 'tool_use',
+      name: 'Read',
+      input: { file_path: 'C:\\Users\\x\\AppData\\Local\\Temp\\panda_verify\\t2-eating.png' },
+    })
+    assert.equal(shot?.path, 'C:\\Users\\x\\AppData\\Local\\Temp\\panda_verify\\t2-eating.png')
+
+    // Relative paths resolve against the work dir server-side.
+    assert.equal(imageRefOf({ ev: 'tool_use', name: 'Read', input: { path: 'shots/a.JPG' } })?.path, 'shots/a.JPG')
+
+    // A Read of source code is not a picture, and a shell command that
+    // mentions .png is a command, not an image.
+    assert.equal(imageRefOf({ ev: 'tool_use', name: 'Read', input: { file_path: 'src/app.tsx' } }), null)
+    assert.equal(
+      imageRefOf({ ev: 'tool_use', name: 'Bash', input: { command: 'rm -f t*.png eat*.png' } }),
+      null,
+    )
+  })
+
+  it('finds a picture named only by the tool result', () => {
+    // A capture tool answers "saved to …" with no path in its call.
+    assert.equal(
+      imageRefOf({ ev: 'tool_result', content: 'screenshot saved to /tmp/panda/shot.png' })?.path,
+      '/tmp/panda/shot.png',
+    )
+    // A whole line that is only a path counts too.
+    assert.equal(imageRefOf({ ev: 'tool_result', content: 'C:\\tmp\\a.png' })?.path, 'C:\\tmp\\a.png')
+
+    // A bare filename inside prose is a mention, not a path to fetch — and a
+    // glob is a pattern, not a file.
+    assert.equal(imageRefOf({ ev: 'tool_result', content: 'wrote shot.png for you' }), null)
+    assert.equal(imageRefOf({ ev: 'tool_result', content: 'removed t*.png' }), null)
+    assert.equal(imageRefOf({ ev: 'tool_result', content: 'File created successfully at: D:\\x\\a.png' })?.path, 'D:\\x\\a.png')
+  })
+
+  it('unwraps an inlined data URL instead of printing base64', () => {
+    const b64 = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUg' + '\n' + 'AAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8'
+    const ref = imageRefOf({ ev: 'tool_result', content: '  ' + b64 + '  ' })
+    assert.ok(ref?.dataUrl?.startsWith('data:image/png;base64,iVBORw0KGgo'))
+    assert.ok(!ref?.dataUrl?.includes('\n'))
+    assert.equal(ref?.path, undefined)
+
+    // The same shape in a tool_use input is a path, not bytes.
+    assert.equal(imageRefOf({ ev: 'tool_result', content: 'data:text/plain;base64,aGk=' }), null)
   })
 })

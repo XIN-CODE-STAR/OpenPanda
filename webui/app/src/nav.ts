@@ -14,8 +14,9 @@
 export type ControlTab = 'queue' | 'plans' | 'projects'
 
 export type Route =
-  | { view: 'sessions'; id: string | null; project?: string | null }
+  | { view: 'sessions'; id: string | null; project?: string | null; ws?: string | null }
   | { view: 'control'; tab?: ControlTab; project?: string | null; review?: boolean }
+  | { view: 'todos' }
   | { view: 'workspace' }
   | { view: 'fleet' }
   | { view: 'profile' }
@@ -45,6 +46,7 @@ export const navViews: Array<[view: string, key: string]> = [
   ['workspace', 'nav.workspace'],
   ['fleet', 'nav.fleet'],
   ['control', 'nav.control'],
+  ['todos', 'nav.todos'],
   // The two boards that are tabs rather than rows.
   ['control:plans', 'nav.plans'],
   ['control:projects', 'nav.projects'],
@@ -63,11 +65,16 @@ export function parseHash(): Route {
   const [path = '', queryStr = ''] = raw.split('?', 2)
   const query = new URLSearchParams(queryStr)
   const projectParam = query.get('project') || null
+  // The workspace a *new* chat starts in — the rail's per-directory "+". It is
+  // not `project`: entering a project scopes the whole pane (its rail, its
+  // files, its boundary guard), while this only pre-answers "where does this
+  // thread run", leaving the reader in the unfiltered history.
+  const wsParam = query.get('ws') || null
   const tabParam = query.get('tab') || null
 
   if (path.startsWith('task/')) return { view: 'detail', id: decodeURIComponent(path.slice(5)) }
   if (path.startsWith('chat/')) return { view: 'sessions', id: decodeURIComponent(path.slice(5)), project: projectParam }
-  if (path === 'chat') return { view: 'sessions', id: null, project: projectParam }
+  if (path === 'chat') return { view: 'sessions', id: null, project: projectParam, ws: wsParam }
   if (path.startsWith('projects/') && path.length > 9) {
     return { view: 'sessions', id: null, project: decodeURIComponent(path.slice(9)) }
   }
@@ -88,6 +95,10 @@ export function parseHash(): Route {
   }
   if (path === 'plans') return { view: 'control', tab: 'plans' }
   if (path === 'projects') return { view: 'control', tab: 'projects' }
+  // 待办: the user's own list, beside the boards. It is its own destination
+  // (not a tab) because it is not about what a node is doing — it is what the
+  // human decided to do.
+  if (path === 'todos' || path === 'todo') return { view: 'todos' }
   if (path === 'fleet' || path === 'nodes') return { view: 'fleet' }
   // 工作空间: the topology of connected devices. `#/workspace` is the only
   // spelling — there is no legacy URL for a page that never existed.
@@ -123,9 +134,12 @@ export function navigate(route: Route): void {
     location.hash = `#/task/${encodeURIComponent(route.id)}`
   } else if (route.view === 'sessions') {
     let base = route.id ? `#/chat/${encodeURIComponent(route.id)}` : '#/chat'
-    if (route.project) {
-      base += `?project=${encodeURIComponent(route.project)}`
-    }
+    const params: string[] = []
+    if (route.project) params.push(`project=${encodeURIComponent(route.project)}`)
+    // Only a thread that does not exist yet can be pointed at a directory; an
+    // open thread answers for itself, from its own project row.
+    if (!route.id && route.ws) params.push(`ws=${encodeURIComponent(route.ws)}`)
+    if (params.length) base += `?${params.join('&')}`
     location.hash = base
   } else if (route.view === 'control') {
     // The queue tab is the page's default, so it stays out of the URL — a

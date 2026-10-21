@@ -56,13 +56,26 @@ function writeSeen(map: Record<string, string>) {
  *  or switch the list into batch mode. Batch mode is where the per-row pin and
  *  delete step aside for checkboxes, a select-all and one bulk delete — the
  *  rail had that chrome before it moved into the sidebar, and a history you
- *  can only prune one row at a time is a history that never gets pruned. */
+ *  can only prune one row at a time is a history that never gets pruned.
+ *
+ *  A "+" rides just before the "…" and reveals on the same hover: starting a
+ *  thread in the directory you are already looking at is the other thing a
+ *  header can offer, and it costs one slot in the same hover wash rather than
+ *  a second control in the rail. It appears under the same conditions as the
+ *  "…" (hover, keyboard focus, always-on where there is no pointer) so the row
+ *  never grows a lone button on one group and two on another. */
 export function SidebarHistory({
   activeId,
   onOpenSession,
+  onNewChat,
 }: {
   activeId: string | null
   onOpenSession(id: string): void
+  /** Start a blank thread in one directory. The header's "+" is the same
+   *  action as 新建对话 with one thing already answered — where it runs — so
+   *  the pane opens with that workspace's directory in the composer instead of
+   *  an empty pick. */
+  onNewChat(workspace: string): void
 }) {
   const [sessions, setSessions] = useState<Session[]>([])
   const [loadError, setLoadError] = useState('')
@@ -359,6 +372,17 @@ export function SidebarHistory({
                     being edited, and the cross is the way out. No floating
                     "done" bar above the list — the exit sits where the mode
                     was entered, so there is nothing to hunt for. */}
+                {!editing && projectName && (
+                  <button
+                    type="button"
+                    class="thread-group-new"
+                    aria-label={t('sessions.newInWorkspace', { name: projectName })}
+                    title={t('sessions.newInWorkspace', { name: projectName })}
+                    onClick={() => onNewChat(projectName)}
+                  >
+                    <Icon name="plus" size={14} />
+                  </button>
+                )}
                 {editing ? (
                   <button
                     type="button"

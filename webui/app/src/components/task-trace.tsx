@@ -35,7 +35,7 @@ interface Step {
   hint?: string
 }
 
-export function TaskTrace({ task }: { task: Task }) {
+export function TaskTrace({ task, defaultOpen }: { task: Task; defaultOpen?: boolean }) {
   // Same seeding as the orbit: the task's newest event may be the only row
   // that says what a mid-flight run is doing on first paint.
   const seed = useMemo(() => {
@@ -126,7 +126,10 @@ export function TaskTrace({ task }: { task: Task }) {
       supervision?.judge_summary ||
       supervision?.verdict_status,
   )
-  const [open, setOpen] = useState(false)
+  // Folded on the page, where the strip is one of eight sections and the
+  // reader is scrolling; open in the chat card, where clicking the task *was*
+  // the request to see how it ran.
+  const [open, setOpen] = useState(Boolean(defaultOpen))
 
   return (
     <section class="tt" aria-label={t('detail.trace')}>
@@ -233,7 +236,9 @@ export function TaskTrace({ task }: { task: Task }) {
           <TraceCell label={execLabel}>
             {exec?.agent && <span>{exec.agent}</span>}
             {exec?.node_name && <span class="dim">@{exec.node_name}</span>}
-            {round && <span class="dim">{round}</span>}
+            {/* The round is on the strip's own top line (`.tt-tail`), beside
+                the live status — repeating it down here put the same "轮次
+                1/5" twice in one card, one under the other. */}
             {supervision?.verdict_status && (
               <span class="dim">
                 {t('detail.result.verdict', { verdict: supervision.verdict_status })}

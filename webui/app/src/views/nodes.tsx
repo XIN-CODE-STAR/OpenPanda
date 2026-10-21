@@ -11,6 +11,7 @@ import {
 } from '../api/client'
 import { useAsync, useChangeSignal, useLocaleRerender } from '../hooks'
 import { t } from '../i18n'
+import { isNodeConnected, isSelfNodeUp } from '../format/node-status'
 import { ErrorState, PageHeader } from '../components/page'
 import { confirmDialog } from '../components/confirm'
 import { AddDeviceCard, CardEditor } from '../components/card-editor'
@@ -197,6 +198,8 @@ function PairCard({ onChanged }: { onChanged(): void }) {
       ) : (
         discovered.map((d) => (
           <div class="node-head" key={d.id} style="gap: 8px; align-items:center; margin: 6px 0">
+            {/* Discovered, not paired: the dot stays neutral — green is
+                reserved for a node that is actually connected. */}
             <span class={`dot node-dot`} aria-hidden />
             <span class="node-name">{d.id}</span>
             <span class="dim mono">{d.addr}</span>
@@ -244,6 +247,7 @@ function isSelfNode(self: SelfInfo | null, n: NodeInfo): boolean {
 /** This machine's device profile — hostname / OS / chip / cores / RAM, plus
  *  the registered node name when the ledger knows it. */
 function SelfCard({ self }: { self: SelfInfo }) {
+  const up = isSelfNodeUp(self)
   return (
     <div class="card self-card">
       <div class="node-head">
@@ -251,9 +255,7 @@ function SelfCard({ self }: { self: SelfInfo }) {
         <span class="badge green">{t('nodes.self')}</span>
         {self.node_name && <span class="badge">{t('nodes.nodeName')}: {self.node_name}</span>}
         {self.node_kind && <span class="badge">{self.node_kind}</span>}
-        <span class={`badge ${self.node_running ? 'green' : 'red'}`}>
-          {self.node_running ? 'running' : 'not running'}
-        </span>
+        <span class={`badge ${up ? 'green' : 'red'}`}>{up ? 'running' : 'not running'}</span>
       </div>
       <p class="dim">
         {self.os}/{self.arch}
@@ -285,7 +287,10 @@ function NodeCard({
   const [trustErr, setTrustErr] = useState('')
   const agentNames = node.agents ? Object.keys(node.agents) : []
   const displayName = (node.name && node.name !== node.id) ? node.name : node.id
-  const canRemove = !isSelf && node.status !== 'online'
+  // One read of the status drives the dot, the badge and the remove action:
+  // a connected node shows green in all three places (and cannot be dropped).
+  const connected = isNodeConnected(node.status)
+  const canRemove = !isSelf && !connected
 
   async function onTrustChange(e: Event) {
     const level = (e.target as HTMLSelectElement).value
@@ -324,7 +329,7 @@ function NodeCard({
     <div class="card node-card">
       <div class="node-head" style="width: 100%;">
         <span
-          class={`dot node-dot${node.status === 'online' ? '' : ' off'}`}
+          class={`dot node-dot${connected ? ' on' : ' off'}`}
           aria-hidden
           title={node.status}
         />
@@ -334,7 +339,7 @@ function NodeCard({
         <span class="node-id mono" title={node.id}>{node.id}</span>
       )}
       <div class="node-badges">
-        <span class={`badge ${node.status === 'online' ? 'green' : ''}`}>{node.status}</span>
+        <span class={`badge ${connected ? 'green' : ''}`}>{node.status}</span>
         <span class="badge">{node.node_kind}</span>
         <span class={`badge ${node.running ? 'green' : 'red'}`}>{node.running ? 'running' : 'stopped'}</span>
         {isSelf && <span class="badge green">{t('nodes.self')}</span>}

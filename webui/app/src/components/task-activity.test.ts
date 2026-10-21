@@ -99,13 +99,13 @@ describe('task-activity', () => {
     assert.equal(line, 'Writing snake.py with curses')
   })
 
-  it('surfaces the adapter silence note verbatim (clipped)', () => {
+  it('re-words the adapter silence note instead of pasting the wire string', () => {
     setLocale('en')
     const line = latestActivity(
       [trace('progress', { note: 'no output for 56s — agent still running' })],
       { state: 'running' },
     )
-    assert.equal(line, 'no output for 56s — agent still running')
+    assert.equal(line, 'No output for 56s — still running')
   })
 
   it('sums all token fields on usage events', () => {

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { t } from '../i18n'
+import { isNodeConnected } from '../format/node-status'
 import { NodeInfo } from '../api/client'
 
 /**
@@ -32,7 +33,7 @@ export interface FleetTopologyCardProps {
 
 export default function FleetTopologyCard(props: FleetTopologyCardProps) {
   const { nodes, selfNodeId, onAddDevice } = props
-  const onlineCount = nodes.filter((n) => onlineStatus(n.status)).length
+  const onlineCount = nodes.filter((n) => isNodeConnected(n.status)).length
   const isSingle = nodes.length <= 1
 
   return (
@@ -80,8 +81,8 @@ function SingleNodeBody(props: { onAddDevice?: () => void }) {
 function NodeList(props: { nodes: NodeInfo[]; selfNodeId?: string }) {
   // Online-first, then by name so the list feels stable.
   const sorted = [...props.nodes].sort((a, b) => {
-    const ao = onlineStatus(a.status) ? 0 : 1
-    const bo = onlineStatus(b.status) ? 0 : 1
+    const ao = isNodeConnected(a.status) ? 0 : 1
+    const bo = isNodeConnected(b.status) ? 0 : 1
     if (ao !== bo) return ao - bo
     return (a.name ?? a.id).localeCompare(b.name ?? b.id)
   })
@@ -95,7 +96,7 @@ function NodeList(props: { nodes: NodeInfo[]; selfNodeId?: string }) {
   return (
     <div class="fleet-nodes" role="list">
       {sorted.map((n) => {
-        const online = onlineStatus(n.status)
+        const online = isNodeConnected(n.status)
         const self =
           (typeof props.selfNodeId === 'string' && n.id === props.selfNodeId) ||
           Boolean(n.is_local)
@@ -146,14 +147,6 @@ function NodeList(props: { nodes: NodeInfo[]; selfNodeId?: string }) {
       })}
     </div>
   )
-}
-
-/** Accepts a handful of online-ish statuses so the green dot survives API
- *  re-wording of the node status column. */
-function onlineStatus(s: string | undefined): boolean {
-  if (!s) return false
-  const v = s.toLowerCase()
-  return v === 'online' || v === 'running' || v === 'connected' || v === 'active' || v === 'ok'
 }
 
 export { FleetTopologyCard as FleetTopologyCard_ }

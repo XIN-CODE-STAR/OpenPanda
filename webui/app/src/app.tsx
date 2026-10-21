@@ -5,6 +5,7 @@ import { PandaAscii } from './brand/panda'
 import { api, clearToken, displayVersion, getToken, onUnauthorized, setToken, subscribeEvents, type UpdateStatus } from './api/client'
 import { onLocaleChange, t } from './i18n'
 import { useAsync } from './hooks'
+import { isSelfNodeUp } from './format/node-status'
 import { navigate, parseHash, type Route } from './nav'
 import { ControlView } from './views/control'
 import { DetailView } from './views/detail'
@@ -12,6 +13,7 @@ import { SessionsView } from './views/sessions'
 import { SidebarHistory } from './views/sidebar-history'
 import { NodesView } from './views/nodes'
 import { WorkspaceView } from './views/workspace'
+import { TodosView } from './views/todos'
 import { ProfileView } from './views/profile'
 import { SettingsView } from './views/settings'
 import { OnboardingBanner } from './views/onboarding'
@@ -169,6 +171,9 @@ export function App() {
             without minting a thread: the thread comes into being when the first
             message leaves the composer, titled after it, so clicking twice
             cannot litter the history with empty untitled sessions.
+            It also carries no working directory. The composer's pick starts
+            empty here — a blank sheet, not last project you visited — and the
+            history's per-directory "+" is the shortcut that fills it in.
             The three after it are the machines and the work: 工作空间 is the
             fleet as a map, 节点网络 is what each node can do, and 队列·任务·项目
             is the boards that work lands on. That last one is the page that
@@ -239,6 +244,17 @@ export function App() {
               </span>
             )}
           </a>
+          {/* 待办 sits beside the boards, not inside them: 队列·任务·项目 is
+              what the node is doing, this is what the human decided to do.
+              The row is the only way in — the page has no other door. */}
+          <a
+            href="#/todos"
+            class={`nav-item${active === 'todos' ? ' active' : ''}`}
+            aria-current={active === 'todos' ? 'page' : undefined}
+          >
+            <Icon name="list-checks" />
+            <span class="nav-label">{t('nav.todos')}</span>
+          </a>
         </div>
 
         <nav class="primary-nav" aria-label={t('nav.aria')}>
@@ -250,6 +266,7 @@ export function App() {
           <SidebarHistory
             activeId={route.view === 'sessions' ? route.id : null}
             onOpenSession={(id) => navigate({ view: 'sessions', id: id || null })}
+            onNewChat={(ws) => navigate({ view: 'sessions', id: null, ws })}
           />
         </nav>
 
@@ -271,12 +288,12 @@ export function App() {
           <SessionsView
             activeId={route.id}
             project={route.project ?? null}
+            ws={route.ws ?? null}
             onOpenSession={(id) => navigate({ view: 'sessions', id: id || null, project: route.project })}
             onExitProject={() => {
               api.exitProject().catch(() => {})
               navigate({ view: 'sessions', id: null, project: null })
             }}
-            onOpenTask={(id) => navigate({ view: 'detail', id })}
             onLogout={logout}
           />
         )}
@@ -303,6 +320,7 @@ export function App() {
             onOpenTask={(tid) => navigate({ view: 'detail', id: tid })}
           />
         )}
+        {route.view === 'todos' && <TodosView onOpenTask={(id) => navigate({ view: 'detail', id })} />}
         {route.view === 'workspace' && <WorkspaceView />}
         {route.view === 'fleet' && <NodesView />}
         {route.view === 'profile' && <ProfileView />}
@@ -380,13 +398,17 @@ function SidebarNode() {
   if (!self) return null
   const name = self.node_name || self.hostname
   if (!name) return null
+  // Green means connected, not "a daemon holds the identity lock": `panda
+  // web` serves the node itself, so `node_running` alone left this dot grey
+  // on a node that was online and heartbeating.
+  const up = isSelfNodeUp(self)
   return (
     <a
       href="#/profile"
       class="sidebar-node"
-      title={t(self.node_running ? 'sidebar.node.up' : 'sidebar.node.down')}
+      title={t(up ? 'sidebar.node.up' : 'sidebar.node.down')}
     >
-      <span class={`dot${self.node_running ? '' : ' off'}`} aria-hidden />
+      <span class={`dot${up ? '' : ' off'}`} aria-hidden />
       <span class="mono sidebar-node-name">{name}</span>
       <span class="ver mono" title={displayVersion(self.version, self.codename)}>
         {displayVersion(self.version, self.codename)}
