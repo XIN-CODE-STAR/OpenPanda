@@ -697,6 +697,54 @@ func ExpireStale(db *sql.DB, maxAgeSec int64, exclude []string) ([]string, error
 	return flipped, nil
 }
 
+// PruneOffline deletes directory rows that have been offline past maxAgeSec
+// and were never directly pinned (pub_key empty). Pinned rows are kept as
+// TOFU commitments; unpinned rows are gossip-only entries that would
+// otherwise accumulate forever (ExpireStale only flips status to offline).
+func PruneOffline(db *sql.DB, maxAgeSec int64, exclude []string) (int64, error) {
+	cutoff := storage.Now() - maxAgeSec
+	skip := make(map[string]bool, len(exclude))
+	for _, id := range exclude {
+		skip[id] = true
+	}
+	rows, err := db.Query(
+		`SELECT id FROM employee_cache
+		  WHERE COALESCE(pub_key,'')='' AND status='offline'
+		    AND COALESCE(last_seen,0) < ? AND COALESCE(seen_at,0) < ?`, cutoff, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("scan prunable nodes: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if !skip[id] {
+			ids = append(ids, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+	var n int64
+	for _, id := range ids {
+		res, err := db.Exec(
+			`DELETE FROM employee_cache
+			  WHERE id=? AND COALESCE(pub_key,'')='' AND status='offline'`, id)
+		if err != nil {
+			return n, fmt.Errorf("prune stale %s: %w", id, err)
+		}
+		if k, _ := res.RowsAffected(); k > 0 {
+			n += k
+		}
+	}
+	return n, nil
+}
+
 // Remove deletes a node's directory row. A removed remote that is still
 // alive re-appears on its next hello, so removal is for stale rows: a
 // renamed machine, a peer whose identity changed, a decommissioned node.

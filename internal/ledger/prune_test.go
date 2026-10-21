@@ -2,7 +2,55 @@
 
 package ledger
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	"github.com/Xustalis/OpenPanda/internal/storage"
+)
+
+// TestPruneOfflineKeepsPins pins the directory GC contract: only long-offline
+// rows with NO verified-hello pin are deleted. A pinned row is a TOFU
+// commitment and must survive; recent rows and explicitly excluded ids stay.
+func TestPruneOfflineKeepsPins(t *testing.T) {
+	db := openLedgerDB(t)
+	now := storage.Now()
+	old := now - int64((31 * 24 * time.Hour).Seconds())
+	recent := now - 60
+	insert := func(id, status, pub string, lastSeen, seenAt int64) {
+		t.Helper()
+		if _, err := db.Exec(`INSERT INTO employee_cache (id, status, pub_key, last_seen, seen_at)
+			VALUES (?, ?, ?, ?, ?)`, id, status, pub, lastSeen, seenAt); err != nil {
+			t.Fatalf("insert %s: %v", id, err)
+		}
+	}
+	insert("gossip-old", "offline", "", old, old)
+	insert("gossip-recent", "offline", "", recent, recent)
+	insert("pinned-old", "offline", "aabb", old, old)
+	insert("excluded-old", "offline", "", old, old)
+	insert("online-old", "online", "", old, old)
+
+	n, err := PruneOffline(db, int64((30 * 24 * time.Hour).Seconds()), []string{"excluded-old"})
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("pruned %d rows, want 1", n)
+	}
+	var left int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM employee_cache WHERE id='gossip-old'`).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 0 {
+		t.Fatal("gossip-only stale row survived")
+	}
+	for _, id := range []string{"gossip-recent", "pinned-old", "excluded-old", "online-old"} {
+		var one int
+		if err := db.QueryRow(`SELECT COUNT(1) FROM employee_cache WHERE id=?`, id).Scan(&one); err != nil || one != 1 {
+			t.Fatalf("%s was pruned (count=%d err=%v)", id, one, err)
+		}
+	}
+}
 
 // A card that travels to another machine brings commands that machine may not
 // have. The pruning has to remove exactly those and leave the rest — including

@@ -171,6 +171,41 @@ func TestApplyDirRowIdentityBinding(t *testing.T) {
 	}
 }
 
+// TestDirRowsLimits pins the inbound flood bounds: per-sender frame budget
+// and the new-id cap shared by one frame. Existing rows remain refreshable
+// even when the directory is full.
+func TestDirRowsLimits(t *testing.T) {
+	c := newCoreOnDB(t, openTestDB(t), "node-a")
+	ctx := context.Background()
+	for i := 0; i < dirRowsBurst; i++ {
+		if !c.dirRowsAllowed("peer") {
+			t.Fatalf("frame %d denied inside the burst", i)
+		}
+	}
+	if c.dirRowsAllowed("peer") {
+		t.Fatal("frame beyond the burst allowed")
+	}
+	if !c.dirRowsAllowed("other") {
+		t.Fatal("a different sender has its own budget")
+	}
+
+	// A full frame budget refuses a new id but lets an existing row refresh.
+	raw, _ := mintDirRow(t, "fresh", time.Now().Unix(), nil)
+	room := 0
+	if c.applyDirRowLimited(ctx, raw, "p", &room) {
+		t.Fatal("new id applied with no room left")
+	}
+	seed, _ := mintDirRow(t, "existing", time.Now().Unix()-10, nil)
+	if !c.applyDirRow(ctx, seed, "p") {
+		t.Fatal("seed row rejected")
+	}
+	refresh, _ := mintDirRow(t, "existing", time.Now().Unix(), nil)
+	room = 0
+	if !c.applyDirRowLimited(ctx, refresh, "p", &room) {
+		t.Fatal("existing row refresh must not consume new-id room")
+	}
+}
+
 func TestApplyDirRowConflicts(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().Unix()

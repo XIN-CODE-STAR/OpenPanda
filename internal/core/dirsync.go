@@ -57,6 +57,19 @@ const (
 	// node to read "online" in our live view. Unsigned rows never claim
 	// liveness — they are forgeable by any gossip hop.
 	dirGossipFresh = 90 * time.Second
+	// dirRowsEvery/dirRowsBurst bound inbound row frames per sender. Each
+	// frame can carry dirRowsPerFrame rows, so without this a member could
+	// stream new ids at line rate.
+	dirRowsEvery = 10 * time.Second
+	dirRowsBurst = 8
+	// dirRowsMax caps the whole directory at the stamp table's own limit.
+	// Beyond it peers can never converge anyway (dirStampMax trims pulls),
+	// so accepting more rows only grows the DB and the heartbeat scan.
+	dirRowsMax = dirStampMax
+	// dirRowTTL is how long an offline, never-directly-pinned row survives
+	// before the stale sweep deletes it. Pinned rows (a verified hello) are
+	// never pruned — their key is a TOFU commitment.
+	dirRowTTL = 30 * 24 * time.Hour
 )
 
 // dirState holds the sync bookkeeping: pullAt/pages bound the pulls WE send;
@@ -69,6 +82,8 @@ type dirState struct {
 	pages     map[string]int
 	recvAt    map[string]time.Time
 	recvPages map[string]int
+	// rowsAt bounds inbound dir_rows frames per sender.
+	rowsAt map[string][]time.Time
 	// sumAt/sum cache the static half of the self-row's capability summary:
 	// summary() probes each agent's usability, too expensive to run every
 	// heartbeat — the card changes on reload, not per beat. Live fields
@@ -401,6 +416,47 @@ func (c *Core) dirAnswerAllowed(peer string, after string) bool {
 	return true
 }
 
+// dirRowsAllowed bounds inbound dir_rows frames per sender. A pull is already
+// rate-limited; rows can also arrive unsolicited (the requester's want reply
+// and a push), so the receiving side needs its own budget.
+func (c *Core) dirRowsAllowed(peer string) bool {
+	if peer == "" {
+		return false
+	}
+	c.dir.mu.Lock()
+	defer c.dir.mu.Unlock()
+	if c.dir.rowsAt == nil {
+		c.dir.rowsAt = make(map[string][]time.Time)
+	}
+	cutoff := time.Now().Add(-dirRowsEvery)
+	hits := c.dir.rowsAt[peer]
+	kept := hits[:0]
+	for _, at := range hits {
+		if at.After(cutoff) {
+			kept = append(kept, at)
+		}
+	}
+	if len(kept) >= dirRowsBurst {
+		c.dir.rowsAt[peer] = kept
+		return false
+	}
+	c.dir.rowsAt[peer] = append(kept, time.Now())
+	return true
+}
+
+// dirRowRoom is the number of NEW ids the directory may still accept. The
+// count is read once per inbound frame, then decremented as new rows land.
+func (c *Core) dirRowRoom(ctx context.Context) int {
+	var n int
+	if err := c.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM employee_cache`).Scan(&n); err != nil {
+		return 0 // fail closed: an unreadable directory is not room to grow
+	}
+	if n >= dirRowsMax {
+		return 0
+	}
+	return dirRowsMax - n
+}
+
 // sendDirPull emits a differential-sync request toward peer. Stamps are the
 // requester's whole table — bounded by the directory cap, not an extra gate.
 func (c *Core) sendDirPull(peer, after string) {
@@ -593,9 +649,14 @@ func (c *Core) handleDirRows(ctx context.Context, env bus.Envelope) {
 	if len(p.Rows) > dirRowsPerFrame || len(p.Want) > dirRowsPerFrame {
 		return
 	}
+	if !c.dirRowsAllowed(env.From) {
+		c.logger.Debug("dir_rows: rate limited", "from", env.From)
+		return
+	}
 	applied := 0
+	room := c.dirRowRoom(ctx)
 	for _, raw := range p.Rows {
-		if c.applyDirRow(ctx, raw, env.From) {
+		if c.applyDirRowLimited(ctx, raw, env.From, &room) {
 			applied++
 		}
 	}
@@ -622,6 +683,13 @@ func (c *Core) handleDirRows(ctx context.Context, env bus.Envelope) {
 // (pub_key/x_pub) write only under a verified signature and never contradict
 // a pinned key. Returns true when the row landed.
 func (c *Core) applyDirRow(ctx context.Context, raw json.RawMessage, via string) bool {
+	return c.applyDirRowLimited(ctx, raw, via, nil)
+}
+
+// applyDirRowLimited is applyDirRow with an optional new-row budget. room is
+// shared across one inbound frame so a 256-row page cannot push the directory
+// past dirRowsMax; nil means the caller is a trusted local path (tests, seed).
+func (c *Core) applyDirRowLimited(ctx context.Context, raw json.RawMessage, via string, room *int) bool {
 	row, err := bus.ParseDirRow(raw)
 	if err != nil {
 		return false
@@ -676,6 +744,15 @@ func (c *Core) applyDirRow(ctx context.Context, raw json.RawMessage, via string)
 		if incPub != "" && row.PubKey != "" && row.PubKey != incPub {
 			return false
 		}
+	}
+	// A new id consumes one slot from this frame's budget. Existing rows
+	// (card/addrs refreshes) are free — the cap bounds the table, not churn.
+	if !found && room != nil {
+		if *room <= 0 {
+			c.logger.Debug("dir row cap reached", "id", row.ID, "via", via)
+			return false
+		}
+		*room--
 	}
 	// Identity writes are signature-gated: the row's Ed25519 proof binds
 	// pub and x_pub as one claim, recorded through the same atomic upsert a
