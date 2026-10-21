@@ -71,6 +71,15 @@ Aún no hay cambios sin publicar.
 
 ### Fixed
 
+- **Un fallo con `--json` también es JSON** — `--json` prometía una respuesta legible por máquina y la rompía en el camino de error; ahora el fallo sale como `{"error":{"code":…,"message":…}}` en stderr.
+- **Una escritura en cola ya no abre un socket de red** — `task add`/`task send`/`task continue` arrancaban un Core completo y competían por el puerto de descubrimiento LAN; la escritura local usa ahora el camino ligero.
+- **El mínimo de toolchain es Go 1.26.10 y el gate ejecuta `govulncheck`** — 1.26.9 arrastraba GO-2026-6809 (verificación de CA intermedia en `crypto/x509`).
+- **Un comando destructivo ya no pasa como reversible** — el clasificador juzgaba por el verbo y autoaprobaba formas peligrosas de `cp`/`mv`/`chmod`/`chown`/`ln`/`tee`/`install`/`kill`; solo las formas que alcanzan rutas del sistema, bits setuid o init suben a Tier 2.
+- **Un daemon que no puede enlazar su puerto sale en vez de reintentar para siempre** — con un `listen_addr` inválido decía «iniciado» y systemd/launchd lo veían sano.
+- **Un `--config` mal escrito es un error, no una advertencia** — los comandos de escritura ya no crean en silencio una configuración inexistente; salen con 2.
+- **«El daemon no está en marcha» ya no se adivina** — cuando `ps` no se puede leer, el sondeo dice «no verificable» en vez de declarar caído un daemon sano.
+- **El desempaquetador usa un nombre aleatorio en vez de `path + ".partial"`** — un nombre fijo era un blanco para un enlace simbólico colocado de antemano.
+
 - **Las tareas multi-salto vuelven a obtener sus entradas a través del relé** — las tramas artifact fetch/chunk viajan por el plano de tránsito ciego (cuerpo sellado de 2 MiB, un fragmento de 1 MiB por trama), así que un ejecutor a dos saltos recibe su árbol de proyecto en vez de fallar con «peer not connected». Verificado en una cadena Mac → relé → nube por una red WAN.
 - **Un `status:"failed"` del modelo ya no se registra como completado** — la salida limpia del adaptador no oculta el fallo que el propio modelo declara; la razón llega al bucle de reintentos, al delegador y a la línea de tiempo.
 - **El rechazo de un par devuelve la tarea a un origen capaz** — la fila en cola se reclama y se ejecuta localmente en vez de devolver un fallo falso, y un Submit síncrono deja de esperar una fila que nadie ejecutaría.
@@ -79,7 +88,10 @@ Aún no hay cambios sin publicar.
 - **Un `hello_reject` por datagrama ya no mata el plano UDP** — las tramas hello ligadas a conexión se descartan antes del dispatch y el manejador tolera una conexión nula.
 - **`sandbox.mode: strict` deniega la lectura de los secretos del nodo** — config/card, SQLite (claves privadas del nodo) y sus WAL/SHM, y el almacén OAuth quedan denegados a nivel de archivo; los directorios padre siguen legibles para no romper los árboles de trabajo.
 - **El sidecar `panda-webui` sirve las API de hilos y skills** — `make run-local` ya no lleva a un 404 al abrir un hilo o la página de skills.
-- **Otros** — `panda model add custom <url>` ya no entra en pánico; el respaldo de desinstalación es 0600 y aborta el borrado si falla; el estado de ejecución `.openpanda/` no se fusiona en la rama; las rutas `--json` fallidas salen con código distinto de cero.
+- **`panda model add custom <url>` ya no entra en pánico** — una lista de posicionales vacía es un error de uso, no un índice fuera de rango.
+- **El respaldo de desinstalación es privado y aborta el borrado si falla** — el archivo se escribe 0600 (contiene el secreto de malla, claves de proveedor y claves privadas del nodo); un fichero ilegible o un disco lleno detienen la desinstalación antes de borrar nada, en vez de dejar un archivo parcial y eliminar los originales.
+- **El estado de ejecución de la sesión nunca se fusiona en la rama del usuario** — todo `.openpanda/` (worktrees, subidas del compositor, temporales de tareas) queda fuera del `git add -A` de la fusión.
+- **Las rutas `--json` fallidas salen con código distinto de cero** — `agents test`, `config model test` y `session rm` ya no devuelven 0 al fallar; `session rm` emite solo JSON (incluidos los errores).
 
 
 - **Las tareas delegadas se reenrutan al expirar el lease del ejecutor en vez de acabar en callejón sin salida** — una tarea despachada cuyo ejecutor perdía el lease antes fallaba de plano; ahora vuelve a la cola con un intento nuevo, el ejecutor desalojado queda fuera de los candidatos y, cuando no hay ruta alternativa, la reentrega se aparca en `task_outbox` a la espera de que ese nodo reviva, en lugar de fabricar un veredicto terminal falso. Los deadlines absolutos siguen ganando al presupuesto de reintentos: una fila que pasa de `deadline_unix` se liquida como expirada sin importar los reintentos que queden, y una tarea fijada (pinned) nunca se repunta en silencio a un sustituto (bf34652).

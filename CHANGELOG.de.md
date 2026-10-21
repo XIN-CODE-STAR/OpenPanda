@@ -73,6 +73,15 @@ Noch keine unveröffentlichten Änderungen.
 
 ### Fixed
 
+- **Ein `--json`-Fehler ist auch JSON** — `--json` versprach eine maschinenlesbare Antwort und brach das Versprechen im Fehlerpfad; der Fehler geht jetzt als `{"error":{"code":…,"message":…}}` nach stderr.
+- **Ein Queue-Schreibvorgang öffnet keinen Netzwerk-Socket mehr** — `task add`/`task send`/`task continue` starteten einen vollständigen Core und konkurrierten um den LAN-Discovery-Port; der lokale Schreibvorgang nimmt jetzt den leichten Pfad.
+- **Die Toolchain-Untergrenze ist Go 1.26.10, und das Gate fährt `govulncheck`** — 1.26.9 trug GO-2026-6809 (Prüfung intermediärer CAs in `crypto/x509`).
+- **Ein destruktiver Befehl passiert nicht mehr als reversibel** — der Klassifizierer urteilte nach dem Verb und genehmigte gefährliche Formen von `cp`/`mv`/`chmod`/`chown`/`ln`/`tee`/`install`/`kill` automatisch; nur Formen, die Systempfade, Setuid-Bits oder init treffen, steigen auf Tier 2.
+- **Ein Daemon, der seinen Port nicht binden kann, beendet sich statt endlos neu zu versuchen** — bei ungültiger `listen_addr` meldete er „gestartet", und systemd/launchd hielten ihn für gesund.
+- **Eine vertippte `--config` ist ein Fehler, keine Warnung** — schreibende Befehle legen nicht mehr still eine nicht existierende Konfiguration an; sie enden mit 2.
+- **„Der Daemon läuft nicht" wird nicht mehr geraten** — wenn `ps` nicht lesbar ist, sagt die Prüfung „nicht verifizierbar", statt einen gesunden Daemon für tot zu erklären.
+- **Der Entpacker staged über einen Zufallsnamen statt `path + ".partial"`** — ein fester Name war ein Ziel für einen vorab platzierten Symlink.
+
 - **Mehrhop-Aufgaben holen ihre Eingaben wieder über den Relay** — Artifact-Fetch/Chunk-Frames laufen über die Blind-Transit-Ebene (versiegelter Body max. 2 MiB, ein 1-MiB-Chunk pro Frame), sodass ein Executor zwei Hops entfernt seinen Projektbaum erhält statt mit „peer not connected" zu scheitern. Auf einer Mac → Relay → Cloud-Kette über WAN verifiziert.
 - **Ein `status:"failed"` des Modells wird nicht mehr als erledigt verbucht** — ein sauberer Adapter-Exit verdeckt die Selbstauskunft des Modells nicht mehr; der Grund erreicht Retry-Schleife, Delegator und Zeitachse.
 - **Lehnt ein Peer ab, läuft die Aufgabe auf einem fähigen Ursprung lokal weiter** — die eingereihte Zeile wird übernommen und ausgeführt statt einen falschen Fehler zu melden; ein synchrones Submit wartet nicht mehr auf eine Zeile, die niemand ausführt.
@@ -81,7 +90,10 @@ Noch keine unveröffentlichten Änderungen.
 - **Ein Datagramm-`hello_reject` kann die UDP-Ebene nicht mehr beenden** — verbindungsgebundene Hello-Frames werden vor dem Dispatch verworfen, und der Handler toleriert eine nil-Verbindung.
 - **`sandbox.mode: strict` verweigert das Lesen von Knotengeheimnissen** — Config/Karte, SQLite (private Knotenschlüssel) samt WAL/SHM und der OAuth-Token-Store sind dateiweise lesegeschützt; Elternverzeichnisse bleiben lesbar, damit Arbeitstrees funktionieren.
 - **Der eigenständige `panda-webui`-Sidecar bedient Thread- und Skill-APIs** — `make run-local` führt beim Öffnen eines Threads oder der Skill-Seite nicht mehr ins 404.
-- **Weitere Korrekturen** — `panda model add custom <url>` panikt nicht mehr; Uninstall-Backups sind 0600 und brechen bei Fehlern das Löschen ab; `.openpanda/`-Laufzeitzustand wird nicht in den Branch gemerged; fehlgeschlagene `--json`-Pfade beenden mit ungleich null.
+- **`panda model add custom <url>` panikt nicht mehr** — eine leere Positionsliste ist ein Nutzungsfehler, kein Index außerhalb des Bereichs.
+- **Uninstall-Backups sind privat und brechen bei Fehlern das Löschen ab** — das Archiv wird mit 0600 geschrieben (es enthält das Mesh-Secret, Provider-Schlüssel und private Knotenschlüssel); eine unlesbare Datei oder eine volle Platte stoppt die Deinstallation, bevor irgendetwas gelöscht wird, statt ein Teilarchiv zu hinterlassen und die Originale zu entfernen.
+- **Der Laufzeitzustand einer Sitzung wird nie in den Benutzerbranch gemerged** — der ganze `.openpanda/`-Baum (Worktrees, Composer-Uploads, Task-Temporärdateien) ist vom `git add -A` des Session-Merges ausgenommen.
+- **Fehlgeschlagene `--json`-Pfade beenden mit ungleich null** — `agents test`, `config model test` und `session rm` geben bei Fehlern kein 0 mehr zurück; `session rm` gibt nur JSON aus (Fehler eingeschlossen).
 
 
 - **Delegierte Aufgaben werden bei abgelaufenem Executor-Lease neu geroutet statt in einer Sackgasse zu enden** — eine verschickte Aufgabe, deren Executor-Lease ablief, schlug früher einfach fehl; jetzt kehrt die Zeile mit einem neuen Attempt in die Warteschlange zurück, der verdrängte Executor wird aus den Kandidaten entfernt, und gibt es keine Alternativroute, parkt die Wiederzustellung in `task_outbox`, bis genau dieser Knoten wieder da ist — statt ein falsches Endurteil zu erzeugen. Absolute Deadlines schlagen weiterhin das Retry-Budget: Eine Zeile jenseits von `deadline_unix` wird unabhängig von Restversuchen als abgelaufen abgerechnet, und eine gepinnte Aufgabe wird nie still auf einen Ersatzknoten umgeleitet (bf34652).

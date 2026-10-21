@@ -85,7 +85,10 @@ OpenPanda（**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **
 - **数据报面上的 `hello_reject` 不再能杀死 UDP 通道** —— 连接绑定的 hello 帧在数据报路径直接丢弃，处理函数也容忍空连接。
 - **`sandbox.mode: strict` 现在拒绝读取节点机密** —— 配置/能力卡、SQLite（节点私钥）及其 WAL/SHM、订阅 OAuth token 均禁止读取；仅禁文件，父目录保持可读以免工作树失效。
 - **独立 `panda-webui` 侧车补齐会话与技能 API** —— `make run-local` 启动的控制台打开会话或技能页不再 404。
-- **其余修复** —— `panda model add custom <url>` 不再 panic；卸载备份权限为 0600 且备份失败时中止删除；`.openpanda/` 运行态不再被会话合并提交；`--json` 失败路径返回非零退出码。
+- **`panda model add custom <url>` 不再 panic** —— 空位置参数返回用法错误，而不是下标越界崩溃。
+- **卸载备份是私有的，且失败时中止删除** —— 备份以 0600 写入（内含 mesh secret、provider key 与节点私钥）；任一文件不可读或磁盘写满时，卸载在删除任何内容之前停下，而不是留下残缺备份再删原文件。
+- **会话运行态不会再被合并进用户分支** —— `.openpanda/`（worktree、输入框上传、任务临时文件）整棵树排除在会话合并的 `git add -A` 之外。
+- **`--json` 失败路径返回非零退出码** —— `agents test`、`config model test`、`session rm` 的 JSON 形式不再在失败时退出 0；`session rm` 只输出 JSON（含错误）。
 
 
 - **破坏性命令不能再冒充可逆命令** —— 分级器过去按动词判，`cp`、`mv`、`chmod`、`chown`、`ln`、`tee`、`kill` 的任何形态都被自动放行：`cp payload /etc/cron.d/x`、`chmod u+s /usr/bin/find`、`ln -sf /etc/passwd ./shadow`、`kill 1` 全都没问就跑了。这些动词的寻常形态仍是 Tier 1——把文件拷进自己的目录不是事故——但碰到系统路径、置 setuid 位、经链接覆盖系统文件、或以 init 为目标的那个形态，现在要授权。解释器里跑的代码同样纳管：脚本里的 `unlink`、`rmtree`、`rm -rf` 与对应的 shell 命令一样升级。
