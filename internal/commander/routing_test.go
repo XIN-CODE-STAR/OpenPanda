@@ -84,6 +84,56 @@ func TestRankAgentsPinnedByName(t *testing.T) {
 	}
 }
 
+// TestRankAgentsRosterNarrowsPool: a thread's roster (WithAgents) removes the
+// agents outside it from ranking entirely — including the cheaper one that
+// would otherwise win on cost.
+func TestRankAgentsRosterNarrowsPool(t *testing.T) {
+	r := NewRouter(scoreCard(), NewExecutor(), config.ModelConfig{}, config.InjectionConfig{}, config.RoutingConfig{})
+	cands := r.WithAgents([]string{"expensive"}).RankAgents([]string{"code:modify"})
+	if len(cands) != 1 || cands[0].Name != "expensive" {
+		t.Fatalf("roster candidates = %+v, want only expensive", cands)
+	}
+	// The original router is untouched: a roster belongs to one task, not to
+	// the node.
+	if all := r.RankAgents([]string{"code:modify"}); len(all) != 2 {
+		t.Fatalf("base router narrowed too: %+v", all)
+	}
+}
+
+// TestRankAgentsRosterBeatsModelPin: an "agent:<name>" pin the model emitted
+// cannot smuggle in an agent the user left out of the team.
+func TestRankAgentsRosterBeatsModelPin(t *testing.T) {
+	r := NewRouter(scoreCard(), NewExecutor(), config.ModelConfig{}, config.InjectionConfig{}, config.RoutingConfig{})
+	cands := r.WithAgents([]string{"cheap"}).RankAgents([]string{"agent:expensive", "code:modify"})
+	if len(cands) != 1 || cands[0].Name != "cheap" {
+		t.Fatalf("roster must outrank the pin: %+v", cands)
+	}
+}
+
+// TestRankAgentsRosterFloor: a roster member that declares none of the task's
+// abilities still runs the work — a one-person team cannot be "no route".
+func TestRankAgentsRosterFloor(t *testing.T) {
+	r := NewRouter(scoreCard(), NewExecutor(), config.ModelConfig{}, config.InjectionConfig{}, config.RoutingConfig{})
+	cands := r.WithAgents([]string{"web"}).RankAgents([]string{"code:modify"})
+	if len(cands) != 1 || cands[0].Name != "web" {
+		t.Fatalf("roster floor candidates = %+v, want web", cands)
+	}
+	// Outside a roster the same mismatch stays unmatched.
+	if cands := r.RankAgents([]string{"code:modify"}); len(cands) != 2 {
+		t.Fatalf("unrestricted ranking changed: %+v", cands)
+	}
+}
+
+// TestWithAgentsAbsentRosterDegrades: a roster naming nobody this node has
+// must not strand the task — the router comes back unrestricted.
+func TestWithAgentsAbsentRosterDegrades(t *testing.T) {
+	r := NewRouter(scoreCard(), NewExecutor(), config.ModelConfig{}, config.InjectionConfig{}, config.RoutingConfig{})
+	narrowed := r.WithAgents([]string{"remote_only_agent"})
+	if cands := narrowed.RankAgents([]string{"code:modify"}); len(cands) != 2 {
+		t.Fatalf("absent roster should not narrow: %+v", cands)
+	}
+}
+
 // TestRouteCarriesAlternates: Route surfaces the runner-up agents as the
 // fallback chain on the plan.
 func TestRouteCarriesAlternates(t *testing.T) {

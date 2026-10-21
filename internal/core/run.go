@@ -5,6 +5,7 @@ package core
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -288,6 +289,23 @@ func (c *Core) run(ctx context.Context, taskID, intent string, required []string
 		outcome.sessionID, outcome.sessionAdapter)
 }
 
+// taskAllowAgents returns the agent roster a task carries in its spec — the
+// chat thread's team pick, which the ask engine copies into spec_json so it
+// persists and travels. Nil means "no restriction": every CLI submission and
+// every row written before rosters existed reads that way, and so does a
+// spec this build cannot parse.
+func (c *Core) taskAllowAgents(ctx context.Context, taskID string) []string {
+	t, err := c.store.Get(ctx, taskID)
+	if err != nil || t.SpecJSON == "" {
+		return nil
+	}
+	var spec entry.TaskSpecDetail
+	if err := json.Unmarshal([]byte(t.SpecJSON), &spec); err != nil {
+		return nil
+	}
+	return spec.AllowAgents
+}
+
 // resolveRunPlan turns a task's requires into an executable plan: route
 // selection, the just-in-time usability and circuit-breaker gates, and the
 // failover/alternate pruning those gates imply. It is run()'s first phase —
@@ -297,6 +315,14 @@ func (c *Core) resolveRunPlan(ctx context.Context, taskID string, required []str
 	if router == nil {
 		// No capability card loaded: nothing to execute.
 		return commander.Plan{}, nil, "", fmt.Errorf("no commander configured")
+	}
+	// A thread's roster (the composer's "who works on this" pick) narrows the
+	// agent pool before anything is routed: a conversation told to use these
+	// hands must not quietly hand the work to someone else. The roster rides
+	// spec_json, so a task delegated to another node arrives with the same
+	// restriction instead of being re-opened to every agent there.
+	if roster := c.taskAllowAgents(ctx, taskID); len(roster) > 0 {
+		router = router.WithAgents(roster)
 	}
 	plan, err := router.Route(required)
 	if err != nil {

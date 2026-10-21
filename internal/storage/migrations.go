@@ -91,6 +91,9 @@ var migrations = []Migration{
 	{Version: 58, Name: "add_task_messages_consumed_at", Apply: migrateV58},
 	{Version: 59, Name: "add_employee_dir_row", Apply: migrateV59},
 	{Version: 60, Name: "add_task_messages_attachments", Apply: migrateV60},
+	// The to-do board landed while upstream claimed 56-60 for the cross-network
+	// mesh columns, so it moves behind them (the same collision v50 had).
+	{Version: 61, Name: "add_todos", Apply: migrateV61},
 }
 
 // migrateV58 adds task_messages.consumed_at: the moment the recipient's round
@@ -1441,5 +1444,42 @@ func migrateV57(tx MigrationExec) error {
 func migrateV60(tx MigrationExec) error {
 	_, err := tx.Exec(`ALTER TABLE task_messages
 		ADD COLUMN attachments TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
+// migrateV61 adds the user's to-do board (internal/todos). A todo is not a
+// task: tasks carry a state machine and an executor, while a todo is a note
+// that only becomes work when its owner starts it — so it lives in its own
+// table instead of borrowing task states. `seq` is the manual lane order the
+// board's drag writes (0 = never dragged, which sorts last); `task_id` links
+// a todo to the task started from it, empty until then.
+func migrateV61(tx MigrationExec) error {
+	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS todos (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		title TEXT NOT NULL,
+		description TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'pending',
+		priority TEXT NOT NULL DEFAULT 'normal',
+		due_at INTEGER NOT NULL DEFAULT 0,
+		started_at INTEGER NOT NULL DEFAULT 0,
+		done_at INTEGER NOT NULL DEFAULT 0,
+		tags TEXT NOT NULL DEFAULT '[]',
+		project TEXT NOT NULL DEFAULT '',
+		task_id TEXT NOT NULL DEFAULT '',
+		seq INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL
+	)`); err != nil {
+		return err
+	}
+	// The board always filters by lane and usually by project; the due index
+	// backs the "overdue first" read the page does on every paint.
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_todos_status ON todos(status, seq)`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_todos_project ON todos(project)`); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_todos_due ON todos(due_at)`)
 	return err
 }

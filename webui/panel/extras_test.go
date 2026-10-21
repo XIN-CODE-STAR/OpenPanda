@@ -3,9 +3,14 @@
 package panel
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
+	"image"
+	"image/png"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -157,6 +162,117 @@ func TestFsReadTruncates(t *testing.T) {
 	}
 	if len(out["content"].(string)) != maxReadBytes {
 		t.Fatalf("content len = %d", len(out["content"].(string)))
+	}
+}
+
+// pngBytes is a real (2×2) PNG — the image endpoint hands back the file's own
+// bytes, so the test needs something a decoder would accept.
+func pngBytes(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 2, 2))); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestFsImageServesPreviewableBytes(t *testing.T) {
+	h, tmp, _ := newFsPanel(t)
+	raw := pngBytes(t)
+	shot := filepath.Join(tmp, "shot.png")
+	if err := os.WriteFile(shot, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, authedReq(http.MethodGet, "/api/fs/image?path="+url.QueryEscape(shot), nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("image status = %d body %s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Type"); got != "image/png" {
+		t.Fatalf("content-type = %q", got)
+	}
+	// The bytes must arrive untouched — a preview that re-encodes would blur
+	// a screenshot the transcript is showing as evidence.
+	if !bytes.Equal(rr.Body.Bytes(), raw) {
+		t.Fatalf("body is not the file's bytes: %d vs %d", rr.Body.Len(), len(raw))
+	}
+	if rr.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("missing nosniff")
+	}
+
+	// A non-image extension is refused before any bytes move: the endpoint
+	// exists for previews, not as a second /api/fs/read.
+	if err := os.WriteFile(filepath.Join(tmp, "notes.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, authedReq(http.MethodGet, "/api/fs/image?path=notes.txt", nil))
+	if rr.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("text file status = %d", rr.Code)
+	}
+
+	// Missing file: 404, not a zero-byte 200.
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, authedReq(http.MethodGet, "/api/fs/image?path=absent.png", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("missing status = %d", rr.Code)
+	}
+}
+
+// TestFsImageTempRootWidensReadOnlyForImages: agents park screenshots in a
+// scratch dir outside every storage root, and the transcript still has to show
+// them. The widening is scoped to the image endpoint — /api/fs/read keeps
+// refusing the very same file.
+func TestFsImageTempRootWidensReadOnlyForImages(t *testing.T) {
+	h, _, _ := newFsPanel(t)
+	// t.TempDir() lives under the OS temp tree and outside the work root.
+	scratch := t.TempDir()
+	shot := filepath.Join(scratch, "capture.png")
+	if err := os.WriteFile(shot, pngBytes(t), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, authedReq(http.MethodGet, "/api/fs/image?path="+url.QueryEscape(shot), nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("temp image status = %d body %s", rr.Code, rr.Body.String())
+	}
+
+	code, _ := doJSON(t, h, authedReq(http.MethodGet, "/api/fs/read?path="+url.QueryEscape(shot), nil))
+	if code != http.StatusForbidden {
+		t.Fatalf("fs/read on a temp file status = %d, want 403", code)
+	}
+
+	// Outside both the roots and the temp tree: refused.
+	// filepath.Dir(os.TempDir()) is the temp tree's parent on every platform.
+	outside := filepath.Join(filepath.Dir(os.TempDir()), "panda-image-outside.png")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, authedReq(http.MethodGet, "/api/fs/image?path="+url.QueryEscape(outside), nil))
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("outside status = %d, want 403", rr.Code)
+	}
+}
+
+func TestFsImageRejectsOversize(t *testing.T) {
+	h, tmp, _ := newFsPanel(t)
+	// A sparse file: stat size is all the handler needs to refuse it, and the
+	// test should not write 16 MiB to disk to prove that.
+	big := filepath.Join(tmp, "huge.png")
+	f, err := os.Create(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(maxImageBytes + 1); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	f.Close()
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, authedReq(http.MethodGet, "/api/fs/image?path=huge.png", nil))
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize status = %d", rr.Code)
 	}
 }
 

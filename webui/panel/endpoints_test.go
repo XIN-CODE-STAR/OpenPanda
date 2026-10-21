@@ -143,6 +143,59 @@ func TestSessionsCRUD(t *testing.T) {
 	}
 }
 
+// TestSessionTeamRoster covers the thread's agent roster: it rides create,
+// PATCH replaces and clears it, and a name that cannot be a card key is
+// refused instead of being silently dropped (a dropped entry is a smaller
+// team; a dropped last entry is "no restriction at all").
+func TestSessionTeamRoster(t *testing.T) {
+	h := New(Deps{
+		Store:     newTestStore(t),
+		Sessions:  sessions.NewStore(t.TempDir()),
+		StaticDir: t.TempDir(),
+		Token:     testToken,
+	})
+
+	code, out := doJSON(t, h, jsonReq(http.MethodPost, "/api/sessions",
+		`{"title":"team","team":["claude_code","opencode"]}`))
+	if code != http.StatusOK {
+		t.Fatalf("create status = %d, body %v", code, out)
+	}
+	id := out["id"].(string)
+	team, _ := out["team"].([]any)
+	if len(team) != 2 || team[0] != "claude_code" {
+		t.Fatalf("created team = %v", out["team"])
+	}
+
+	// PATCH replaces the roster, deduping and trimming as it goes.
+	code, out = doJSON(t, h, jsonReq(http.MethodPatch, "/api/sessions/"+id,
+		`{"team":["codex"," codex ","pi"]}`))
+	if code != http.StatusOK {
+		t.Fatalf("patch status = %d, out = %v", code, out)
+	}
+	team, _ = out["team"].([]any)
+	if len(team) != 2 || team[0] != "codex" || team[1] != "pi" {
+		t.Fatalf("patched team = %v", out["team"])
+	}
+
+	// An explicit empty list clears it — no restriction again.
+	code, out = doJSON(t, h, jsonReq(http.MethodPatch, "/api/sessions/"+id, `{"team":[]}`))
+	if code != http.StatusOK {
+		t.Fatalf("clear status = %d, out = %v", code, out)
+	}
+	if team, ok := out["team"].([]any); ok && len(team) != 0 {
+		t.Fatalf("cleared team = %v, want empty", out["team"])
+	}
+
+	// A slash can never be a card agent key; refuse it rather than dropping.
+	if code, _ := doJSON(t, h, jsonReq(http.MethodPatch, "/api/sessions/"+id, `{"team":["a/b"]}`)); code != http.StatusBadRequest {
+		t.Fatalf("invalid team status = %d, want 400", code)
+	}
+	// An omitted field leaves the roster alone.
+	if code, _ := doJSON(t, h, jsonReq(http.MethodPatch, "/api/sessions/"+id, `{"title":"renamed"}`)); code != http.StatusOK {
+		t.Fatalf("title-only patch status = %d", code)
+	}
+}
+
 func TestSessionPinAndBulkDelete(t *testing.T) {
 	h := New(Deps{
 		Store:     newTestStore(t),

@@ -115,7 +115,7 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("event: change\ndata: init\n\n"))
 	flusher.Flush()
 
-	var lastTask, lastNode, lastRem, lastSess string
+	var lastTask, lastNode, lastRem, lastSess, lastTodo string
 	// trace watermark: the highest task_events.id we have already delivered.
 	// The stream is a post-connect delta by design — the orbit hydrates from
 	// GET /api/tasks/{id} and the board reads each task's last_event stamp,
@@ -151,10 +151,12 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 			nodeFP := h.cachedNodeFingerprint()
 			remFP := h.cachedReminderFingerprint()
 			sessFP := h.cachedSessionFingerprint()
-			fpChanged := first || taskFP != lastTask || nodeFP != lastNode || remFP != lastRem || sessFP != lastSess
+			todoFP := h.cachedTodoFingerprint()
+			fpChanged := first || taskFP != lastTask || nodeFP != lastNode || remFP != lastRem ||
+				sessFP != lastSess || todoFP != lastTodo
 			if fpChanged {
 				first = false
-				lastTask, lastNode, lastRem, lastSess = taskFP, nodeFP, remFP, sessFP
+				lastTask, lastNode, lastRem, lastSess, lastTodo = taskFP, nodeFP, remFP, sessFP, todoFP
 				kinds := []string{"tasks"}
 				if nodeFP != "" {
 					kinds = append(kinds, "nodes")
@@ -165,11 +167,14 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 				if sessFP != "" {
 					kinds = append(kinds, "sessions")
 				}
-				// Fixed four-slot fingerprint field — task/node/reminder/session —
-				// so a missing middle fingerprint never shifts the sessions slot
-				// left. Older clients read the same first three slots and ignore
-				// the fourth.
-				data := taskFP + "/" + nodeFP + "/" + remFP + "/" + sessFP
+				if todoFP != "" {
+					kinds = append(kinds, "todos")
+				}
+				// Fixed-slot fingerprint field — task/node/reminder/session/todo —
+				// so a missing middle fingerprint never shifts the slots after it
+				// left. Older clients read the first three (or four) and ignore
+				// the tail; the kinds list is what they actually switch on.
+				data := taskFP + "/" + nodeFP + "/" + remFP + "/" + sessFP + "/" + todoFP
 				if _, err := w.Write([]byte("event: change\ndata: " + strings.Join(kinds, ",") + " " + data + "\n\n")); err != nil {
 					return
 				}

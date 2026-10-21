@@ -25,6 +25,11 @@ type agentJSON struct {
 	Version     string `json:"version,omitempty"`
 	InstallHint string `json:"install_hint,omitempty"`
 	InstallURL  string `json:"install_url,omitempty"`
+	// BestAt/CostTier are the registry's own description of the agent — what
+	// it is good at and what it costs. The composer's team picker reads them
+	// to say what each "employee" does instead of only naming a CLI.
+	BestAt   []string `json:"best_at,omitempty"`
+	CostTier string   `json:"cost_tier,omitempty"`
 }
 
 // probeAgent resolves one registry entry's install path and best-effort
@@ -37,6 +42,8 @@ func probeAgent(k agents.Known) agentJSON {
 		DisplayName: k.DisplayName,
 		InstallHint: k.InstallHint,
 		InstallURL:  k.InstallURL,
+		BestAt:      k.DefaultBestAt,
+		CostTier:    k.DefaultCostTier,
 	}
 	for _, bin := range k.Binaries {
 		if path, err := exec.LookPath(bin); err == nil {
@@ -69,6 +76,12 @@ func firstLine(s string) string {
 // listAgents serves GET /api/agents — the known agent CLIs (from the
 // registry) with install state, path, best-effort version, and install
 // guidance for the settings page.
+//
+// The probes stay serial on purpose. They were parallelised once to shorten
+// the roster card's wait and measured *worse* (2.5s → 10s on a Windows box):
+// each probe spawns a Node-based CLI, and eleven of them starting at once
+// saturate the disk and blow through the 5s per-probe timeout. One at a time
+// is the faster queue here, and the card opens on skeletons meanwhile.
 func (h *handler) listAgents(w http.ResponseWriter, r *http.Request) {
 	known := agents.Registry()
 	out := make([]agentJSON, 0, len(known))

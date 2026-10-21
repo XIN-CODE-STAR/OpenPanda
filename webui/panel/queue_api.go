@@ -3,6 +3,7 @@
 package panel
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -78,10 +79,6 @@ func (h *handler) createTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	requires := req.Requires
-	if len(requires) == 0 {
-		requires = defaultBoardRequires
-	}
 	// The parallel-mode fields carry the same contract the CLI flags do:
 	// they only mean something with a project to scope, and scope lanes and
 	// the private copy are mutually exclusive (the copy ignores paths
@@ -101,7 +98,47 @@ func (h *handler) createTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, errors.New("scope_paths and isolate are mutually exclusive"))
 		return
 	}
+	// Hand the tail the trimmed lanes rather than the raw field: trimming
+	// reuses req.ScopePaths' backing array and only shortens the slice, so the
+	// field still carries the pre-trim tail. The core normalizes paths anyway,
+	// but a caller should not have to know that to read this correctly.
+	req.ScopePaths = trimmedPaths
 
+	taskID, sessionID, state, warn, err := h.enqueueBoardTask(r.Context(), eng, req, priority)
+	if err != nil {
+		writeEnqueueErr(w, err)
+		return
+	}
+	// warn carries the dead-queue advisory ("no consumer will drain this
+	// store") — the board surfaces it as a toast so an accepted task that can
+	// never run never reads as a success.
+	writeJSON(w, map[string]string{"task_id": taskID, "session_id": sessionID, "state": state, "warning": warn})
+}
+
+// enqueueBoardTask is the shared tail of every "a human asked for a task"
+// path: POST /api/tasks and the to-do board's 开始 (POST /api/todos/{id}/start).
+// It enqueues the row and mints the linked session so the card can jump into
+// the thread where the work streams.
+//
+// The caller keeps the validation (it knows which fields its surface offers);
+// this function owns the contract both surfaces must honour — no WorkDir, so
+// a task whose `requires` names another device's ability can still leave this
+// node, and the session created only after a successful enqueue so a failure
+// leaves no orphan thread behind.
+func (h *handler) enqueueBoardTask(
+	ctx context.Context,
+	eng *askengine.Engine,
+	req createTaskRequest,
+	priority int,
+) (taskID, sessionID, state, warn string, err error) {
+	// The routing ability both surfaces fall back to. It lives here rather
+	// than in the callers because it is part of the contract this function
+	// owns: a board task with no `requires` still has to route somewhere, and
+	// a surface that forgets to say so must not file a task nothing can claim.
+	requires := req.Requires
+	if len(requires) == 0 {
+		requires = defaultBoardRequires
+	}
 	in := core.TaskInput{
 		Title:         req.Title,
 		Project:       strings.TrimSpace(req.Project),
@@ -109,44 +146,36 @@ func (h *handler) createTask(w http.ResponseWriter, r *http.Request) {
 		Requires:      requires,
 		Authorized:    req.Authorize,
 		PreferredNode: req.Node,
-		Paths:         trimmedPaths,
+		Paths:         req.ScopePaths,
 		Isolate:       req.Isolate,
 	}
 	q := core.DefaultQueueSpec()
 	q.Priority = priority
 	q.ResourceKeys = req.ResourceKeys
-	// No WorkDir: the node-wide default the executor falls back to is the same
-	// value eng.WorkPath() would pin, and a pinned task never forwards to a
-	// peer — a board task with `requires` pointing at another device's ability
-	// must be able to leave this node.
 
-	task, warn, err := eng.EnqueueTask(r.Context(), in, q)
+	task, warn, err := eng.EnqueueTask(ctx, in, q)
 	if err != nil {
-		if errors.Is(err, askengine.ErrApprovalDenied) {
-			// A remembered deny answered before the row existed: report it as a
-			// policy refusal the board can show, not a server fault.
-			writeErr(w, http.StatusConflict, err)
-			return
-		}
-		writeErr(w, http.StatusInternalServerError, err)
-		return
+		return "", "", "", "", err
 	}
-
-	// Linked session: the board card jumps into it and the task's progress
-	// streams there. Created after a successful enqueue so a failure leaves
-	// no orphan session behind.
-	sessionID := ""
 	if h.sessions != nil {
-		if sess, err := h.sessions.Create(req.Title, req.Project); err == nil {
+		if sess, serr := h.sessions.Create(req.Title, req.Project); serr == nil {
 			sessionID = sess.ID
 			_, _ = h.sessions.AppendTurn(sess.ID, sessions.Turn{Role: "user", Text: req.Prompt})
-			_ = h.store.SetSessionID(r.Context(), task.TaskID, sess.ID)
+			_ = h.store.SetSessionID(ctx, task.TaskID, sess.ID)
 		}
 	}
-	// warn carries the dead-queue advisory ("no consumer will drain this
-	// store") — the board surfaces it as a toast so an accepted task that can
-	// never run never reads as a success.
-	writeJSON(w, map[string]string{"task_id": task.TaskID, "session_id": sessionID, "state": task.State, "warning": warn})
+	return task.TaskID, sessionID, task.State, warn, nil
+}
+
+// writeEnqueueErr maps an enqueue failure onto the board's HTTP vocabulary.
+func writeEnqueueErr(w http.ResponseWriter, err error) {
+	if errors.Is(err, askengine.ErrApprovalDenied) {
+		// A remembered deny answered before the row existed: report it as a
+		// policy refusal the board can show, not a server fault.
+		writeErr(w, http.StatusConflict, err)
+		return
+	}
+	writeErr(w, http.StatusInternalServerError, err)
 }
 
 // sendMessageRequest is the body of POST /api/tasks/{id}/messages and

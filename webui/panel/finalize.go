@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Xustalis/OpenPanda/internal/core"
 	"github.com/Xustalis/OpenPanda/internal/guard"
@@ -92,38 +93,156 @@ func (h *handler) finalizeSessionSweep(ctx context.Context) {
 	}
 }
 
-// taskSummary renders the one-turn digest of a finished task: state line
-// plus the best-effort result text (the adapter payload is JSON; see
-// extractResultText for where the readable part lives). reason is the task's
-// own failure explanation, read from its event history by the caller.
-//
-// The order matters: a digest that says "[failed] low" (the risk level, which
-// is not a fact about what happened) told the reader nothing, and "[done]
-// <title>" is no better than the task card it sits under.
+// taskSummary renders the one-turn report of a finished task.
 func (h *handler) taskSummary(ctx context.Context, t core.Task) string {
 	reason := ""
 	if t.State != core.StateDone {
 		reason = h.failureReason(ctx, t.TaskID)
 	}
-	return summaryText(t, reason)
+	return summaryText(t, reason, h.taskAgent(ctx, t))
 }
 
-// summaryText is the pure composition of the digest: adapter payload, then the
-// task's own failure reason, then the title, and only as a last resort the
-// risk level — which says something about the work, never about what happened.
-func summaryText(t core.Task, reason string) string {
-	var b strings.Builder
-	b.WriteString("[" + t.State + "] ")
-	if text := extractResultText(t.ResultJSON); text != "" {
-		b.WriteString(text)
-		return b.String()
+// summaryText is the pure composition of the report, in two parts and no
+// more: the orchestration line — state, the employee that ran it, the job it
+// was given — and then that employee's own closing paragraph.
+//
+// The thread is a conversation, not a log. It used to carry the entire
+// adapter payload: a 2 000-word agent reply, its "变更 / 验证" sections and
+// the code fences inside them, printed whole under a `[done]` tag. What a
+// reader wants from the transcript is who did the work and how it ended; the
+// play-by-play is one click away on the task page, and replaying the dump
+// into the model's own history spent the context window on its own past
+// prose. One conclusion paragraph is the summary — the sections above it are
+// the evidence behind it.
+func summaryText(t core.Task, reason, agent string) string {
+	head := "[" + t.State + "] "
+	if agent != "" {
+		head += "@" + agent + " · "
 	}
-	if t.State != core.StateDone && reason != "" {
-		b.WriteString(reason)
-		return b.String()
+	head += t.Title
+
+	// A failed run's own reason is its conclusion: there is no adapter answer
+	// to take a closing paragraph from, and the reason is what the reader
+	// needs. A done run never shows a stale reason from an earlier attempt.
+	body := conclusionOf(extractResultText(t.ResultJSON))
+	if body == "" && t.State != core.StateDone {
+		body = conclusionOf(reason)
 	}
-	b.WriteString(t.Title)
-	return b.String()
+	if body == "" {
+		return head
+	}
+	return head + "\n" + body
+}
+
+// maxConclusionRunes bounds one employee's closing paragraph. A conclusion is
+// a paragraph, so the cap is generous — but an agent that answers in one
+// 6 000-character block must not put the whole block in the thread.
+const maxConclusionRunes = 800
+
+// conclusionOf picks the closing paragraph of an agent's reply — the last
+// block that reads as a verdict rather than as more evidence. Walking back a
+// few blocks skips what cannot be a conclusion: a fenced code block, a table,
+// a bare heading, or a trailing "要我继续吗？" (a question is a prompt for the
+// next turn, not the answer to this one).
+func conclusionOf(text string) string {
+	text = strings.TrimSpace(strings.ReplaceAll(text, "\r\n", "\n"))
+	if text == "" {
+		return ""
+	}
+	blocks := strings.Split(text, "\n\n")
+	// Only the tail can be the conclusion; scanning the whole reply would let
+	// an early paragraph win over the ending that supersedes it.
+	for i := len(blocks) - 1; i >= 0 && i >= len(blocks)-4; i-- {
+		if b := strings.TrimSpace(blocks[i]); isConclusionBlock(b) {
+			return clipConclusion(b)
+		}
+	}
+	return clipConclusion(strings.TrimSpace(blocks[len(blocks)-1]))
+}
+
+// isConclusionBlock reports whether one paragraph of a reply can stand as its
+// conclusion. The thresholds are deliberately low: "已完成。" is a real
+// verdict, and refusing it would push the reader back into the log.
+func isConclusionBlock(b string) bool {
+	if b == "" {
+		return false
+	}
+	// Code and tables are evidence, never the verdict.
+	if strings.HasPrefix(b, "```") || strings.HasPrefix(b, "|") || strings.HasPrefix(b, "    ") {
+		return false
+	}
+	// A heading with nothing under it names a section, it does not conclude.
+	if strings.HasPrefix(b, "#") && !strings.Contains(b, "\n") {
+		return false
+	}
+	if utf8.RuneCountInString(b) < 4 {
+		return false
+	}
+	// A trailing question is the agent asking what to do next.
+	last := strings.TrimSpace(b)
+	if (strings.HasSuffix(last, "?") || strings.HasSuffix(last, "？")) && !strings.ContainsAny(last, "。！.!") {
+		return false
+	}
+	return true
+}
+
+// clipConclusion bounds a paragraph without cutting it mid-sentence: the cut
+// falls back to the last sentence break inside the budget when there is one,
+// so a truncated conclusion ends on a full stop and an ellipsis rather than
+// on half a word. The cut is on runes, never bytes — a byte cap used to slice
+// Chinese replies at a third of their length.
+func clipConclusion(s string) string {
+	if utf8.RuneCountInString(s) <= maxConclusionRunes {
+		return s
+	}
+	runes := []rune(s)
+	cut := maxConclusionRunes
+	// Look for a sentence end in the last quarter of the budget.
+	for i := cut - 1; i >= cut-maxConclusionRunes/4 && i > 0; i-- {
+		switch runes[i] {
+		case '。', '！', '？', '.', '!', '?', '\n':
+			return strings.TrimSpace(string(runes[:i+1])) + "…"
+		}
+	}
+	return strings.TrimSpace(string(runes[:cut])) + "…"
+}
+
+// taskAgent names the employee that actually ran the task. A remote or
+// delegated result carries it in the payload; a local run reports the adapter
+// on its timeline instead (exec_agent_start) and leaves the payload without an
+// agent field, so the events are read as the fallback — otherwise the thread
+// says "done" without ever saying who did it.
+func (h *handler) taskAgent(ctx context.Context, t core.Task) string {
+	// A result that travelled (delegated, remote) names the agent it was run
+	// by; that is the authoritative answer and needs no timeline read.
+	if t.ResultJSON != "" {
+		var payload struct {
+			Agent string `json:"agent"`
+		}
+		if json.Unmarshal([]byte(t.ResultJSON), &payload) == nil {
+			if a := strings.TrimSpace(payload.Agent); a != "" {
+				return a
+			}
+		}
+	}
+	events, err := h.store.Events(ctx, t.TaskID)
+	if err != nil {
+		return ""
+	}
+	for i := len(events) - 1; i >= 0; i-- {
+		switch events[i].Type {
+		case "exec_agent_start", "agent_usage", "supervision_round":
+		default:
+			continue
+		}
+		var d struct {
+			Agent string `json:"agent"`
+		}
+		if json.Unmarshal([]byte(events[i].DataJSON), &d) == nil && strings.TrimSpace(d.Agent) != "" {
+			return strings.TrimSpace(d.Agent)
+		}
+	}
+	return ""
 }
 
 // failureReason reads the newest result/review event's own explanation. A task
@@ -162,16 +281,11 @@ func (h *handler) failureReason(ctx context.Context, taskID string) string {
 // left every task without that key with an empty digest, so the summary fell
 // through to the risk level and the thread showed things like "[done] low".
 //
-// The text comes back whole. It used to be capped at 800 bytes — compared with
-// len(), not a rune count, so a Chinese result was cut at roughly a third of
-// that and the thread ended mid-sentence on an ellipsis the reader had no way
-// to expand ("背景含渐变天空、…" under a task that had in fact finished).
-// Nothing here needs the cap: the transcript is local storage and AppendTurn
-// only appends, so the one real budget is the replay window, which
-// sessions.ReplayBudget already enforces when the thread is compacted.
-// The bounds that keep a pathological task from writing an unbounded row sit
-// upstream, on the process output itself: executil's capture cap (8 MiB) and
-// the bus clamp for remote results (512 KiB per field).
+// The text comes back whole — conclusionOf is what shortens it for the
+// thread, and it does so on purpose, at a paragraph boundary. The bounds that
+// keep a pathological task from writing an unbounded row sit upstream, on the
+// process output itself: executil's capture cap (8 MiB) and the bus clamp for
+// remote results (512 KiB per field).
 func extractResultText(resultJSON string) string {
 	if resultJSON == "" {
 		return ""

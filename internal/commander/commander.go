@@ -52,6 +52,10 @@ type Router struct {
 	selfConfigPath string
 	// preferred lists agent names that receive a score bonus during routing.
 	preferred []string
+	// allowedAgents, when non-empty, is the only agent pool routing may pick
+	// from — a chat thread's team roster (see WithAgents). Empty is the
+	// ordinary case: every agent on the card is a candidate.
+	allowedAgents []string
 	// probeAgent reports whether an agent's CLI is usable on this machine.
 	// Injectable for tests; production runs AgentDispatchable (static
 	// viability plus the provider-endpoint reachability probe).
@@ -147,6 +151,55 @@ func (r *Router) SetEndpointProber(fn func(spec ProbeSpec) ProbeVerdict) {
 // Card returns the router's underlying capability card.
 func (r *Router) Card() ledger.Card { return r.card }
 
+// WithAgents returns a copy of the router whose agent pool is limited to
+// names — a chat thread's roster, chosen in the composer. Native commands and
+// actuators are deliberately untouched: the roster answers "which agent may
+// take this work", not "may this declared command run".
+//
+// Names this node does not carry are ignored, and when none of them are
+// present the router comes back unchanged. That is the honest degradation: a
+// roster of employees who work on another machine must not strand the task
+// here with "no route" when this node has hands of its own.
+func (r *Router) WithAgents(names []string) *Router {
+	if len(names) == 0 {
+		return r
+	}
+	agents := make(map[string]ledger.Agent, len(names))
+	present := make([]string, 0, len(names))
+	for _, n := range names {
+		if ag, ok := r.card.Agents[n]; ok {
+			if _, dup := agents[n]; dup {
+				continue
+			}
+			agents[n] = ag
+			present = append(present, n)
+		}
+	}
+	if len(present) == 0 {
+		return r
+	}
+	card := r.card
+	card.Agents = agents
+	clone := *r
+	clone.card = card
+	clone.allowedAgents = present
+	return &clone
+}
+
+// agentAllowed reports whether name is inside the roster (always true when the
+// router carries no roster).
+func (r *Router) agentAllowed(name string) bool {
+	if len(r.allowedAgents) == 0 {
+		return true
+	}
+	for _, n := range r.allowedAgents {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
 // Agent returns the agent definition by name, or ok=false.
 func (r *Router) Agent(name string) (ledger.Agent, bool) {
 	ag, ok := r.card.Agents[name]
@@ -204,6 +257,11 @@ func (r *Router) MatchActuator(required []string) (ledger.ActuatorProfile, bool)
 // preferredBonus is the score bonus an agent listed in
 // routing.preferred_agents receives during ranking.
 const preferredBonus = 0.5
+
+// allowedFloor is the capability score a roster member gets when it declares
+// none of a task's required abilities. Below every real match (0.9/1.0) so a
+// capable teammate still wins, above zero so the roster can always answer.
+const allowedFloor = 0.5
 
 // retryBackoff is the wait before a single retry on a transient provider
 // failure (rate limit / 5xx). Deliberately short: these resolve in seconds.
@@ -283,9 +341,16 @@ func (r *Router) resolveAgentName(req string) (string, ledger.Agent, bool) {
 // discount + preferred-agents bonus. A requirement of the form
 // "agent:<name>" pins that exact agent — an explicit user choice never fans
 // out to substitutes.
+//
+// A roster (WithAgents) filters the pool before any of that: an agent outside
+// the thread's team is not a candidate at all, including one named by an
+// "agent:<name>" pin the model emitted. Inside the roster, an agent that
+// declares none of the required abilities still scores allowedFloor — the
+// team is an instruction, so the smallest roster of one employee must run the
+// work rather than fail to route.
 func (r *Router) RankAgents(required []string) []AgentCandidate {
 	for _, req := range required {
-		if name, ag, ok := r.resolveAgentName(req); ok {
+		if name, ag, ok := r.resolveAgentName(req); ok && r.agentAllowed(name) {
 			return []AgentCandidate{{Name: name, Agent: ag, Score: 1 + r.bonus(name)}}
 		}
 	}
@@ -317,7 +382,13 @@ func (r *Router) RankAgents(required []string) []AgentCandidate {
 			}
 		}
 		if best == 0 {
-			continue
+			// A roster member with no declared match still gets a floor
+			// score; without it a one-person team could not take a task
+			// whose abilities that person's card does not spell out.
+			if len(r.allowedAgents) == 0 {
+				continue
+			}
+			best = allowedFloor
 		}
 		score := best*costMultiplier(ag.CostTier) + r.bonus(name)
 		out = append(out, AgentCandidate{Name: name, Agent: ag, Score: score})

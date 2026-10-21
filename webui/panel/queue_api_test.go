@@ -270,10 +270,33 @@ func TestCreateTaskScopeValidation(t *testing.T) {
 		t.Fatalf("scope+isolate: %d", rr.Code)
 	}
 	// A scoped task with a project is accepted and the declaration lands on
-	// the row (blank entries are trimmed away, not counted).
-	rr := post(`{"title":"t","project":"p","scope_paths":[" a "," "]}`)
+	// the row — trimmed, with blank entries not counted. The blank leads so
+	// the trim has something to do ahead of a real lane.
+	rr := post(`{"title":"t","project":"p","scope_paths":[" "," a "]}`)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("scoped task: %d %s", rr.Code, rr.Body.String())
+	}
+	// What lands on the row is the trimmed list, not the request field. The
+	// shared enqueue tail has to be handed the trimmed slice: trimming reuses
+	// the request's backing array and only shortens it, so passing the raw
+	// field files a lane the board never showed.
+	var res struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	row, err := engine.TaskStore().Get(context.Background(), res.TaskID)
+	if err != nil {
+		t.Fatalf("read task: %v", err)
+	}
+	if len(row.ScopePaths) != 1 || row.ScopePaths[0] != "a" {
+		t.Fatalf("scope paths on the row = %v, want [a]", row.ScopePaths)
+	}
+	// A board task that names no ability still routes on the default, and the
+	// shared tail owns that fallback so neither surface can forget it.
+	if len(row.Requires) != len(defaultBoardRequires) || row.Requires[0] != defaultBoardRequires[0] {
+		t.Fatalf("requires on the row = %v, want %v", row.Requires, defaultBoardRequires)
 	}
 }
 

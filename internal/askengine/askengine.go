@@ -1582,6 +1582,14 @@ type AskScope struct {
 	// to the scheduler. Plans are unaffected: per-stage routing is the
 	// point of a pipeline, so a flat node pin would defeat it.
 	Node string
+
+	// Agents is the thread's roster: the agent names this conversation is
+	// allowed to hand work to. It is copied into every classified task's spec
+	// (allow_agents) and enforced at routing time on whichever node executes
+	// the task, so it constrains plans, sub-agents and remote hops alike
+	// rather than being a hint the model may ignore. Empty means no
+	// restriction — the scheduler routes by capability, as before.
+	Agents []string
 }
 
 // AskTurns is the backward-compatible session-aware entry point. Callers that
@@ -1996,7 +2004,7 @@ rounds:
 			)
 		case entry.KindPlan:
 			cb.progress(Progress{Kind: ProgressPlan, Name: out.Plan.Goal})
-			return e.startClassifiedPlan(ctx, out.Plan, authorize, cb)
+			return e.startClassifiedPlan(ctx, out.Plan, scope, authorize, cb)
 		case entry.KindToolCall:
 			calls := out.ToolCalls()
 			if len(calls) == 0 {
@@ -2157,7 +2165,7 @@ rounds:
 			return &Result{Kind: "answer", Answer: i18n.Tf(effectiveLocale, "ask.loop.noConvergePlan", "n", strconv.Itoa(maxRounds), "goal", final.Plan.Goal)}, nil
 		}
 		cb.progress(Progress{Kind: ProgressPlan, Name: final.Plan.Goal})
-		return e.startClassifiedPlan(ctx, final.Plan, authorize, cb)
+		return e.startClassifiedPlan(ctx, final.Plan, scope, authorize, cb)
 	}
 	if lastTask != nil {
 		lastTask.Answer = final.Answer
@@ -2337,7 +2345,7 @@ func (e *Engine) PlanStages(ctx context.Context, planID string) ([]core.Task, er
 // tier-2 consent (core.StartPlan), so an irreversible stage parks in review for
 // a person instead of inheriting a blanket approval given to the whole sentence.
 // Consent for one shell command is not consent for a three-machine pipeline.
-func (e *Engine) startClassifiedPlan(ctx context.Context, spec *entry.PlanSpec, _ bool, cb StreamCallbacks) (*Result, error) {
+func (e *Engine) startClassifiedPlan(ctx context.Context, spec *entry.PlanSpec, scope AskScope, _ bool, cb StreamCallbacks) (*Result, error) {
 	sched := e.sched.Load()
 	if sched == nil {
 		return nil, fmt.Errorf("plan output requires a capability card (scheduler initialization failed)")
@@ -2353,6 +2361,12 @@ func (e *Engine) startClassifiedPlan(ctx context.Context, spec *entry.PlanSpec, 
 	// No work dir, for the same reason `panda plan run` sets none: a path on this
 	// machine means nothing on the machine that runs the stage.
 	q.WorkDir = ""
+	// The stages belong to the conversation that asked for the plan. Without
+	// the link a plan's stages settled into silence: the thread got the receipt
+	// ("3 stages started") and never heard which employee finished what, while
+	// the panel's session finalizer — which reports a settled task back into
+	// its thread — had nothing to match on.
+	q.SessionID = scope.SessionID
 	planID, err := sched.StartPlan(ctx, p, q)
 	if err != nil {
 		return &Result{Kind: "plan", PlanID: planID, PlanGoal: p.Goal, Stderr: err.Error(), ExitCode: 1}, nil
@@ -2435,6 +2449,14 @@ func (e *Engine) submitTask(ctx context.Context, spec *entry.TaskSpec, prompt st
 	// left routing to the scheduler — a model-emitted pin always wins.
 	if scope.Node != "" && spec.Spec.Node == "" {
 		spec.Spec.Node = scope.Node
+	}
+	// The thread's roster rides the spec, not this call: spec_json is what
+	// persists on the row and what a delegated task carries to its executor,
+	// so the restriction is enforced wherever the work actually runs. An
+	// explicit roster always wins over the model's own requirements — the
+	// user said which hands may touch this conversation.
+	if len(scope.Agents) > 0 {
+		spec.Spec.AllowAgents = append([]string(nil), scope.Agents...)
 	}
 	in := toTaskInput(spec, targetLoc)
 	workDir := scope.WorkDir
