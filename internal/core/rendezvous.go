@@ -31,9 +31,11 @@ import (
 // trust level the card framework already grants every other claim).
 
 const (
-	// rendezvousK is the redundancy target: two edges survive one loss
-	// without a partition; a third buys little for a personal mesh.
-	rendezvousK = 2
+	// rendezvousKDefault is the redundancy target used when no policy is
+	// installed: two edges survive one loss without a partition. The live
+	// target is network.bootstrap_edges (0 = manual mode), resolved by
+	// Core.rendezvousTarget.
+	rendezvousKDefault = 2
 	// rendezvousEvalEvery is the re-election period (design: 5min).
 	rendezvousEvalEvery = 5 * time.Minute
 	// rendezvousHysteresis requires a challenger to beat an incumbent's
@@ -67,14 +69,25 @@ type rendezvousCandidate struct {
 // keep incumbents unless a challenger wins by the hysteresis margin, then
 // dial whatever the elected set still lacks an edge to.
 func (c *Core) rendezvousEval(ctx context.Context) {
+	k := c.rendezvousTarget()
 	c.rzv.mu.Lock()
 	c.rzv.lastEval = time.Now()
+	if k == 0 {
+		// Manual mode (network.bootstrap_edges: 0): the mesh is the
+		// configured peer list, exactly as before the feature existed. An
+		// empty set with degraded=false is the honest report — this node
+		// chose not to keep rendezvous edges, it did not fail to find one.
+		c.rzv.peers = nil
+		c.rzv.degraded = false
+		c.rzv.mu.Unlock()
+		return
+	}
 	c.rzv.mu.Unlock()
 	cands := c.rendezvousCandidates(ctx)
 	// Elect: top-K by score with failure-domain diversity — two edges into
 	// the same /24 are one failure waiting to happen, so a worse-scored
 	// candidate in a fresh domain wins the second slot.
-	elected := c.rendezvousElect(cands)
+	elected := c.rendezvousElect(cands, k)
 	c.rzv.mu.Lock()
 	if c.rzv.peers == nil {
 		c.rzv.peers = make(map[string]bool)
@@ -178,7 +191,7 @@ func (c *Core) rendezvousCandidates(ctx context.Context) []rendezvousCandidate {
 // rendezvousElect picks up to K candidates honoring hysteresis: an incumbent
 // already in the set keeps its seat unless a challenger out-scores it by the
 // margin, and failure-domain diversity is enforced across the electees.
-func (c *Core) rendezvousElect(cands []rendezvousCandidate) map[string]bool {
+func (c *Core) rendezvousElect(cands []rendezvousCandidate, k int) map[string]bool {
 	c.rzv.mu.Lock()
 	incumbents := c.rzv.peers
 	c.rzv.mu.Unlock()
@@ -188,7 +201,7 @@ func (c *Core) rendezvousElect(cands []rendezvousCandidate) map[string]bool {
 	// not been decisively beaten — this pass computes stability, the fill
 	// pass below adds fresh capacity.
 	for _, cd := range cands {
-		if len(elected) >= rendezvousK {
+		if len(elected) >= k {
 			break
 		}
 		if incumbents[cd.id] {
@@ -212,7 +225,7 @@ func (c *Core) rendezvousElect(cands []rendezvousCandidate) map[string]bool {
 	}
 	// Fill: best remaining candidates, preferring fresh domains.
 	for _, cd := range cands {
-		if len(elected) >= rendezvousK {
+		if len(elected) >= k {
 			break
 		}
 		if elected[cd.id] || domains[cd.domain] {

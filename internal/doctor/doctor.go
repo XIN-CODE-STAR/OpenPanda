@@ -92,6 +92,9 @@ func Run(configPath string) []Check {
 			if c := checkDBGrowth(cfg); c.Key != "" {
 				add(c)
 			}
+			if c := checkMesh(cfg); c.Key != "" {
+				add(c)
+			}
 		} else {
 			add(fail("doctor.db.no", "path", cfg.Storage.DBPath))
 		}

@@ -1266,6 +1266,11 @@ type Node struct {
 	// Relay is the node's advertised relay-capability block, decoded from
 	// the relay column; nil when the peer declares no relay services.
 	Relay *RelayProfile `json:"relay,omitempty"`
+	// LearnedVia names the peer that gossiped this row to us (cross-network
+	// mesh M1); "" means the row came from a direct signed hello. It is a
+	// provenance label, not an identity assertion — the row's own signature
+	// is what makes it a credential.
+	LearnedVia string `json:"learned_via,omitempty"`
 	// Reputation is a runtime-only annotation, never stored or serialized:
 	// the local delegation_metrics success rate this node observed for the
 	// row's owner, stamped in by Core when routing.reputation is enabled.
@@ -1500,7 +1505,7 @@ func AbilityMatches(declared, required string) bool {
 
 // Query returns nodes matching filters. Empty status or name matches all.
 func Query(db *sql.DB, status, name string) ([]Node, error) {
-	q := `SELECT id, COALESCE(name,''), COALESCE(chip,''), COALESCE(node_kind, 'physical'), COALESCE(node_identity, ''), COALESCE(status,''), COALESCE(last_seen,0), COALESCE(scheduler_tier,0), native_json, agents_json, manual_json, capacity_json, resource_profile_json, neighbors_json, links_json, contacts_json, projects_json, COALESCE(pub_key,''), COALESCE(key_verified,0), COALESCE(ver,''), COALESCE(trust,''), COALESCE(os,''), COALESCE(device_class,''), COALESCE(x_pub,''), COALESCE(addrs,''), COALESCE(relay,'')
+	q := `SELECT id, COALESCE(name,''), COALESCE(chip,''), COALESCE(node_kind, 'physical'), COALESCE(node_identity, ''), COALESCE(status,''), COALESCE(last_seen,0), COALESCE(scheduler_tier,0), native_json, agents_json, manual_json, capacity_json, resource_profile_json, neighbors_json, links_json, contacts_json, projects_json, COALESCE(pub_key,''), COALESCE(key_verified,0), COALESCE(ver,''), COALESCE(trust,''), COALESCE(os,''), COALESCE(device_class,''), COALESCE(x_pub,''), COALESCE(addrs,''), COALESCE(relay,''), COALESCE(learned_via,'')
 	      FROM employee_cache WHERE 1=1`
 	var args []any
 	if status != "" {
@@ -1527,7 +1532,8 @@ func Query(db *sql.DB, status, name string) ([]Node, error) {
 		var native, agents, manual, capJSON, resJSON, neighborsJSON, linksJSON, contactsJSON, projectsJSON, addrsJSON, relayJSON sql.NullString
 		if err := rows.Scan(&n.ID, &n.Name, &n.Chip, &n.NodeKind, &n.NodeIdentity, &n.Status, &n.LastSeen, &n.SchedulerTier,
 			&native, &agents, &manual, &capJSON, &resJSON, &neighborsJSON, &linksJSON, &contactsJSON, &projectsJSON,
-			&n.PubKey, &n.KeyVerified, &n.Ver, &n.Trust, &n.OS, &n.FormFactor, &n.XPub, &addrsJSON, &relayJSON); err != nil {
+			&n.PubKey, &n.KeyVerified, &n.Ver, &n.Trust, &n.OS, &n.FormFactor, &n.XPub, &addrsJSON, &relayJSON,
+			&n.LearnedVia); err != nil {
 			return nil, err
 		}
 		if native.Valid && native.String != "" {

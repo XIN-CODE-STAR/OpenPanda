@@ -236,6 +236,16 @@ type Core struct {
 	peerTrustHints map[string]string
 	reputationOn   atomic.Bool
 
+	// Cross-network policy (network.*): the rendezvous target K, the ladder
+	// and relay switches, and this node's own rendezvous role. Swapped whole
+	// under polMu so ApplyNetworkConfig is one assignment; the zero value
+	// means "never configured" and resolves to the built-in defaults, which
+	// is what tests and embedders that never call SetNetworkPolicy get.
+	polMu    sync.RWMutex
+	netPol   networkPolicy
+	polSet   bool
+	relayLim relayBudget
+
 	mu    sync.RWMutex
 	peers map[string]*Peer
 	// greetedConns tracks the conns whose first hello we already replied
@@ -2232,12 +2242,18 @@ func (c *Core) dial(ctx context.Context, addr string) (*bus.Conn, error) {
 // to seal frames with, so advertising it would be a lie. e2et rides only
 // when the X25519 half of this node's identity materialized: transit
 // sealing needs the peer's x_pub, and the cap says "frames sealed to mine
-// open here". trnz is unconditional — relaying a transit frame for an
-// authenticated member is baseline mesh citizenship, the same contract
-// punch envelope forwarding already runs on; the trust.relay policy block
-// (P4b) adds the opt-out.
+// open here". trnz tracks network.transit — relaying a transit frame for an
+// authenticated member is baseline mesh citizenship, but an operator who
+// switched the plane off must not be handed frames this node will drop.
+// trust.relay then narrows WHOSE frames are served and at what rate.
 func (c *Core) helloCaps() []string {
-	caps := []string{bus.CapBinaryData, bus.CapTransitRelay}
+	caps := []string{bus.CapBinaryData}
+	// trnz rides only when this node is willing to serve the plane: a node
+	// with network.transit:false must not be selected as a hop, or every
+	// frame routed through it dies at the unhandled-type gate.
+	if c.netPolicy().transit {
+		caps = append(caps, bus.CapTransitRelay)
+	}
 	if c.sharedSecretValue() != "" {
 		caps = append(caps, bus.CapSessionAEAD)
 	}
@@ -3217,10 +3233,63 @@ func (c *Core) summary() ledger.CapabilitySummary {
 	// ignore them, new peers read them for the path-priority ladder.
 	if card.Relay != nil {
 		r := *card.Relay
-		s.Relay = &r
+		pol := c.netPolicy()
+		if !pol.transit {
+			r.Transit = false
+		}
+		switch pol.rendezvous {
+		case "never":
+			r.Rendezvous = false
+		case "always":
+			// Operator assertion: the card's declaration rides unchanged.
+		default: // "auto"
+			// Claim the role only when a stranger could actually dial us.
+			// A LAN-only address serves the peers already on that segment,
+			// which is precisely not what a rendezvous point is for; the
+			// AutoNAT callback proof (P5) will tighten this further.
+			if r.Rendezvous && !c.hasPublicAddr() {
+				r.Rendezvous = false
+			}
+		}
+		if r.Transit || r.Rendezvous {
+			s.Relay = &r
+		}
 	}
 	s.Addrs = c.selfAddrs()
 	return s
+}
+
+// hasPublicAddr reports whether any advertised dial candidate is globally
+// routable — the proof network.rendezvous:auto requires before the card
+// claims the role. Hostnames pass: a domain is the operator's promise that
+// something in front of it is reachable, and refusing it would make the
+// knob useless for exactly the deployments (a home node behind a mapped
+// port) the design says can serve.
+func (c *Core) hasPublicAddr() bool {
+	for _, a := range c.selfAddrs() {
+		host, _, err := net.SplitHostPort(a)
+		if err != nil {
+			continue
+		}
+		ip := net.ParseIP(host)
+		if ip == nil {
+			return true
+		}
+		if ip.IsGlobalUnicast() && !ip.IsPrivate() && !isSharedAddr(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// isSharedAddr reports the CGNAT / Tailscale 100.64.0.0/10 band: globally
+// shaped, but reachable only inside the overlay that assigned it.
+func isSharedAddr(ip net.IP) bool {
+	v4 := ip.To4()
+	if v4 == nil {
+		return false
+	}
+	return v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127
 }
 
 // selfAddrs returns this node's advertised dial candidates for the

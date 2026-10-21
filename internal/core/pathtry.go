@@ -71,6 +71,108 @@ type pathState struct {
 	// edgeLoad caches each peer's heartbeat-advertised live edge count for
 	// rendezvous scoring — volatile by nature, so it stays in memory.
 	edgeLoad map[string]int
+	// loaded marks the one-time read of the persisted nat_suspect state
+	// (settings key natStateSetting). It is lazy rather than wired into
+	// NewCore so embedders that never punch never touch the store.
+	loaded bool
+}
+
+// natStateSetting is the settings key carrying the nat_suspect bookkeeping
+// across restarts (design §6.2's nat_state table, held in the KV store the
+// node key already uses). Losing it means re-spraying a symmetric-NAT peer
+// for two full windows after every restart, which is exactly the behaviour
+// the suspect window exists to stop.
+const natStateSetting = "nat_state"
+
+// natStateFile is the persisted shape: peer → suspect-until (unix seconds)
+// and peer → consecutive failed windows.
+type natStateFile struct {
+	Until map[string]int64 `json:"until,omitempty"`
+	Fails map[string]int   `json:"fails,omitempty"`
+}
+
+// loadNatState restores the suspect set once per process. Expired entries
+// are dropped on the way in — a window that elapsed while the node was off
+// is over, not paused.
+func (c *Core) loadNatState(ctx context.Context) {
+	c.path.mu.Lock()
+	c.path.init()
+	if c.path.loaded {
+		c.path.mu.Unlock()
+		return
+	}
+	c.path.loaded = true
+	c.path.mu.Unlock()
+	if c.db == nil {
+		return
+	}
+	var raw string
+	if err := c.db.QueryRowContext(ctx,
+		`SELECT value FROM settings WHERE key = ?`, natStateSetting).Scan(&raw); err != nil {
+		return
+	}
+	var st natStateFile
+	if err := json.Unmarshal([]byte(raw), &st); err != nil {
+		return
+	}
+	now := time.Now()
+	c.path.mu.Lock()
+	defer c.path.mu.Unlock()
+	for peer, until := range st.Until {
+		t := time.Unix(until, 0)
+		if t.After(now) {
+			c.path.natSuspect[peer] = t
+		}
+	}
+	for peer, n := range st.Fails {
+		if n > 0 {
+			c.path.punchTries[peer] = n
+		}
+	}
+}
+
+// snapshotNatStateLocked copies the persistable half of the path state.
+// Caller holds c.path.mu.
+func (c *Core) snapshotNatStateLocked() natStateFile {
+	st := natStateFile{}
+	now := time.Now()
+	for peer, until := range c.path.natSuspect {
+		if until.After(now) {
+			if st.Until == nil {
+				st.Until = make(map[string]int64)
+			}
+			st.Until[peer] = until.Unix()
+		}
+	}
+	for peer, n := range c.path.punchTries {
+		if n > 0 {
+			if st.Fails == nil {
+				st.Fails = make(map[string]int)
+			}
+			st.Fails[peer] = n
+		}
+	}
+	return st
+}
+
+// saveNatState writes the snapshot back. Best-effort: a store failure costs
+// one re-spray after the next restart, never correctness.
+func (c *Core) saveNatState(ctx context.Context, st natStateFile) {
+	if c.db == nil || (len(st.Until) == 0 && len(st.Fails) == 0) {
+		// Nothing to remember: clear the key rather than leave a stale blob
+		// that a later load would re-apply.
+		if c.db != nil {
+			_, _ = c.db.ExecContext(ctx, `DELETE FROM settings WHERE key = ?`, natStateSetting)
+		}
+		return
+	}
+	raw, err := json.Marshal(st)
+	if err != nil {
+		return
+	}
+	_, _ = c.db.ExecContext(ctx,
+		`INSERT INTO settings (key, value) VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value=excluded.value`, natStateSetting, string(raw))
 }
 
 func (p *pathState) init() {
@@ -238,6 +340,14 @@ func addrPublic(addr string) bool {
 // failed windows raise nat_suspect, after which the honest answer is the
 // outbox, not more spray.
 func (c *Core) autoPunch(ctx context.Context, id string) {
+	// network.auto_punch: false keeps the manual punch:<id> path as the only
+	// way a punch happens — the ladder then stops at the dial rung.
+	if !c.netPolicy().autoPunch {
+		return
+	}
+	// Restore the suspect set before consulting it — otherwise the first
+	// post-restart window always sprays a peer we already know is hopeless.
+	c.loadNatState(ctx)
 	c.udpMu.Lock()
 	hasUDP := c.udp != nil
 	port := c.udpPeerPort[id]
@@ -324,20 +434,34 @@ func (c *Core) seedPunchCandidates(ctx context.Context, id string, udpPort int) 
 // passed since the last attempt with still no route, a failure is counted;
 // natSuspectAfter of those park the peer as suspected-unreachable-by-punch.
 func (c *Core) notePunchAttempt(id string) {
+	// UDPRoute takes the UDP lock; read it before path.mu so the two are
+	// never nested (the ladder's other direction, udpMu → path.mu, is the
+	// order autoPunch already uses).
+	routed := c.UDPRoute(id) != nil
 	c.path.mu.Lock()
 	c.path.init()
-	defer c.path.mu.Unlock()
-	if c.UDPRoute(id) != nil {
-		c.path.punchTries[id] = 0
+	changed := false
+	switch {
+	case routed:
+		changed = c.path.punchTries[id] != 0 || c.path.natSuspect[id] != time.Time{}
+		delete(c.path.punchTries, id)
 		delete(c.path.natSuspect, id)
-		return
+	default:
+		c.path.punchTries[id]++
+		changed = true
+		if c.path.punchTries[id] >= natSuspectAfter {
+			c.path.natSuspect[id] = time.Now().Add(natSuspectWindow)
+			c.path.punchTries[id] = 0
+			c.logger.Info("peer suspected unpunchable — falling back to relay/outbox",
+				"peer", id, "retry_after", natSuspectWindow)
+			c.audit(context.Background(), "", "nat_suspect", id,
+				"punch_failed", natSuspectWindow.String())
+		}
 	}
-	c.path.punchTries[id]++
-	if c.path.punchTries[id] >= natSuspectAfter {
-		c.path.natSuspect[id] = time.Now().Add(natSuspectWindow)
-		c.path.punchTries[id] = 0
-		c.logger.Info("peer suspected unpunchable — falling back to relay/outbox",
-			"peer", id, "retry_after", natSuspectWindow)
+	snapshot := c.snapshotNatStateLocked()
+	c.path.mu.Unlock()
+	if changed {
+		c.saveNatState(context.Background(), snapshot)
 	}
 }
 

@@ -97,8 +97,8 @@ func TestRendezvousElect(t *testing.T) {
 	t.Run("K cap", func(t *testing.T) {
 		got := c.rendezvousElect([]rendezvousCandidate{
 			mk("a", 100, "d1"), mk("b", 90, "d2"), mk("c", 80, "d3"),
-		})
-		if len(got) != rendezvousK || !got["a"] || !got["b"] {
+		}, rendezvousKDefault)
+		if len(got) != rendezvousKDefault || !got["a"] || !got["b"] {
 			t.Fatalf("elected %v", got)
 		}
 	})
@@ -106,7 +106,7 @@ func TestRendezvousElect(t *testing.T) {
 	t.Run("domain diversity", func(t *testing.T) {
 		got := c.rendezvousElect([]rendezvousCandidate{
 			mk("a", 100, "same"), mk("b", 99, "same"), mk("c", 10, "other"),
-		})
+		}, rendezvousKDefault)
 		if !got["a"] || !got["c"] || got["b"] {
 			t.Fatalf("same-domain runner-up beat the diverse pick: %v", got)
 		}
@@ -119,7 +119,7 @@ func TestRendezvousElect(t *testing.T) {
 		// Challenger scores better but not by the hysteresis margin.
 		got := c.rendezvousElect([]rendezvousCandidate{
 			mk("ch", 120, "d2"), mk("inc", 100, "d1"),
-		})
+		}, rendezvousKDefault)
 		if !got["inc"] {
 			t.Fatalf("incumbent lost to a marginal challenger: %v", got)
 		}
@@ -132,7 +132,7 @@ func TestRendezvousElect(t *testing.T) {
 		// score 100 * 1.25 = 125; 200 clears it decisively.
 		got := c.rendezvousElect([]rendezvousCandidate{
 			mk("ch", 200, "d2"), mk("inc", 100, "d1"),
-		})
+		}, rendezvousKDefault)
 		if !got["ch"] {
 			t.Fatalf("decisive challenger not elected: %v", got)
 		}

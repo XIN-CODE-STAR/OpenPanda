@@ -380,6 +380,66 @@ type TrustAcceptPolicy struct {
 type TrustConfig struct {
 	Send   TrustSendConfig   `yaml:"send"`
 	Accept TrustAcceptConfig `yaml:"accept"`
+	Relay  TrustRelayConfig  `yaml:"relay"`
+}
+
+// TrustRelayConfig is the transit-relay permission surface (cross-network
+// mesh §4.2). Transit is the inbound table — whose relayed frames this node
+// will forward on; Serve is the outbound one — through which peers' relays
+// this node will route its own frames. Both default to the design's policy
+// (serve: mesh + guarded, use: mesh only), so a fleet that never touches
+// this block behaves exactly as the hard-coded policy before it existed.
+//
+// MaxKbps and MaxSessions bound what serving others may cost this node:
+// max_kbps is a token bucket on relayed bytes (0 = unlimited), and
+// max_sessions caps concurrently relayed frames (0 = unlimited) — the
+// self-harm protection for a metered link, not a fairness scheduler.
+type TrustRelayConfig struct {
+	Transit     TrustRelayMatrix `yaml:"transit"`
+	Serve       TrustRelayMatrix `yaml:"serve"`
+	MaxKbps     int              `yaml:"max_kbps"`
+	MaxSessions int              `yaml:"max_sessions"`
+}
+
+// TrustRelayMatrix is the per-tier switch table. A nil field means "use the
+// built-in default for this matrix", so a config that sets only "open:
+// false" keeps every other tier at its design value.
+type TrustRelayMatrix struct {
+	Mesh    *bool `yaml:"mesh"`
+	Guarded *bool `yaml:"guarded"`
+	Open    *bool `yaml:"open"`
+}
+
+// forLevel returns the operator's explicit answer for a tier, or nil when
+// the tier was not mentioned and the caller's default applies.
+func (m TrustRelayMatrix) forLevel(l trust.Level) *bool {
+	switch l {
+	case trust.Mesh:
+		return m.Mesh
+	case trust.Guarded:
+		return m.Guarded
+	case trust.Open:
+		return m.Open
+	}
+	return nil
+}
+
+// RelayAcceptFor answers "will this node relay a transit frame handed to it
+// by a peer at this tier" — the inbound half of §4.2's trust.relay.transit.
+func (t TrustConfig) RelayAcceptFor(l trust.Level) bool {
+	if v := t.Relay.Transit.forLevel(l); v != nil {
+		return *v
+	}
+	return l != trust.Open
+}
+
+// RelayServeFor answers "may this node route its own transit frames through
+// a relay at this tier" — the outbound half, trust.relay.serve.
+func (t TrustConfig) RelayServeFor(l trust.Level) bool {
+	if v := t.Relay.Serve.forLevel(l); v != nil {
+		return *v
+	}
+	return l == trust.Mesh
 }
 
 // TrustSendConfig groups the outbound ceilings by tier.
@@ -424,6 +484,12 @@ func (t TrustConfig) Validate() error {
 	case "", "honor", "strip", "refuse":
 	default:
 		return fmt.Errorf("config: network.trust.accept.guarded.self_signed %q is invalid (want honor, strip, or refuse)", t.Accept.Guarded.SelfSigned)
+	}
+	if t.Relay.MaxKbps < 0 {
+		return fmt.Errorf("config: network.trust.relay.max_kbps %d is negative (0 means unlimited)", t.Relay.MaxKbps)
+	}
+	if t.Relay.MaxSessions < 0 {
+		return fmt.Errorf("config: network.trust.relay.max_sessions %d is negative (0 means unlimited)", t.Relay.MaxSessions)
 	}
 	return nil
 }
@@ -568,6 +634,32 @@ type NetworkConfig struct {
 	// pending-list → admit flow. Ignored without a shared_secret (a hello
 	// that cannot authenticate would only churn).
 	DiscoveryAutoDial bool `yaml:"discovery_auto_dial"`
+
+	// BootstrapEdges is the rendezvous-edge target K (cross-network mesh
+	// M2): how many long-lived edges this node keeps to peers that advertise
+	// relay.rendezvous. 0 selects manual mode — no edge is elected and the
+	// mesh is exactly the configured peer list, which is the behaviour every
+	// release before the feature had.
+	BootstrapEdges int `yaml:"bootstrap_edges"`
+	// AutoPunch enables the reachability ladder's hole-punch rung: a send
+	// with no live track kicks a background dial and then a punch for a
+	// directory peer that advertises a udp_port, instead of waiting for a
+	// hand-written punch:<id> entry. Explicit punch: entries keep their own
+	// semantics either way.
+	AutoPunch bool `yaml:"auto_punch"`
+	// Transit enables this node's client half of the blind-relay plane: it
+	// will hand a frame to a relay hop when it has no live track. The
+	// serving half — relaying other members' frames — is governed by
+	// trust.relay, so a node can consume relays without ever serving one.
+	Transit bool `yaml:"transit"`
+	// Rendezvous is this node's own willingness to be a rendezvous point:
+	// "auto" advertises the role only once this node can prove reachability
+	// (a globally routable advertised address today; the AutoNAT callback
+	// proof upgrades this in P5), "always" is an operator assertion that
+	// skips the proof, "never" keeps the role off the card entirely. Reading
+	// OTHER nodes' rendezvous rows is unaffected — a node that never serves
+	// still uses everyone else's edges.
+	Rendezvous string `yaml:"rendezvous"`
 }
 
 // defaultDiscoveryAddr is the port LAN-discovery binds when the operator
@@ -1176,6 +1268,14 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("config: network.discovery_addr %q is not host:port or \"off\": %w", c.Network.DiscoveryAddr, err)
 		}
 	}
+	if c.Network.BootstrapEdges < 0 || c.Network.BootstrapEdges > 8 {
+		return fmt.Errorf("config: network.bootstrap_edges %d is out of range (0 disables rendezvous edges; more than 8 is not a personal mesh)", c.Network.BootstrapEdges)
+	}
+	switch c.Network.Rendezvous {
+	case "", "auto", "always", "never":
+	default:
+		return fmt.Errorf("config: network.rendezvous %q is invalid (want auto, always, or never)", c.Network.Rendezvous)
+	}
 	for _, addr := range []struct{ name, value string }{
 		{"network.listen_addr", c.Network.ListenAddr},
 		{"network.panel_addr", c.Network.PanelAddr},
@@ -1451,6 +1551,14 @@ func Default() *Config {
 			// secret still gates admission, so opting out is for operators
 			// who want every peer to be an explicit act.
 			DiscoveryAutoDial: true,
+			// Two rendezvous edges survive one loss without a partition (M2).
+			BootstrapEdges: 2,
+			// The ladder and the relay plane are on by default: they are the
+			// whole point of the cross-network work, and both fail honestly
+			// (outbox/DTN) when no peer can serve them.
+			AutoPunch:  true,
+			Transit:    true,
+			Rendezvous: "auto",
 		},
 		Storage: StorageConfig{
 			DBPath:       filepath.Join(data, "openpanda.db"),

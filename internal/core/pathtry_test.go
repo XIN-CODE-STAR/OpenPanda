@@ -290,3 +290,69 @@ func TestKickReachableDedupe(t *testing.T) {
 		t.Fatal("self/session id kicked the ladder")
 	}
 }
+
+// TestNatStatePersistsAcrossRestart: the nat_suspect window survives a
+// process restart (design §6.2's nat_state), so a node does not re-spray a
+// symmetric-NAT peer for two full windows every time it boots.
+func TestNatStatePersistsAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	c1 := newCoreOnDB(t, db, "n1")
+	c1.notePunchAttempt("peer-a")
+	c1.notePunchAttempt("peer-a") // reaches natSuspectAfter
+	c1.path.mu.Lock()
+	raised := c1.path.natSuspect["peer-a"].After(time.Now())
+	c1.path.mu.Unlock()
+	if !raised {
+		t.Fatal("suspicion never raised in the first place")
+	}
+
+	c2 := newCoreOnDB(t, db, "n2")
+	c2.loadNatState(ctx)
+	c2.path.mu.Lock()
+	until, ok := c2.path.natSuspect["peer-a"]
+	c2.path.mu.Unlock()
+	if !ok || !until.After(time.Now()) {
+		t.Fatalf("suspect state not restored: ok=%v until=%v", ok, until)
+	}
+
+	// A window that elapsed while the node was off is over, not paused.
+	if _, err := db.Exec(`UPDATE settings SET value = ? WHERE key = ?`,
+		`{"until":{"peer-old":1}}`, natStateSetting); err != nil {
+		t.Fatal(err)
+	}
+	c3 := newCoreOnDB(t, db, "n3")
+	c3.loadNatState(ctx)
+	c3.path.mu.Lock()
+	_, staleKept := c3.path.natSuspect["peer-old"]
+	c3.path.mu.Unlock()
+	if staleKept {
+		t.Fatal("expired suspect entry must be dropped on load")
+	}
+}
+
+// TestNatStateClearsOnRoute: a proven UDP route wipes the peer's suspicion
+// and the persisted copy with it.
+func TestNatStateClearsOnRoute(t *testing.T) {
+	ctx := context.Background()
+	c := newCoreOnDB(t, openTestDB(t), "n1")
+	c.path.mu.Lock()
+	c.path.init()
+	c.path.natSuspect["peer-a"] = time.Now().Add(time.Minute)
+	c.path.punchTries["peer-a"] = 1
+	c.path.mu.Unlock()
+	// No UDP plane means UDPRoute is nil, so drive the clear directly.
+	c.path.mu.Lock()
+	delete(c.path.natSuspect, "peer-a")
+	delete(c.path.punchTries, "peer-a")
+	snap := c.snapshotNatStateLocked()
+	c.path.mu.Unlock()
+	c.saveNatState(ctx, snap)
+	var n int
+	if err := c.db.QueryRow(`SELECT COUNT(*) FROM settings WHERE key = ?`, natStateSetting).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatal("empty snapshot should delete the persisted key")
+	}
+}

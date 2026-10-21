@@ -59,6 +59,12 @@ var errTransitTooLarge = errors.New("transit: frame exceeds the relay size budge
 // frame instead of writing it into a relay that must discard it.
 var errTransitUnattested = errors.New("transit: sender has no Ed25519 identity")
 
+// errTransitDisabled is network.transit: false. The node still reads transit
+// frames addressed to it (a peer may route through someone else to reach
+// us), but it never originates one — the client half of the plane is the
+// part the operator switched off.
+var errTransitDisabled = errors.New("transit: disabled by network.transit")
+
 // transitEligible reports whether a frame type may be sealed into a transit
 // inner. Hello and the pair exchange are conn-bound by definition — a hello
 // arriving over transit could not bind its peer id to any conn, and pair
@@ -90,6 +96,9 @@ func transitEligible(typ string) bool {
 func (c *Core) sendViaTransit(ctx context.Context, id string, env bus.Envelope) error {
 	if !transitEligible(env.Type) {
 		return errTransitUnsupported
+	}
+	if !c.netPolicy().transit {
+		return errTransitDisabled
 	}
 	target := env.To
 	if target == "" {
@@ -235,6 +244,24 @@ func (c *Core) handleTransit(ctx context.Context, conn *bus.Conn, env bus.Envelo
 		c.logger.Debug("transit: ttl exhausted", "from", env.From, "dest", p.Dest)
 		return
 	}
+	// Serving gate (§4.2): trust.relay.transit decides whose frames this node
+	// forwards. It is checked only on the relaying path — a frame addressed
+	// to this node is delivery, not service, and must open regardless of how
+	// the operator fenced the sender.
+	if !c.relayAcceptAllowed(ctx, env.From) {
+		c.logger.Debug("transit: relay refused by trust policy", "from", env.From, "dest", p.Dest)
+		return
+	}
+	release, ok := c.relayLim.acquire()
+	if !ok {
+		c.logger.Debug("transit: relay session cap reached", "from", env.From, "dest", p.Dest)
+		return
+	}
+	defer release()
+	if !c.relayLim.allow(len(p.Inner)) {
+		c.logger.Debug("transit: relay bandwidth cap reached", "from", env.From, "bytes", len(p.Inner))
+		return
+	}
 	// No-echo: never hand a frame straight back to the conn it arrived on.
 	// env.From is the origin, conn.PeerID() the inbound relay — excluding
 	// both covers the two obvious loop arms.
@@ -279,23 +306,32 @@ func (c *Core) handleTransit(ctx context.Context, conn *bus.Conn, env bus.Envelo
 // transit frame.
 func (c *Core) transitNextHop(ctx context.Context, destKey string, exclude map[string]bool) string {
 	excluded := func(id string) bool { return exclude[id] }
+	// Candidates are collected under the peer lock and filtered outside it:
+	// the serve gate resolves each candidate's trust tier, which is a store
+	// read, and holding c.mu across a query would stall every heartbeat and
+	// conn registration behind it.
+	var candidates []string
 	if inst := c.instanceForStable(ctx, destKey); inst != "" && !excluded(inst) {
 		if conn := c.connFor(inst); conn != nil && conn.Supports(bus.CapTransitRelay) {
-			return inst
-		}
-		if hop, _ := c.dtnNextHop(ctx, inst, exclude, 0, 0); hop != "" && !excluded(hop) {
+			candidates = append(candidates, inst)
+		} else if hop, _ := c.dtnNextHop(ctx, inst, exclude, 0, 0); hop != "" && !excluded(hop) {
 			if conn := c.connFor(hop); conn != nil && conn.Supports(bus.CapTransitRelay) {
-				return hop
+				candidates = append(candidates, hop)
 			}
 		}
 	}
 	c.mu.RLock()
-	defer c.mu.RUnlock()
 	for id, p := range c.peers {
 		if excluded(id) || p.conn == nil {
 			continue
 		}
 		if p.conn.Supports(bus.CapTransitRelay) {
+			candidates = append(candidates, id)
+		}
+	}
+	c.mu.RUnlock()
+	for _, id := range candidates {
+		if c.relayServeAllowed(ctx, id) {
 			return id
 		}
 	}

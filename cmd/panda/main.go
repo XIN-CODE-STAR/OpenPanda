@@ -399,6 +399,11 @@ func runDaemon(args []string) {
 	coreNode.SetTrustConfig(cfg.Network.Trust)
 	coreNode.SetPeerTrustHints(cfg.Network.PeerTrustHints())
 	coreNode.SetReputationEnabled(cfg.Routing.Reputation)
+	// Cross-network policy (network.bootstrap_edges / auto_punch / transit /
+	// rendezvous + the trust.relay tables): installed here so a node started
+	// without it runs the documented defaults rather than an unconfigured
+	// zero policy.
+	coreNode.SetNetworkPolicy(cfg.Network)
 	// The artifact pool is the data plane: a stage's packed output, named by its
 	// hash, that a later stage on another node pulls over the bus. Without it a
 	// delegated task can only carry a path, which means nothing on the node that
