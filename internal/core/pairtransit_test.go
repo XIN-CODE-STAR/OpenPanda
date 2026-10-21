@@ -16,6 +16,78 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// TestPairHelloTargetingSelfAnswersLocally pins the cold-start URI's primary
+// path: `nodes invite --uri` points b= and k= at the same node, so the joiner
+// dials that node with Target=k:<its own key>. The node must answer the
+// ceremony itself instead of asking the mesh to route it back.
+func TestPairHelloTargetingSelfAnswersLocally(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	intro := newCore(t, "intro-self", "127.0.0.1:17983")
+	if err := intro.Register(ctx); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	go func() { _ = intro.Listen(ctx, "127.0.0.1:17983") }()
+	time.Sleep(200 * time.Millisecond)
+
+	introPub, _, ok := intro.nodeKeyPair()
+	if !ok {
+		t.Fatal("introducer has no identity key")
+	}
+	introStable := stableIDPrefix + hex.EncodeToString(introPub)
+
+	joinerPub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("joiner key: %v", err)
+	}
+	joinerX, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("joiner x key: %v", err)
+	}
+	nonce := make([]byte, 16)
+	_, _ = rand.Read(nonce)
+	session := "sess-self-" + t.Name()
+
+	ws, _, err := websocket.DefaultDialer.Dial("ws://127.0.0.1:17983/ws", nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer ws.Close()
+	hello, err := bus.NewEnvelope(bus.MsgPairHello, "pair-init", "m-"+session, bus.PairHelloPayload{
+		Session: session,
+		X:       hex.EncodeToString(joinerX.PublicKey().Bytes()),
+		Pub:     hex.EncodeToString(joinerPub),
+		Nonce:   hex.EncodeToString(nonce),
+		Addr:    "0.0.0.0:19998",
+		Name:    "pair-init",
+		NodeID:  "pair-init",
+		Target:  introStable,
+	})
+	if err != nil {
+		t.Fatalf("envelope: %v", err)
+	}
+	if err := ws.WriteJSON(hello); err != nil {
+		t.Fatalf("pair_hello: %v", err)
+	}
+
+	_ = ws.SetReadDeadline(time.Now().Add(10 * time.Second))
+	var env bus.Envelope
+	if err := ws.ReadJSON(&env); err != nil {
+		t.Fatalf("read reply: %v", err)
+	}
+	if env.Type != bus.MsgPairReady {
+		t.Fatalf("direct self-target = %s, want pair_ready", env.Type)
+	}
+	var ready bus.PairReadyPayload
+	if err := env.PayloadInto(&ready); err != nil || ready.Session != session {
+		t.Fatalf("bad pair_ready: %v", err)
+	}
+	if ready.Pub != hex.EncodeToString(introPub) {
+		t.Fatalf("pair_ready pub = %s, want the introducer's identity", ready.Pub)
+	}
+}
+
 // TestPairOverTransitThroughContactPoint walks the whole P4b path in-process:
 // a joiner that can reach neither the introducer nor the mesh dials a contact
 // point, names the introducer it wants, and completes the ceremony through

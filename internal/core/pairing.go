@@ -167,9 +167,19 @@ func (c *Core) pairHello(ctx context.Context, conn *bus.Conn, hop *bus.Conn, env
 	// responder — the joiner behind NAT naming the introducer it cannot dial.
 	// Only a DIRECT conn can be asking: a transit-delivered hello has already
 	// been through a proxy, and honoring its Target would loop it onward.
+	//
+	// The target may name THIS node: `panda nodes invite --uri` emits a
+	// bootstrap that is the introducer itself and pins k= to its own key, so
+	// the joiner dials us directly with Target=k:<self>. Answering locally is
+	// the whole ceremony; proxying would ask the mesh to route the handshake
+	// back to us (and on a two-node mesh fail with introducer_unreachable).
 	if p.Target != "" && conn != nil {
-		c.proxyPairHello(ctx, conn, env, p)
-		return
+		if c.isSelfStable(strings.ToLower(p.Target)) {
+			p.Target = ""
+		} else {
+			c.proxyPairHello(ctx, conn, env, p)
+			return
+		}
 	}
 	if conn == nil && hop == nil {
 		return
