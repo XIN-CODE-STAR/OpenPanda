@@ -520,6 +520,20 @@ func runDaemon(args []string) {
 		}
 	})
 
+	// Task recovery FIRST: it normalizes the rows the previous process left
+	// behind (running → resumed/failed, dispatched → queued, submitted →
+	// queued). The queue scheduler must not be running yet: its first pass
+	// claims queued rows (queued → dispatched) and hands them to a runner,
+	// and Recover's dispatched → queued branch would then move that very row
+	// back under the runner, which refuses it ("cannot run task in state
+	// queued") and the task is lost. Recovering before the scheduler starts
+	// means every row it touches is still untouched by this process.
+	if n, err := coreNode.Recover(ctx); err != nil {
+		logger.Warn("task recovery failed", "err", err)
+	} else if n > 0 {
+		logger.Info("recovered tasks from previous run", "count", n)
+	}
+
 	// Queue scheduler (panel queue redesign): adopt queued-and-scheduled tasks
 	// in policy order (drag seq → priority → FIFO) when resources allow. Runs
 	// alongside the daemon so enqueued tasks execute even without the panel.
@@ -619,12 +633,6 @@ func runDaemon(args []string) {
 	coreNode.EnsureNodeKey()
 	guard.Go(logger, "daemon: heartbeat", cancel, func() { coreNode.RunHeartbeat(ctx) })
 	guard.Go(logger, "daemon: monitor", cancel, func() { coreNode.RunMonitor(ctx) })
-
-	if n, err := coreNode.Recover(ctx); err != nil {
-		logger.Warn("task recovery failed", "err", err)
-	} else if n > 0 {
-		logger.Info("recovered tasks from previous run", "count", n)
-	}
 
 	// Farsky datagram plane (UDP + NAT punching). "" follows listen_addr's
 	// port but binds the wildcard interface: every datagram is AEAD-sealed or
