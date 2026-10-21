@@ -340,6 +340,7 @@ const ja: Messages = {
   'sessions.taskCreated': 'タスクを作成しました',
   'sessions.msgSend': 'タスクにメッセージ',
   'sessions.viewTask': 'タスクを見る',
+  'sessions.castPlan': 'プランを開く',
   'sessions.chainShow': '思考の連鎖',
   'sessions.chainHide': '折りたたむ',
   'sessions.chainEmpty': 'タスクイベントはまだありません。',

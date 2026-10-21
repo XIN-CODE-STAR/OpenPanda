@@ -46,6 +46,10 @@ OpenPanda (**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **A
 
 ## [Unreleased]
 
+_No unreleased changes yet._
+
+## [0.1.0] - 2026-10-22
+
 ### Added
 
 - **A screenshot in the transcript is a picture, not a path** — a tool row that read or produced an image (`Read` of a `shot.png`, a capture that answered "saved to …") showed nothing but the filename, so checking what the agent actually saw meant opening the file by hand. The log now draws the picture under the call — a framed thumbnail capped at 220px — and one click opens it full screen with the path in the footer; Esc, a click outside or × closes it. `GET /api/fs/image` streams the bytes from the storage roots or the OS temp tree (images only, 16 MiB cap, `nosniff`), loads them lazily as the row scrolls into view, and a path that no longer exists leaves one quiet "preview unavailable" line instead of a broken icon.
@@ -78,6 +82,20 @@ OpenPanda (**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **A
 - **The task detail page leads with its verdict, and folds what it cannot summarize** — the page opened on a facts band: five columns of grey ids, a trace strip, then a result section whose useful line was a 300-character error string, with the eighteen-row event log (55% of the page) printed in full underneath. A verdict block now comes first — the state badge, one sentence of what happened (the failure the run reported, its own verdict, or the last line it wrote), and what the answer cost (elapsed, rounds, tokens, money) — with the reason clamped to three lines and the rest one click away. Under it the reference facts fold into one header line (`#id · project · owner · created`), the brief folds to its first sentence plus a constraint count, and the log opens on its last five events. The result section no longer repeats the state, the reason, the tokens or the cost the verdict already states; it disappears when it carried nothing but a failure, and the log's final result row stops printing the same output a second time. Agent-session scratch files (`.claude/…`) no longer count as changed files.
 
 ### Fixed
+
+- **Multi-hop tasks can pull their inputs through the relay again** — artifact fetch and chunk frames now ride the blind-transit plane, with a 2 MiB sealed-body budget that holds one 1 MiB chunk per frame. An executor two hops from the origin receives its project tree instead of failing with "peer not connected". Verified on a Mac → relay → cloud chain across a WAN link.
+- **A model that reports `status:"failed"` is no longer recorded as done** — a clean adapter exit no longer masks the model's own failure. The reason reaches the retry loop, the delegator and the task timeline instead of only a trace event.
+- **A peer's decline hands the task back to a capable origin** — when the best remaining place to run a declined task is this node, the queued row is claimed and executed locally instead of surfacing a false failure (and a synchronous submit no longer waits on a row nothing would run).
+- **A known node cannot be impersonated by omitting its Ed25519 block** — once a node id has a key on record, a hello must present that key; a key change is an operator action (`nodes remove` / re-pair). Previously any mesh member could claim a known id keylessly and inherit its trust zone.
+- **Delegated project packs are unpacked only after trust admission, with receiver-side bounds** — an `open` or refused origin can no longer write into project memory just by sending a delegate, and a compression bomb is bounded by decompressed size and free space rather than the sender's claim.
+- **A datagram `hello_reject` can no longer kill the UDP plane** — connection-bound hello frames are dropped before dispatch, and the handler tolerates a nil connection. One sealed frame from a member used to end the single UDP read loop for the whole node.
+- **`sandbox.mode: strict` denies reading node secrets** — the config/card, SQLite file (node Ed25519/X25519 private keys), its WAL/SHM siblings and the subscription OAuth token store are read-denied. Only the files are denied; parent directories stay readable so work trees keep working.
+- **The standalone `panda-webui` sidecar serves the thread and skills APIs** — sessions, worktrees and the skill store are wired into the sidecar `make run-local` launches, so opening a thread or the Skills page no longer lands on a 404.
+- **`panda model add custom <url>` no longer panics** — an empty positional list is a usage error, not an index-out-of-range crash.
+- **Uninstall backups are private and abort deletion on failure** — the archive is written 0600 (it holds the mesh secret, provider keys and node private keys), and an unreadable file or full disk now stops the uninstall before anything is deleted instead of producing a partial archive and deleting the originals.
+- **Session runtime state is never merged into the user's branch** — the whole `.openpanda/` tree (worktrees, composer uploads, task scratch) is excluded from the session merge's `git add -A`; a pasted screenshot or secret no longer becomes a commit.
+- **`--json` forms exit non-zero on failure** for `agents test`, `config model test` and `session rm`, and `session rm` emits only JSON (errors included) instead of human text mixed into the stream.
+
 
 - **A destructive command can no longer pass as reversible** — the tier classifier judged a command by its verb, so `cp`, `mv`, `chmod`, `chown`, `ln`, `tee` and `kill` were auto-approved in every form: `cp payload /etc/cron.d/x`, `chmod u+s /usr/bin/find`, `ln -sf /etc/passwd ./shadow` and `kill 1` all ran without asking. Those verbs stay Tier 1 in their ordinary form — copying a file into your own tree is not an incident — but the form that reaches a system path, sets a setuid bit, overwrites a system file through a link, or targets init now requires authorization. Code run through an interpreter is covered the same way: `unlink`, `rmtree` and `rm -rf` spelled inside a script escalate like the shell command does.
 

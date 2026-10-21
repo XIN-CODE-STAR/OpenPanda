@@ -665,47 +665,60 @@ func tern(cond bool, a, b string) string {
 // and PATH entries are never archived; files that vanished between Scan and
 // execution are skipped silently. Returns the number of files archived.
 func BackupZip(dest string, targets []Target) (int, error) {
-	f, err := os.Create(dest)
+	// 0600: the archive holds config.yaml (mesh secret, panel token,
+	// provider keys), the database (node private keys) and memory files.
+	// os.Create's 0666&umask left all of it world-readable in $HOME.
+	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return 0, fmt.Errorf("backup: create %s: %w", dest, err)
 	}
 	defer f.Close()
 	zw := zip.NewWriter(f)
 	count := 0
+	var firstErr error
 	for _, t := range targets {
 		if !t.Exists || t.Kind == KindBinary || t.Kind == KindPath {
 			continue
 		}
 		root := filepath.Base(t.Path)
 		err := filepath.WalkDir(t.Path, func(p string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
-				return err // skip unreadable entries, keep walking elsewhere
+			if err != nil {
+				// An unreadable entry is a hole in the archive. The caller
+				// deletes the originals right after a successful backup, so
+				// skipping it silently loses data; fail the backup instead.
+				return fmt.Errorf("walk %s: %w", p, err)
+			}
+			if d.IsDir() {
+				return nil
 			}
 			rel, err := filepath.Rel(t.Path, p)
 			if err != nil {
-				return nil
+				return fmt.Errorf("backup path %s: %w", p, err)
 			}
 			in, err := os.Open(p)
 			if err != nil {
-				return nil // unreadable file: skip, don't abort the backup
+				return fmt.Errorf("open %s: %w", p, err)
 			}
 			defer in.Close()
 			w, err := zw.Create(filepath.ToSlash(filepath.Join(root, rel)))
 			if err != nil {
-				return nil
+				return fmt.Errorf("archive %s: %w", p, err)
 			}
 			if _, err := io.Copy(w, in); err != nil {
-				return nil
+				return fmt.Errorf("copy %s: %w", p, err)
 			}
 			count++
 			return nil
 		})
-		if err != nil {
-			continue
+		if err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
-	if err := zw.Close(); err != nil {
-		return count, fmt.Errorf("backup: finalize %s: %w", dest, err)
+	if err := zw.Close(); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("finalize %s: %w", dest, err)
+	}
+	if firstErr != nil {
+		return count, fmt.Errorf("backup: %w", firstErr)
 	}
 	return count, nil
 }
@@ -801,6 +814,13 @@ func ExecuteUninstall(targets []Target, opt UninstallOptions) UninstallOutcome {
 		n, err := BackupZip(opt.BackupPath, archive)
 		out.BackupFiles = n
 		out.BackupErr = err
+		if err != nil {
+			// Stop before deleting anything. The archive is the user's only
+			// way back, and a partial one means at least one target was not
+			// captured — deleting the originals would turn a failed backup
+			// into data loss. --backup-only already returned below.
+			return out
+		}
 	}
 	if opt.BackupOnly {
 		return out

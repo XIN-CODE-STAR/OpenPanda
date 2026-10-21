@@ -343,6 +343,7 @@ const en: Messages = {
   'sessions.taskCreated': 'Task created',
   'sessions.msgSend': 'Message the task',
   'sessions.viewTask': 'View task',
+  'sessions.castPlan': 'Open plan',
   'sessions.chainShow': 'Thinking chain',
   'sessions.chainHide': 'Hide chain',
   'sessions.chainEmpty': 'No task events yet.',

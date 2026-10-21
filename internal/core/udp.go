@@ -137,8 +137,13 @@ func (c *Core) handleUDPEnvelope(ctx context.Context, env bus.Envelope, src *net
 	if env.From == "" || env.From == c.nodeID {
 		return
 	}
-	if env.Type == bus.MsgHello {
-		c.logger.Warn("udp: hello over datagram dropped", "from", env.From)
+	// Both hello types are connection-bound: a hello opens a WS handshake,
+	// and hello_reject answers one on the conn it arrived on. The datagram
+	// plane has no conn, so dispatch would hand a nil *bus.Conn to a handler
+	// that dereferences it — a member could kill the single UDP read loop
+	// (and with it every punch and sealed datagram) with one frame.
+	if env.Type == bus.MsgHello || env.Type == bus.MsgHelloReject {
+		c.logger.Warn("udp: hello frame over datagram dropped", "type", env.Type, "from", env.From)
 		return
 	}
 	if !c.udpPeerTrusted(env.From, src) {

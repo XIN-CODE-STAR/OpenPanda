@@ -330,3 +330,46 @@ func TestWorktreeRejectsTraversalIDs(t *testing.T) {
 		}
 	}
 }
+
+// TestWorktreeExcludesOpenPandaRuntime pins the merge boundary: composer
+// uploads live under .openpanda/uploads inside the worktree, and Merge runs
+// `git add -A`. Only .openpanda/worktrees used to be excluded, so a pasted
+// screenshot or secret was committed and merged into the user's branch.
+func TestWorktreeExcludesOpenPandaRuntime(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	repo := newGitRepo(t)
+	w, err := OpenWorktrees(repo)
+	if err != nil {
+		t.Fatalf("open worktrees: %v", err)
+	}
+	ctx := context.Background()
+	wt, err := w.Ensure(ctx, "excl-runtime")
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	exclude, err := os.ReadFile(filepath.Join(repo, ".git", "info", "exclude"))
+	if err != nil {
+		t.Fatalf("read exclude: %v", err)
+	}
+	if !strings.Contains(string(exclude), ".openpanda/") {
+		t.Fatalf("runtime tree not excluded: %s", exclude)
+	}
+	uploads := filepath.Join(wt, ".openpanda", "uploads")
+	if err := os.MkdirAll(uploads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(uploads, "secret.png"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := w.Status(ctx, "excl-runtime")
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	for _, c := range st {
+		if strings.Contains(c.Path, ".openpanda") {
+			t.Fatalf("runtime file reported as a session change: %+v", c)
+		}
+	}
+}

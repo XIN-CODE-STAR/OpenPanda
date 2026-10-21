@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,8 +47,13 @@ func updateEnvOptions(opts updater.Options) updater.Options {
 	if opts.ReleaseKey == "" {
 		opts.ReleaseKey = versionpkg.ReleasePubKey
 	}
-	if os.Getenv("OPENPANDA_UPDATE_UNSIGNED") != "" {
-		opts.AllowUnsigned = true
+	// Parse, don't test presence: OPENPANDA_UPDATE_UNSIGNED=0 used to be a
+	// non-empty string and therefore ENABLED checksum-only updates — the
+	// opposite of what an operator writing 0 to enforce signatures asked for.
+	if v := strings.TrimSpace(os.Getenv("OPENPANDA_UPDATE_UNSIGNED")); v != "" {
+		if on, err := strconv.ParseBool(v); err == nil && on {
+			opts.AllowUnsigned = true
+		}
 	}
 	return opts
 }

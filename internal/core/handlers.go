@@ -367,18 +367,15 @@ func (c *Core) handleDelegate(ctx context.Context, env bus.Envelope) {
 			c.logger.Warn("import bundled artifacts", "task", t.TaskID, "err", err)
 		}
 	}
-	// The project's memory lands before anything runs, so the agent reads it from
-	// the same path a local task would.
-	if err := c.landProjectPack(p.Project, p.ProjectPack); err != nil {
-		// Degraded, not fatal: the task runs without the project's memory, and
-		// the gap is recorded so the operator can see why context was thin.
-		if c.store != nil {
-			if recordErr := c.store.RecordEvent(ctx, t.TaskID, EvContextDegraded, map[string]any{
-				"stage": "land_memory", "project": p.Project, "err": err.Error(),
-			}); recordErr != nil {
-				c.logger.Error("record context degraded event failed", "err", recordErr)
-			}
-		}
+	// The project's memory is unpacked here only for a MESH origin, which
+	// admission auto-accepts anyway; that keeps a task parked for operator
+	// review carrying its memory once approved. Any origin below mesh is
+	// landed in handleLocalDelegate only after the trust gate — unpacking a
+	// peer-supplied archive writes into this node's project directory, and an
+	// `open` or refused origin must not get that write just by sending a
+	// delegate. A forward hop carries the pack onward untouched.
+	if c.meshOriginOf(ctx, chain, env.From) {
+		c.landProjectPackForTask(ctx, t.TaskID, p.Project, p.ProjectPack)
 	}
 	// The wire-supplied timeout becomes this node's own lease on the task —
 	// including the parked waiting_context state — so it must not exceed the
@@ -463,6 +460,35 @@ func (c *Core) terminalizeDeclined(ctx context.Context, taskID, reason string) {
 	}
 }
 
+// meshOriginOf reports whether a delegate's ORIGIN (chain[0], falling back to
+// the carrier for a legacy payload with no chain) sits in the mesh trust
+// zone. Mesh is auto-admitted by the accept policy, which is what lets the
+// project pack land before routing without opening a write to a peer the gate
+// would refuse or park.
+func (c *Core) meshOriginOf(ctx context.Context, chain []string, from string) bool {
+	origin := from
+	if len(chain) > 0 && chain[0] != "" {
+		origin = chain[0]
+	}
+	return c.peerTrustOf(ctx, origin) == trust.Mesh
+}
+
+// landProjectPackForTask is the degraded-not-fatal wrapper around the unpack:
+// a task without its memory still runs, and the gap is recorded so the
+// operator can see why context was thin.
+func (c *Core) landProjectPackForTask(ctx context.Context, taskID, project string, pack []byte) {
+	if err := c.landProjectPack(project, pack); err != nil {
+		if c.store == nil {
+			return
+		}
+		if recordErr := c.store.RecordEvent(ctx, taskID, EvContextDegraded, map[string]any{
+			"stage": "land_memory", "project": project, "err": err.Error(),
+		}); recordErr != nil {
+			c.logger.Error("record context degraded event failed", "err", recordErr)
+		}
+	}
+}
+
 // handleLocalDelegate runs a task this node can execute, resolving its context
 // first (design doc §12.4). A pointer hit executes immediately (zero transfer);
 // a pointer miss parks the task in waiting_context and fetches the snapshot
@@ -497,6 +523,13 @@ func (c *Core) handleLocalDelegate(ctx context.Context, env bus.Envelope, taskID
 		})
 		c.terminalizeDeclined(ctx, taskID, adm.reason)
 		return
+	}
+	// Admission passed: only now may a sub-mesh origin's project memory be
+	// unpacked into this node's project directory. Mesh origins already
+	// landed it before routing (see handleDelegate); landing twice would just
+	// re-extract the same tree, so it is skipped here.
+	if !c.meshOriginOf(ctx, chain, env.From) {
+		c.landProjectPackForTask(ctx, taskID, p.Project, p.ProjectPack)
 	}
 	release, ok := c.reserveCapacity(ctx)
 	if !ok {

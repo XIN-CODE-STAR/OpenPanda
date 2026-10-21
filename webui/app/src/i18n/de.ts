@@ -341,6 +341,7 @@ const de: Messages = {
   'sessions.taskCreated': 'Aufgabe erstellt',
   'sessions.msgSend': 'Nachricht an die Aufgabe',
   'sessions.viewTask': 'Aufgabe ansehen',
+  'sessions.castPlan': 'Plan öffnen',
   'sessions.chainShow': 'Gedankenkette',
   'sessions.chainHide': 'Ausblenden',
   'sessions.chainEmpty': 'Noch keine Aufgaben-Ereignisse.',

@@ -1465,13 +1465,17 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 		}
 		structured := parseStructuredResult(res.Structured)
 		// The schema's status field is the model's self-report. question and
-		// delegate are consumed below; "failed" is traced as evidence for the
-		// judge rather than flipping res.OK — a task kill here would bypass
-		// the supervision round that could issue a corrective continuation.
+		// delegate are consumed below; "failed" is honored as a failure rather
+		// than traced and forgotten — an adapter can exit 0 with a clean
+		// envelope while the model itself says it could not do the work (a
+		// CLI-authenticated agent whose turn failed is the common case), and
+		// settling that as done tells the user and the delegator a lie. The
+		// retry/judge path above this loop is the corrective continuation.
 		if structured != nil && structured.Status != "" && structured.Status != "done" {
 			c.EvTrace(execCtx, taskID, "structured_status", map[string]any{
 				"round": round + 1, "agent": res.Agent, "status": structured.Status,
 			})
+			applyStructuredFailure(&res, structured)
 		}
 		if res.SessionID != "" && res.SessionID != sessionID {
 			sessionID = res.SessionID
@@ -2317,3 +2321,25 @@ func (c *Core) finalizeRun(ctx context.Context, taskID string, task Task, plan c
 // footprint's job is showing what the task touched, and the first few hundred
 // paths show that fine — a node_modules-scale rewrite would only drown it.
 const maxFilesChangedReport = 200
+
+// applyStructuredFailure turns a model's self-reported failed status into a
+// failed result. The adapter envelope's ok field only reports whether the CLI
+// turn itself completed; it cannot know that the model answered "I could not
+// reach the device". Without this, that run settles as done and the user and
+// every upstream delegator are told work succeeded when it did not. The
+// model's own answer becomes the failure reason when the adapter left stderr
+// empty, so the retry loop and the task timeline carry something actionable.
+func applyStructuredFailure(res *commander.Result, sr *structuredAgentResult) {
+	if res == nil || sr == nil || sr.Status != "failed" {
+		return
+	}
+	res.OK = false
+	if strings.TrimSpace(res.Stderr) != "" {
+		return
+	}
+	reason := strings.TrimSpace(sr.Answer)
+	if reason == "" {
+		reason = "agent reported status: failed"
+	}
+	res.Stderr = reason
+}

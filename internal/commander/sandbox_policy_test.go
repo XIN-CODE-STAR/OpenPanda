@@ -41,7 +41,7 @@ func TestAdapterCredentialSplitIsDeclaredNotGuessed(t *testing.T) {
 	// The policy carries the two kinds in separate fields so a backend
 	// pre-creating missing bind sources makes a directory for one and a file
 	// for the other.
-	SetSandboxConfig(config.SandboxConfig{Mode: "standard"}, nil)
+	SetSandboxConfig(config.SandboxConfig{Mode: "standard"}, nil, nil)
 	t.Cleanup(func() { security.SetBasePolicy(security.Policy{Mode: security.ModeOff, AllowNetwork: true}) })
 	p := adapterSandboxPolicy("claude_code", "claude_code.py", "/tmp/work")
 	if !contains(p.WritablePaths, ".claude") {
@@ -69,7 +69,7 @@ func TestAdapterCredentialSplitIsDeclaredNotGuessed(t *testing.T) {
 // review fix — opencode's own config under it still arrives through the
 // credential manifest.
 func TestStandardModeDeniesCredentialWrites(t *testing.T) {
-	SetSandboxConfig(config.SandboxConfig{Mode: "standard"}, nil)
+	SetSandboxConfig(config.SandboxConfig{Mode: "standard"}, nil, nil)
 	t.Cleanup(func() { security.SetBasePolicy(security.Policy{Mode: security.ModeOff, AllowNetwork: true}) })
 
 	p := adapterSandboxPolicy("claude_code", "claude_code.py", "/tmp/work")
@@ -144,5 +144,40 @@ func TestProtectedPathsCoversNodeState(t *testing.T) {
 	// until the lazy init), while everything else stays.
 	if contains(ProtectedPaths(cfg, configPath, ""), "") {
 		t.Fatal("empty card path leaked an empty entry into the deny list")
+	}
+}
+
+// TestStrictModeDeniesNodeSecretReads pins the strict-mode read boundary:
+// the node's own config/card/database (mesh secret, provider keys, node
+// private keys) and the OAuth token store must be unreadable by every
+// sandboxed subprocess. Standard mode keeps reads open, as documented.
+func TestStrictModeDeniesNodeSecretReads(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Storage.DBPath = "/data/openpanda.db"
+	secrets := SecretReadDenyPaths(cfg, "/cfg/config.yaml", "/cfg/capabilities.yaml")
+	for _, want := range []string{
+		"/cfg/config.yaml", "/cfg/capabilities.yaml",
+		"/data/openpanda.db", "/data/openpanda.db-wal", "/data/openpanda.db-shm",
+	} {
+		if !contains(secrets, want) {
+			t.Fatalf("%s missing from SecretReadDenyPaths: %v", want, secrets)
+		}
+	}
+
+	SetSandboxConfig(config.SandboxConfig{Mode: "strict"}, nil, secrets)
+	t.Cleanup(func() { security.SetBasePolicy(security.Policy{Mode: security.ModeOff, AllowNetwork: true}) })
+	base := security.BasePolicy()
+	for _, want := range secrets {
+		if !contains(base.DenyReadPaths, want) {
+			t.Fatalf("strict base policy does not deny reading %s: %v", want, base.DenyReadPaths)
+		}
+	}
+
+	SetSandboxConfig(config.SandboxConfig{Mode: "standard"}, nil, secrets)
+	base = security.BasePolicy()
+	for _, secret := range secrets {
+		if contains(base.DenyReadPaths, secret) {
+			t.Fatalf("standard mode must not deny reading %s", secret)
+		}
 	}
 }

@@ -10,17 +10,19 @@ package version
 // Version is the semantic version of this build, and the default for a build
 // that does not go through release packaging.
 //
-// It tracks the newest tag on main — currently the v0.0.12-preview preview —
-// so ad-hoc builds identify themselves with the branch's latest published
-// lineage.
-var Version = "0.0.12-preview"
+// It tracks the newest tag on main — currently v0.1.0, the first release-grade
+// version — so ad-hoc builds identify themselves with the branch's latest
+// published lineage.
+var Version = "0.1.0"
 
-// Codename is the release line's thematic name — v0.0.12 is "Constellation":
-// the fleet drawn as one sky. The workspace page renders every device as a
-// plate on a live topology map keyed by hop count, same-project tasks fly in
-// parallel through path-scoped lanes and isolated worktrees, and the console
+// Codename is the release line's thematic name — "Constellation": the fleet
+// drawn as one sky. The workspace page renders every device as a plate on a
+// live topology map keyed by hop count, same-project tasks fly in parallel
+// through path-scoped lanes and isolated worktrees, and the console
 // consolidates into the single place that constellation is commanded from.
-// Surfaced by `panda version` and /api/version; not part of the semver itself.
+// v0.1.0 is the first release-grade version on that line: the same shape, with
+// the audit's correctness and security fixes closed. Surfaced by `panda
+// version` and /api/version; not part of the semver itself.
 var Codename = "Constellation"
 
 // ReleaseDate is the day this release line shipped, "2006-01-02". It is the
@@ -29,7 +31,7 @@ var Codename = "Constellation"
 // Version and Codename when a release is cut, and left empty for ad-hoc
 // builds that never had a release day. The console's profile page prints it
 // as "发布于 …" and falls back to omitting the line when it is empty.
-var ReleaseDate = "2026-10-19"
+var ReleaseDate = "2026-10-22"
 
 // Build provenance classes — which channel produced a binary. They ride the
 // wire as hello/heartbeat `prov`. The unset default normalizes to

@@ -727,18 +727,28 @@ func (c *Core) fetchStageInputs(ctx context.Context, t Task, workDir string) err
 				// ourselves over the bus would only time out.
 				return fmt.Errorf("artifact %s of stage %s is not in the local pool", in.Hash, in.Stage)
 			}
-			err := func() error {
-				_, err := c.FetchArtifactRef(ctx, in.Source, t.TaskID, in)
-				return err
-			}()
-			if err != nil {
-				// Relay hop: on a partial mesh the producer may be
-				// unreachable directly (it ran a sibling stage elsewhere),
-				// while the node that handed us this stage is reachable by
-				// construction and forwards the pull up the chain toward
-				// whoever holds the bytes — ending at the plan node, which
-				// keeps a replica of every stage output.
-				if pred := c.chainPredecessor(ctx, t.TaskID); pred != "" && pred != c.nodeID && pred != in.Source {
+			// Relay hop: on a partial mesh the producer may be unreachable
+			// directly (it ran a sibling stage elsewhere), while the node
+			// that handed us this stage is reachable by construction and
+			// forwards the pull up the chain toward whoever holds the bytes
+			// — ending at the plan node, which keeps a replica of every
+			// stage output.
+			pred := c.chainPredecessor(ctx, t.TaskID)
+			tryRelay := pred != "" && pred != c.nodeID && pred != in.Source
+			noDirect := c.connFor(in.Source) == nil
+			var err error
+			if tryRelay && noDirect {
+				// Ask the predecessor FIRST when the producer has no direct
+				// link. The transit fallback would hand the fetch to a relay,
+				// but the producer's attestation gate can refuse a sender it
+				// has never heard of — and that refusal arrives only after the
+				// transfer's per-chunk timeout, turning a fast relay into a
+				// hung stage. The predecessor path is authenticated per hop
+				// and already works.
+				_, err = c.FetchArtifactRef(ctx, pred, t.TaskID, in)
+			} else {
+				_, err = c.FetchArtifactRef(ctx, in.Source, t.TaskID, in)
+				if err != nil && tryRelay {
 					if _, perr := c.FetchArtifactRef(ctx, pred, t.TaskID, in); perr == nil {
 						err = nil
 					}

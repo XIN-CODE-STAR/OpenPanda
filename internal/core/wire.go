@@ -309,6 +309,31 @@ func (c *Core) rerouteDeclined(ctx context.Context, taskID string) bool {
 			revival = true
 		}
 	}
+	if decision.Action == scheduler.ActionLocal {
+		// The best remaining place to run is this node. The row is queued
+		// with owner=self; mark it schedulable and drive it through the same
+		// runner the queue uses. Returning false here was a dead end: the
+		// delegator was told the task failed while holding a capability that
+		// could do it, and a synchronous Submit waited on a row nothing would
+		// ever run.
+		if err := c.store.SetQueueMeta(ctx, taskID, t.Priority, t.SessionID, t.WorkDir, t.ResourceKeys); err != nil {
+			c.logger.Warn("reroute: mark local schedulable", "task", taskID, "err", err)
+			return false
+		}
+		// Claim before running: the queue runner's ClaimLocal is what moves
+		// queued -> dispatched, and run() refuses a row still in queued. The
+		// state-guarded UPDATE is the race arbiter against the queue runner.
+		if err := c.store.ClaimLocal(ctx, taskID, c.nodeID); err != nil {
+			c.logger.Warn("reroute: claim local", "task", taskID, "err", err)
+			return false
+		}
+		c.queueWake()
+		c.goGuarded("reroute local run", func() {
+			c.runScheduled(context.WithoutCancel(ctx), taskID)
+		})
+		c.logger.Info("reroute: running locally", "task", taskID, "reason", decision.Reason)
+		return true
+	}
 	if decision.Action != scheduler.ActionForward {
 		c.logger.Info("reroute: no alternate node", "task", taskID, "action", decision.Action,
 			"reason", c.enrichDeclineReason(ctx, taskID, decision.Reason))

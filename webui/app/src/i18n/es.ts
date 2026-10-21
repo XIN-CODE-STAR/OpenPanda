@@ -341,6 +341,7 @@ const es: Messages = {
   'sessions.taskCreated': 'Tarea creada',
   'sessions.msgSend': 'Enviar mensaje a la tarea',
   'sessions.viewTask': 'Ver tarea',
+  'sessions.castPlan': 'Abrir plan',
   'sessions.chainShow': 'Cadena de razonamiento',
   'sessions.chainHide': 'Ocultar',
   'sessions.chainEmpty': 'Aún no hay eventos de la tarea.',

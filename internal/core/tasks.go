@@ -2673,8 +2673,13 @@ func (s *TaskStore) Recover(ctx context.Context, selfNode string) (int, error) {
 		// and the sweep releases it — or fails it — exactly as if the restart
 		// never happened. Non-plan submitted rows are unscheduled asks awaiting
 		// a first dispatch, so they requeue safely.
+		// remote = 0 is the trust-admission boundary: an inbound delegate
+		// that died between CreateWithID(remote=true) and admitDelegate was
+		// never admitted, and requeueing it here would run/forward it with
+		// the accept policy bypassed. The mid-life sweep
+		// (CancelStaleRemoteSubmits) terminalizes those instead.
 		n, err = s.recoverBatchTx(ctx, tx, []string{StateSubmitted}, StateQueued, "requeued",
-			`AND (plan_id IS NULL OR plan_id = '')`)
+			`AND (plan_id IS NULL OR plan_id = '') AND remote = 0`)
 		if err != nil {
 			return fmt.Errorf("recover submitted tasks: %w", err)
 		}

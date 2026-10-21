@@ -300,3 +300,19 @@ func TestModelTestCustomEmptyModel(t *testing.T) {
 		t.Fatalf("expected the probe to use the advertised model, got %q", gotModel)
 	}
 }
+
+// TestSplitModelKeyAliasNoPositionals pins the guard that turned
+// `model add custom <url>` (and the keyed variant) into a panic: both
+// branches used to index pos[0] unconditionally.
+func TestSplitModelKeyAliasNoPositionals(t *testing.T) {
+	model, key, alias := splitModelKeyAlias(nil)
+	if model != "" || key != "" || alias != "" {
+		t.Fatalf("empty input = (%q,%q,%q), want all empty", model, key, alias)
+	}
+	// A lone key-looking token is a key with no model — legal, and the
+	// provider default applies.
+	model, key, alias = splitModelKeyAlias([]string{"sk-" + strings.Repeat("a", 40)})
+	if model != "" || key == "" || alias != "" {
+		t.Fatalf("lone key = (%q,%q,%q)", model, key, alias)
+	}
+}

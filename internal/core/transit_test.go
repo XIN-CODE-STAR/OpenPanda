@@ -246,15 +246,13 @@ func TestTransitTTLExhaustion(t *testing.T) {
 }
 
 // TestTransitEligibility covers the denylist: frames whose handler binds the
-// sender to a conn, and the artifact plane's request/response pulls, must
-// never be sealed into a transit inner. The artifact fetch is small enough to
-// seal but its reply is a bulk chunk — letting the request through would skip
-// the caller's relay fallback and wait out a transfer budget for bytes that
-// cannot ride back.
+// sender to a conn, and the unsolicited push side of the artifact plane, must
+// never be sealed into a transit inner. Fetch/chunk DO ride transit: both keep
+// their own From/To inside the sealed envelope, so the reply reaches the
+// requester through the relay, and transitMaxInner is sized for one chunk.
 func TestTransitEligibility(t *testing.T) {
 	for _, typ := range []string{
 		bus.MsgHello, bus.MsgHelloReject,
-		bus.MsgArtifactFetch, bus.MsgArtifactChunk,
 		bus.MsgArtifactPush, bus.MsgArtifactPushStatus, bus.MsgArtifactPushDone,
 	} {
 		if transitEligible(typ) {
@@ -263,6 +261,11 @@ func TestTransitEligibility(t *testing.T) {
 		if err := newCoreErr(t).sendViaTransit(context.Background(), "peer-x",
 			bus.Envelope{V: 2, Type: typ, MsgID: "m", From: "n"}); err == nil {
 			t.Fatalf("sendViaTransit accepted ineligible type %q", typ)
+		}
+	}
+	for _, typ := range []string{bus.MsgArtifactFetch, bus.MsgArtifactChunk} {
+		if !transitEligible(typ) {
+			t.Fatalf("frame type %q must be transit-eligible for multi-hop input pulls", typ)
 		}
 	}
 	// Pair frames are the one type that is DELIVERABLE over transit (P4b:

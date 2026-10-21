@@ -497,12 +497,24 @@ func (c *Core) notePackSkipped(ctx context.Context, taskID, stage, dir string, m
 	}
 }
 
+// Bounds on a wire-supplied project pack. MaxProjectPackBytes caps the
+// compressed bytes the protocol allows; the decompressed cap and free-space
+// watermark are this side's own, because the sender's limit is an assertion
+// and a compression bomb expands against the receiver's disk.
+const (
+	maxProjectPackUnpacked = 64 << 20
+	projectPackMinFree     = 256 << 20
+)
+
 // landProjectPack extracts a delegated project's memory into this node's own
 // projects directory, so the executing agent reads the project's memory from the
 // same path a local task would. Best-effort: a task without its memory still runs.
 func (c *Core) landProjectPack(project string, pack []byte) error {
 	if len(pack) == 0 || project == "" || c.projectsRoot == "" {
 		return nil
+	}
+	if len(pack) > bus.MaxProjectPackBytes {
+		return fmt.Errorf("project pack is %d bytes, limit %d", len(pack), bus.MaxProjectPackBytes)
 	}
 	dir, err := c.projectMemoryDir(c.projectsRoot, project)
 	if err != nil {
@@ -514,7 +526,7 @@ func (c *Core) landProjectPack(project string, pack []byte) error {
 		return err
 	}
 
-	if _, err := artifact.Unpack(bytes.NewReader(pack), dir); err != nil {
+	if _, err := artifact.UnpackLimited(bytes.NewReader(pack), dir, maxProjectPackUnpacked, projectPackMinFree); err != nil {
 		c.logger.Warn("land project pack: unpack", "project", project, "err", err)
 		return err
 	}

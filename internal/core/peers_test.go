@@ -127,10 +127,17 @@ func TestProbePeerAgainstHeldEdge(t *testing.T) {
 	worker := newCore(t, "worker-held", "127.0.0.1:17983")
 	startPair(t, ctx, entry, worker, "127.0.0.1:17982", "127.0.0.1:17983")
 
-	// The live worker core holds the edge; the probe claims the same id.
+	// The live worker core holds the edge; the probe claims the same id. It
+	// must sign with that identity's key: the entry has the worker's public
+	// key on record, and a hello for a known id that omits it is exactly the
+	// impersonation the pin rejects.
+	pub, priv, ok := worker.nodeKeyPair()
+	if !ok {
+		t.Fatal("worker has no identity key")
+	}
 	res, err := ProbePeer(ctx, "worker-held", ledger.Card{Device: "worker-held"},
 		config.ModelConfig{}, config.NetworkConfig{SharedSecret: testSharedSecret},
-		"127.0.0.1:17982", nil, nil)
+		"127.0.0.1:17982", pub, priv)
 	if err != nil {
 		t.Fatalf("probe against a held edge = %v, want reachable", err)
 	}

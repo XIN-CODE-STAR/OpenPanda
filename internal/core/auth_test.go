@@ -455,3 +455,52 @@ func TestDelegateStampsRemoteProvenance(t *testing.T) {
 		t.Fatalf("locally submitted task stamped remote")
 	}
 }
+
+// TestRejectKeylessHelloForKnownNode closes the trust-zone impersonation
+// hole: every member holds the shared secret, so a keyless hello for a node
+// id whose key is on record used to be admitted as that node and inherit its
+// trust tier. Once an identity has a key, the hello must present it.
+func TestRejectKeylessHelloForKnownNode(t *testing.T) {
+	ctx := context.Background()
+	worker := newCoreWithNative(t, "worker", "127.0.0.1:17978", ledger.NativeAbility{ID: "sys:info", Command: "uname"})
+	if err := worker.Register(ctx); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	pub, _, err := bus.GenerateNodeKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	if err := ledger.Register(worker.db, ledger.Card{Device: "victim"}, "victim", 1); err != nil {
+		t.Fatalf("register victim row: %v", err)
+	}
+	if _, err := worker.db.Exec(`UPDATE employee_cache SET pub_key=? WHERE id=?`,
+		hex.EncodeToString(pub), "victim"); err != nil {
+		t.Fatalf("record victim key: %v", err)
+	}
+	startListener(t, worker, "127.0.0.1:17978")
+
+	ws := rawDial(t, "127.0.0.1:17978")
+	ts := time.Now().Unix()
+	const nonce = "attacker-nonce"
+	env, err := bus.NewEnvelope(bus.MsgHello, "victim", "h-1", bus.HelloPayload{
+		NodeID: "victim", Ver: "t", Ts: ts, Nonce: nonce,
+		// Membership is real (the attacker is a mesh member), identity is
+		// absent — exactly the shape the pin must refuse.
+		Sig: bus.HelloSigN(testSharedSecret, "victim", ts, nonce),
+	})
+	if err != nil {
+		t.Fatalf("build hello: %v", err)
+	}
+	if err := ws.WriteJSON(env); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	if reason := expectHelloReject(t, ws); reason != "identity" {
+		t.Fatalf("keyless hello for a known id reject reason = %q, want identity", reason)
+	}
+
+	worker.mu.RLock()
+	defer worker.mu.RUnlock()
+	if _, ok := worker.peers["victim"]; ok {
+		t.Fatal("keyless hello was registered as the known identity")
+	}
+}
