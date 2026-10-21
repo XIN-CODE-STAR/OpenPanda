@@ -155,6 +155,7 @@ JSON 重打包）。
 | `dir_rows` | `DirRowsPayload` | pull 的应答：差量行数组（每行是源节点 Ed25519 签名的规范化 JSON，逐跳原样转发）+ `want`（应答方缺的 id，一次往返双向收敛）+ `cursor`/`more` 分页（双闸：256 行 ∧ 1 MiB 帧体） |
 | `punch_offer` | `PunchOfferPayload` | NAT 打洞协调：会话 nonce + 候选端点 + TTL |
 | `punch_ready` | `PunchOfferPayload` | 应答 offer：回显 nonce，附己方候选端点 |
+| `punch_want` | `PunchWantPayload` | 自动打洞提示（跨网段 mesh M3）：发送方按字典序选举不是 offerer，请对方（较小 id 一侧）向自己发 `punch_offer`；`ttl` 约束中继跳数，与 offer 同套逐跳转发纪律 |
 | `pair_hello` | `PairHelloPayload` | LAN 配对发起（未认证连接上除 hello 外唯一受理的帧）：会话 id + 临时 X25519 公钥 + Ed25519 身份 + nonce |
 | `pair_ready` | `PairReadyPayload` | 配对应答：对端的 X25519/nonce/身份，两侧由此推出同一短验证码 |
 | `pair_secret` | `PairSecretPayload` | 配对确认后投递共享密钥：AES-256-GCM 密封（HKDF(dh, nonces)），仅 responder→initiator |
@@ -200,7 +201,11 @@ hello 校验失败时服务端回 `hello_reject`（`reason`：`auth` 签名/密�
 - `ver`：本机版本号，mid-release 升级不必等重连就刷新对端目录行
   （fleet 面板的版本错位告警即拿它与自身构建对比）；
 - `prov`：构建出处（`release`|`self`|`unsigned`），同 hello 镜像——
-  mid-life 换二进制（update apply、self-build）不等重连就刷新目录行。
+  mid-life 换二进制（update apply、self-build）不等重连就刷新目录行；
+- `dir_digest`：目录戳表 `id→content_hash`（剔除 session 行）排序后的
+  SHA-256——M1 差量同步的扳机，见流行病节目；
+- `edge_load`：本机当前活跃边数（跨网段 mesh M3）——会合边打分偏向
+  少被钉住的候选，避免全网格把会合职责堆到同几个热节点上。
 
 ### `task_delegate`
 任务移交（§10.3 示例）。除 `task_id` / `parent_id` / `project` / `title` /
@@ -437,6 +442,35 @@ seen_at 不动 digest。冲突裁决：签名行 > 未签名行，同级取 `see
 签名行。自己的行每次心跳现签；拉取双向限速（新鲜 pull 30s/对端，续页
 按会话 ≤8 页）；`learned_via` 记录投递该行的对端。老节点字段缺省、帧型
 不识——同步对它们静默不发生，协议其余部分不变。
+
+### 动态会合边与可达性阶梯（M2/M3）
+
+**会合边**不是角色而是偏好：每个节点在目录行里挑 K=2 个广告了
+`relay.rendezvous` 且在线、有 `pub_key`、可达的候选，保持长连。打分 =
+行龄衰减（分钟级）+ 活边加成 − 心跳 `edge_load` 惩罚；选举带 1.25× 滞回
+（挑战者须决定性胜过在位者才换边）和故障域去重（同 v4 /24、同 v6 /48
+的候选互斥第二席），每 5min 重评。会合边是 punch 信封与 transit 转发
+赖以流通的骨架——候选归零时节点如实降级：直连/打洞照旧、目录注明
+degraded、outbox/DTN 兜底，不谎报可达性。
+
+**可达性阶梯**在 `sendTo` 发现无活轨时后台点燃（30s/对端去重），让
+*下一次* 发送能走直连而不是永远靠中继：
+
+1. **addrs 直拨**：目录行自广告地址按序尝试（全局 v6 → 公网 v4 →
+   主机名 → 其余；并发上限 4，失败地址冷却 5min）。来源闸：未签名的
+   间接（gossip）行不许指挥拨号；签名/直连行的私网与回环提示只在
+   直连学来的行上生效——转发行的 LAN 地址对本网段毫无意义。
+2. **自动打洞**：目录行 `udp_port>0` 时进入打洞级。**选举**：字典序较小
+   的 node id 是 offerer，直接发 `punch_offer`（60s/对端间隔）；较大侧
+   只发 `punch_want` 提示——它感知到失败但 spray 归对方出。喷候选从
+   目录 addr 的 IP × udp_port 合成（同套来源闸）。两个失败窗口仍无路由
+   记 `nat_suspect`（10min），期间打洞级整体跳过——诚实的答案是
+   outbox/DTN，不是无尽喷包；路由一旦证实即刻洗清。
+3. **transit → outbox**：阶梯不改变既有的深层回退，只是让中继越来越少
+   被需要。
+
+静态 `punch:<id>` 配置路径不变：它是显式 SLA，自动级只是给没有配置
+的对端补上同样的机制；`punchAt`/`punchMaxSessions` 等预算两侧共享。
 
 ## LAN 发现 beacon 与配对
 

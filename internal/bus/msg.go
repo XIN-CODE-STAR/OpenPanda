@@ -78,6 +78,13 @@ const (
 	// any residual loop.
 	MsgPunchOffer = "punch_offer"
 	MsgPunchReady = "punch_ready"
+	// MsgPunchWant is the auto-punch hint (cross-network mesh M3): the
+	// sender tells the receiver "please send ME a punch_offer" — the fix
+	// for the election's blind end, where only the lexicographically
+	// larger node observed the send failure but the smaller one owns the
+	// offerer role. It relays like punch_offer (TTL-bounded); a receiver
+	// honoring it punches env.From.
+	MsgPunchWant = "punch_want"
 	// MsgTransit is the blind-relay envelope (cross-network mesh design M3):
 	// it carries a sealed inner frame toward a destination the sender cannot
 	// reach directly. Relays read only the payload's outer shell — the

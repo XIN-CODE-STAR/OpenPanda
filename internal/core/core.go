@@ -594,6 +594,13 @@ type Core struct {
 	// dir holds the epidemic-directory sync bookkeeping (M1): per-peer pull
 	// rate limiting and continuation-page counts, in dirsync.go.
 	dir dirState
+	// path holds the reachability ladder's bookkeeping (M3): addr-dial
+	// cooldowns, auto-punch pacing, nat_suspect marks, and peers'
+	// advertised edge counts, in pathtry.go.
+	path pathState
+	// rendezvous holds the dynamic rendezvous-edge state (M2), in
+	// rendezvous.go.
+	rzv rendezvousState
 }
 
 // dtnRelay is one bundle's forwarding record on this node.
@@ -1294,7 +1301,7 @@ func (c *Core) broadcastHeartbeat(ctx context.Context) {
 		Neighbors:     c.livePeerIDs(), Links: wireLinks,
 		Contacts: c.wireContacts(), Projects: projects,
 		Ver: version.Version, Prov: wireProvenance(),
-		DirDigest: dirDigest,
+		DirDigest: dirDigest, EdgeLoad: len(conns),
 	})
 	if err != nil {
 		c.logger.Warn("build heartbeat", "err", err)
@@ -1491,6 +1498,9 @@ func (c *Core) handleHeartbeat(ctx context.Context, env bus.Envelope) {
 			c.logger.Info("peer card updated", "peer", env.From)
 		}
 	}
+	// Edge load (M3): the sender's advertised live-edge count feeds
+	// rendezvous scoring so the mesh prefers less-pinned candidates.
+	c.notePeerEdgeLoad(env.From, p.EdgeLoad)
 	// M1 last: the beat may have just changed our own table (card, adjacency),
 	// so the digest compare runs after every write above — a mismatch then
 	// reflects the post-apply state, not a stale snapshot.
@@ -1536,6 +1546,15 @@ func (c *Core) RunMonitor(ctx context.Context) {
 			// S1-4: directory rows for silently-dead peers stay online forever
 			// without a liveness sweep, and routing keeps aiming ghosts.
 			c.sweepStalePeers(ctx)
+			// M2: re-elect the dynamic rendezvous set on its own cadence —
+			// the 5s tick would re-score far more often than a re-election
+			// can usefully change anything, so the eval paces itself.
+			c.rzv.mu.Lock()
+			due := time.Since(c.rzv.lastEval) >= rendezvousEvalEvery || c.rzv.lastEval.IsZero()
+			c.rzv.mu.Unlock()
+			if due {
+				c.rendezvousEval(ctx)
+			}
 			// §4.1: RTT samples land after the connect-time refresh, so the
 			// self row's link metrics need the periodic re-publish the tick
 			// provides; and any outbox entry whose peer reconnected between
@@ -2514,6 +2533,10 @@ func (c *Core) dispatch(ctx context.Context, conn *bus.Conn, env bus.Envelope) {
 		} else {
 			c.handlePunchReady(ctx, env)
 		}
+	case bus.MsgPunchWant:
+		// The auto-punch hint rides the same relayed-To pattern as the
+		// offer it requests; the handler forwards or honors it.
+		c.handlePunchWant(ctx, env)
 	default:
 		c.logger.Warn("unhandled message type", "type", env.Type, "from", env.From)
 	}
@@ -3050,7 +3073,13 @@ func (c *Core) sendTo(id string, env bus.Envelope) error {
 	if u != nil && addr != nil {
 		return u.SendEnvelope(env, addr)
 	}
-	// No live track: the blind-transit fallback (M3) seals the frame for the
+	// No live track: kick the reachability ladder in the background — the
+	// directory addrs and the punch rung may turn up a direct edge so the
+	// NEXT send rides direct instead of relay. The kick never blocks this
+	// send and never re-enters sendTo; the dedup window makes it cheap for
+	// a burst of sends against the same dead peer.
+	c.kickReachable(id)
+	// The blind-transit fallback (M3) seals the frame for the
 	// destination's identity and hands it to a relay hop before the caller
 	// gives up and parks it in the outbox. sendViaTransit never re-enters
 	// sendTo (it forwards on a conn directly), so this cannot recurse.

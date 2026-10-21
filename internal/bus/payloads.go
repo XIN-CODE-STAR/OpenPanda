@@ -155,6 +155,11 @@ type HeartbeatPayload struct {
 	// sends dir_pull — matching digests mean the two tables already agree and
 	// no frames flow. Absent on old nodes; receivers skip the compare.
 	DirDigest string `json:"dir_digest,omitempty"`
+	// EdgeLoad is the sender's live peer-edge count (M2): rendezvous
+	// scoring prefers a candidate whose mesh is not already pinned on it —
+	// a node carrying forty edges is a worse redundancy pick than one
+	// carrying four. Absent on old nodes; receivers treat it as unknown.
+	EdgeLoad int `json:"edge_load,omitempty"`
 }
 
 // LinkMetric is the wire form of one measured edge weight (§4.1): the round-
@@ -201,6 +206,13 @@ type TransitPayload struct {
 	TTL   int    `json:"ttl"`   // decremented per relay; <=1 dies at the next relay
 	Seal  string `json:"seal"`  // SealX25519 | SealMesh
 	Inner []byte `json:"inner"` // sealed transitInner blob
+}
+
+// PunchWantPayload is the auto-punch request (M3): the sender asks the
+// receiver — the lexicographically-smaller, offerer-elected side — to send
+// it a punch_offer. TTL bounds relay hops the same way punch_offer's does.
+type PunchWantPayload struct {
+	TTL int `json:"ttl"`
 }
 
 // DirPullPayload is the differential-sync request (M1): the requester's own
