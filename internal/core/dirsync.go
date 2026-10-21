@@ -62,6 +62,10 @@ const (
 	// stream new ids at line rate.
 	dirRowsEvery = 10 * time.Second
 	dirRowsBurst = 8
+	// dirRowsNewPerWindow bounds NEW ids one sender may introduce per
+	// dirRowsEvery. The frame budget alone still lets 8×256 ids land in one
+	// window, enough to fill the whole directory and block honest peers.
+	dirRowsNewPerWindow = 256
 	// dirRowsMax caps the whole directory at the stamp table's own limit.
 	// Beyond it peers can never converge anyway (dirStampMax trims pulls),
 	// so accepting more rows only grows the DB and the heartbeat scan.
@@ -82,8 +86,11 @@ type dirState struct {
 	pages     map[string]int
 	recvAt    map[string]time.Time
 	recvPages map[string]int
-	// rowsAt bounds inbound dir_rows frames per sender.
-	rowsAt map[string][]time.Time
+	// rowsAt bounds inbound dir_rows frames per sender; rowsNew/rowsNewAt
+	// bound the NEW ids that sender may introduce per window.
+	rowsAt    map[string][]time.Time
+	rowsNew   map[string]int
+	rowsNewAt map[string]time.Time
 	// sumAt/sum cache the static half of the self-row's capability summary:
 	// summary() probes each agent's usability, too expensive to run every
 	// heartbeat — the card changes on reload, not per beat. Live fields
@@ -444,6 +451,47 @@ func (c *Core) dirRowsAllowed(peer string) bool {
 	return true
 }
 
+// dirNewRowsRemaining is the NEW-id budget left for peer in the current
+// window. The counter resets when the window rolls, independent of whether
+// the peer is still sending.
+func (c *Core) dirNewRowsRemaining(peer string) int {
+	c.dir.mu.Lock()
+	defer c.dir.mu.Unlock()
+	if c.dir.rowsNew == nil {
+		c.dir.rowsNew = make(map[string]int)
+		c.dir.rowsNewAt = make(map[string]time.Time)
+	}
+	now := time.Now()
+	if now.Sub(c.dir.rowsNewAt[peer]) >= dirRowsEvery {
+		c.dir.rowsNew[peer] = 0
+		c.dir.rowsNewAt[peer] = now
+	}
+	left := dirRowsNewPerWindow - c.dir.rowsNew[peer]
+	if left < 0 {
+		return 0
+	}
+	return left
+}
+
+// dirNewRowsAdded charges n new ids to peer's current window budget.
+func (c *Core) dirNewRowsAdded(peer string, n int) {
+	if n <= 0 {
+		return
+	}
+	c.dir.mu.Lock()
+	if c.dir.rowsNew == nil {
+		c.dir.rowsNew = make(map[string]int)
+		c.dir.rowsNewAt = make(map[string]time.Time)
+	}
+	now := time.Now()
+	if c.dir.rowsNewAt[peer].IsZero() || now.Sub(c.dir.rowsNewAt[peer]) >= dirRowsEvery {
+		c.dir.rowsNew[peer] = 0
+		c.dir.rowsNewAt[peer] = now
+	}
+	c.dir.rowsNew[peer] += n
+	c.dir.mu.Unlock()
+}
+
 // dirRowRoom is the number of NEW ids the directory may still accept. The
 // count is read once per inbound frame, then decremented as new rows land.
 func (c *Core) dirRowRoom(ctx context.Context) int {
@@ -655,10 +703,17 @@ func (c *Core) handleDirRows(ctx context.Context, env bus.Envelope) {
 	}
 	applied := 0
 	room := c.dirRowRoom(ctx)
+	if per := c.dirNewRowsRemaining(env.From); per < room {
+		room = per
+	}
+	startRoom := room
 	for _, raw := range p.Rows {
 		if c.applyDirRowLimited(ctx, raw, env.From, &room) {
 			applied++
 		}
+	}
+	if added := startRoom - room; added > 0 {
+		c.dirNewRowsAdded(env.From, added)
 	}
 	if applied > 0 {
 		c.mesh.dirRowsIn.Add(int64(applied))

@@ -204,6 +204,19 @@ func TestDirRowsLimits(t *testing.T) {
 	if !c.applyDirRowLimited(ctx, refresh, "p", &room) {
 		t.Fatal("existing row refresh must not consume new-id room")
 	}
+
+	// Per-sender new-id budget: exhausting it closes the window's room and
+	// only a rolled window reopens it.
+	c.dirNewRowsAdded("peer", dirRowsNewPerWindow)
+	if got := c.dirNewRowsRemaining("peer"); got != 0 {
+		t.Fatalf("new-id budget after exhaustion = %d, want 0", got)
+	}
+	c.dir.mu.Lock()
+	c.dir.rowsNewAt["peer"] = time.Now().Add(-2 * dirRowsEvery)
+	c.dir.mu.Unlock()
+	if got := c.dirNewRowsRemaining("peer"); got != dirRowsNewPerWindow {
+		t.Fatalf("new-id budget after window roll = %d, want %d", got, dirRowsNewPerWindow)
+	}
 }
 
 func TestApplyDirRowConflicts(t *testing.T) {
