@@ -447,6 +447,9 @@ func (c *Core) waitRemoteResult(ctx context.Context, cur Task, ch <-chan bus.Tas
 	for {
 		select {
 		case res := <-ch:
+			// The approval reached the executor and the result is here; a
+			// backup resume parked for a relay handoff has done its job.
+			c.resumeOutboxDrop(ctx, cur.OwnerNode, taskID)
 			final, err := c.store.Get(ctx, taskID)
 			if err != nil {
 				return cur, res, err
@@ -472,6 +475,7 @@ func (c *Core) waitRemoteResult(ctx context.Context, cur Task, ch <-chan bus.Tas
 			if Terminal(t.State) {
 				// A monitor, cancel or concurrent runner already closed the
 				// row: report the real terminal state, not a timeout verdict.
+				c.resumeOutboxDrop(ctx, cur.OwnerNode, taskID)
 				return t, bus.TaskResultPayload{
 					TaskID: t.TaskID, AttemptID: t.AttemptID, State: t.State,
 				}, nil
@@ -881,14 +885,16 @@ func (c *Core) resumeRemote(ctx context.Context, cur Task, target, answer string
 	if err != nil {
 		return cur, bus.TaskResultPayload{}, fmt.Errorf("mint message id: %w", err)
 	}
-	env, err := bus.NewEnvelope(bus.MsgTaskResume, c.nodeID, msgID, bus.TaskResumePayload{
+	payload := bus.TaskResumePayload{
 		TaskID: taskID, AttemptID: cur.AttemptID, Answer: answer,
-	})
+	}
+	env, err := bus.NewEnvelope(bus.MsgTaskResume, c.nodeID, msgID, payload)
 	if err != nil {
 		return cur, bus.TaskResultPayload{}, fmt.Errorf("build resume: %w", err)
 	}
 	env.To = target
-	if err := c.sendTo(target, env); err != nil {
+	relayed, serr := c.sendToDetail(target, env)
+	if serr != nil {
 		// The executor went away between the refusal and the approval — a
 		// transient flap must not kill the user's explicit consent. Park the
 		// approval in the resume outbox: the next hello from the peer
@@ -900,10 +906,8 @@ func (c *Core) resumeRemote(ctx context.Context, cur Task, target, answer string
 		if lerr := c.store.ClearLease(ctx, taskID); lerr != nil {
 			c.logger.Warn("resume: clear lease for parked approval", "task", taskID, "err", lerr)
 		}
-		c.resumeOutboxPersist(ctx, target, bus.TaskResumePayload{
-			TaskID: taskID, AttemptID: cur.AttemptID, Answer: answer,
-		}, ttl)
-		c.logger.Info("resume parked for executor's next link", "task", taskID, "to", target, "err", err)
+		c.resumeOutboxPersist(ctx, target, payload, ttl)
+		c.logger.Info("resume parked for executor's next link", "task", taskID, "to", target, "err", serr)
 		if !c.sendableTo(target) {
 			// No track can carry the resume at all: holding the caller on the
 			// wait channel would park them for the entire outbox ttl (and then
@@ -925,6 +929,14 @@ func (c *Core) resumeRemote(ctx context.Context, cur Task, target, answer string
 		// The link exists but the write failed transiently: the periodic
 		// outbox sweep redelivers on this same connection, so keep waiting.
 		return c.waitRemoteResult(ctx, cur, ch, "resume")
+	}
+	if relayed {
+		// A relay accepted the frame, but the final hop is unconfirmed. Keep
+		// a resume copy parked: if the executor never sees the approval, the
+		// next flush redelivers it. The result path drops the copy when the
+		// executor answers.
+		c.resumeOutboxPersist(ctx, target, payload, time.Now().Add(c.lease()).Unix())
+		c.logger.Info("resume handed to transit; keeping outbox row", "task", taskID, "to", target)
 	}
 	c.logger.Info("resume forwarded to executor", "task", taskID, "to", target)
 

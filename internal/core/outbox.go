@@ -378,7 +378,8 @@ func (c *Core) outboxFlush(ctx context.Context, peer string) {
 		// it. handleCancel is idempotent — a cancel for a task the peer
 		// never received, or one already terminal, is a no-op.
 		for _, e := range cancels {
-			if !c.deliverCancel(flushCtx, peer, e.taskID, e.attempt, e.reason) {
+			accepted, _ := c.deliverCancel(flushCtx, peer, e.taskID, e.attempt, e.reason)
+			if !accepted {
 				continue // still parked; retry on next reconnect
 			}
 			c.cancelOutboxDropKey(flushCtx, e.peer, e.taskID)
@@ -808,7 +809,8 @@ func (c *Core) supersedeTarget(ctx context.Context, taskID, newTarget string) {
 	if t, terr := c.store.Get(ctx, taskID); terr == nil {
 		attemptID = t.AttemptID
 	}
-	if !c.deliverCancel(ctx, prev, taskID, attemptID, reason) {
+	accepted, relayed := c.deliverCancel(ctx, prev, taskID, attemptID, reason)
+	if !accepted || relayed {
 		c.outboxCancelPersist(ctx, prev, taskID, attemptID, reason)
 	}
 	c.logger.Info("superseded prior dispatch target", "task", taskID,
@@ -818,25 +820,26 @@ func (c *Core) supersedeTarget(ctx context.Context, taskID, newTarget string) {
 // deliverCancel places a task_cancel envelope on the wire to peer, returning
 // whether it was accepted by the connection. Shared by the initial send path
 // (forwardCancelDownstream) and the flush path.
-func (c *Core) deliverCancel(ctx context.Context, peer, taskID, attemptID, reason string) bool {
+func (c *Core) deliverCancel(ctx context.Context, peer, taskID, attemptID, reason string) (accepted, relayed bool) {
 	msgID, err := newUUID()
 	if err != nil {
 		c.logger.Warn("outbox: mint cancel id", "task", taskID, "err", err)
-		return false
+		return false, false
 	}
 	env, err := bus.NewEnvelope(bus.MsgTaskCancel, c.nodeID, msgID, bus.TaskCancelPayload{
 		TaskID: taskID, Reason: reason, AttemptID: attemptID,
 	})
 	if err != nil {
 		c.logger.Warn("outbox: build cancel envelope", "task", taskID, "err", err)
-		return false
+		return false, false
 	}
 	env.To = peer
-	if err := c.sendTo(peer, env); err != nil {
+	relayed, err = c.sendToDetail(peer, env)
+	if err != nil {
 		c.logger.Debug("outbox: send cancel", "task", taskID, "peer", peer, "err", err)
-		return false
+		return false, false
 	}
-	return true
+	return true, relayed
 }
 
 // taskOutboxPersist stores a forward task that could not be delivered immediately,

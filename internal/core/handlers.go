@@ -735,14 +735,23 @@ func (c *Core) proceedLocalDelegate(ctx context.Context, env bus.Envelope, taskI
 			c.terminalizeDeclined(ctx, taskID, err.Error())
 			return
 		}
-		if err := c.reply(ctx, env, bus.MsgTaskResult, result); err != nil {
-			c.logger.Warn("send task_result", "err", err, "task", taskID)
+		relayed, rerr := c.replyWithDelivery(ctx, env, bus.MsgTaskResult, result)
+		if rerr != nil {
+			c.logger.Warn("send task_result", "err", rerr, "task", taskID)
 			// The delegator is unreachable at the moment the result is ready
 			// (review P0-2): park it so the outcome is redelivered on reconnect
 			// instead of the delegator's lease expiring into a false failed.
 			if result.TaskID == "" {
 				result.TaskID = taskID
 			}
+			c.outboxPersist(ctx, env.From, result)
+		} else if relayed {
+			// A relay took the frame but did not confirm the final hop. Keep
+			// custody until a direct send (or an idempotent duplicate) lands.
+			if result.TaskID == "" {
+				result.TaskID = taskID
+			}
+			c.logger.Info("task_result handed to transit; keeping outbox row", "task", taskID)
 			c.outboxPersist(ctx, env.From, result)
 		} else {
 			c.outboxDrop(ctx, env.From, taskID)

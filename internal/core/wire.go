@@ -885,7 +885,8 @@ func (c *Core) forwardCancelTo(ctx context.Context, target, taskID, attemptID, r
 	if reason == "" {
 		reason = "cancelled by delegator"
 	}
-	if c.deliverCancel(ctx, target, taskID, attemptID, reason) {
+	accepted, relayed := c.deliverCancel(ctx, target, taskID, attemptID, reason)
+	if accepted && !relayed {
 		// Delivered now: parked copies of the order it supersedes are dead
 		// weight. A delivered tree cancel obsoletes everything parked for
 		// the pair; a dispensation-scoped one clears only its own kind — a
@@ -896,6 +897,13 @@ func (c *Core) forwardCancelTo(ctx context.Context, target, taskID, attemptID, r
 			c.cancelOutboxDropDispensation(ctx, target, taskID)
 		}
 		c.logger.Info("cancel forwarded downstream", "task", taskID, "to", target)
+		return
+	}
+	if accepted && relayed {
+		// A relay took the frame but did not confirm the final hop. Keep a
+		// copy parked; handleCancel is idempotent, so a duplicate is safe.
+		c.logger.Info("cancel handed to transit; keeping outbox row", "task", taskID, "to", target)
+		c.outboxCancelPersist(ctx, target, taskID, attemptID, reason)
 		return
 	}
 	// The executor is unreachable at the moment of the cancel. Park it for
@@ -1224,8 +1232,19 @@ const acceptOutboxTTL = 7 * 24 * time.Hour
 // chain. That predecessor may be a dead ephemeral participant after restart.
 // Failed delivery uses the normal result outbox keyed by the live requester.
 func (c *Core) replyResult(ctx context.Context, env bus.Envelope, result bus.TaskResultPayload) {
-	if err := c.reply(ctx, env, bus.MsgTaskResult, result); err != nil {
+	relayed, err := c.replyWithDelivery(ctx, env, bus.MsgTaskResult, result)
+	if err != nil {
 		c.logger.Warn("reply task result", "task", result.TaskID, "to", env.From, "err", err)
+		c.outboxPersist(ctx, env.From, result)
+		return
+	}
+	if relayed {
+		// A relay accepted the frame; nobody confirmed the final hop. Keep
+		// the result parked so the delegator's next hello redelivers it
+		// direct. The receiver's result handler is state-CAS guarded, so an
+		// at-least-once duplicate is harmless.
+		c.logger.Info("reply task result: relay handoff unconfirmed; keeping outbox row",
+			"task", result.TaskID, "to", env.From)
 		c.outboxPersist(ctx, env.From, result)
 		return
 	}
@@ -1237,20 +1256,27 @@ func (c *Core) replyResult(ctx context.Context, env bus.Envelope, result bus.Tas
 // route still gets its answer when the frame fits, and every caller shares
 // the same fallback instead of replies alone blackholing on NAT-bound links.
 func (c *Core) reply(ctx context.Context, env bus.Envelope, typ string, payload any) error {
+	_, err := c.replyWithDelivery(ctx, env, typ, payload)
+	return err
+}
+
+// replyWithDelivery is reply with the relay-handoff signal from sendToDetail.
+func (c *Core) replyWithDelivery(_ context.Context, env bus.Envelope, typ string, payload any) (bool, error) {
 	msgID, err := newUUID()
 	if err != nil {
-		return err
+		return false, err
 	}
 	envOut, err := bus.NewEnvelope(typ, c.nodeID, msgID, payload)
 	if err != nil {
-		return err
+		return false, err
 	}
 	envOut.To = env.From
-	if err := c.sendTo(env.From, envOut); err != nil {
+	relayed, err := c.sendToDetail(env.From, envOut)
+	if err != nil {
 		c.logger.Warn("reply: no path to peer", "peer", env.From, "type", typ, "err", err)
-		return err
+		return false, err
 	}
-	return nil
+	return relayed, nil
 }
 
 // isOutputStagnant reports whether an agent's output across consecutive supervision rounds

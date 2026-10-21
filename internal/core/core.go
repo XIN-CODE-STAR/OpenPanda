@@ -3109,16 +3109,26 @@ func (c *Core) stateOscillates(key, hash string) bool {
 // datagram that cannot carry the frame fails the same way a missing peer
 // does — the caller's outbox parking is the next hop for both.
 func (c *Core) sendTo(id string, env bus.Envelope) error {
+	_, err := c.sendToDetail(id, env)
+	return err
+}
+
+// sendToDetail is sendTo with a delivery signal: relayed=true means the frame
+// was handed to a transit relay whose onward delivery is NOT confirmed. Most
+// callers do not care (the mesh is best-effort); the durable paths — task
+// results, cancels, resumes and parked work — use the flag to keep their
+// outbox row instead of treating a relay handoff as delivery.
+func (c *Core) sendToDetail(id string, env bus.Envelope) (relayed bool, err error) {
 	conn := c.connFor(id)
 	if conn != nil {
-		return conn.Send(env)
+		return false, conn.Send(env)
 	}
 	c.udpMu.Lock()
 	u := c.udp
 	addr := c.udpRoutes[id]
 	c.udpMu.Unlock()
 	if u != nil && addr != nil {
-		return u.SendEnvelope(env, addr)
+		return false, u.SendEnvelope(env, addr)
 	}
 	// No live track: kick the reachability ladder in the background — the
 	// directory addrs and the punch rung may turn up a direct edge so the
@@ -3131,9 +3141,9 @@ func (c *Core) sendTo(id string, env bus.Envelope) error {
 	// gives up and parks it in the outbox. sendViaTransit never re-enters
 	// sendTo (it forwards on a conn directly), so this cannot recurse.
 	if err := c.sendViaTransit(context.Background(), id, env); err == nil {
-		return nil
+		return true, nil
 	}
-	return errors.New("peer not connected: " + id)
+	return false, errors.New("peer not connected: " + id)
 }
 
 // sendDataFrame delivers an envelope whose payload carries a bulk []byte. On
