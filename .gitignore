@@ -12,6 +12,9 @@ bin/
 # Bubble Tea import probe). Always regenerated, never committed.
 /_teasmoke
 
+# Editor debug-session binaries (dlv/gopls __debug_bin* under cmd/).
+__debug_bin*
+
 # SQLite
 *.db
 *.db-wal
@@ -162,6 +165,9 @@ fetch_emails.py
 
 # Marketing site — work in progress. Un-ignore when the Pages site ships.
 /site/
+
+# Local design references and visual-companion drafts
+/.superpowers/
 
 .gocache-tmp
 /.gocache/

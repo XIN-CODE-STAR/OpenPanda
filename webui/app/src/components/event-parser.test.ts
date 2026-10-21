@@ -256,4 +256,42 @@ describe('buildRows pipeline grouping', () => {
       assert.ok(!row.formatted.quiet)
     }
   })
+
+  it('does not fold a retry across a pipeline run it actually follows', () => {
+    // retry 1 → lifecycle strip → retry 2: folding retry 2 into the first
+    // row would render a newer event before the pipeline it postdates.
+    const events = [
+      { ts: 1, type: 'progress', data: '{"note":"Claude: API retry 1 (429)…"}' },
+      { ts: 2, type: 'submit', data: '{"owner":"mac"}' },
+      { ts: 3, type: 'queue', data: 'null' },
+      { ts: 4, type: 'progress', data: '{"note":"Claude: API retry 2 (429)…"}' },
+    ]
+    const rows = buildRows(events as never)
+    assert.equal(rows.length, 3)
+    assert.equal(rows[0]?.kind, 'event')
+    assert.equal(rows[1]?.kind, 'pipeline')
+    assert.equal(rows[2]?.kind, 'event')
+    if (rows[0]?.kind === 'event') assert.equal(rows[0].count ?? 1, 1)
+    if (rows[2]?.kind === 'event') assert.match(rows[2].formatted.summary ?? '', /retry 2/)
+  })
+
+  it('renders a user message with its mode instead of the bare event name', () => {
+    // Before this case existed, once and inject landed on the unknown-event
+    // fallback and the timeline printed the literal string "user_msg" — the
+    // one place a user looks for their own note showed nothing readable.
+    setLocale('en')
+    const queued = formatTaskEvent('user_msg', JSON.stringify({ mode: 'queue', text: 'also update the README' }))
+    assert.equal(queued.label, 'user message')
+    assert.equal(queued.summary, 'also update the README')
+    assert.equal(queued.badgeClass, 'dim')
+    assert.deepEqual(queued.tags, [{ key: 'Mode', value: 'queue' }])
+
+    const injected = formatTaskEvent('user_msg', JSON.stringify({ mode: 'inject', text: 'stop editing' }))
+    assert.equal(injected.badgeClass, 'info')
+
+    // The delivery half: proof the round folded the note into its prompt.
+    const read = formatTaskEvent('user_msg_consumed', JSON.stringify({ mode: 'inject', seq: 2, text: 'stop editing' }))
+    assert.equal(read.label, 'user message read')
+    assert.equal(read.badgeClass, 'accent')
+  })
 })

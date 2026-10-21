@@ -562,7 +562,7 @@ func (s *TaskStore) applyTransition(ctx context.Context, taskID, from, to, owner
 
 func validApprovalDisposition(disposition ApprovalDisposition) bool {
 	switch disposition {
-	case ApprovalAcceptWork, ApprovalResumeExecution, ApprovalNeedsChangedInput, ApprovalAdmissionReview:
+	case ApprovalAcceptWork, ApprovalResumeExecution, ApprovalNeedsChangedInput, ApprovalAdmissionReview, ApprovalSelfMerge:
 		return true
 	default:
 		return false
@@ -1336,6 +1336,13 @@ const (
 	// operator, and the delegator — who is also the suspect the gate exists
 	// for — must not talk the executor out of its own review.
 	ApprovalAdmissionReview ApprovalDisposition = "admission_review"
+	// ApprovalSelfMerge marks a review row carrying a self-evolution patch-set
+	// merge proposal (design §4.2). Approving it runs the merge pipeline —
+	// worktree apply, gate, build, StageLocal, Apply — never agent execution,
+	// so it deliberately does NOT appear in resumesOnApprove: the queue
+	// scheduler must never pick the row up as ordinary work, and a bare
+	// store.Approve (no pipeline in the process) is refused outright.
+	ApprovalSelfMerge ApprovalDisposition = "self_merge"
 )
 
 // resumesOnApprove reports whether approving a parked row should put it back
@@ -1346,7 +1353,7 @@ func resumesOnApprove(d ApprovalDisposition) bool {
 
 func parseApprovalDisposition(raw string) ApprovalDisposition {
 	switch ApprovalDisposition(raw) {
-	case ApprovalAcceptWork, ApprovalResumeExecution, ApprovalNeedsChangedInput, ApprovalAdmissionReview:
+	case ApprovalAcceptWork, ApprovalResumeExecution, ApprovalNeedsChangedInput, ApprovalAdmissionReview, ApprovalSelfMerge:
 		return ApprovalDisposition(raw)
 	default:
 		return ""
@@ -1382,6 +1389,13 @@ func (s *TaskStore) Approve(ctx context.Context, taskID string) error {
 	}
 	if disposition == ApprovalNeedsChangedInput {
 		return fmt.Errorf("%w: task %s", ErrApprovalNeedsChangedInput, taskID)
+	}
+	// A self-merge row's approval IS the merge pipeline (gate, build, swap).
+	// A bare store approve would mark the proposal done while the patch set
+	// never merged — approve must go through ResumeApproved on a Core that
+	// has the self-evolution manager wired.
+	if disposition == ApprovalSelfMerge {
+		return fmt.Errorf("%w: task %s is a self-merge proposal — approve it through the merge pipeline (panda approve on a self_evolution-enabled node)", ErrIllegal, taskID)
 	}
 	resume := resumesOnApprove(disposition)
 	// Guarded UPDATE (P2-8): a concurrent reject/approve must not both win.

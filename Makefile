@@ -13,7 +13,7 @@ VERSION ?= $(shell sed -n 's/^var Version = "\(.*\)"/\1/p' internal/version/vers
 # LDFLAGS_DEV below: stripped symbols, no version override — they keep the
 # version.Version source value (including the -beta / -rc suffixes that a
 # VERSION override here would strip).
-RELEASE_LDFLAGS := -s -w -X github.com/Xustalis/OpenPanda/internal/version.Version=$(VERSION)
+RELEASE_LDFLAGS := -s -w -X github.com/Xustalis/OpenPanda/internal/version.Version=$(VERSION) -X github.com/Xustalis/OpenPanda/internal/version.Provenance=release
 # A pinned release key bakes its public half into release binaries so the
 # self-update path verifies checksums.txt.sig by default. Same knob as
 # scripts/package.sh (which additionally signs checksums.txt itself).
@@ -212,8 +212,13 @@ fmt-check:
 		echo "gofmt needed:"; echo "$$unformatted"; exit 1; \
 	fi
 
+# The per-package test timeout is raised for the race legs. Under -race the
+# core package's e2e suite (real loopback websockets, real timers) runs for
+# about nine minutes on a workstation — past Go's 10-minute default on a
+# shared CI runner, which then fails the leg on the clock instead of on a
+# defect. The CI job's own budget is 20 minutes, so 15m leaves room.
 race:
-	CGO_ENABLED=1 $(GO) test -race ./...
+	CGO_ENABLED=1 $(GO) test -race -timeout 15m ./...
 
 # race-focused is the race detector scoped to the packages that actually share
 # state across goroutines and connections — the CI gate's race leg. `race`
@@ -221,7 +226,7 @@ race:
 # goroutine-free packages buy no detections. CGO is forced on because -race
 # requires it and some runners leave it disabled.
 race-focused:
-	CGO_ENABLED=1 $(GO) test -race ./internal/core/... ./internal/commander/... ./internal/bus/... ./internal/storage/... ./internal/askengine/... ./internal/scheduler/... ./webui/panel/...
+	CGO_ENABLED=1 $(GO) test -race -timeout 15m ./internal/core/... ./internal/commander/... ./internal/bus/... ./internal/storage/... ./internal/askengine/... ./internal/scheduler/... ./webui/panel/...
 
 # ============================================================================
 # CI Gate 清单化 (§稳定性 P1)

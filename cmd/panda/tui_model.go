@@ -160,6 +160,20 @@ type tuiModel struct {
 	// taskListState is the state filter the open task picker was built with
 	// ("" = all), so a watch event can rebuild the list in place.
 	taskListState string
+	// focusTask is the task the user last opened from the queue picker — the
+	// default target for `/queue` and `/inject`, which otherwise have no way to
+	// know which of a dozen rows the user means. Empty until a task is chosen;
+	// the commands fall back to requiring an explicit id.
+	focusTask string
+	// streamTask is the task row the running ask created, reported by the
+	// engine before it executes (StreamCallbacks.OnTaskRow). It is the target
+	// a mid-turn Enter types into, and it outranks focusTask because it names
+	// the work actually on screen. Cleared when the turn ends.
+	streamTask string
+	// staged is the note the last Enter queued mid-turn. A second Enter with
+	// the same text promotes it to an inject instead of posting a duplicate —
+	// that two-step gesture is the whole queue-vs-inject contract in the TUI.
+	staged *stagedNote
 
 	// Onboarding state
 	onboardingStep onboardingStep

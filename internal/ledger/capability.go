@@ -42,6 +42,26 @@ type Card struct {
 	Actuators       []ActuatorProfile `yaml:"actuators,omitempty" json:"actuators,omitempty"`
 	Capacity        Capacity          `yaml:"capacity" json:"capacity"`
 	ResourceProfile ResourceProfile   `yaml:"resource_profile" json:"resource_profile"`
+	// Relay declares which mesh-forwarding services this node offers peers
+	// (cross-network mesh design M2/M3): rendezvous and transit are
+	// advertised CAPABILITIES, not privileged roles — any node may claim
+	// them, the network verifies them in use. Nil means the card declares
+	// no relay services; member-level transit forwarding itself is baseline
+	// behaviour (like punch relaying), not gated by this declaration.
+	Relay *RelayProfile `yaml:"relay,omitempty" json:"relay,omitempty"`
+}
+
+// RelayProfile is the card's relay-capability block: which store-and-forward
+// services the node offers, at what bandwidth, and for whom. Rendezvous
+// marks the node a bootstrap/rendezvous candidate (long-uptime, reachable);
+// Transit marks a good transit choice for sealed relay selection; MaxKbps is
+// the offered relay bandwidth; ForTrust bounds the trust tiers served
+// ("mesh" default — "" reads the same).
+type RelayProfile struct {
+	Rendezvous bool   `yaml:"rendezvous,omitempty" json:"rendezvous,omitempty"`
+	Transit    bool   `yaml:"transit,omitempty" json:"transit,omitempty"`
+	MaxKbps    int    `yaml:"max_kbps,omitempty" json:"max_kbps,omitempty"`
+	ForTrust   string `yaml:"for_trust,omitempty" json:"for_trust,omitempty"`
 }
 
 // ActuatorProfile is the unified model equalizing software cognitive agents and hardware peripherals (whitepaper §7.1).
@@ -263,6 +283,15 @@ type CapabilitySummary struct {
 	// packing it across the wire (§6.3 residence term). Membership changes as
 	// projects land, so the regular heartbeat carries the same list.
 	Projects []string `json:"projects,omitempty"`
+	// Relay is this node's advertised relay-capability block (cross-network
+	// mesh M2/M3) — nil when the card declares no relay services.
+	Relay *RelayProfile `json:"relay,omitempty"`
+	// Addrs is the node's self-asserted dial candidates (host:wsPort —
+	// interface addresses plus the public hints peers observed for it). A
+	// hint, not a promise: the dialer verifies identity at the hello, so a
+	// wrong address costs a failed dial, never a spoofed node. Additive;
+	// absent on peers that predate the field.
+	Addrs []string `json:"addrs,omitempty"`
 }
 
 // LinkMetric is one measured edge of the link-state graph (§4.1): the
@@ -337,7 +366,13 @@ func Register(db *sql.DB, c Card, id string, tier int) error {
 	if osName == "" {
 		osName = runtime.GOOS
 	}
-	return upsertNode(db, id, c.Device, c.Chip, kind, identity, string(native), string(agents), string(manual), string(capJSON), string(resJSON), "", "", "", "", tier, machineClass{OS: osName, Form: c.FormFactor})
+	relayJSON := ""
+	if c.Relay != nil {
+		if b, err := json.Marshal(c.Relay); err == nil {
+			relayJSON = string(b)
+		}
+	}
+	return upsertNode(db, id, c.Device, c.Chip, kind, identity, string(native), string(agents), string(manual), string(capJSON), string(resJSON), "", "", "", "", "", relayJSON, tier, machineClass{OS: osName, Form: c.FormFactor})
 }
 
 // machineClass is the pair of machine facts stored beside a row: the system
@@ -351,10 +386,10 @@ type machineClass struct {
 // profile/neighbors/link metrics/contacts already marshalled to JSON — and
 // marks it online. Shared by Register (self, full card) and UpsertRemote
 // (peer, ID-only summary) so the upsert SQL lives in one place.
-func upsertNode(db *sql.DB, id, device, chip, kind, identity, nativeJSON, agentsJSON, manualJSON, capJSON, resJSON, neighborsJSON, linksJSON, contactsJSON, projectsJSON string, tier int, m machineClass) error {
+func upsertNode(db *sql.DB, id, device, chip, kind, identity, nativeJSON, agentsJSON, manualJSON, capJSON, resJSON, neighborsJSON, linksJSON, contactsJSON, projectsJSON, addrsJSON, relayJSON string, tier int, m machineClass) error {
 	_, err := db.Exec(`
-		INSERT INTO employee_cache (id, name, department, chip, node_kind, node_identity, native_json, agents_json, manual_json, capacity_json, resource_profile_json, neighbors_json, links_json, contacts_json, projects_json, status, last_seen, scheduler_tier, os, device_class)
-		VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'online', ?, ?, ?, ?)
+		INSERT INTO employee_cache (id, name, department, chip, node_kind, node_identity, native_json, agents_json, manual_json, capacity_json, resource_profile_json, neighbors_json, links_json, contacts_json, projects_json, addrs, relay, status, last_seen, scheduler_tier, os, device_class)
+		VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'online', ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name=excluded.name, chip=excluded.chip,
 			node_kind=excluded.node_kind, node_identity=excluded.node_identity,
@@ -374,6 +409,12 @@ func upsertNode(db *sql.DB, id, device, chip, kind, identity, nativeJSON, agents
 				ELSE excluded.contacts_json END,
 			projects_json=CASE WHEN excluded.projects_json='' THEN employee_cache.projects_json
 				ELSE excluded.projects_json END,
+			-- Same "absent says nothing" contract for the reachability columns:
+			-- '[]' is an explicit empty claim, ''/'null' preserves the last one.
+			addrs=CASE WHEN excluded.addrs IN ('','null') THEN employee_cache.addrs
+				ELSE excluded.addrs END,
+			relay=CASE WHEN excluded.relay IN ('','null') THEN employee_cache.relay
+				ELSE excluded.relay END,
 			-- Machine facts survive a peer that cannot report them (an older
 			-- build, a summary that omits the fields): empty means "this beat
 			-- said nothing", not "this machine has no OS".
@@ -381,7 +422,7 @@ func upsertNode(db *sql.DB, id, device, chip, kind, identity, nativeJSON, agents
 			device_class=CASE WHEN excluded.device_class='' THEN employee_cache.device_class
 				ELSE excluded.device_class END,
 			status='online', last_seen=excluded.last_seen, scheduler_tier=excluded.scheduler_tier`,
-		id, device, chip, kind, identity, nativeJSON, agentsJSON, manualJSON, capJSON, resJSON, neighborsJSON, linksJSON, contactsJSON, projectsJSON, storage.Now(), tier, m.OS, m.Form,
+		id, device, chip, kind, identity, nativeJSON, agentsJSON, manualJSON, capJSON, resJSON, neighborsJSON, linksJSON, contactsJSON, projectsJSON, addrsJSON, relayJSON, storage.Now(), tier, m.OS, m.Form,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert %s: %w", id, err)
@@ -459,6 +500,38 @@ func SetNodeVerIfChanged(db *sql.DB, id, ver string) error {
 	return nil
 }
 
+// SetNodeProvIfChanged stamps the build provenance a peer advertised (hello
+// or heartbeat prov field) into its directory row — the input the trust
+// layer's accept.<tier>.self_signed policy weighs a self-built origin
+// against. Same contract as SetNodeVerIfChanged: a no-op write gate keeps a
+// steady beat cheap, and an empty prov — an old node, or a new node that
+// chose not to say — leaves the stored stamp alone rather than erasing it.
+// The value is self-asserted bookkeeping, not attestation.
+func SetNodeProvIfChanged(db *sql.DB, id, prov string) error {
+	if prov == "" {
+		return nil
+	}
+	_, err := db.Exec(`UPDATE employee_cache SET prov=? WHERE id=? AND COALESCE(prov,'') IS NOT ?`, prov, id, prov)
+	if err != nil {
+		return fmt.Errorf("set prov %s: %w", id, err)
+	}
+	return nil
+}
+
+// PeerProvenance returns the build provenance stamped on a node's row
+// ("", "unsigned", "release", "self"). Row-level self-asserted build
+// metadata — unlike trust it does NOT follow the Ed25519 key across
+// sibling rows, since a restart can legitimately run a different build.
+func PeerProvenance(db *sql.DB, nodeID string) string {
+	if db == nil || nodeID == "" {
+		return ""
+	}
+	var prov string
+	_ = db.QueryRow(`SELECT COALESCE(prov,'') FROM employee_cache WHERE id=?`,
+		nodeID).Scan(&prov)
+	return prov
+}
+
 // UpdateAdjacency refreshes a node's advertised edge set, measured link
 // weights (§4.1) and contact plan (§8.4) without touching the rest of its
 // row — the gossip channel heartbeats drive between full card updates.
@@ -484,6 +557,22 @@ func UpdateAdjacency(db *sql.DB, id, neighborsJSON, linksJSON, contactsJSON, pro
 		if _, err := db.Exec(`UPDATE employee_cache SET projects_json=? WHERE id=?`, projectsJSON, id); err != nil {
 			return fmt.Errorf("update projects %s: %w", id, err)
 		}
+	}
+	return nil
+}
+
+// UpdateAddrsIfChanged writes this node's self-asserted dial candidates into
+// its directory row's addrs column — the reachability half of the
+// cross-network mesh card (M3): peers read it to try a direct dial before
+// punching or relaying. Change-gated for the same reason as
+// UpdateAdjacencyIfChanged: the 5s self-row refresh must not append a WAL
+// page every tick for a set that almost never changes.
+func UpdateAddrsIfChanged(db *sql.DB, id, addrsJSON string) error {
+	_, err := db.Exec(
+		`UPDATE employee_cache SET addrs=? WHERE id=? AND COALESCE(addrs,'') IS NOT ?`,
+		addrsJSON, id, addrsJSON)
+	if err != nil {
+		return fmt.Errorf("update addrs %s: %w", id, err)
 	}
 	return nil
 }
@@ -606,6 +695,54 @@ func ExpireStale(db *sql.DB, maxAgeSec int64, exclude []string) ([]string, error
 		flipped = append(flipped, id)
 	}
 	return flipped, nil
+}
+
+// PruneOffline deletes directory rows that have been offline past maxAgeSec
+// and were never directly pinned (pub_key empty). Pinned rows are kept as
+// TOFU commitments; unpinned rows are gossip-only entries that would
+// otherwise accumulate forever (ExpireStale only flips status to offline).
+func PruneOffline(db *sql.DB, maxAgeSec int64, exclude []string) (int64, error) {
+	cutoff := storage.Now() - maxAgeSec
+	skip := make(map[string]bool, len(exclude))
+	for _, id := range exclude {
+		skip[id] = true
+	}
+	rows, err := db.Query(
+		`SELECT id FROM employee_cache
+		  WHERE COALESCE(pub_key,'')='' AND status='offline'
+		    AND COALESCE(last_seen,0) < ? AND COALESCE(seen_at,0) < ?`, cutoff, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("scan prunable nodes: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if !skip[id] {
+			ids = append(ids, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+	var n int64
+	for _, id := range ids {
+		res, err := db.Exec(
+			`DELETE FROM employee_cache
+			  WHERE id=? AND COALESCE(pub_key,'')='' AND status='offline'`, id)
+		if err != nil {
+			return n, fmt.Errorf("prune stale %s: %w", id, err)
+		}
+		if k, _ := res.RowsAffected(); k > 0 {
+			n += k
+		}
+	}
+	return n, nil
 }
 
 // Remove deletes a node's directory row. A removed remote that is still
@@ -941,7 +1078,10 @@ func ForgetPending(db *sql.DB, id string) error {
 // marking it online. Remote nodes are stored with ID-only abilities (no
 // executable commands) since this node never runs their commands directly —
 // it forwards to them. Mirrors Register's ON CONFLICT upsert.
-func UpsertRemote(db *sql.DB, id string, s CapabilitySummary) error {
+// summaryWireJSON explodes a CapabilitySummary into the employee_cache JSON
+// columns. Shared by UpsertRemote (direct hello/heartbeat observation) and
+// UpsertGossiped (epidemic-directory rows) so both paths store the same shape.
+func summaryWireJSON(s CapabilitySummary) (nativeJSON, agentsJSON, manualJSON, capJSON, resJSON, neighborsJSON, linksJSON, contactsJSON, projectsJSON, addrsJSON, relayJSON string, err error) {
 	native := make([]NativeAbility, 0, len(s.NativeIDs)+len(s.ActuatorIDs))
 	for _, nid := range s.NativeIDs {
 		native = append(native, NativeAbility{ID: nid})
@@ -960,47 +1100,77 @@ func UpsertRemote(db *sql.DB, id string, s CapabilitySummary) error {
 		manual = append(manual, ManualAbility{ID: mid})
 	}
 
-	nativeJSON, err := json.Marshal(native)
+	b, err := json.Marshal(native)
 	if err != nil {
-		return fmt.Errorf("marshal remote native: %w", err)
+		err = fmt.Errorf("marshal remote native: %w", err)
+		return
 	}
-	agentsJSON, err := json.Marshal(agents)
-	if err != nil {
-		return fmt.Errorf("marshal remote agents: %w", err)
+	nativeJSON = string(b)
+	if b, err = json.Marshal(agents); err != nil {
+		err = fmt.Errorf("marshal remote agents: %w", err)
+		return
 	}
-	manualJSON, err := json.Marshal(manual)
-	if err != nil {
-		return fmt.Errorf("marshal remote manual: %w", err)
+	agentsJSON = string(b)
+	if b, err = json.Marshal(manual); err != nil {
+		err = fmt.Errorf("marshal remote manual: %w", err)
+		return
 	}
-	capJSON, err := json.Marshal(s.Capacity)
-	if err != nil {
-		return fmt.Errorf("marshal remote capacity: %w", err)
+	manualJSON = string(b)
+	if b, err = json.Marshal(s.Capacity); err != nil {
+		err = fmt.Errorf("marshal remote capacity: %w", err)
+		return
 	}
-	resJSON, err := json.Marshal(s.ResourceProfile)
-	if err != nil {
-		return fmt.Errorf("marshal remote resource profile: %w", err)
+	capJSON = string(b)
+	if b, err = json.Marshal(s.ResourceProfile); err != nil {
+		err = fmt.Errorf("marshal remote resource profile: %w", err)
+		return
 	}
-	neighborsJSON, err := json.Marshal(s.Neighbors)
-	if err != nil {
-		return fmt.Errorf("marshal remote neighbors: %w", err)
+	resJSON = string(b)
+	if b, err = json.Marshal(s.Neighbors); err != nil {
+		err = fmt.Errorf("marshal remote neighbors: %w", err)
+		return
 	}
-	linksJSON, err := json.Marshal(s.Links)
-	if err != nil {
-		return fmt.Errorf("marshal remote link metrics: %w", err)
+	neighborsJSON = string(b)
+	if b, err = json.Marshal(s.Links); err != nil {
+		err = fmt.Errorf("marshal remote link metrics: %w", err)
+		return
 	}
-	contactsJSON, err := json.Marshal(s.Contacts)
-	if err != nil {
-		return fmt.Errorf("marshal remote contacts: %w", err)
+	linksJSON = string(b)
+	if b, err = json.Marshal(s.Contacts); err != nil {
+		err = fmt.Errorf("marshal remote contacts: %w", err)
+		return
 	}
+	contactsJSON = string(b)
 	// s.Projects stays nil on a peer that predates the field: marshalling the
 	// nil slice still lands as "null" in the column, which decodes to the same
 	// absence — the row simply reads as "unknown residence" until a heartbeat
 	// carrying the list arrives.
-	projectsJSON, err := json.Marshal(s.Projects)
-	if err != nil {
-		return fmt.Errorf("marshal remote projects: %w", err)
+	if b, err = json.Marshal(s.Projects); err != nil {
+		err = fmt.Errorf("marshal remote projects: %w", err)
+		return
 	}
+	projectsJSON = string(b)
+	if b, err = json.Marshal(s.Addrs); err != nil {
+		err = fmt.Errorf("marshal remote addrs: %w", err)
+		return
+	}
+	addrsJSON = string(b)
+	relayJSON = ""
+	if s.Relay != nil {
+		if b, err = json.Marshal(s.Relay); err != nil {
+			err = fmt.Errorf("marshal remote relay: %w", err)
+			return
+		}
+		relayJSON = string(b)
+	}
+	return
+}
 
+func UpsertRemote(db *sql.DB, id string, s CapabilitySummary) error {
+	nativeJSON, agentsJSON, manualJSON, capJSON, resJSON, neighborsJSON, linksJSON, contactsJSON, projectsJSON, addrsJSON, relayJSON, err := summaryWireJSON(s)
+	if err != nil {
+		return err
+	}
 	kind, identity := s.NodeKind, s.NodeIdentity
 	if kind == "" {
 		kind = "physical"
@@ -1008,7 +1178,68 @@ func UpsertRemote(db *sql.DB, id string, s CapabilitySummary) error {
 	if identity == "" {
 		identity = id
 	}
-	return upsertNode(db, id, s.Device, s.Chip, kind, identity, string(nativeJSON), string(agentsJSON), string(manualJSON), string(capJSON), string(resJSON), string(neighborsJSON), string(linksJSON), string(contactsJSON), string(projectsJSON), s.SchedulerTier, machineClass{OS: s.OS, Form: s.FormFactor})
+	return upsertNode(db, id, s.Device, s.Chip, kind, identity, nativeJSON, agentsJSON, manualJSON, capJSON, resJSON, neighborsJSON, linksJSON, contactsJSON, projectsJSON, addrsJSON, relayJSON, s.SchedulerTier, machineClass{OS: s.OS, Form: s.FormFactor})
+}
+
+// UpsertGossiped applies a directory row that arrived over epidemic sync
+// (M1): the card columns land like UpsertRemote, but freshness is
+// source-minted (lastSeen is the row's seen_at, not our clock) and status is
+// promote-only — a fresh signed row may mark its node online, while nothing
+// gossiped ever demotes a live one: staleness is the local sweep's job, not
+// a foreign claim's.
+func UpsertGossiped(db *sql.DB, id string, s CapabilitySummary, lastSeen int64, online bool) error {
+	nativeJSON, agentsJSON, manualJSON, capJSON, resJSON, neighborsJSON, linksJSON, contactsJSON, projectsJSON, addrsJSON, relayJSON, err := summaryWireJSON(s)
+	if err != nil {
+		return err
+	}
+	kind, identity := s.NodeKind, s.NodeIdentity
+	if kind == "" {
+		kind = "physical"
+	}
+	if identity == "" {
+		identity = id
+	}
+	status := "offline"
+	if online {
+		status = "online"
+	}
+	_, err = db.Exec(`
+		INSERT INTO employee_cache (id, name, department, chip, node_kind, node_identity, native_json, agents_json, manual_json, capacity_json, resource_profile_json, neighbors_json, links_json, contacts_json, projects_json, addrs, relay, status, last_seen, scheduler_tier, os, device_class)
+		VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			name=excluded.name, chip=excluded.chip,
+			node_kind=excluded.node_kind, node_identity=excluded.node_identity,
+			native_json=excluded.native_json, agents_json=excluded.agents_json,
+			manual_json=excluded.manual_json, capacity_json=excluded.capacity_json,
+			resource_profile_json=excluded.resource_profile_json,
+			neighbors_json=CASE WHEN excluded.neighbors_json IN ('','null') THEN employee_cache.neighbors_json
+				ELSE excluded.neighbors_json END,
+			links_json=CASE WHEN excluded.links_json IN ('','null') THEN employee_cache.links_json
+				ELSE excluded.links_json END,
+			contacts_json=CASE WHEN excluded.contacts_json IN ('','null') THEN employee_cache.contacts_json
+				ELSE excluded.contacts_json END,
+			projects_json=CASE WHEN excluded.projects_json='' THEN employee_cache.projects_json
+				ELSE excluded.projects_json END,
+			addrs=CASE WHEN excluded.addrs IN ('','null') THEN employee_cache.addrs
+				ELSE excluded.addrs END,
+			relay=CASE WHEN excluded.relay IN ('','null') THEN employee_cache.relay
+				ELSE excluded.relay END,
+			os=CASE WHEN excluded.os='' THEN employee_cache.os ELSE excluded.os END,
+			device_class=CASE WHEN excluded.device_class='' THEN employee_cache.device_class
+				ELSE employee_cache.device_class END,
+			-- promote-only status and monotone last_seen: gossip can mark a
+			-- fresh node online but never rewinds one we observed more
+			-- recently, and never asserts offline on its own.
+			status=CASE WHEN excluded.status='online' THEN 'online' ELSE employee_cache.status END,
+			last_seen=CASE WHEN excluded.last_seen > COALESCE(employee_cache.last_seen,0)
+				THEN excluded.last_seen ELSE employee_cache.last_seen END,
+			scheduler_tier=excluded.scheduler_tier`,
+		id, s.Device, s.Chip, kind, identity, nativeJSON, agentsJSON, manualJSON, capJSON, resJSON, neighborsJSON, linksJSON, contactsJSON, projectsJSON, addrsJSON, relayJSON, status, lastSeen, s.SchedulerTier, s.OS, s.FormFactor,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert gossiped %s: %w", id, err)
+	}
+	return nil
 }
 
 // Node is a single employee_cache row, decoded.
@@ -1074,6 +1305,20 @@ type Node struct {
 	// peer claims for itself is never honored — and a key change under the
 	// row demotes mesh to guarded alongside the key_verified reset.
 	Trust string `json:"trust,omitempty"`
+	// XPub is the node's advertised X25519 identity key (hex) — the transit
+	// seal's destination half, learned from signed hellos alongside PubKey.
+	XPub string `json:"x_pub,omitempty"`
+	// Addrs is the node's self-advertised dial candidates (cross-network
+	// mesh M3), decoded from the addrs column. Hints, not promises.
+	Addrs []string `json:"addrs,omitempty"`
+	// Relay is the node's advertised relay-capability block, decoded from
+	// the relay column; nil when the peer declares no relay services.
+	Relay *RelayProfile `json:"relay,omitempty"`
+	// LearnedVia names the peer that gossiped this row to us (cross-network
+	// mesh M1); "" means the row came from a direct signed hello. It is a
+	// provenance label, not an identity assertion — the row's own signature
+	// is what makes it a credential.
+	LearnedVia string `json:"learned_via,omitempty"`
 	// Reputation is a runtime-only annotation, never stored or serialized:
 	// the local delegation_metrics success rate this node observed for the
 	// row's owner, stamped in by Core when routing.reputation is enabled.
@@ -1308,7 +1553,7 @@ func AbilityMatches(declared, required string) bool {
 
 // Query returns nodes matching filters. Empty status or name matches all.
 func Query(db *sql.DB, status, name string) ([]Node, error) {
-	q := `SELECT id, COALESCE(name,''), COALESCE(chip,''), COALESCE(node_kind, 'physical'), COALESCE(node_identity, ''), COALESCE(status,''), COALESCE(last_seen,0), COALESCE(scheduler_tier,0), native_json, agents_json, manual_json, capacity_json, resource_profile_json, neighbors_json, links_json, contacts_json, projects_json, COALESCE(pub_key,''), COALESCE(key_verified,0), COALESCE(ver,''), COALESCE(trust,''), COALESCE(os,''), COALESCE(device_class,'')
+	q := `SELECT id, COALESCE(name,''), COALESCE(chip,''), COALESCE(node_kind, 'physical'), COALESCE(node_identity, ''), COALESCE(status,''), COALESCE(last_seen,0), COALESCE(scheduler_tier,0), native_json, agents_json, manual_json, capacity_json, resource_profile_json, neighbors_json, links_json, contacts_json, projects_json, COALESCE(pub_key,''), COALESCE(key_verified,0), COALESCE(ver,''), COALESCE(trust,''), COALESCE(os,''), COALESCE(device_class,''), COALESCE(x_pub,''), COALESCE(addrs,''), COALESCE(relay,''), COALESCE(learned_via,'')
 	      FROM employee_cache WHERE 1=1`
 	var args []any
 	if status != "" {
@@ -1332,10 +1577,11 @@ func Query(db *sql.DB, status, name string) ([]Node, error) {
 		// later by a migration (legacy rows are NULL until re-upserted), and a
 		// partial insert leaves the others NULL too. Scan all of them as nullable
 		// so a single such row does not fail the whole directory query.
-		var native, agents, manual, capJSON, resJSON, neighborsJSON, linksJSON, contactsJSON, projectsJSON sql.NullString
+		var native, agents, manual, capJSON, resJSON, neighborsJSON, linksJSON, contactsJSON, projectsJSON, addrsJSON, relayJSON sql.NullString
 		if err := rows.Scan(&n.ID, &n.Name, &n.Chip, &n.NodeKind, &n.NodeIdentity, &n.Status, &n.LastSeen, &n.SchedulerTier,
 			&native, &agents, &manual, &capJSON, &resJSON, &neighborsJSON, &linksJSON, &contactsJSON, &projectsJSON,
-			&n.PubKey, &n.KeyVerified, &n.Ver, &n.Trust, &n.OS, &n.FormFactor); err != nil {
+			&n.PubKey, &n.KeyVerified, &n.Ver, &n.Trust, &n.OS, &n.FormFactor, &n.XPub, &addrsJSON, &relayJSON,
+			&n.LearnedVia); err != nil {
 			return nil, err
 		}
 		if native.Valid && native.String != "" {
@@ -1378,6 +1624,15 @@ func Query(db *sql.DB, status, name string) ([]Node, error) {
 		}
 		if projectsJSON.Valid && projectsJSON.String != "" {
 			_ = json.Unmarshal([]byte(projectsJSON.String), &n.Projects)
+		}
+		if addrsJSON.Valid && addrsJSON.String != "" {
+			_ = json.Unmarshal([]byte(addrsJSON.String), &n.Addrs)
+		}
+		if relayJSON.Valid && relayJSON.String != "" && relayJSON.String != "null" {
+			var r RelayProfile
+			if err := json.Unmarshal([]byte(relayJSON.String), &r); err == nil {
+				n.Relay = &r
+			}
 		}
 		out = append(out, n)
 	}

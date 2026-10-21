@@ -220,6 +220,16 @@ func (c *Core) sweepStalePeers(ctx context.Context) {
 		c.logger.Info("stale peer marked offline", "peer", id)
 	}
 
+	// Directory GC: unpinned rows (gossip-only entries, no verified-hello
+	// key) that stayed offline past dirRowTTL are deleted. ExpireStale only
+	// flips the status, so without this a member can grow employee_cache
+	// without bound. Pinned rows survive — their key is a TOFU commitment.
+	if n, err := ledger.PruneOffline(c.db, int64(dirRowTTL.Seconds()), exclude); err != nil {
+		c.logger.Warn("prune offline directory rows", "err", err)
+	} else if n > 0 {
+		c.logger.Info("pruned offline directory rows", "rows", n)
+	}
+
 	// Session-ghost GC: rows keyed by an ephemeral "-8hex" id can never host
 	// a fleet member again once their session ends — delete them outright
 	// instead of letting them pile up as offline routing candidates.

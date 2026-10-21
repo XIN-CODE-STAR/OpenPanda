@@ -158,7 +158,39 @@ async function request<T>(
   throw lastErr
 }
 
+// requestText is request's text-body twin — patch previews and other raw
+// payloads that are not JSON.
+async function requestText(method: string, path: string): Promise<string> {
+  const headers: Record<string, string> = {}
+  const token = currentToken()
+  if (token) headers.Authorization = `Bearer ${token}`
+  const res = await fetch(path, { method, headers, signal: AbortSignal.timeout(60_000) })
+  if (!res.ok) {
+    if (res.status === 401) {
+      clearToken()
+      unauthorizedListeners.forEach((fn) => fn())
+    }
+    const text = await res.text().catch(() => '')
+    throw new ApiError(res.status, text || res.statusText)
+  }
+  return res.text()
+}
+
 // ---- Wire types (mirror webui/panel JSON) ----
+
+/** Self-evolution patch set as GET /api/selfevo/{id} returns it. */
+export interface SelfEvoSet {
+  id: string
+  state: string
+  title: string
+  base: string
+  version: string
+  producer: string
+  files: string[]
+  critical: boolean
+  critical_paths?: string[]
+  gate_ok: boolean
+}
 
 export interface TaskEvent {
   ts: number
@@ -208,9 +240,9 @@ export interface ScoredCandidate {
   node_id: string
   node_name?: string
   // total_score is the flat numeric ranking (§3.1.1 short path); consumers
-  // that want the "why" read breakdown.*. Both are populated on the wire.
+  // that want the "why" read score_breakdown.*. Both are populated on the wire.
   total_score: number
-  breakdown: ScoreBreakdown
+  score_breakdown: ScoreBreakdown
 }
 
 export interface TraceEvent {
@@ -411,6 +443,34 @@ export interface TaskBoardMessage {
   body: string
   sent_at: number
   recv_at: number
+  /** When the task's round loop folded this note into its prompt; 0 = still
+   *  waiting. recv_at cannot answer that (it is stamped on arrival), so this
+   *  is the only field that separates "queued" from "read". */
+  consumed_at?: number
+}
+
+/** One row of the composer's pending strip — a note typed mid-turn that no
+ *  round has folded yet. `key` is what edit/drop/promote address. */
+export interface SessionNote {
+  key: string
+  task_id?: string
+  text: string
+  attachments?: string[]
+  /** queue = waits for the next round; inject = leads it. */
+  mode: 'queue' | 'inject' | string
+  at: number
+  /** True for a board row (durable across reloads and restarts). */
+  durable?: boolean
+}
+
+/** Outcome of an edit/drop/promote on a pending note. `warning` carries the
+ *  server's caveat when an inject could not abort (another process runs the
+ *  round), so the surface never claims a cut it did not make. */
+export interface NoteResult {
+  key: string
+  task_id?: string
+  status: 'edited' | 'dropped' | 'queued' | 'interrupted' | string
+  warning?: string
 }
 
 export interface ApprovalOperation {
@@ -889,6 +949,54 @@ export const api = {
     return request('GET', `/api/tasks/${encodeURIComponent(id)}/messages`)
   },
 
+  /** Type into a thread while its turn streams — the composer's queue/inject
+   *  pair. A thread whose task is still live takes the durable board path
+   *  (the response then carries its task_id); a plain answer turn rides the
+   *  streaming ask's steer channel, which only exists while the turn runs.
+   *  attachments are upload mentions (see uploadSessionFiles); the server
+   *  appends them to the note as `@path` refs, so a screenshot can ride a
+   *  queue/inject instead of being refused with "no files mid-turn". */
+  sendSessionMessage(
+    id: string,
+    text: string,
+    inject: boolean,
+    attachments: string[] = [],
+  ): Promise<TaskMessageResult> {
+    return request('POST', `/api/sessions/${encodeURIComponent(id)}/messages`, {
+      text,
+      inject,
+      attachments,
+    })
+  },
+
+  /** The composer's pending strip: notes this user queued or injected that no
+   *  round has folded yet. Board rows survive a reload; `mem:` keys are the
+   *  process-local steer queue of a plain answer turn. */
+  sessionNotes(id: string): Promise<{ session_id: string; notes: SessionNote[] }> {
+    return request('GET', `/api/sessions/${encodeURIComponent(id)}/notes`)
+  },
+
+  /** Rewrite a pending note before a round reads it. Refused with 409 once the
+   *  round has consumed it — the board must not disagree with the prompt. */
+  editSessionNote(id: string, key: string, text: string, attachments: string[] = []): Promise<NoteResult> {
+    return request('PATCH', `/api/sessions/${encodeURIComponent(id)}/notes/${encodeURIComponent(key)}`, {
+      text,
+      attachments,
+    })
+  },
+
+  /** Take a pending note back out of the queue. */
+  deleteSessionNote(id: string, key: string): Promise<NoteResult> {
+    return request('DELETE', `/api/sessions/${encodeURIComponent(id)}/notes/${encodeURIComponent(key)}`)
+  },
+
+  /** Escalate a queued note to an inject in place — no second row, so the
+   *  round reads the same words once. Reports "interrupted" only when this
+   *  console's engine actually aborted the running round. */
+  promoteSessionNote(id: string, key: string): Promise<NoteResult> {
+    return request('POST', `/api/sessions/${encodeURIComponent(id)}/notes/${encodeURIComponent(key)}/promote`)
+  },
+
   /** Persist a drag: ids arrive top-to-bottom and get seq 1..n. */
   reorderTasks(ids: string[]): Promise<{ updated: number }> {
     return request('POST', '/api/tasks/reorder', { ids })
@@ -906,6 +1014,17 @@ export const api = {
 
   task(id: string): Promise<Task> {
     return request('GET', `/api/tasks/${id}`)
+  },
+
+  /** Self-evolution patch sets: the merge-review surface. A proposal is a
+   *  review task whose spec.kind === 'self_merge'; these endpoints show the
+   *  diff the approve button would merge. */
+  selfEvoSet(id: string): Promise<SelfEvoSet> {
+    return request('GET', `/api/selfevo/${encodeURIComponent(id)}`)
+  },
+
+  selfEvoFile(id: string, name: string): Promise<string> {
+    return requestText('GET', `/api/selfevo/${encodeURIComponent(id)}/file?n=${encodeURIComponent(name)}`)
   },
 
   /** Artifact data plane: the file listing inside the task's output
@@ -2060,6 +2179,11 @@ export interface AskStreamHandlers {
   onStatus(text: string, ev?: AskStatusEvent): void
   onOperation(operationID: string): void
   onResult(r: AskResult): void
+  /** A note the round loop actually folded into its prompt, with the round that
+   *  carries it. The note was accepted earlier (POST /api/sessions/{id}/messages);
+   *  this event is the proof it reached the model, so the console can stop
+   *  calling it "queued". Fires zero or more times per turn. */
+  onSteer?(text: string, round: number): void
   /** `code` carries the panel's machine reason when one exists —
    *  "model_config" marks the fix-in-settings class of failure. */
   onError(message: string, code?: string, info?: AskErrorInfo): void
@@ -2096,6 +2220,7 @@ export async function askSessionStream(
       else if (event === 'delta') h.onDelta(payload.text ?? '')
       else if (event === 'status') h.onStatus(payload.text ?? '', payload as AskStatusEvent)
       else if (event === 'operation') h.onOperation(payload.operation_id ?? '')
+      else if (event === 'steer') h.onSteer?.(payload.text ?? '', payload.round ?? 0)
       else if (event === 'result') h.onResult(payload as AskResult)
       else if (event === 'error')
         h.onError(payload.message ?? 'unknown error', payload.code || undefined, {

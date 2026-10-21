@@ -227,6 +227,33 @@ func TestTrustConfigOverrides(t *testing.T) {
 	}
 }
 
+// TestTrustConfigSelfSigned: the accept.<tier>.self_signed knob defaults to
+// the built-in tier tables (guarded strips a self-built origin's consent),
+// honors the guarded override, and rejects unknown values; mesh and open
+// stay untunable as always.
+func TestTrustConfigSelfSigned(t *testing.T) {
+	if d := (TrustConfig{}).AcceptPolicyFor(trust.Guarded).SelfSigned; d != trust.SelfSignedStrip {
+		t.Fatalf("default guarded self_signed = %q, want %q", d, trust.SelfSignedStrip)
+	}
+	if d := (TrustConfig{}).AcceptPolicyFor(trust.Mesh).SelfSigned; d != trust.SelfSignedHonor {
+		t.Fatalf("mesh self_signed = %q, want %q (untunable)", d, trust.SelfSignedHonor)
+	}
+	if d := (TrustConfig{}).AcceptPolicyFor(trust.Open).SelfSigned; d != trust.SelfSignedRefuse {
+		t.Fatalf("open self_signed = %q, want %q (untunable)", d, trust.SelfSignedRefuse)
+	}
+	tc := TrustConfig{Accept: TrustAcceptConfig{Guarded: TrustAcceptPolicy{SelfSigned: "honor"}}}
+	if got := tc.AcceptPolicyFor(trust.Guarded).SelfSigned; got != "honor" {
+		t.Fatalf("self_signed override = %q, want honor", got)
+	}
+	tc = TrustConfig{Accept: TrustAcceptConfig{Guarded: TrustAcceptPolicy{SelfSigned: "refuse"}}}
+	if got := tc.AcceptPolicyFor(trust.Guarded).SelfSigned; got != "refuse" {
+		t.Fatalf("self_signed override = %q, want refuse", got)
+	}
+	if err := (TrustConfig{Accept: TrustAcceptConfig{Guarded: TrustAcceptPolicy{SelfSigned: "maybe"}}}).Validate(); err == nil {
+		t.Fatal("invalid self_signed must fail validation")
+	}
+}
+
 func TestLoadMalformedReturnsError(t *testing.T) {
 	p := writeTemp(t, "node: [unclosed\n  bad: : yaml: [")
 	if _, err := Load(p); err == nil {

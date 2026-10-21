@@ -356,6 +356,62 @@ func TestUpsertRemoteRoundTrip(t *testing.T) {
 	}
 }
 
+// TestUpsertRemoteRelayAddrs covers the M3 reachability columns: a summary
+// carrying relay services and advertised dial addresses must round-trip
+// through the directory, and a follow-up summary from a peer that predates
+// the fields must preserve the last claim rather than blanking it.
+func TestUpsertRemoteRelayAddrs(t *testing.T) {
+	db := openLedgerDB(t)
+	sum := CapabilitySummary{
+		Device: "relay-1",
+		Relay:  &RelayProfile{Rendezvous: true, Transit: true, MaxKbps: 2048, ForTrust: "mesh"},
+		Addrs:  []string{"203.0.113.7:7836", "10.0.0.4:7836"},
+	}
+	if err := UpsertRemote(db, "relay-1", sum); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	nodes, err := Query(db, "", "relay-1")
+	if err != nil || len(nodes) != 1 {
+		t.Fatalf("query: %v len=%d", err, len(nodes))
+	}
+	n := nodes[0]
+	if n.Relay == nil || !n.Relay.Rendezvous || !n.Relay.Transit || n.Relay.MaxKbps != 2048 || n.Relay.ForTrust != "mesh" {
+		t.Fatalf("relay profile not round-tripped: %+v", n.Relay)
+	}
+	if len(n.Addrs) != 2 || n.Addrs[0] != "203.0.113.7:7836" {
+		t.Fatalf("addrs not round-tripped: %+v", n.Addrs)
+	}
+
+	// A partial summary from an old build (no relay, no addrs) must leave
+	// the stored reachability alone — absent says nothing, it never erases.
+	if err := UpsertRemote(db, "relay-1", CapabilitySummary{Device: "relay-1"}); err != nil {
+		t.Fatalf("partial upsert: %v", err)
+	}
+	n = mustQueryOne(t, db, "relay-1")
+	if n.Relay == nil || len(n.Addrs) != 2 {
+		t.Fatalf("partial summary blanked reachability: relay=%+v addrs=%v", n.Relay, n.Addrs)
+	}
+
+	// An explicit empty addr list IS a claim: the peer retracted its dial
+	// candidates (e.g. listener moved to loopback).
+	if err := UpsertRemote(db, "relay-1", CapabilitySummary{Device: "relay-1", Addrs: []string{}}); err != nil {
+		t.Fatalf("retract upsert: %v", err)
+	}
+	n = mustQueryOne(t, db, "relay-1")
+	if len(n.Addrs) != 0 {
+		t.Fatalf("explicit empty addrs did not clear the list: %+v", n.Addrs)
+	}
+}
+
+func mustQueryOne(t *testing.T, db *sql.DB, id string) Node {
+	t.Helper()
+	nodes, err := Query(db, "", id)
+	if err != nil || len(nodes) != 1 {
+		t.Fatalf("query %s: %v len=%d", id, err, len(nodes))
+	}
+	return nodes[0]
+}
+
 func TestNodeMatches(t *testing.T) {
 	n := Node{
 		Native: []NativeAbility{{ID: "gpio:read"}},

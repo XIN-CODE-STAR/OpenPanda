@@ -144,7 +144,7 @@ export default function DecisionOrbit(props: DecisionOrbitProps) {
   }, [classify])
 
   const routeSummary = useMemo(() => {
-    const target = route?.target ?? route?.chosen
+    const target = route?.target_node ?? route?.target ?? route?.chosen
     if (!target && !route?.candidates?.length) return null
     const cands = route?.candidates?.length ?? 0
     // §4.1.1 折叠态：「已派 2 节点」
@@ -302,7 +302,7 @@ export default function DecisionOrbit(props: DecisionOrbitProps) {
                 <RouteBlock
                   rows={routeRows}
                   selfNodeId={selfNodeId}
-                  chosen={route?.target ?? route?.chosen}
+                  chosen={route?.target_node ?? route?.target ?? route?.chosen}
                   skipped={Boolean(execStart) && !route}
                 />
               )}
@@ -434,6 +434,9 @@ function ClassifyLine({ classify, skipped }: { classify: ClassifySlot | null; sk
 type RouteRow = {
   /** Human readable stage name; empty string for a non-plan task. */
   stageLabel: string
+  /** The candidate's node id — `chosen` is the display name, so the
+   *  picked-row highlight has to compare ids, not names. */
+  nodeId?: string
   /** Candidate(s) actually chosen for this stage. */
   chosen?: string
   /** §4.1.1 "（本机，有 codex）" / "（显存 24G ✓）" / "（空闲）". */
@@ -464,7 +467,7 @@ function RouteBlock(props: {
           role="listitem"
           class={
             'orbit-route-line' +
-            ((r.chosen && (r.chosen === chosen || r.chosen === selfNodeId)) ? ' chosen' : '')
+            ((r.nodeId && (r.nodeId === chosen || r.nodeId === selfNodeId)) ? ' chosen' : '')
           }
         >
           {r.stageLabel && <span class="stage-name">{r.stageLabel}</span>}
@@ -501,7 +504,10 @@ function ExecLine(props: {
         <>
           <span
             class="orbit-bar"
-            role="img"
+            role="progressbar"
+            aria-valuenow={progress}
+            aria-valuemin={0}
+            aria-valuemax={100}
             aria-label={t('orbit.summary.progress', { pct: progress })}
           >
             <span class="orbit-bar-fill" style={`--prog:${progress}%`} />
@@ -597,6 +603,9 @@ interface ClassifySlot {
 }
 interface RouteSlot {
   action?: 'local' | 'forward' | 'decline' | string
+  /** The wire key the scheduler emits (submit.go); `target`/`chosen` stay as
+   *  fallbacks for traces written before the name settled. */
+  target_node?: string
   chosen?: string
   target?: string
   reason?: string
@@ -642,7 +651,7 @@ function buildRouteRows(x: {
 }): RouteRow[] {
   const cands = x.route?.candidates ?? []
   const labels = x.planMeta?.stage_labels ?? []
-  const chosenTarget = x.route?.target ?? x.route?.chosen
+  const chosenTarget = x.route?.target_node ?? x.route?.target ?? x.route?.chosen
   const isPlan = (x.classify?.kind ?? x.classify?.class) === 'plan'
 
   // Plan: one row per stage label. If a stage label matches the chosen
@@ -651,7 +660,9 @@ function buildRouteRows(x: {
   // we stage-label the chosen candidate's row and attribute the top other
   // scores to the remaining labels in order.
   if (isPlan && labels.length > 0) {
-    const sorted = [...cands].sort((a, b) => (b.breakdown?.total ?? 0) - (a.breakdown?.total ?? 0))
+    const sorted = [...cands].sort(
+      (a, b) => (b.score_breakdown?.total ?? b.total_score ?? 0) - (a.score_breakdown?.total ?? a.total_score ?? 0),
+    )
     const rows: RouteRow[] = labels.map((label, i) => {
       const isActiveStage = x.planMeta?.stage_id === label
       const cand =
@@ -661,16 +672,17 @@ function buildRouteRows(x: {
         sorted[i] ??
         sorted[0]
       if (!cand) {
-        return { stageLabel: label, chosen: chosenTarget, note: '', score: undefined }
+        return { stageLabel: label, nodeId: chosenTarget, chosen: chosenTarget, note: '', score: undefined }
       }
       const note = cand.node_id === x.selfNodeId
         ? t('orbit.route.localAttr')
         : t('orbit.route.remoteAttr')
       return {
         stageLabel: label,
+        nodeId: cand.node_id,
         chosen: cand.node_name ?? cand.node_id,
         note,
-        score: cand.breakdown?.total,
+        score: cand.score_breakdown?.total ?? cand.total_score,
       }
     })
     return rows
@@ -678,7 +690,9 @@ function buildRouteRows(x: {
 
   // Non-plan task: single row — the chosen candidate only.
   if (!cands.length) return []
-  const sorted = [...cands].sort((a, b) => (b.breakdown?.total ?? 0) - (a.breakdown?.total ?? 0))
+  const sorted = [...cands].sort(
+    (a, b) => (b.score_breakdown?.total ?? b.total_score ?? 0) - (a.score_breakdown?.total ?? a.total_score ?? 0),
+  )
   const chosen = cands.find((c) => c.node_id === chosenTarget) ?? sorted[0]
   if (!chosen) return []
   const note = chosen.node_id === x.selfNodeId
@@ -686,9 +700,10 @@ function buildRouteRows(x: {
     : t('orbit.route.remoteAttr')
   return [{
     stageLabel: '',
+    nodeId: chosen.node_id,
     chosen: chosen.node_name ?? chosen.node_id,
     note,
-    score: chosen.breakdown?.total,
+    score: chosen.score_breakdown?.total ?? chosen.total_score,
   }]
 }
 

@@ -38,10 +38,16 @@ type Manager struct {
 }
 
 // stagedRelease is a downloaded-and-verified release waiting to be applied.
+// local marks a tree staged by StageLocal (the self-evolution pipeline's own
+// build): it never passed signature verification, so a successful apply of
+// it must NOT refresh the panda.release rollback copy — the fallback exists
+// to out-live self builds, and letting one overwrite it would leave nothing
+// signed to fall back to.
 type stagedRelease struct {
 	dir     string // temporary staging dir (removed on cleanup)
 	root    string // extracted openpanda/ dir inside dir
 	version string
+	local   bool
 }
 
 // New builds a Manager from opts. Empty values fall back to safe defaults:
@@ -201,6 +207,68 @@ func (m *Manager) DownloadForce(ctx context.Context, force bool) error {
 	m.staged = &stagedRelease{dir: dir, root: root, version: version}
 	m.stage = StageStaged
 	return nil
+}
+
+// StageLocal stages a locally built release tree for the same Apply path a
+// downloaded release takes — the self-evolution seam (design §2.2). root must
+// already hold the release layout ({root}/bin/panda plus the optional
+// adapters/ and extensions/voice/ resource dirs the apply step syncs). The
+// tree is COPIED into a Manager-owned staging dir, because Apply and Cancel
+// both remove staged.dir — a borrowed worktree would be deleted under the
+// caller. No signature check runs: that verification is download-channel
+// machinery, bypassed by design rather than punched through.
+func (m *Manager) StageLocal(root, version string) error {
+	if _, err := os.Stat(filepath.Join(root, "bin", exeName())); err != nil {
+		return fmt.Errorf("stage local tree has no %s binary: %w", exeName(), err)
+	}
+	dir, err := os.MkdirTemp("", "openpanda-selfstage-")
+	if err != nil {
+		return err
+	}
+	dst := filepath.Join(dir, "openpanda")
+	if err := copyTree(root, dst); err != nil {
+		os.RemoveAll(dir)
+		return fmt.Errorf("stage local tree: %w", err)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.staged != nil {
+		os.RemoveAll(m.staged.dir)
+	}
+	m.staged = &stagedRelease{dir: dir, root: dst, version: version, local: true}
+	m.stage = StageStaged
+	m.latest = version
+	m.errMsg = ""
+	return nil
+}
+
+// copyTree recursively copies src into dst (created fresh). Symlinks are
+// duplicated as symlinks; resource files keep their mode bits.
+func copyTree(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		to := filepath.Join(dst, rel)
+		mode := info.Mode()
+		switch {
+		case mode.IsDir():
+			return os.MkdirAll(to, 0o755)
+		case mode&os.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(target, to)
+		case mode.IsRegular():
+			return copyFile(path, to, mode.Perm())
+		}
+		return nil
+	})
 }
 
 // Apply installs the staged release over the running install and restarts the

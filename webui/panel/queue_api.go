@@ -149,13 +149,16 @@ func (h *handler) createTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"task_id": task.TaskID, "session_id": sessionID, "state": task.State, "warning": warn})
 }
 
-// sendMessageRequest is the body of POST /api/tasks/{id}/messages — the two
-// send modes: a queued note the agent reads at its next supervision round,
-// or an injected steer that leads the next round and aborts the in-flight
-// one when this console's engine runs the task.
+// sendMessageRequest is the body of POST /api/tasks/{id}/messages and
+// POST /api/sessions/{id}/messages — the two send modes: a queued note the
+// agent reads at its next supervision round, or an injected steer that leads
+// the next round and aborts the in-flight one when this console's engine runs
+// the task. Attachments are workspace paths the composer already uploaded;
+// the store appends one `@path` line each, so the note stays self-contained.
 type sendMessageRequest struct {
-	Text   string `json:"text"`
-	Inject bool   `json:"inject"`
+	Text        string   `json:"text"`
+	Attachments []string `json:"attachments"`
+	Inject      bool     `json:"inject"`
 }
 
 // sendTaskMessage serves POST /api/tasks/{id}/messages (steer.go): deliver a
@@ -171,19 +174,20 @@ func (h *handler) sendTaskMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Text = strings.TrimSpace(req.Text)
-	if req.Text == "" {
+	req.Attachments = cleanAttachments(req.Attachments)
+	if req.Text == "" && len(req.Attachments) == 0 {
 		writeErr(w, http.StatusBadRequest, errors.New("text must not be empty"))
 		return
 	}
 	status := "queued"
 	warning := ""
 	if eng := h.currentEngine(); eng != nil {
-		st, warn, err := eng.SendTaskMessage(r.Context(), id, req.Text, req.Inject)
-		if err != nil {
-			writeTaskMessageErr(w, err)
+		res, serr := eng.SendTaskNote(r.Context(), id, req.Text, req.Attachments, req.Inject)
+		if serr != nil {
+			writeTaskMessageErr(w, serr)
 			return
 		}
-		status, warning = st, warn
+		status, warning = res.Status, res.Warning
 	} else {
 		if req.Inject {
 			writeErr(w, http.StatusServiceUnavailable, errors.New("inject requires the ask engine (set model.base_url to enable)"))
@@ -194,7 +198,7 @@ func (h *handler) sendTaskMessage(w http.ResponseWriter, r *http.Request) {
 		if h.cfg != nil {
 			nodeID = core.RuntimeNodeID(h.cfg.Node.Name, h.cfg.Node.Kind, h.cfg.Node.EffectiveIdentity())
 		}
-		if err := h.store.PostUserMessage(r.Context(), id, req.Text, grade, nodeID); err != nil {
+		if _, err := h.store.PostUserNote(r.Context(), id, req.Text, req.Attachments, grade, nodeID); err != nil {
 			writeTaskMessageErr(w, err)
 			return
 		}
@@ -246,6 +250,12 @@ func writeTaskMessageErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		writeErr(w, http.StatusNotFound, errors.New("no such task"))
+	case strings.Contains(msg, "no such note"):
+		writeErr(w, http.StatusNotFound, errors.New(msg))
+	case strings.Contains(msg, "already read"):
+		// The round folded this note into a prompt; editing or dropping it now
+		// would leave the board disagreeing with what the model was told.
+		writeErr(w, http.StatusConflict, errors.New(msg))
 	case strings.Contains(msg, "messages reach running or queued work only"),
 		strings.Contains(msg, "runs on "):
 		writeErr(w, http.StatusConflict, errors.New(msg))

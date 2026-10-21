@@ -70,12 +70,15 @@ export function App() {
   // system. A bookmark saved back then still has to land somewhere useful, so
   // it drops the reader on the thread with the card raised; the URL is
   // rewritten because the card is state, not a destination. Keyed on the route
-  // so a hash typed into the address bar of an already-open tab works too.
+  // so a hash typed into the address bar of an already-open tab works too, and
+  // gated on `authed` so a bookmark opened against the token gate keeps its
+  // meaning — consuming it before the bell mounted would lose the card.
   useEffect(() => {
+    if (!authed) return
     if (!location.hash.replace(/^#\/?/, '').startsWith('reminders')) return
     history.replaceState(null, '', '#/chat')
     requestAnimationFrame(openReminders)
-  }, [route])
+  }, [route, authed])
 
   if (!authed) {
     return (

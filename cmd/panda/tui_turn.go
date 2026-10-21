@@ -100,6 +100,13 @@ func (m tuiModel) onDone(msg doneMsg) (tea.Model, tea.Cmd) {
 	}
 	m.mode = modeIdle
 	m.stream = nil
+	// The turn is over: a note staged against it can no longer be promoted
+	// (its task row, if any, has run past the round the steer would lead), and
+	// the next mid-turn Enter must start a fresh queue rather than escalating
+	// stale text. The board row itself stays — it is durable and may still be
+	// read by the task's next round.
+	m.staged = nil
+	m.streamTask = ""
 
 	if msg.err != nil {
 		// A user-initiated cancel (Esc / Ctrl+C mid-stream) surfaces as a context

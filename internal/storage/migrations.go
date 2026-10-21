@@ -86,6 +86,47 @@ var migrations = []Migration{
 	// that row too, since 50 will never run again on it.
 	{Version: 54, Name: "add_employee_machine_class", Apply: migrateV54},
 	{Version: 55, Name: "add_cancel_outbox_attempt", Apply: migrateV55},
+	{Version: 56, Name: "add_employee_transit_dir", Apply: migrateV56},
+	{Version: 57, Name: "add_employee_prov", Apply: migrateV57},
+	{Version: 58, Name: "add_task_messages_consumed_at", Apply: migrateV58},
+	{Version: 59, Name: "add_employee_dir_row", Apply: migrateV59},
+	{Version: 60, Name: "add_task_messages_attachments", Apply: migrateV60},
+}
+
+// migrateV58 adds task_messages.consumed_at: the moment the recipient's round
+// loop folded that slot into its prompt (0 = never). recv_at cannot carry this
+// signal — PutTaskMessage stamps it on arrival, so every row reads "received"
+// the moment it is posted, and a surface could never tell "waiting for the next
+// round" from "already read". The read is written back by the consumer
+// (Core.takeSteer / Core.drainTaskMessages), which is why it belongs on the row
+// rather than in an in-memory seen-set: a console rendering the board lives in
+// another process, or another device, and both need the same answer.
+func migrateV58(tx MigrationExec) error {
+	_, err := tx.Exec(`ALTER TABLE task_messages
+		ADD COLUMN consumed_at INTEGER NOT NULL DEFAULT 0`)
+	return err
+}
+
+// migrateV59 adds the gossip-layer columns directory sync (§2) serves from:
+// dir_row_json is the verbatim canonical row JSON as it arrived (or as we
+// minted it for ourselves), dir_sig its Ed25519 signature extracted for the
+// signed-beats-unsigned conflict compare. Serving the stored bytes keeps a
+// forwarded row's signature verifiable byte-for-byte no matter how the live
+// columns drifted since — the row is a credential, not a view.
+func migrateV59(tx MigrationExec) error {
+	exists, err := tableExistsTx(tx, "employee_cache")
+	if err != nil || !exists {
+		return err
+	}
+	for _, col := range []struct{ name, def string }{
+		{"dir_row_json", "TEXT NOT NULL DEFAULT ''"},
+		{"dir_sig", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := addColumnIfMissingTx(tx, "employee_cache", col.name, col.def); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // migrateV44 adds task_messages: the per-scope message board sibling tasks
@@ -1343,4 +1384,62 @@ func migrateV55(tx MigrationExec) error {
 		return err
 	}
 	return addColumnIfMissingTx(tx, "cancel_outbox", "attempt_id", "TEXT NOT NULL DEFAULT ''")
+}
+
+// migrateV56 adds the cross-network mesh directory columns (author design
+// 2026-10-21 §6.2). x_pub is the peer's X25519 identity key (hex) learned
+// from signed hellos next to pub_key — transit sealing needs it to open an
+// ECIES-style channel to that node. addrs/relay carry the peer's
+// self-advertised dial candidates and relay capability block as JSON from
+// its capability summary. learned_via records how the row reached us
+// (” = direct hello; populated when directory gossip lands in P2).
+// seen_at is the source-minted freshness the signed row carries — distinct
+// from last_seen, which is OUR local observation clock. content_hash is the
+// change-detection digest over the row's signed content (minus seen_at/sig):
+// directory gossip compares it instead of shipping whole rows.
+func migrateV56(tx MigrationExec) error {
+	exists, err := tableExistsTx(tx, "employee_cache")
+	if err != nil || !exists {
+		return err
+	}
+	for _, col := range []struct{ name, def string }{
+		{"x_pub", "TEXT NOT NULL DEFAULT ''"},
+		{"addrs", "TEXT NOT NULL DEFAULT ''"},
+		{"relay", "TEXT NOT NULL DEFAULT ''"},
+		{"learned_via", "TEXT NOT NULL DEFAULT ''"},
+		{"seen_at", "INTEGER NOT NULL DEFAULT 0"},
+		{"content_hash", "BLOB"},
+	} {
+		if err := addColumnIfMissingTx(tx, "employee_cache", col.name, col.def); err != nil {
+			return err
+		}
+	}
+	_, err = tx.Exec(`CREATE INDEX IF NOT EXISTS idx_employee_seen ON employee_cache(seen_at)`)
+	return err
+}
+
+// migrateV57 adds employee_cache.prov: the peer's self-asserted build
+// provenance (release | self | unsigned), stamped from
+// hello/heartbeat `prov` the same way `ver` follows the wire. The trust
+// layer reads it when weighing a self-signed origin's work
+// (accept.<tier>.self_signed); rows from pre-column peers stay empty —
+// "never reported", distinct from an honest "unsigned".
+func migrateV57(tx MigrationExec) error {
+	exists, err := tableExistsTx(tx, "employee_cache")
+	if err != nil || !exists {
+		return err
+	}
+	return addColumnIfMissingTx(tx, "employee_cache", "prov", "TEXT NOT NULL DEFAULT ''")
+}
+
+// migrateV60 adds task_messages.attachments: the files a user rode along with
+// a queue/inject note, as a JSON array of workspace-relative paths. The body
+// already carries them as `@path` refs for the agent (see PostUserNote); this
+// column is what lets a console draw the note's chips and let the user edit
+// the prose without re-typing the attachment block. Empty = no attachments,
+// which is every row written before this migration.
+func migrateV60(tx MigrationExec) error {
+	_, err := tx.Exec(`ALTER TABLE task_messages
+		ADD COLUMN attachments TEXT NOT NULL DEFAULT ''`)
+	return err
 }

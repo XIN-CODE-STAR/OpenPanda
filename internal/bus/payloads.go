@@ -27,14 +27,30 @@ func unixNow() int64 { return time.Now().Unix() }
 // indistinguishable from a replay. Old peers send none and are verified
 // against the two-field form.
 type HelloPayload struct {
-	NodeID string          `json:"node_id"`
-	Ver    string          `json:"ver"`
+	NodeID string `json:"node_id"`
+	Ver    string `json:"ver"`
+	// Prov is the sender's build provenance (release | self | unsigned) —
+	// the version.ProvenanceClass stamp. Absent means a pre-provenance peer
+	// that does not send the field; a current dev build sends "unsigned"
+	// explicitly. Self-asserted and outside the signature domain, like Ver:
+	// honest-node bookkeeping the receiver's trust policy reads
+	// (accept.<tier>.self_signed), never a security proof — the locally
+	// asserted tier stays the boundary.
+	Prov   string          `json:"prov,omitempty"`
 	Card   json.RawMessage `json:"card,omitempty"`
 	Ts     int64           `json:"ts,omitempty"`    // unix seconds, bound into Sig
 	Nonce  string          `json:"nonce,omitempty"` // per-dial random, bound into Sig when present
 	Sig    string          `json:"sig"`
 	PubKey string          `json:"pub_key,omitempty"` // Ed25519 public key hex (cryptographic identity)
 	EdSig  string          `json:"ed_sig,omitempty"`  // Ed25519 signature over NodeID:Ts:Nonce
+	// XPub is the node's X25519 identity key (hex) — the second half of the
+	// dual-key identity (cross-network mesh design §3): Ed25519 signs,
+	// X25519 agrees transit keys. It is self-asserted like UDPPort: only
+	// recorded after the hello's EdSig verified the claimed Ed25519 key, and
+	// a peer that lies about its own x_pub only breaks sealing TO itself.
+	// Peers that predate the field send nothing and transit to them
+	// degrades to the member-level mesh seal.
+	XPub string `json:"x_pub,omitempty"`
 	// UDPPort advertises the sender's datagram-plane listener (farsky). A
 	// peer that cannot hold a TCP session to us can still be reached by a
 	// punch: combine this port with the IP we observe its connection coming
@@ -128,6 +144,22 @@ type HeartbeatPayload struct {
 	// fleet panel's version-skew warning diffs against its own build.
 	// Absent on old nodes; receivers leave any stored stamp alone.
 	Ver string `json:"ver,omitempty"`
+	// Prov mirrors HelloPayload.Prov on every beat so a mid-life binary
+	// swap (update apply, self-build) refreshes the directory row without
+	// waiting for a reconnect. Absent on old nodes; receivers leave any
+	// stored stamp alone.
+	Prov string `json:"prov,omitempty"`
+	// DirDigest is the sender's directory table digest (cross-network mesh
+	// M1): SHA-256 over the sorted "id:content_hash" lines of every gossipable
+	// row (session/ghost rows excluded). A receiver whose own digest differs
+	// sends dir_pull — matching digests mean the two tables already agree and
+	// no frames flow. Absent on old nodes; receivers skip the compare.
+	DirDigest string `json:"dir_digest,omitempty"`
+	// EdgeLoad is the sender's live peer-edge count (M2): rendezvous
+	// scoring prefers a candidate whose mesh is not already pinned on it —
+	// a node carrying forty edges is a worse redundancy pick than one
+	// carrying four. Absent on old nodes; receivers treat it as unknown.
+	EdgeLoad int `json:"edge_load,omitempty"`
 }
 
 // LinkMetric is the wire form of one measured edge weight (§4.1): the round-
@@ -154,6 +186,105 @@ type Contact struct {
 	End     int64  `json:"end"`
 	RateBps int64  `json:"rate_bps,omitempty"`
 	Period  int64  `json:"period,omitempty"`
+}
+
+// TransitMaxTTL bounds how many relay hops a transit frame may spend. Six
+// matches the design's relay budget: long enough for a re-forwarded path
+// through a sparse graph, short enough that a loop dies quickly on top of
+// the msg-id dedup that kills the two-hop case outright.
+const TransitMaxTTL = 6
+
+// TransitPayload is the outer shell of a transit frame (cross-network mesh
+// design M3/§3). A relay reads ONLY this: where the frame is headed, how
+// many hops it has left, which seal level wraps the body, and the sealed
+// body itself. Inner is the AEAD blob (nonce‖ciphertext, plus the ephemeral
+// key prefix under the x25519 level) carrying a transitInner — the original
+// envelope plus the sender's Ed25519 attestation binding env.From to its
+// identity. The blob never rides plaintext; relays are blind by design.
+type TransitPayload struct {
+	Dest  string `json:"dest"`  // stable "k:<pub>" identity or instance id
+	TTL   int    `json:"ttl"`   // decremented per relay; <=1 dies at the next relay
+	Seal  string `json:"seal"`  // SealX25519 | SealMesh
+	Inner []byte `json:"inner"` // sealed transitInner blob
+}
+
+// DialCheckPayload asks the receiver to try reaching this node once, so an
+// advertised rendezvous role is proven rather than claimed. Addr is the ws
+// endpoint to dial (host:port); UDP carries the datagram port for a future
+// STUN-bind probe. Nonce correlates the answer with the request.
+type DialCheckPayload struct {
+	Addr  string `json:"addr"`
+	UDP   int    `json:"udp,omitempty"`
+	Nonce string `json:"nonce"`
+}
+
+// DialCheckAckPayload reports what a dial_check actually achieved. Proto is
+// "ws" for the TCP probe (udp arrives with the datagram-plane variant).
+type DialCheckAckPayload struct {
+	Nonce string `json:"nonce"`
+	OK    bool   `json:"ok"`
+	Proto string `json:"proto,omitempty"`
+}
+
+// PunchWantPayload is the auto-punch request (M3): the sender asks the
+// receiver — the lexicographically-smaller, offerer-elected side — to send
+// it a punch_offer. TTL bounds relay hops the same way punch_offer's does.
+type PunchWantPayload struct {
+	TTL int `json:"ttl"`
+}
+
+// DirPullPayload is the differential-sync request (M1): the requester's own
+// id→content_hash stamp table plus an optional resume cursor for paged
+// replies. The responder diffs it against its own table and answers
+// dir_rows — rows the requester lacks or hashes differently on, plus a want
+// list of the ids the RESPONDER lacks, so a single exchange converges both
+// directions.
+type DirPullPayload struct {
+	// Stamps maps directory id → content_hash (hex). Bounded by the sync
+	// cap; a requester with more rows sends the prefix and pages with After.
+	Stamps map[string]string `json:"stamps"`
+	// After resumes a paged reply: only rows with id > After are eligible.
+	// A non-empty After marks the pull as a continuation — the 30s per-peer
+	// pull limit applies to fresh pulls, not to finishing a sync already
+	// underway.
+	After string `json:"after,omitempty"`
+}
+
+// DirRowsPayload carries signed directory rows plus the responder's want
+// list. Rows travel as canonical JSON blobs — each is a credential signed by
+// its owner's Ed25519 key, forwarded byte-for-byte so the signature keeps
+// verifying no matter how many hops it crossed.
+type DirRowsPayload struct {
+	Rows []json.RawMessage `json:"rows,omitempty"`
+	// Want lists the ids the SENDER of this frame still lacks: the receiver
+	// should answer with one dir_rows carrying those rows (and no want of
+	// its own — one round completes the exchange).
+	Want []string `json:"want,omitempty"`
+	// Cursor/More paginate: when the response hit a budget (row count or
+	// byte cap) before the last differing id, Cursor is the last id sent and
+	// More is true; the requester continues with dir_pull{after: cursor}.
+	Cursor string `json:"cursor,omitempty"`
+	More   bool   `json:"more,omitempty"`
+}
+
+// DirRow is the canonical row shape for content hashing and signing (M1 §2).
+// content_hash covers every field EXCEPT seen_at and sig — freshness churn
+// must not defeat the digest — while sig signs everything except itself
+// (seen_at included: a gossiped row's age is source-minted, not attacker-
+// rewritable). Field order here IS the canonical serialization order.
+type DirRow struct {
+	ID        string          `json:"id"`
+	PubKey    string          `json:"pub,omitempty"`
+	XPub      string          `json:"x_pub,omitempty"`
+	Ver       string          `json:"ver,omitempty"`
+	Card      json.RawMessage `json:"card,omitempty"` // CapabilitySummary JSON
+	Addrs     []string        `json:"addrs,omitempty"`
+	Neighbors []string        `json:"neighbors,omitempty"`
+	Links     []LinkMetric    `json:"links,omitempty"`
+	UDPPort   int             `json:"udp_port,omitempty"`
+	Relay     json.RawMessage `json:"relay,omitempty"` // RelayProfile JSON
+	SeenAt    int64           `json:"seen_at"`
+	Sig       string          `json:"sig,omitempty"` // Ed25519 over canonical minus sig
 }
 
 // TaskDelegatePayload is the task handoff (design doc §10.3 example). The
@@ -953,6 +1084,11 @@ type PairHelloPayload struct {
 	Addr    string `json:"addr"`    // initiator's advertised listen addr (host may be 0.0.0.0)
 	Name    string `json:"name"`    // configured node.name, display only
 	NodeID  string `json:"node_id"` // runtime node id, display only
+	// Target (P4b) asks the receiver to FORWARD this pair_hello to the named
+	// stable identity instead of answering it: the receiver is being used as
+	// a contact point by a joiner that cannot reach the introducer directly.
+	// Absent on every pre-feature frame and on the direct (LAN) path.
+	Target string `json:"target,omitempty"`
 }
 
 // PairReadyPayload answers pair_hello with the responder's ephemeral half.

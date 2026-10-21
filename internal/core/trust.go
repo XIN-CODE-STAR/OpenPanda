@@ -16,6 +16,7 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/ledger"
 	"github.com/Xustalis/OpenPanda/internal/scheduler"
 	"github.com/Xustalis/OpenPanda/internal/trust"
+	"github.com/Xustalis/OpenPanda/internal/version"
 )
 
 // Trust zones are an experimental feature (docs/plans/design-trust-zones-
@@ -226,6 +227,70 @@ func (c *Core) modelCredsWithheld(ctx context.Context, t Task) bool {
 	return c.acceptPolicyFor(tier).ModelCreds == trust.CredsWithhold
 }
 
+// peerProvenance reads the build provenance stamped on a peer's directory
+// row (release | self | unsigned | "" unknown). Session ids resolve through
+// their host node's row like peerPubKey does — a session never gets its own
+// row but shares the host's build; stable "k:<pub>" ids fold to the most
+// recently seen instance holding that key, matching instanceForStable's
+// pick. Unlike trust the value is row-level on purpose: it describes the
+// running binary, not the identity, and a restart may run a different one.
+func (c *Core) peerProvenance(nodeID string) string {
+	if c.db == nil || nodeID == "" {
+		return ""
+	}
+	var prov string
+	err := c.db.QueryRow(
+		`SELECT COALESCE(prov,'') FROM employee_cache WHERE id = ?`, nodeID).Scan(&prov)
+	if err != nil || prov == "" {
+		if strings.HasPrefix(nodeID, stableIDPrefix) {
+			_ = c.db.QueryRow(
+				`SELECT COALESCE(prov,'') FROM employee_cache WHERE pub_key = ?
+				 ORDER BY (status = 'online') DESC, last_seen DESC LIMIT 1`,
+				nodeID[len(stableIDPrefix):]).Scan(&prov)
+		} else if base, ok := scheduler.EphemeralBase(nodeID); ok && base != nodeID {
+			_ = c.db.QueryRow(
+				`SELECT COALESCE(prov,'') FROM employee_cache WHERE id = ?`, base).Scan(&prov)
+		}
+	}
+	return prov
+}
+
+// originProvenance is the self-asserted build provenance of the node that
+// authored a delegate — chain[0], or the sender when the chain is absent.
+// The origin is what a tier-2 consent grant verifies against, so its build
+// is the one accept.<tier>.self_signed weighs; a self-built relay is only
+// transport and cannot mint another node's grant anyway. The value is
+// self-asserted bookkeeping: a dishonest origin could claim a release-built
+// chain[0], but then its consent must still verify under that node's key —
+// the grant's crypto keeps the honest-node provenance dial honest where it
+// matters.
+func (c *Core) originProvenance(chain []string, sender string) string {
+	origin := sender
+	if len(chain) > 0 {
+		origin = chain[0]
+	}
+	return c.peerProvenance(origin)
+}
+
+// foreignConsentStripped reports whether the origin's tier-2 consent grant
+// may substitute for this node's approval on an inbound delegate, and the
+// audit-ready reason when it may not. Two independent rules can strip: the
+// path's least-trusting tier (foreign_consent — "their yes is not our yes"),
+// and an origin whose build is self-signed under a tier whose self_signed
+// rule downgrades its consent the same way. The second rule never widens
+// the first: honor only ever restores pre-feature behaviour.
+func (c *Core) foreignConsentStripped(ctx context.Context, chain []string, sender string) (bool, string) {
+	pol := c.acceptPolicyFor(c.admissionTier(ctx, chain, sender))
+	if pol.ForeignConsent == trust.ConsentStrip {
+		return true, "delegation path's least-trusting tier strips foreign tier-2 consent"
+	}
+	if pol.SelfSigned == trust.SelfSignedStrip &&
+		c.originProvenance(chain, sender) == version.ProvenanceSelf {
+		return true, "origin's self-signed build strips its foreign tier-2 consent (accept.<tier>.self_signed)"
+	}
+	return false, ""
+}
+
 // delegateAdmission is the inbound gate's verdict: admit outright, park for
 // this node's operator to review, or decline with a wire reason code.
 type delegateAdmission struct {
@@ -263,6 +328,16 @@ func (c *Core) admitDelegate(ctx context.Context, taskID string, p bus.TaskDeleg
 		return delegateAdmission{
 			code:   bus.DeclineCodeTrustRefused,
 			reason: fmt.Sprintf("screen capture tasks admit mesh origins only (origin at %s trust)", tier),
+		}
+	}
+	// An origin running a self-evolution-built binary may be refused
+	// outright at this tier — deterministic like the screen gate, before
+	// the optional classifier, and it can never be relaxed by a verdict.
+	if pol.SelfSigned == trust.SelfSignedRefuse &&
+		c.originProvenance(chain, sender) == version.ProvenanceSelf {
+		return delegateAdmission{
+			code:   bus.DeclineCodeTrustRefused,
+			reason: fmt.Sprintf("accept policy refuses self-signed origin's work at %s trust", tier),
 		}
 	}
 	mode := pol.Mode

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,6 +48,16 @@ func applyRelease(ctx context.Context, m *Manager, s *stagedRelease) error {
 	if err := replaceBinary(newBin, dst); err != nil {
 		return fmt.Errorf("replace binary: %w", err)
 	}
+	// Keep the latest official-release binary on disk as the self-evolution
+	// rollback target (design §5): after every RELEASE-channel swap the fresh
+	// binary is copied beside the install as panda.release. A StageLocal
+	// (self-built) apply deliberately skips this — a self build overwriting
+	// the fallback would leave nothing signed to roll back to.
+	if !s.local {
+		if err := copyFile(newBin, ReleaseFallbackPath(), 0o755); err != nil {
+			m.opts.Logger.Warn("update: release fallback copy failed", "err", err)
+		}
+	}
 
 	// Refresh the agent adapters and voice sidecars beside the running binary.
 	// They are secondary to the binary, so a failure here is logged, not fatal
@@ -64,7 +75,10 @@ func applyRelease(ctx context.Context, m *Manager, s *stagedRelease) error {
 	// the node kernel, not just for this console process. Apply gated on the
 	// shared store being idle, so the bounce cannot interrupt in-flight work.
 	// Best-effort — a hand-run daemon or an unregistered service is normal.
-	install.RestartDaemon()
+	// A caller that must finish bookkeeping first (self-evolution) defers it.
+	if !m.opts.SkipDaemonRestart {
+		install.RestartDaemon()
+	}
 
 	// Restart on a slight delay so the HTTP apply response can flush before
 	// the process image is replaced. If NoRestart is requested (CLI one-shot),
@@ -73,6 +87,26 @@ func applyRelease(ctx context.Context, m *Manager, s *stagedRelease) error {
 		guard.Go(m.opts.Logger, "updater: delayed restart", nil, func() { delayedRestart(m) })
 	}
 	return nil
+}
+
+// RestartAfterSwap bounces the daemon after a swap whose caller deferred the
+// restart to finish its own bookkeeping. A one-shot CLI must not re-exec
+// itself; the service bounce is still the daemon's path back to the new
+// image. A hand-run daemon falls through to the delayed self-exec.
+func RestartAfterSwap(logger *slog.Logger, oneShot bool) {
+	install.RestartDaemon()
+	if oneShot {
+		return
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	guard.Go(logger, "updater: delayed restart", nil, func() {
+		time.Sleep(300 * time.Millisecond)
+		if err := restartSelf(); err != nil {
+			logger.Error("update: restart failed", "err", err)
+		}
+	})
 }
 
 // runningBinary returns the executable path, resolved through symlinks, so the
@@ -86,6 +120,90 @@ func runningBinary() string {
 		return resolved
 	}
 	return exe
+}
+
+// ReleaseFallbackPath is where the last applied official-release binary is
+// kept for `panda self rollback` — a sibling of the running binary named
+// panda.release (panda.release.exe on Windows). The resource manifest sync
+// only touches adapters/ and extensions/voice/, so the file survives every
+// update; Windows' SweepResidue only targets .old sidecars, likewise.
+func ReleaseFallbackPath() string {
+	bin := runningBinary()
+	if bin == "" {
+		return ""
+	}
+	name := "panda.release"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	return filepath.Join(filepath.Dir(bin), name)
+}
+
+// RollbackToRelease swaps the retained release binary back over the running
+// install — the escape hatch for a self-built binary gone wrong. It uses the
+// same atomic replaceBinary the update path does. The caller handles process
+// restart (applyRelease's delayedRestart/install.RestartDaemon are not
+// invoked here — a CLI rollback asks the operator or bounces the service).
+//
+// floor is the schema version the live data directory already carries. The
+// caller must pass it: the fallback binary is probed in isolation and cannot
+// see the data directory it would be rolled back onto.
+func RollbackToRelease(floor int) error {
+	fallback := ReleaseFallbackPath()
+	if fallback == "" {
+		return fmt.Errorf("cannot locate the running binary")
+	}
+	if _, err := os.Stat(fallback); err != nil {
+		return fmt.Errorf("no release fallback at %s — nothing signed to roll back to (run a release-channel update first)", fallback)
+	}
+	dst := runningBinary()
+	if dst == "" {
+		return fmt.Errorf("cannot locate the running binary")
+	}
+	if err := checkSelfRollbackSchema(fallback, floor); err != nil {
+		return err
+	}
+	if err := replaceBinary(fallback, dst); err != nil {
+		return fmt.Errorf("restore release binary: %w", err)
+	}
+	return nil
+}
+
+// checkSelfRollbackSchema refuses a rollback whose fallback binary predates
+// the data directory's schema floor — rolling back to a binary that cannot
+// open the store bricks the node as surely as a bad update would.
+//
+// The guard fails closed: when the data directory is at a non-zero schema and
+// the fallback cannot report its ceiling, the rollback is refused. The
+// fallback's own db_schema reading describes whatever data directory IT
+// opened (the probe runs without the caller's --config), so it is only used
+// when the caller knows no floor.
+func checkSelfRollbackSchema(fallback string, floor int) error {
+	out, err := exec.Command(fallback, "version", "--json").Output()
+	if err != nil {
+		return fmt.Errorf("probe fallback binary: %w", err)
+	}
+	var info struct {
+		Schema   int `json:"schema"`
+		DBSchema int `json:"db_schema"`
+	}
+	if err := json.Unmarshal(out, &info); err != nil {
+		return fmt.Errorf("probe fallback binary: unreadable version JSON")
+	}
+	if floor <= 0 {
+		// The caller knows no floor: fall back to the probe's own reading.
+		floor = info.DBSchema
+	}
+	if floor <= 0 {
+		return nil // nothing to protect — the data directory is at schema v0
+	}
+	if info.Schema <= 0 {
+		return fmt.Errorf("release fallback cannot report its schema ceiling but the data directory is at schema v%d — rollback refused", floor)
+	}
+	if info.Schema < floor {
+		return fmt.Errorf("release fallback supports schema v%d but the data directory is at v%d — rollback refused", info.Schema, floor)
+	}
+	return nil
 }
 
 // checkStagedSchema guards the swap: the staged binary must support at least

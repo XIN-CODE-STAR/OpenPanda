@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { api, type Reminder } from '../api/client'
+import { formatDuration } from '../format/time'
 import { useAsync, useChangeSignal, useLocaleRerender } from '../hooks'
 import { t } from '../i18n'
 import { Icon } from './icons'
@@ -71,11 +72,11 @@ export function ReminderBell() {
   useEffect(() => {
     if (!open) return
     const onDown = (e: PointerEvent) => {
-      if (root.current?.contains(e.target as Node) || layerAboveOwnsEscape()) return
+      if (root.current?.contains(e.target as Node) || layerAboveOwnsEscape('.reminder-pop')) return
       setOpen(false)
     }
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape' || layerAboveOwnsEscape()) return
+      if (e.key !== 'Escape' || layerAboveOwnsEscape('.reminder-pop')) return
       e.stopPropagation()
       setOpen(false)
     }
@@ -137,12 +138,14 @@ function RemindersCard(props: {
   const [dueAt, setDueAt] = useState('')
   const [everyMin, setEveryMin] = useState('')
   const [adding, setAdding] = useState(false)
-  const [notify, setNotify] = useState<'idle' | 'on' | 'unsupported' | 'denied' | 'error'>('idle')
+  const [notify, setNotify] = useState<'checking' | 'idle' | 'on' | 'unsupported' | 'denied' | 'error'>('checking')
 
   // The switch is a statement about *this* browser, so it starts from what the
   // browser says rather than from an idle "enable it" button: a live push
   // subscription means the line is already on, and re-offering it would be a
-  // lie the first click would expose.
+  // lie the first click would expose. While that check is in flight the
+  // footer draws nothing — an "enable" button that swaps for "already on"
+  // a beat later reads as a flicker, not as two states.
   useEffect(() => {
     if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
       setNotify('unsupported')
@@ -152,9 +155,11 @@ function RemindersCard(props: {
     navigator.serviceWorker.ready
       .then((reg) => reg.pushManager.getSubscription())
       .then((sub) => {
-        if (alive && sub) setNotify('on')
+        if (alive) setNotify(sub ? 'on' : 'idle')
       })
-      .catch(() => {})
+      .catch(() => {
+        if (alive) setNotify('idle')
+      })
     return () => {
       alive = false
     }
@@ -382,20 +387,6 @@ function ReminderRow({ r, now, onDelete }: { r: Reminder; now: number; onDelete(
       </div>
     </div>
   )
-}
-
-/** "5d 3h" / "2h 05m" / "12m" / "45s" — compact human countdown, units
- *  localized so CJK locales read 天/小时/分钟/秒 instead of latin letters. */
-function formatDuration(ms: number): string {
-  const s = Math.max(1, Math.round(ms / 1000))
-  const d = Math.floor(s / 86400)
-  const h = Math.floor((s % 86400) / 3600)
-  const m = Math.floor((s % 3600) / 60)
-  const sec = s % 60
-  if (d > 0) return `${d}${t('time.unit.d')} ${h}${t('time.unit.h')}`
-  if (h > 0) return `${h}${t('time.unit.h')} ${String(m).padStart(2, '0')}${t('time.unit.m')}`
-  if (m > 0) return `${m}${t('time.unit.m')}`
-  return `${sec}${t('time.unit.s')}`
 }
 
 /** VAPID keys arrive URL-base64 encoded; PushManager wants raw bytes. */

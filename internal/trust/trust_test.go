@@ -92,6 +92,22 @@ func TestDefaultAccept(t *testing.T) {
 	}
 }
 
+// TestDefaultAcceptSelfSigned pins the self-evolution provenance defaults:
+// mesh honors a self-built origin's consent (pre-feature parity), guarded
+// strips it to the restricted tool face, and open refuses self-signed work —
+// moot there while its DelegateOrigin already declines everything.
+func TestDefaultAcceptSelfSigned(t *testing.T) {
+	if a := DefaultAccept(Mesh); a.SelfSigned != SelfSignedHonor {
+		t.Fatalf("mesh self_signed = %q, want %q", a.SelfSigned, SelfSignedHonor)
+	}
+	if a := DefaultAccept(Guarded); a.SelfSigned != SelfSignedStrip {
+		t.Fatalf("guarded self_signed = %q, want %q", a.SelfSigned, SelfSignedStrip)
+	}
+	if a := DefaultAccept(Open); a.SelfSigned != SelfSignedRefuse {
+		t.Fatalf("open self_signed = %q, want %q", a.SelfSigned, SelfSignedRefuse)
+	}
+}
+
 // TestDefaultAcceptModelCreds: credential withholding is the sub-mesh
 // default — a semi-trusted task's text must never read this node's API keys
 // out of the subprocess env, while mesh keeps the pre-feature provide.

@@ -4,6 +4,7 @@ package core
 
 import (
 	"context"
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"encoding/hex"
 	"testing"
@@ -76,6 +77,29 @@ func TestHelloRecordsPeerPubKey(t *testing.T) {
 	if epub, _, ok := entry.nodeKeyPair(); !ok || !epub.Equal(entryPub) {
 		t.Fatal("recorded entry pubkey differs from its node key")
 	}
+
+	// The X25519 half rides the same verified-hello gate: each side must
+	// have stored the peer's x_pub (for transit sealing) bound to the
+	// Ed25519 proof that just verified.
+	awaitX := func(c *Core, id string) *ecdh.PublicKey {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if x, ok := c.peerXPub(context.Background(), id); ok {
+				return x
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s did not record %s's x_pub from the signed hello", c.nodeID, id)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	if _, wx, ok := worker.nodeXKey(); !ok || !awaitX(entry, "worker").Equal(wx) {
+		t.Fatal("recorded worker x_pub differs from its node x key")
+	}
+	if _, ex, ok := entry.nodeXKey(); !ok || !awaitX(worker, "entry").Equal(ex) {
+		t.Fatal("recorded entry x_pub differs from its node x key")
+	}
 }
 
 // TestPeerKeyTofuLifecycle covers the trust-on-first-use contract the CLI
@@ -127,7 +151,7 @@ func TestPeerKeyTofuLifecycle(t *testing.T) {
 
 	// A new key under the same ID loses the stamp — the human never saw it.
 	newPub, _, _ := bus.GenerateNodeKey()
-	entry.recordPeerPubKey(ctx, "worker", hex.EncodeToString(newPub))
+	entry.recordPeerPubKey(ctx, "worker", hex.EncodeToString(newPub), "")
 	nodes, _ = ledger.Query(entry.db, "", "worker")
 	if nodes[0].Verified() {
 		t.Fatal("a changed key must not inherit the old key's verification")
@@ -157,7 +181,7 @@ func TestConsentGrantVerification(t *testing.T) {
 
 	// Executor learns the origin's key from its signed hello (recorded here).
 	opub, _, _ := origin.nodeKeyPair()
-	exec.recordPeerPubKey(context.Background(), "origin", hex.EncodeToString(opub))
+	exec.recordPeerPubKey(context.Background(), "origin", hex.EncodeToString(opub), "")
 
 	if !exec.consentGrantValid(p, "origin") {
 		t.Fatal("a grant signed by the recorded origin key was rejected")
@@ -258,7 +282,7 @@ func TestArtifactGrantDirectHandoff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("orch key: %v", err)
 	}
-	producer.recordPeerPubKey(ctx, orchID, hex.EncodeToString(orchPub))
+	producer.recordPeerPubKey(ctx, orchID, hex.EncodeToString(orchPub), "")
 
 	grant := bus.SignArtifactGrant(orchPriv, planID, consTask, prodTask, m.Hash)
 	ref := bus.ArtifactRef{

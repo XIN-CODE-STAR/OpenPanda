@@ -21,7 +21,7 @@ func TestSessionHelloLeavesNoGhostRow(t *testing.T) {
 
 	sessID := "peer-1a2b3c4d" // the "-8hex" suffix marks a session, not a node
 	pub, _, _ := bus.GenerateNodeKey()
-	c.recordPeerPubKey(ctx, sessID, hex.EncodeToString(pub))
+	c.recordPeerPubKey(ctx, sessID, hex.EncodeToString(pub), "")
 
 	var n int
 	if err := c.db.QueryRow(`SELECT COUNT(1) FROM employee_cache WHERE id=?`, sessID).Scan(&n); err != nil {
@@ -50,7 +50,7 @@ func TestRecordPeerPubKeyReapsStaleAliases(t *testing.T) {
 			t.Fatalf("seed %s: %v", id, err)
 		}
 	}
-	c.recordPeerPubKey(ctx, "peer", keyHex)
+	c.recordPeerPubKey(ctx, "peer", keyHex, "")
 
 	for _, id := range []string{"peer-oldname", "peer-1a2b3c4d"} {
 		var n int
@@ -73,7 +73,7 @@ func TestPeerPubKeyEphemeralFallback(t *testing.T) {
 	c := pinCore(t, "self", "marker")
 
 	pub, _, _ := bus.GenerateNodeKey()
-	c.recordPeerPubKey(ctx, "peer", hex.EncodeToString(pub))
+	c.recordPeerPubKey(ctx, "peer", hex.EncodeToString(pub), "")
 
 	got, ok := c.peerPubKey("peer-1a2b3c4d")
 	if !ok || !got.Equal(pub) {

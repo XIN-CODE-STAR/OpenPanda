@@ -186,6 +186,7 @@ func (c *Core) ApplyNetworkConfig(ctx context.Context, n config.NetworkConfig) {
 	c.SyncPeers(ctx, n.PeerAddrs())
 	c.SetPeerTrustHints(n.PeerTrustHints())
 	c.SetTrustConfig(n.Trust)
+	c.SetNetworkPolicy(n)
 }
 
 // ProbeResult is what a `nodes add`/`pair` self-check learned from the peer:

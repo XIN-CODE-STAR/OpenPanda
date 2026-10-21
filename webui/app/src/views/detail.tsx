@@ -3,13 +3,15 @@
 import { useState } from 'preact/hooks'
 import { api, isTaskStalled, type ApprovalScope, type Task, type TaskEvent } from '../api/client'
 import { useAsync, useChangeSignal, useLocaleRerender, useVisibleInterval } from '../hooks'
-import { t } from '../i18n'
+import { t, locale } from '../i18n'
+import { formatDuration } from '../format/time'
 import { navigate } from '../nav'
 import { ScopeSelect } from '../components/scope-select'
 import { StateBadge } from '../components/state-badge'
 import { toast, toastError } from '../components/toast'
 import { confirmDialog } from '../components/confirm'
 import { TaskTrace } from '../components/task-trace'
+import { DiffViewer } from '../components/diff-viewer'
 import { EventTimeline } from '../components/event-timeline'
 import { Markdown } from '../md/render'
 import { Icon } from '../components/icons'
@@ -145,7 +147,9 @@ export function DetailView({
   // broken button — the user clicks it, nothing happens, and the reason sits
   // hundreds of pixels below the fold.
   const blocked = task.state === 'review' && task.approval_disposition === 'needs_changed_input'
-  const parkReason = blocked ? reviewReason(task.events ?? []) : ''
+  // Read for every review state, not only the blocked banner: the verdict
+  // block falls back to it when the result carries no reason of its own.
+  const parkReason = task.state === 'review' ? reviewReason(task.events ?? []) : ''
   // Whether the result carries anything worth a section. A `{"failed": …}`
   // blob has already been read out in the verdict block, and the log's own
   // raw toggle still reaches it.
@@ -352,6 +356,11 @@ export function DetailView({
             spec only existed as a JSON blob users had to decode. Folded by
             default: it is the task's contract, not its outcome, and read open
             it pushed the result a third of a screen down. */}
+        {/* A self-merge proposal's "spec" IS the patch set — the review the
+            approve button answers is this diff, so it renders ahead of the
+            generic spec card. */}
+        <SelfMergeCard spec={task.spec} />
+
         <SpecCard spec={task.spec} />
 
         {board && board.messages.length > 0 && (
@@ -371,6 +380,17 @@ export function DetailView({
                   {m.grade !== 'status' && (
                     <span class={`badge ${m.grade === 'steer' ? 'blue' : 'dim'}`}>{m.grade}</span>
                   )}
+                  {/* Delivery state, on the user's own notes only: a note lands
+                      on the board the moment it is posted, so without this the
+                      row reads "queued" forever and "did the agent see it?"
+                      has no answer on screen. consumed_at is stamped by the
+                      round that folded the note into its prompt. */}
+                  {(m.sender === 'user' || m.sender.startsWith('user:')) &&
+                    (m.consumed_at ? (
+                      <span class="badge dim">{t('detail.board.read')}</span>
+                    ) : (
+                      <span class="badge yellow">{t('detail.board.pending')}</span>
+                    ))}
                   <span class="dt-board-body">{m.body}</span>
                   <span class="dim dt-board-time">
                     {m.sent_at ? fmtShort(new Date(m.sent_at * 1000).toISOString()) : ''}
@@ -679,6 +699,77 @@ function Fact({
  *  first sentence of the target, so the page always answers "what was this
  *  asked to do" without a click. Open, the brief was 266px of dense prose
  *  sitting between the result and the log. */
+/** SelfMergeCard renders a self-evolution merge proposal: the signed patch
+ *  set's manifest (producer, base, target version, the RECOMPUTED critical
+ *  flag) plus each patch file's diff behind an expander — the artifact the
+ *  reviewer's approve/reject actually decides on. Only renders for tasks
+ *  whose spec carries the self_merge envelope. */
+function SelfMergeCard({ spec }: { spec?: string }) {
+  const env = spec ? parseResult(spec) : null
+  const setID = env && env.kind === 'self_merge' ? String(env.patchset || '') : ''
+  const [open, setOpen] = useState(false)
+  const [patchOpen, setPatchOpen] = useState<Record<string, boolean>>({})
+  const { data: set } = useAsync(() => (setID ? api.selfEvoSet(setID) : Promise.resolve(null)), [setID])
+  if (!setID || !set) return null
+  return (
+    <section class="dt-sec">
+      <div class="dt-sec-head">
+        <h2 class="dt-sec-title">
+          {t('detail.selfmerge.title')}
+          {set.critical && <span class="badge red">{t('detail.selfmerge.critical')}</span>}
+        </h2>
+        <span class="dt-sec-hint">
+          {set.files.length} {t('detail.selfmerge.patches')}
+          {set.gate_ok ? ` · ${t('detail.selfmerge.gateOk')}` : ` · ${t('detail.selfmerge.gateNone')}`}
+        </span>
+        <button type="button" class="dt-sec-action" onClick={() => setOpen((v) => !v)}>
+          {open ? t('events.collapse') : t('detail.spec.expand')}
+        </button>
+      </div>
+
+      <dl class="dt-spec-foot">
+        <dt>{t('detail.selfmerge.producer')}</dt>
+        <dd class="mono">{set.producer}</dd>
+        <dt>{t('detail.selfmerge.base')}</dt>
+        <dd class="mono">{set.base}</dd>
+        <dt>{t('detail.selfmerge.version')}</dt>
+        <dd class="mono">{set.version}</dd>
+      </dl>
+      {set.critical && set.critical_paths && set.critical_paths.length > 0 && (
+        <p class="gate-error">
+          {t('detail.selfmerge.critical')}: <span class="mono">{set.critical_paths.join(', ')}</span>
+        </p>
+      )}
+
+      {open && (
+        <ul class="diff-files">
+          {set.files.map((f) => (
+            <li key={f}>
+              <button
+                type="button"
+                class="dt-sec-action"
+                onClick={() => setPatchOpen((m) => ({ ...m, [f]: !m[f] }))}
+              >
+                {patchOpen[f] ? '▾' : '▸'}
+              </button>
+              <span class="mono">{f}</span>
+              {patchOpen[f] && <SelfMergePatch id={set.id} name={f} />}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+/** SelfMergePatch lazy-loads one patch file's unified diff. */
+function SelfMergePatch({ id, name }: { id: string; name: string }) {
+  const { data, error } = useAsync(() => api.selfEvoFile(id, name), [id, name])
+  if (error) return <p class="gate-error">{String(error)}</p>
+  if (!data) return <p class="dim">…</p>
+  return <DiffViewer patch={data} />
+}
+
 function SpecCard({ spec }: { spec?: string }) {
   const [open, setOpen] = useState(false)
   const s = spec ? parseResult(spec) : null
@@ -954,18 +1045,27 @@ function reviewReason(events: { type: string; data?: string }[]): string {
 }
 
 function fmtFull(iso: string): string {
-  return iso ? new Date(iso).toLocaleString() : '—'
+  return iso ? new Date(iso).toLocaleString(locale()) : '—'
 }
 
 /** Compact stamp for the header line: the year is noise on a run that started
- *  today, and the seconds never helped anyone. */
+ *  today, and the seconds never helped anyone. The locale decides field order
+ *  and the 12/24-hour cycle rather than a hand-rolled "MM-DD HH:mm" that
+ *  reads as 24-hour time to a reader whose locale never shows it. */
 function fmtShort(iso: string): string {
   if (!iso) return '—'
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return '—'
-  const p = (n: number) => String(n).padStart(2, '0')
-  const md = `${p(d.getMonth() + 1)}-${p(d.getDate())}`
-  return `${md} ${p(d.getHours())}:${p(d.getMinutes())}`
+  try {
+    return new Intl.DateTimeFormat(locale(), {
+      month: 'numeric',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    }).format(d)
+  } catch {
+    return '—'
+  }
 }
 
 function shortId(id: string): string {
@@ -978,10 +1078,5 @@ function elapsedLabel(created: string, updated: string, open: boolean): string {
   if (open || !created || !updated) return ''
   const ms = new Date(updated).getTime() - new Date(created).getTime()
   if (!Number.isFinite(ms) || ms <= 0) return ''
-  const s = Math.round(ms / 1000)
-  if (s < 60) return `${s}s`
-  const m = Math.floor(s / 60)
-  if (m < 60) return `${m}m ${s % 60}s`
-  const h = Math.floor(m / 60)
-  return `${h}h ${m % 60}m`
+  return formatDuration(ms)
 }

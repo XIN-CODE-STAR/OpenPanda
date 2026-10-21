@@ -77,6 +77,39 @@ network:
   # party. The hello's shared secret still decides membership; auto-dial only
   # saves typing the IP. Set false to keep every join an explicit admit.
   # discovery_auto_dial: false
+  # ── Cross-network mesh (discovery / rendezvous / blind relay) ───────────
+  # Nodes behind NAT discover and reach each other without any fixed
+  # centre: the directory is gossiped along every edge, rendezvous is a
+  # capability a node advertises rather than a role it holds, and a relay
+  # sees only "for k:<pub>, TTL, N bytes" because the payload is sealed
+  # end-to-end. Path order is strictly direct-first — configured peer, then
+  # advertised addr, then hole punch, then relay, then the DTN outbox.
+  # bootstrap_edges (default 2): rendezvous edges this node keeps. Two
+  # survive one loss without a partition. 0 is manual mode — no edges are
+  # elected and the mesh is exactly the peers listed above, the behaviour
+  # every release before this feature had.
+  # bootstrap_edges: 2
+  # auto_punch (default true): when a send finds no live track, punch a
+  # directory peer that advertises a UDP port instead of waiting for a
+  # hand-written `punch:<id>` entry. Two failed windows mark the peer
+  # nat_suspect for 10 minutes (persisted across restarts) — after that the
+  # honest path is the relay, then the outbox, not endless spraying.
+  # auto_punch: true
+  # transit (default true): this node's CLIENT half of the relay plane —
+  # whether it hands frames to a relay hop when it has no live track.
+  # Serving other members is the separate trust.relay surface below, so a
+  # small box can consume relays without ever paying to serve one.
+  # transit: true
+  # rendezvous (default "auto"): this node's own willingness to be a
+  # rendezvous point. "auto" advertises the role only once this node can
+  # prove it is reachable — today a globally routable listen address or a
+  # hostname (the AutoNAT callback proof tightens this further); "always"
+  # is an operator assertion behind a NAT map we cannot see from here;
+  # "never" keeps the role off the card. Reading OTHER nodes' rendezvous
+  # rows is unaffected — a node that never serves still uses everyone
+  # else's edges.
+  # rendezvous: "auto"
+
   # ── Cleartext ws:// gate (legacy peers only) ──
   # Modern peers negotiate sessaead inside the hello and seal every frame
   # after it, so ws:// to them is safe anywhere. The gate below only governs
@@ -161,6 +194,35 @@ network:
   #                                # finds nothing. provide for the
   #                                # same-owner case only — a guarded peer
   #                                # you nevertheless trust with keys.
+  #       self_signed: "strip"     # honor | strip | refuse — how work whose
+  #                                # ORIGIN runs a self-evolution-built
+  #                                # binary is treated. strip (default)
+  #                                # drops its tier-2 consent grant like
+  #                                # foreign_consent does: the task lands on
+  #                                # the restricted tool face and
+  #                                # irreversibles park for local review.
+  #                                # refuse declines the delegate outright;
+  #                                # honor weighs its consent like a
+  #                                # release-signed build's. Provenance is
+  #                                # self-asserted — this is a conservative
+  #                                # dial on honest nodes, not an
+  #                                # attestation check.
+
+  #   relay:                     # blind-relay permission tables
+  #     transit:                 # whose relayed frames this node forwards ON
+  #       mesh: true             # a trusted member's frame is baseline
+  #       guarded: true          # mesh citizenship
+  #       open: false            # a stranger's frame never spends our uplink
+  #     serve:                   # whose relay hops we route OUR frames through
+  #       mesh: true
+  #       guarded: false         # a semi-trusted box sees only sealed bytes,
+  #       open: false            # so rows are labelled by the OTHER end's tier
+  #     max_kbps: 0              # 0 = unlimited; a token bucket on relayed
+  #                              # bytes — self-harm protection on a metered
+  #                              # link, not a fairness scheduler. Excess is
+  #                              # dropped (transit is best-effort; the
+  #                              # sender's outbox is the reliable path).
+  #     max_sessions: 64         # concurrent relayed frames, 0 = unlimited
 
   # ── DTN contact plan: scheduled transmission windows ─────────────────────
   # For links that are predictably up only at times — a nightly batch host, a
@@ -473,3 +535,27 @@ push:
 # ui:
 #   locale: "zh-CN"               # en | zh-CN | ja | es | de
 #   mouse: "select"               # select | scroll
+
+# ── Self-evolution (v0.2.x, opt-in, off by default) ──────────────────────
+# Lets this node merge signed patch sets produced by itself (or, later, mesh
+# peers) through the review queue: `panda self` mints/imports a set, it parks
+# as a review task, and `panda approve` runs the merge — worktree apply,
+# full `make gate`, build, staged swap through the SAME updater path an
+# official release takes. The release-signed binary stays beside the install
+# as panda.release; `panda self rollback` restores it.
+#
+# Requirements are developer-grade: go, git, make, python3, and a C toolchain
+# for the gate's CGO race leg. `panda self doctor` preflights the box.
+# self_evolution:
+#   enabled: false
+#   repo: ""                      # REQUIRED when enabled: this node's OpenPanda
+#                                 # checkout — the merge worktree is a detached
+#                                 # `git worktree add` under <data>/self/.
+#   producers: "self"             # self | mesh — whose signed patch sets a merge
+#                                 # proposal accepts. mesh reserves the phase-5
+#                                 # cross-node transfer; today only this node's
+#                                 # own key mints mergeable sets.
+#   rebase_on_update: true        # after an official update lands on a
+#                                 # self-built node, try rebasing queued sets
+#                                 # onto it; a conflict marks the set and the
+#                                 # node stays on the release binary.

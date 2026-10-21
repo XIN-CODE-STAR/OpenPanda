@@ -152,6 +152,50 @@ English translation of [status.md](status.md)（中文版为准）· English
 > panda-screen missing-value guards, shell completions for `task
 > board`/`task artifact`; version turned `0.0.11`, `make gate` green).
 
+> 2026-10-21 (cross-network mesh P1–P5: dual-key identity and reachability cards,
+> transitive blind relay, epidemic directory sync, K=2 rendezvous edges and the
+> reachability ladder, policy surface and relay budgets, `panda://join`, pair over
+> transit, `dial_check`, and §8 counters. Remaining: UPnP/NAT-PMP, punch/dir
+> source-signature convergence, and a daemon→panel IPC path for mesh metrics).
+>
+> 2026-10-21 (self-evolution phases 1–4 main body, opt-in and off by default:
+> signed patch-set manifests with per-patch sha256, `<data>/self` queue + merge
+> worktree, a merge proposal as a review task, approve → apply → `make gate` →
+> build → `StageLocal` → swap, `panda.release` rollback, cross-process worktree
+> lock, base-freshness check, `+self.N` allocation at merge, and a service restart
+> deferred until the review row settles; web patch-set/diff review card and
+> read-only `/api/selfevo`. Remaining: mesh transport, auto mode, producer-side
+> gate digest, `panda update --no-rebase`, macOS stable signing).
+>
+> 2026-10-21 (a review pass over the P0–P2 findings — self-evolution side: a
+> merge proposal pins the digest of the manifest the reviewer saw, and an
+> approve whose set changed since (the boot-time rebase sweep rewrites a
+> queued set in place) asks for a re-review instead of merging unseen bytes;
+> a rebase no longer rewrites a terminal (rejected/merged) set and no longer
+> erases a "rejected" marker (one rebase used to turn the human's "no" back
+> into a pending set); `panda self rebase` now carries the same admission
+> rule as the boot sweep (under producers=self a foreign set is no longer
+> re-signed into "this node's"); a manifest's base must be a pinned commit
+> sha; set ids are validated as plain directory names (no escaping the
+> queue root); an import no longer carries the source directory's `.state`
+> marker; the `+self.N` counter is persisted so `reset --purge` cannot make
+> the version regress; the rollback's schema guard fails closed and uses the
+> live data directory's floor. Cross-network side: a transit destination
+> checks that the inner frame is addressed to it (otherwise it executes
+> somebody else's task and answers for them); the relay bandwidth budget
+> charges the bytes that actually leave the node; an unsigned directory row
+> may create a row but never displace one (otherwise any member could
+> rewrite a peer's card and addrs and knock it out of the dial path); the
+> per-sender new-id budget is reserved under the lock (no TOCTOU) and each
+> sender's share of the directory is capped (rotating session ids does not
+> help); the want list is sorted before the page cut (it used to be cut in
+> map order, so the two sides never covered the same ids); the directory
+> digest ignores the measured RTT (it used to move with every ping, so the
+> two sides never converged and re-pulled every 30s) and is cached for 2s
+> (each inbound heartbeat used to cost a full table scan and hash); the
+> rendezvous election treats the failure domain as a preference rather than
+> a filter (every LAN peer shares one domain, so only one was elected)).
+>
 > This document answers one question: **where the project stands now —
 > what works and what does not.**
 

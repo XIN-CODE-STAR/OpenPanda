@@ -1079,6 +1079,30 @@ func (r *repl) cmdTaskSend(fields []string) {
 	}
 }
 
+// cmdQueue implements `/queue <task-id> <text>` — the queue half of the send
+// pair under the name the TUI and the web console use. It delegates to
+// cmdTaskSend so the three surfaces cannot drift apart, and only adds the
+// guard cmdTaskSend would otherwise report in `task send` vocabulary.
+func (r *repl) cmdQueue(arg string) {
+	fields := strings.Fields(arg)
+	if len(fields) < 2 {
+		r.outln(i18n.T(r.loc, "cli.task.note.usage"))
+		return
+	}
+	r.cmdTaskSend(fields)
+}
+
+// cmdInject implements `/inject <task-id> <text>` — the same note, plus aborting
+// the in-flight round when this seat's engine runs the task.
+func (r *repl) cmdInject(arg string) {
+	fields := strings.Fields(arg)
+	if len(fields) < 2 {
+		r.outln(i18n.T(r.loc, "cli.task.note.usage"))
+		return
+	}
+	r.cmdTaskSend(append([]string{"--inject"}, fields...))
+}
+
 // cmdTaskContinue implements `/task continue <id> [note]` — requeue a task the
 // supervisor parked with needs_followup so it keeps working under a fresh
 // round budget (same session, same work dir); the optional note leads the

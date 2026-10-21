@@ -192,6 +192,9 @@ func main() {
 			ConfigPath:   configPathOrDefault(*configPath),
 			StaticDir:    *staticDir,
 			Token:        cfg.Network.PanelToken,
+			// This process's executable is panda-webui, not the panda install
+			// target a self-merge swap replaces. Refuse those approvals here.
+			Sidecar: true,
 		}),
 	}
 	errCh := make(chan error, 1)

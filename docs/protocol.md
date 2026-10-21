@@ -125,7 +125,7 @@ JSON 重打包）。
 
 | `type` | 负载结构 | 说明 |
 |---|---|---|
-| `hello` | `HelloPayload` | 连接时声明身份：`card` 摘要 + HMAC `sig`（绑 `ts`/`nonce`）+ Ed25519 `pub_key`/`ed_sig` + `udp_port` + `caps` + `authoritative` |
+| `hello` | `HelloPayload` | 连接时声明身份：`card` 摘要 + HMAC `sig`（绑 `ts`/`nonce`）+ Ed25519 `pub_key`/`ed_sig` + X25519 `x_pub` + `udp_port` + `caps` + `authoritative` |
 | `hello_reject` | `HelloRejectPayload` | 握手失败时服务端在断连前给出的唯一回执：`reason` ∈ `auth`/`identity`/`replay` |
 | `join` | — | 加入（常量定义在 `bus`，处理在核心层） |
 | `heartbeat` | `HeartbeatPayload` | 状态 + 容量；可顺带最新能力卡 `card` |
@@ -150,8 +150,12 @@ JSON 重打包）。
 | `agent_grant` | `AgentGrantPayload` | 租约锁授权/拒绝（§5.2，`denied` 区分显式拒绝与无应答） |
 | `agent_yield` | `AgentYieldPayload` | agent 在检查点让出执行 |
 | `dtn_bundle` | `DTNBundlePayload` | 一个 CBOR 编码的 DTN bundle 原样透传（见下） |
+| `transit` | `TransitPayload` | 盲中继帧（跨网段 mesh M3）：`dest`（稳定 `k:<pub>` 或实例 id）+ `ttl` + `seal`（`x25519`\|`mesh`）+ `inner` 密封 blob。中继只见外壳，逐跳转发；终点开封、验内层 Ed25519 认证后按直收分发 |
+| `dir_pull` | `DirPullPayload` | 目录差量同步请求（跨网段 mesh M1）：请求方完整 `id→content_hash` 戳表 + 可选 `after` 续页游标。心跳 `dir_digest` 不匹配才发，30s/对端限速（续页豁免但有页数上限） |
+| `dir_rows` | `DirRowsPayload` | pull 的应答：差量行数组（每行是源节点 Ed25519 签名的规范化 JSON，逐跳原样转发）+ `want`（应答方缺的 id，一次往返双向收敛）+ `cursor`/`more` 分页（双闸：256 行 ∧ 1 MiB 帧体） |
 | `punch_offer` | `PunchOfferPayload` | NAT 打洞协调：会话 nonce + 候选端点 + TTL |
 | `punch_ready` | `PunchOfferPayload` | 应答 offer：回显 nonce，附己方候选端点 |
+| `punch_want` | `PunchWantPayload` | 自动打洞提示（跨网段 mesh M3）：发送方按字典序选举不是 offerer，请对方（较小 id 一侧）向自己发 `punch_offer`；`ttl` 约束中继跳数，与 offer 同套逐跳转发纪律 |
 | `pair_hello` | `PairHelloPayload` | LAN 配对发起（未认证连接上除 hello 外唯一受理的帧）：会话 id + 临时 X25519 公钥 + Ed25519 身份 + nonce |
 | `pair_ready` | `PairReadyPayload` | 配对应答：对端的 X25519/nonce/身份，两侧由此推出同一短验证码 |
 | `pair_secret` | `PairSecretPayload` | 配对确认后投递共享密钥：AES-256-GCM 密封（HKDF(dh, nonces)），仅 responder→initiator |
@@ -165,7 +169,13 @@ JSON 重打包）。
 监听端口，0 = 无 UDP 面）、`caps`（可选线能力清单：`sessaead` 会话加密、
 `binart` 二进制数据帧——不认识某项能力的对端只是不启用它）、
 `authoritative`（声明发送进程持有节点身份锁，同 id 仲裁让真正的 daemon 从
-借用引擎的兄弟进程手里收回对端边）。能力摘要刻意以原始 JSON 透传，让传输层
+借用引擎的兄弟进程手里收回对端边）、`x_pub`（X25519 身份公钥 hex——双钥
+身份的另一半：Ed25519 签名、X25519 做 transit 密钥协商；仅在该 hello 的
+EdSig 验过后才入目录 `x_pub` 列，旧对端不带此字段、发往它们的 transit 退化为
+成员级 mesh 密封）、`prov`（构建出处：`release`|`self`|`unsigned`——
+version.Provenance 戳，自声明且在签名域外，接收方白名单化后落目录行，
+供 `accept.<tier>.self_signed` 信任策略权衡自建二进制的任务来源；
+缺席 = 不认识该字段的旧节点）。能力摘要刻意以原始 JSON 透传，让传输层
 与持有 `CapabilitySummary` 类型的 ledger 包解耦。hello **应答**额外带
 `you`——对端观察到本连接来源 IP，是白送的反射地址发现（不签名：篡改它只
 换来错误的候选列表，打洞握手本身会识破）。
@@ -189,7 +199,13 @@ hello 校验失败时服务端回 `hello_reject`（`reason`：`auth` 签名/密�
   （空数组 = 无计划），字段缺席才表示旧节点；
 - `projects`：本机持有 checkout 的项目名（驻留路由打分的输入）；
 - `ver`：本机版本号，mid-release 升级不必等重连就刷新对端目录行
-  （fleet 面板的版本错位告警即拿它与自身构建对比）。
+  （fleet 面板的版本错位告警即拿它与自身构建对比）；
+- `prov`：构建出处（`release`|`self`|`unsigned`），同 hello 镜像——
+  mid-life 换二进制（update apply、self-build）不等重连就刷新目录行；
+- `dir_digest`：目录戳表 `id→content_hash`（剔除 session 行）排序后的
+  SHA-256——M1 差量同步的扳机，见流行病节目；
+- `edge_load`：本机当前活跃边数（跨网段 mesh M3）——会合边打分偏向
+  少被钉住的候选，避免全网格把会合职责堆到同几个热节点上。
 
 ### `task_delegate`
 任务移交（§10.3 示例）。除 `task_id` / `parent_id` / `project` / `title` /
@@ -387,6 +403,144 @@ TTL 期满。同一规则约束 `artifact_push` 的收方。
 结果，统一在 UDP 监听端口——打洞永远从共享 socket 喷出，NAT 开的洞就是监听
 口）。`punch_ready` 回显 nonce 并附己方候选，双方同时开喷。`network.peers` 里
 `punch:<node-id>` 形态的条目触发这条路径；打通的端点成为 `sendTo` 的回退路由。
+
+### 盲中继：`transit`
+`sendTo` 直连与打洞路由都不通时的兜底（跨网段 mesh 设计 M3）。外层信封是
+普通 `transit` 帧，`env.From`/`msg_id` 走逐跳重写与去重（同 punch 中继纪律），
+`env.To` 记最终目的地；`TransitPayload` 是**中继唯一可读的外壳**——`dest`
+（优先稳定键 `k:<pub>`，经目录解析当前实例）、`ttl`（`TransitMaxTTL=6` 逐跳递减，
+耗尽即弃）、`seal` 级别、`inner` 密封 blob（≤1 MiB）。
+
+`inner` 密封内容 = `{env, pub, sig}`：原信封字节 + 发送方 Ed25519 对内层字节的
+认证（`panda-transit-inner-v1` 域前缀），所以中继改不动 `From`/`MsgID`/负载。
+`pub`/`sig` 是必需字段，无签名的内层直接丢弃；实例/会话 id 必须能经目录行
+绑定到同一签名密钥。未钉住的 id 只放行 heartbeat 与 punch 协调帧作为首次
+接触，任务/结果/授权类帧必须先由签名 hello 建立身份，避免幽灵 id 借用默认
+mesh 信任。落地端还要核内层信封的收件人确是自己（空收件人按广播放行）：否则
+成员可以把给别人的帧封好后路由过来，让本节点替别人执行任务并替人回结果。
+两级密封：`x25519` 用 ECIES（临时 X25519 公钥前缀 + HKDF 绑双方公钥 +
+AES-256-GCM）封到目的节点的 `x_pub`，中继只读到 dest+大小+TTL；目的端没发布
+`x_pub` 时退化 `mesh` 级——HKDF(mesh 密钥 + dest 绑定) ，任何成员都能开，
+发送方记 `transit_degraded` 审计。hello `caps` 里 `e2et` 宣告可当被密封目的地
+（发布了 `x_pub`），`trnz` 宣告会替成员转发；转发只走 WS conn（UDP 1400B 装
+不下），hello/pair 类 conn 绑定帧永远不可被密封进内层。工件面（`artifact_fetch`
+及其 chunk/push 应答）同样不进 transit：请求虽小，应答是 1 MiB 级块，密封后
+必然超过 inner 上限；放行请求只会跳过调用方的链上/枢纽回退，让拉取空等预算。
+数据面应走直连或既有中继路径。
+
+### 流行病目录：`dir_pull`/`dir_rows`（M1）
+
+每拍心跳捎带 `dir_digest`——发送方目录戳表（`id→content_hash`，会话/幽灵行
+除外）排序拼接后的 SHA-256。表一致即零额外帧；不一致才触发 `dir_pull`：
+请求方发自己的全量戳表，应答方差量回 `dir_rows`——对方缺/哈希不同的行
+（≤256 行 ∧ ≤1 MiB，触顶处生成 `cursor` 供 `after` 续页）加上 `want`
+（应答方自己缺的 id），一次往返两侧收敛。行是**凭证不是视图**：源节点
+Ed25519 签名（`sig` 覆盖 seen_at 在内的全部字段，规范化 JSON），逐跳原样
+转发；`content_hash` 覆盖除 `seen_at`/`sig` 外的**稳定**内容——实测 RTT
+（`links[].rtt_ms`）也被剔除，否则摘要随每次 ping 变动、两端目录永远不收敛，
+只能每 30s 互拉一次；源端重铸 seen_at 同样不动 digest。冲突裁决：签名行 >
+未签名行，同级取 `seen_at` 新者；未签名行只能**新建**一行，永远不能顶掉已有
+行（否则任何成员都能改写别人的能力卡/地址，并把它踢出拨号路径）；未来时标按
+±5min 钳制。无签名行可流通（直接观测本来就没签名）但永不写
+身份列（`pub_key`/`x_pub` 只收签名行），且断言能力/地址的分量低于任何
+签名行。自己的行每次心跳现签；拉取双向限速（新鲜 pull 30s/对端，续页
+按会话 ≤8 页）；`learned_via` 记录投递该行的对端。收侧另有两道闸：每发送者
+每 10s 窗口最多引入 256 个新 id（锁内预留，未用即退还），且单个发送者占用的
+目录份额不超过全表四分之一（按 `learned_via` 与其已钉密钥归属合并计账，
+轮换 session id 也逃不掉）——否则一个成员可以把共享目录填满自己的行，
+诚实的对端再也挤不进自己的行。老节点字段缺省、帧型
+不识——同步对它们静默不发生，协议其余部分不变。
+
+### 动态会合边与可达性阶梯（M2/M3）
+
+**会合边**不是角色而是偏好：每个节点在目录行里挑 K=2 个广告了
+`relay.rendezvous` 且在线、有 `pub_key`、可达的候选，保持长连。打分 =
+行龄衰减（分钟级）+ 活边加成 − 心跳 `edge_load` 惩罚；选举带 1.25× 滞回
+（挑战者须决定性胜过在位者才换边）和故障域偏好（同 v4 /24、同 v6 /48 的候选
+优先错开，但只是偏好不是硬过滤——LAN 内所有节点同域，硬过滤只会选出第二个
+节点就停手，网格只剩一条边），每 5min 重评。会合边是 punch 信封与 transit 转发
+赖以流通的骨架——候选归零时节点如实降级：直连/打洞照旧、目录注明
+degraded、outbox/DTN 兜底，不谎报可达性。
+
+**可达性阶梯**在 `sendTo` 发现无活轨时后台点燃（30s/对端去重），让
+*下一次* 发送能走直连而不是永远靠中继：
+
+1. **addrs 直拨**：目录行自广告地址按序尝试（全局 v6 → 公网 v4 →
+   主机名 → 其余；并发上限 4，失败地址冷却 5min）。来源闸：未签名的
+   间接（gossip）行不许指挥拨号；签名/直连行的私网与回环提示只在
+   直连学来的行上生效——转发行的 LAN 地址对本网段毫无意义。
+2. **自动打洞**：目录行 `udp_port>0` 时进入打洞级。**选举**：字典序较小
+   的 node id 是 offerer，直接发 `punch_offer`（60s/对端间隔）；较大侧
+   只发 `punch_want` 提示——它感知到失败但 spray 归对方出。喷候选从
+   目录 addr 的 IP × udp_port 合成（同套来源闸）。两个失败窗口仍无路由
+   记 `nat_suspect`（10min），期间打洞级整体跳过——诚实的答案是
+   outbox/DTN，不是无尽喷包；路由一旦证实即刻洗清。
+3. **transit → outbox**：阶梯不改变既有的深层回退，只是让中继越来越少
+   被需要。
+
+**会合能力是证明出来的（P5）**：节点宣告 `relay.rendezvous` 后，必须向
+≥2 个已认证邻居发 `dial_check{addr,udp,nonce}`，请对方真去拨自己的公网
+地址；对方拨通回 `dial_check_ack{nonce,ok}`。凑够 2 个**不同**对端的成功回执
+才算 proven（证明 30 分钟过期，12 分钟刷新一轮），期间能力卡上才写
+`rendezvous: true`。探测方的闸与可达性阶梯同源：只拨全局可路由地址，
+私网/回环/overlay 一律不拨，每对端每分钟至多一次——这是成员间的互助，
+不是扫描服务。`network.rendezvous: always` 可跳过证明（运维声明），
+`auto` 在没有邻居可问时退化为"有公网地址即可宣告"。
+
+静态 `punch:<id>` 配置路径不变：它是显式 SLA，自动级只是给没有配置
+的对端补上同样的机制；`punchAt`/`punchMaxSessions` 等预算两侧共享。
+
+### `panda://join` 冷启动 URI（P4a）
+
+零信息 = 零发现，这是物理不是缺陷，所以入网只需要**一个可敲门的地址**：
+
+```
+panda://join?b=203.0.113.5:7836&b=node.example.com:7836&k=k:<pub>&c=482913
+```
+
+| 字段 | 语义 |
+|---|---|
+| `b` | 可重复的接触点地址（`host:port` 或 `ws(s)://`）。任意在线成员都可充当，无专用服务器；按序尝试直到一个应答。 |
+| `k` | 引入者的稳定 Ed25519 身份。`pair_ready` 回的 `pub` 不匹配则跳过该接触点——接触点可以是任何人，**引入者不能**。 |
+| `c` | 期望的配对码（SAS，`482913` 与 `482-913` 等价）。给出即自动比对，不匹配直接中止：这就是 MITM 判定，没有留给人眼跳过。 |
+
+流程复用既有配对仪式：拨 `b` → `pair_hello`/`pair_ready` → 两端显示同一
+SAS → 引入者人工确认 → `pair_secret` 带密封密钥回程 → 落地为
+`network.shared_secret` + 该 `b` 进 `peers`。URI 只加了两道**收密前**的闸
+（`k`/`c`），不改配对协议本身。`panda nodes invite --uri` 打印的本机 URI
+就是 `panda join` 解析的那一行（往返有单测）。
+
+### pair 帧经 transit：接触点代理（P4b）
+
+joiner 与引入者双向不可达时，`b` 里的任意在线成员充当**接触点**转发配对
+握手。两端仍然只说原来的配对协议——没有新方言，也没有改变客户端：
+
+```
+joiner ──明文 pair_hello{target=k:<I>}──▶ 接触点 C
+C ──transit{seal:"none", dest=k:<I>, inner=pair_hello}──▶ 引入者 I
+I ──transit{seal:"none", dest=k:<J>}──▶ C
+C ──明文 pair_ready / pair_secret──▶ joiner
+```
+
+- **接触点回程绑定（att_clients）**：C 收到带 `target` 的 `pair_hello` 时，
+  按其中的 `pub` 记 `k:<joiner-pub> → 该未认证 conn`，TTL = 配对窗口
+  4 分钟、上限 16 条、conn 死亡即清。transit 的 `dest` 解析顺序变为
+  `instanceForStable → att_clients → 丢/回执`。绑定只存本地、不 gossip、
+  不授予任何成员权利；冒名者顶多让两端 SAS 不一致——那是配对本来就要
+  检测的东西。
+- **`target` 只被消费一次**：C 转发前必须清空它，否则引入者会把自己当成
+  第二个接触点继续转。
+- **`seal:"none"` 是唯一的未密封豁免**，且**只对 pair_\* 内层生效**：
+  joiner 此刻既无 shared_secret（mesh 密封不成立）、也不知引入者的
+  X25519 钥（x25519 密封不成立）。pair 帧从设计第一天起就按"敌对信道"
+  处理——机密性靠 DH 盒，认证靠 SAS；中继能读、能改、能丢，任何一种
+  都会表现为两个人屏幕上的码不一致或盒子打不开。任何非 pair 内层若以
+  `seal:"none"` 到达，接收端直接丢弃并告警。
+- 引入者的会话不再绑定 conn：`pairSession` 记录 `replyHop`（来路中继）
+  与 `replyDest`（joiner 的稳定身份），`pair_ready`/`pair_secret`/
+  `pair_reject` 全部沿同一条回路发出，并以 `transit_degraded` 记账。
+- x25519 升级（joiner 在 `pair_hello` 里带 `x_pub`，引入者直接密封回程）
+  留给后续阶段：它需要客户端能解 transit 外壳，本阶段刻意不引入。
 
 ## LAN 发现 beacon 与配对
 

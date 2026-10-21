@@ -572,6 +572,78 @@ func TestMigrateV50TasksSpawnDepth(t *testing.T) {
 	}
 }
 
+// V56 lands the cross-network mesh columns on employee_cache (design §6.2):
+// the X25519 identity peers seal transit to, advertised dial addresses and
+// relay services, plus the directory-gossip bookkeeping (learned_via,
+// seen_at, content_hash) P2 diffs against.
+func TestMigrateV56EmployeeTransitDir(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+	if err := Migrate(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	for _, col := range []string{"x_pub", "addrs", "relay", "learned_via", "seen_at", "content_hash"} {
+		if !columnExists(t, db, "employee_cache", col) {
+			t.Fatalf("employee_cache.%s missing after migrate", col)
+		}
+	}
+	// Pre-existing rows read the documented defaults — an empty claim, not
+	// a NULL that decode sites would have to special-case.
+	if _, err := db.Exec(
+		`INSERT INTO employee_cache (id, status, last_seen) VALUES ('legacy', 'offline', 0)`); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+	var xpub, addrs, relay, via string
+	var seen int64
+	if err := db.QueryRow(
+		`SELECT x_pub, addrs, relay, learned_via, seen_at FROM employee_cache WHERE id='legacy'`).
+		Scan(&xpub, &addrs, &relay, &via, &seen); err != nil {
+		t.Fatalf("read legacy defaults: %v", err)
+	}
+	if xpub != "" || addrs != "" || relay != "" || via != "" || seen != 0 {
+		t.Fatalf("legacy defaults = %q,%q,%q,%q,%d — want all-empty", xpub, addrs, relay, via, seen)
+	}
+	// Idempotent: a second run must not fail or duplicate the columns.
+	if err := Migrate(db); err != nil {
+		t.Fatalf("re-migrate: %v", err)
+	}
+}
+
+// V57 lands employee_cache.prov: the self-asserted build provenance
+// (release | self | unsigned) stamped from hello/heartbeat. Pre-existing
+// rows default to empty — "never reported" — distinct from an honest
+// "unsigned" a new-format dev peer advertises.
+func TestMigrateV57EmployeeProv(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+	if err := Migrate(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if !columnExists(t, db, "employee_cache", "prov") {
+		t.Fatal("employee_cache.prov missing after migrate")
+	}
+	if _, err := db.Exec(
+		`INSERT INTO employee_cache (id, status, last_seen) VALUES ('legacy', 'offline', 0)`); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+	var prov string
+	if err := db.QueryRow(`SELECT prov FROM employee_cache WHERE id='legacy'`).Scan(&prov); err != nil {
+		t.Fatalf("read legacy prov: %v", err)
+	}
+	if prov != "" {
+		t.Fatalf("legacy prov = %q, want empty (never reported)", prov)
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatalf("re-migrate: %v", err)
+	}
+}
+
 func columnExists(t *testing.T, db *sql.DB, table, col string) bool {
 	t.Helper()
 	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))

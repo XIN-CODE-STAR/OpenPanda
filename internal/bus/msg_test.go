@@ -38,6 +38,58 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 	}
 }
 
+// TestProvenanceWireRoundTrip pins the build-provenance field on the two
+// directory frames: a stamped value survives marshal → PayloadInto on both
+// hello and heartbeat, and a pre-provenance frame (field absent outright)
+// decodes to "" rather than failing — the legacy-peer compat contract.
+func TestProvenanceWireRoundTrip(t *testing.T) {
+	env, err := NewEnvelope(MsgHello, "n1", "m-1", HelloPayload{NodeID: "n1", Ver: "v", Prov: "self"})
+	if err != nil {
+		t.Fatalf("new envelope: %v", err)
+	}
+	raw, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got Envelope
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var hp HelloPayload
+	if err := got.PayloadInto(&hp); err != nil {
+		t.Fatalf("hello decode: %v", err)
+	}
+	if hp.Prov != "self" {
+		t.Fatalf("hello prov = %q, want self", hp.Prov)
+	}
+
+	env, err = NewEnvelope(MsgHeartbeat, "n1", "m-2", HeartbeatPayload{Status: "online", Prov: "release"})
+	if err != nil {
+		t.Fatalf("new heartbeat envelope: %v", err)
+	}
+	var got2 Envelope
+	raw, _ = json.Marshal(env)
+	if err := json.Unmarshal(raw, &got2); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var bp HeartbeatPayload
+	if err := got2.PayloadInto(&bp); err != nil {
+		t.Fatalf("heartbeat decode: %v", err)
+	}
+	if bp.Prov != "release" {
+		t.Fatalf("heartbeat prov = %q, want release", bp.Prov)
+	}
+
+	// Legacy frame: prov absent outright decodes to "" (old-peer unknown).
+	var legacy HelloPayload
+	if err := json.Unmarshal([]byte(`{"node_id":"old","ver":"v","sig":"s"}`), &legacy); err != nil {
+		t.Fatalf("legacy hello decode: %v", err)
+	}
+	if legacy.Prov != "" {
+		t.Fatalf("legacy hello prov = %q, want empty", legacy.Prov)
+	}
+}
+
 func TestEnvelopeEmptyPayload(t *testing.T) {
 	env, err := NewEnvelope(MsgTaskAccept, "opi", "msg-2", nil)
 	if err != nil {

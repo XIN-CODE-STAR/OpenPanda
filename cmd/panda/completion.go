@@ -167,7 +167,7 @@ _panda() {
     fi
     case "$sub" in
 `)
-	for _, cmd := range []string{"nodes", "task", "plan", "session", "sessions", "skill", "model", "models", "config", "memory", "project", "reminder", "card", "agents", "auth", "completion"} {
+	for _, cmd := range []string{"nodes", "join", "task", "plan", "session", "sessions", "skill", "model", "models", "config", "memory", "project", "reminder", "card", "agents", "auth", "completion"} {
 		words := completionVerbsFor(cmd)
 		if cmd == "sessions" {
 			words = completionVerbsFor("session")
@@ -229,7 +229,7 @@ _panda() {
     local -a verbs
     case "${bare[1]}" in
 `)
-	for _, cmd := range []string{"nodes", "task", "plan", "session", "sessions", "skill", "model", "models", "config", "memory", "project", "reminder", "card", "agents", "auth", "completion"} {
+	for _, cmd := range []string{"nodes", "join", "task", "plan", "session", "sessions", "skill", "model", "models", "config", "memory", "project", "reminder", "card", "agents", "auth", "completion"} {
 		words := completionVerbsFor(cmd)
 		switch cmd {
 		case "sessions":
@@ -269,7 +269,7 @@ end
 
 complete -c panda -f -n 'test (__fish_panda_bare_count) -eq 0' -a '` + completionTopWords() + `' -d 'panda command'
 `)
-	for _, cmd := range []string{"nodes", "task", "plan", "session", "sessions", "skill", "model", "models", "config", "memory", "project", "reminder", "card", "agents", "auth", "completion"} {
+	for _, cmd := range []string{"nodes", "join", "task", "plan", "session", "sessions", "skill", "model", "models", "config", "memory", "project", "reminder", "card", "agents", "auth", "completion"} {
 		words := completionVerbsFor(cmd)
 		switch cmd {
 		case "sessions":
@@ -311,7 +311,7 @@ func powershellCompletion() string {
 
 $_pandaCommands = @(` + quote(subcommandNames()) + ")\n")
 	b.WriteString("$_pandaVerbs = @{\n")
-	for _, cmd := range []string{"nodes", "task", "plan", "session", "skill", "model", "config", "memory", "project", "reminder", "card", "agents", "auth", "completion"} {
+	for _, cmd := range []string{"nodes", "join", "task", "plan", "session", "skill", "model", "config", "memory", "project", "reminder", "card", "agents", "auth", "completion"} {
 		words := completionVerbs[cmd]
 		if cmd == "completion" {
 			words = []string{"bash", "zsh", "fish", "powershell"}

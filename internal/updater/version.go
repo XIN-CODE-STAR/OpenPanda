@@ -100,6 +100,10 @@ type Options struct {
 	IncludePrerelease bool
 	// NoRestart prevents delayedRestart from running, for one-shot CLI commands.
 	NoRestart bool
+	// SkipDaemonRestart prevents applyRelease from bouncing the daemon
+	// service. The self-evolution pipeline sets this so it can archive the
+	// patch set and complete the review task before the process restarts.
+	SkipDaemonRestart bool
 	// SchemaFloor, when set, reports the data directory's current schema
 	// version (PRAGMA user_version). Apply probes the staged binary's
 	// migration ceiling via `panda version --json` and refuses the swap when

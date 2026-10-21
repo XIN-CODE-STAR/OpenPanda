@@ -76,6 +76,11 @@ type Deps struct {
 	StaticDir  string
 	Token      string
 	Updater    *updater.Manager // nil disables the self-update endpoints
+	// Sidecar marks the standalone panda-webui process. A self-merge
+	// approval swaps os.Executable(), and the sidecar's executable is the
+	// console binary — not the panda install target. The daemon and
+	// `panda web` (both running the panda binary) leave this false.
+	Sidecar bool
 }
 
 // New builds the panel HTTP handler: the static web app under StaticDir plus
@@ -112,6 +117,7 @@ func New(d Deps) http.Handler {
 		configPath:         d.ConfigPath,
 		cardFilePath:       d.CardPath,
 		updater:            d.Updater,
+		sidecar:            d.Sidecar,
 		activeAsks:         make(map[string]sessionOperation),
 		approvalOperations: make(map[string]approvalOperation),
 		serviceCtx:         context.Background(),
@@ -173,6 +179,12 @@ func New(d Deps) http.Handler {
 	mux.HandleFunc("POST /api/pair/initiate", h.initiatePair)
 	mux.HandleFunc("POST /api/pair/answer", h.answerPair)
 	mux.HandleFunc("GET /api/self", h.getSelf)
+	// Self-evolution (design doc §4.2): patch-set queue + diff preview for the
+	// merge-review gate. Read-only — the approve/reject actions ride the
+	// existing task review endpoints since a proposal IS a review task.
+	mux.HandleFunc("GET /api/selfevo", h.getSelfEvo)
+	mux.HandleFunc("GET /api/selfevo/{id}", h.getSelfEvoSet)
+	mux.HandleFunc("GET /api/selfevo/{id}/file", h.getSelfEvoFile)
 	mux.HandleFunc("GET /api/stats", h.getStats)
 	mux.HandleFunc("GET /api/events", h.events)
 	mux.HandleFunc("GET /api/settings/model", h.getModelSettings)
@@ -258,6 +270,15 @@ func New(d Deps) http.Handler {
 		mux.HandleFunc("DELETE /api/sessions/{id}", h.deleteSession)
 		mux.HandleFunc("POST /api/sessions/{id}/fork", h.forkSession)
 		mux.HandleFunc("POST /api/sessions/{id}/ask", h.sessionAsk)
+		// Type into the thread while the agent works — the queue/inject pair
+		// the composer promises (see session_msg.go). The notes routes are the
+		// same contract's read/edit/drop/promote half: a queued note the user
+		// can no longer see is a note they cannot correct.
+		mux.HandleFunc("POST /api/sessions/{id}/messages", h.sendSessionMessage)
+		mux.HandleFunc("GET /api/sessions/{id}/notes", h.listSessionNotes)
+		mux.HandleFunc("PATCH /api/sessions/{id}/notes/{key}", h.editSessionNote)
+		mux.HandleFunc("DELETE /api/sessions/{id}/notes/{key}", h.deleteSessionNote)
+		mux.HandleFunc("POST /api/sessions/{id}/notes/{key}/promote", h.promoteSessionNote)
 		mux.HandleFunc("GET /api/sessions/{id}/approval", h.getSessionApproval)
 		mux.HandleFunc("DELETE /api/sessions/{id}/approval", h.clearSessionApproval)
 		mux.HandleFunc("POST /api/sessions/{id}/cancel", h.sessionCancel)
@@ -499,6 +520,9 @@ type handler struct {
 	// means "ask the live engine which card it was built from".
 	cardFilePath string
 	updater      *updater.Manager
+	// sidecar is true in the standalone panda-webui process; a self-merge
+	// approval there would overwrite the console binary.
+	sidecar bool
 
 	// cfgMu guards h.cfg only when no engine exists to borrow a lock from —
 	// degraded static mode still serves concurrent HTTP handlers. When the
@@ -508,6 +532,16 @@ type handler struct {
 	askMu         sync.Mutex
 	askGeneration uint64
 	activeAsks    map[string]sessionOperation
+
+	// steerMu guards steers: one bounded queue per session holding what the
+	// user typed while that session's turn streams. It is the console's twin of
+	// the TUI's askStream.steer channel — the only delivery path for a plain
+	// answer turn, which has no task row to land a durable note on.
+	steerMu sync.Mutex
+	steers  map[string][]pendingNote
+	// memSeq stamps the in-memory notes' keys. Guarded by steerMu; monotonic
+	// per process so a key handed to the browser never names a later note.
+	memSeq int
 
 	approvalMu         sync.Mutex
 	approvalOperations map[string]approvalOperation
@@ -866,9 +900,11 @@ func (h *handler) attachLastEvents(ctx context.Context, tasks []taskJSON) {
 	}
 }
 
-// visibleTraceTypes is the 8-track set the decision-orbit component paints.
+// visibleTraceTypes is the track set the decision-orbit component paints.
 // Mirrors the map in events.go (same package, kept here so getTask's filter
-// is obvious without chasing a separate file).
+// is obvious without chasing a separate file). user_msg belongs here: the
+// whole point of the strip is "what is happening to this task right now", and
+// a queued or injected user note that never shows up reads as dropped input.
 var visibleTraceTypes = map[string]bool{
 	"reasoning":          true,
 	"classify_result":    true,
@@ -879,6 +915,8 @@ var visibleTraceTypes = map[string]bool{
 	"tier2_triggered":    true,
 	"plan_stage_changed": true,
 	"artifact_transfer":  true,
+	"user_msg":           true,
+	"user_msg_consumed":  true,
 }
 
 // getTask serves one task's full row plus its event timeline.
@@ -1106,6 +1144,14 @@ func (h *handler) approveTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if disposition == core.ApprovalNeedsChangedInput {
 		writeErr(w, http.StatusConflict, core.ErrApprovalNeedsChangedInput)
+		return
+	}
+	// A self-merge approval runs the merge pipeline, whose final step swaps
+	// os.Executable(). In the sidecar that file is panda-webui, not the panda
+	// install target — refuse before remembering the approval so the operator
+	// can settle the review from the daemon (`panda approve`).
+	if disposition == core.ApprovalSelfMerge && h.sidecar {
+		writeErr(w, http.StatusConflict, errors.New("self-merge proposals must be approved with `panda approve` — the web sidecar cannot swap its own binary"))
 		return
 	}
 	if !h.rememberTaskApproval(w, r, id, body.Scope, projectstore.DecisionApprove) {

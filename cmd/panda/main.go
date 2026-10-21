@@ -38,6 +38,7 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/reminders"
 	"github.com/Xustalis/OpenPanda/internal/scheduler"
 	"github.com/Xustalis/OpenPanda/internal/security"
+	"github.com/Xustalis/OpenPanda/internal/self"
 	"github.com/Xustalis/OpenPanda/internal/skills"
 	"github.com/Xustalis/OpenPanda/internal/storage"
 	"github.com/Xustalis/OpenPanda/internal/updater"
@@ -93,12 +94,12 @@ func main() {
 func subcommandNames() []string {
 	return []string{
 		"daemon", "serve", "ask", "repl", "chat", "web", "voice",
-		"install", "uninstall", "update", "upgrade", "doctor", "status", "nodes", "pair", "queue",
+		"install", "uninstall", "update", "upgrade", "doctor", "status", "nodes", "pair", "join", "queue",
 		"task", "plan", "cancel", "approve", "reject", "logs", "skill", "mcp",
 		"reminder", "detect", "card", "init", "metrics", "heatmap", "audit", "session",
 		"sessions", "memory", "config", "model", "models", "agents", "project",
 		"auth", "rpc",
-		"read", "view", "cat", "md", "markdown", "version", "help", "completion",
+		"read", "view", "cat", "md", "markdown", "version", "help", "completion", "self",
 	}
 }
 
@@ -273,6 +274,23 @@ func runDaemon(args []string) {
 	// The self-tools MCP server spawned from .mcp.json inherits the daemon's
 	// --config choice; empty means its own default discovery.
 	coreNode.SetSelfConfigPath(*configPath)
+	// Self-evolution (opt-in): wire the patch-set manager so self-merge
+	// review approvals run the pipeline in this process. The daemon is NOT
+	// a one-shot — a merge apply re-execs it onto the new binary.
+	if cfg.SelfEvolution.Enabled {
+		coreNode.SetSelfEvolution(self.New(cfg.SelfEvolutionDir(), cfg.SelfEvolution.Repo, logger), false, cfg.SelfEvolution.Producers)
+	}
+	// Startup self-check (design §5): a self-built binary with no release
+	// fallback on disk has no signed escape hatch — say so loudly once per
+	// boot instead of letting the operator discover it mid-incident.
+	if versionpkg.ProvenanceClass() == versionpkg.ProvenanceSelf {
+		if fb := updater.ReleaseFallbackPath(); fb != "" {
+			if _, err := os.Stat(fb); err != nil {
+				logger.Warn("self-built binary with no release fallback",
+					"want", fb, "fix", "apply any official release once, or run `panda update`")
+			}
+		}
+	}
 	// Supervision (上级完成度判定): judge agent results against the task's
 	// success criteria and re-delegate work that isn't complete. A model-less
 	// node skips this — agent tasks finish in one shot as before.
@@ -399,6 +417,11 @@ func runDaemon(args []string) {
 	coreNode.SetTrustConfig(cfg.Network.Trust)
 	coreNode.SetPeerTrustHints(cfg.Network.PeerTrustHints())
 	coreNode.SetReputationEnabled(cfg.Routing.Reputation)
+	// Cross-network policy (network.bootstrap_edges / auto_punch / transit /
+	// rendezvous + the trust.relay tables): installed here so a node started
+	// without it runs the documented defaults rather than an unconfigured
+	// zero policy.
+	coreNode.SetNetworkPolicy(cfg.Network)
 	// The artifact pool is the data plane: a stage's packed output, named by its
 	// hash, that a later stage on another node pulls over the bus. Without it a
 	// delegated task can only carry a path, which means nothing on the node that
@@ -567,6 +590,14 @@ func runDaemon(args []string) {
 	}))
 	updateNotice.StartAutoCheck(ctx, 6*time.Hour)
 
+	// Phase-4 coexistence (design §7 q3): after an official update landed and
+	// the daemon restarted onto it, carry queued patch sets forward onto the
+	// repo's new HEAD — a conflict marks the set and the release binary stays
+	// in charge. Runs once per boot; a no-op when nothing is queued.
+	if cfg.SelfEvolution.Enabled && cfg.SelfEvolution.RebaseOnUpdate {
+		guard.Go(logger, "self: rebase sweep", nil, func() { coreNode.SelfRebaseSweep(ctx) })
+	}
+
 	if err := coreNode.Register(ctx); err != nil {
 		fatal("register node", err)
 	}
@@ -639,13 +670,14 @@ func runDaemon(args []string) {
 		}); err != nil {
 			return err
 		}
-		coreNode.ApplyNetworkConfig(ctx, config.NetworkConfig{
-			SharedSecret:      fresh.Network.SharedSecret,
-			Peers:             peers,
-			AllowCleartext:    fresh.Network.AllowCleartext,
-			AllowCleartextFor: fresh.Network.AllowCleartextFor,
-			Trust:             fresh.Network.Trust,
-		})
+		// Apply the WHOLE freshly-loaded network section, not a hand-built
+		// literal: NetworkConfig's cross-net fields (bootstrap_edges,
+		// auto_punch, transit, rendezvous) default to false/zero when
+		// omitted, and SetNetworkPolicy would silently switch the mesh into
+		// manual mode after every pairing. Only the peer list is new here.
+		live := fresh.Network
+		live.Peers = peers
+		coreNode.ApplyNetworkConfig(ctx, live)
 		return nil
 	})
 
@@ -772,9 +804,10 @@ func fatalMsg(msg string) {
 func printVersion(_ []string) {
 	if jsonOutput {
 		info := map[string]any{
-			"version":  versionpkg.Version,
-			"codename": versionpkg.Codename,
-			"schema":   storage.LatestVersion(),
+			"version":    versionpkg.Version,
+			"codename":   versionpkg.Codename,
+			"schema":     storage.LatestVersion(),
+			"provenance": versionpkg.ProvenanceClass(),
 		}
 		// db_schema lets a probe (self-updater, install.sh) learn the data
 		// directory's current schema from this binary alone — the value that
@@ -786,7 +819,15 @@ func printVersion(_ []string) {
 		emitJSON(info)
 		return
 	}
-	fmt.Printf("panda %s\n", versionpkg.Display())
+	line := versionpkg.Display()
+	// A build from a channel other than release says so in the human line —
+	// an operator must be able to tell a self-evolution binary apart at a
+	// glance (release and unsigned dev need no mark: they are the ordinary
+	// cases).
+	if p := versionpkg.ProvenanceClass(); p != versionpkg.ProvenanceRelease && p != versionpkg.ProvenanceUnsigned {
+		line += " (" + p + ")"
+	}
+	fmt.Printf("panda %s\n", line)
 }
 
 // printUsage lists the subcommands as a grouped command tree — `panda help`
@@ -880,6 +921,8 @@ func printUsage(w *os.File) {
 	h("  mcp", "cli.help.d.mcp", wide)
 	h("  rpc", "cli.help.d.rpc", wide)
 	h("  auth login|status|logout <provider>", "cli.help.d.auth", wide)
+	line("  self status|queue|doctor|mint|propose|rebase|rollback|reset")
+	h("", "cli.help.d.self", wide)
 	line("")
 	line(t("cli.help.g.observability"))
 	h("  status", "cli.help.d.status", wide)

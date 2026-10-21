@@ -149,6 +149,38 @@ func runStatus(args []string) {
 			break
 		}
 	}
+	// The mesh column follows the same "only when it says something" rule as
+	// trust: a fleet that never advertises relay services, dial addrs, or a
+	// gossip-learned row pays nothing for it.
+	showMesh := false
+	for _, v := range views {
+		if !v.Local && (v.Relay != nil || len(v.Addrs) > 0 || v.LearnedVia != "") {
+			showMesh = true
+			break
+		}
+	}
+	const meshW = 12
+	meshCell := func(v nodeStatusView) string {
+		if v.Local {
+			return cell("—", meshW)
+		}
+		var parts []string
+		if v.Relay != nil {
+			if v.Relay.Rendezvous {
+				parts = append(parts, "rv")
+			}
+			if v.Relay.Transit {
+				parts = append(parts, "tx")
+			}
+		}
+		if n := len(v.Addrs); n > 0 {
+			parts = append(parts, fmt.Sprintf("a%d", n))
+		}
+		if v.LearnedVia != "" {
+			parts = append(parts, "via:"+v.LearnedVia)
+		}
+		return cell(cliui.Truncate(strings.Join(parts, " "), meshW, true), meshW)
+	}
 	trustCell := func(v nodeStatusView) string {
 		if v.Local {
 			return cell("—", trustW)
@@ -168,6 +200,9 @@ func runStatus(args []string) {
 	}
 	if showTrust {
 		header = append(header, cell(i18n.T(loc, "cli.col.trust"), trustW))
+	}
+	if showMesh {
+		header = append(header, cell(i18n.T(loc, "cli.col.mesh"), meshW))
 	}
 	header = append(header, cell(i18n.T(loc, "cli.col.fp"), 17), i18n.T(loc, "cli.col.seen"))
 	fmt.Println(listHeader(header...))
@@ -190,6 +225,9 @@ func runStatus(args []string) {
 		}
 		if showTrust {
 			cells = append(cells, trustCell(view))
+		}
+		if showMesh {
+			cells = append(cells, meshCell(view))
 		}
 		cells = append(cells, nodeFP(n), humanAge(loc, n.LastSeen))
 		fmt.Println(row(cells...))

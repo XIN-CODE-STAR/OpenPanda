@@ -629,6 +629,32 @@ export function formatTaskEvent(type: string, rawData?: string): FormattedEvent 
         rawJson,
       }
     }
+    case 'user_msg': {
+      // A note the user sent into a running or queued task. It used to fall
+      // through to the unknown-event branch and render as the bare string
+      // "user_msg" — visible only if you knew what to look for, which is the
+      // same as invisible.
+      const mode = str(data?.mode)
+      if (mode) tags.push({ key: t('events.tag.mode'), value: mode })
+      return {
+        type,
+        label: t('events.user_msg'),
+        badgeClass: mode === 'inject' ? 'info' : 'dim',
+        summary: str(data?.text) || undefined,
+        tags,
+        rawJson,
+      }
+    }
+    case 'user_msg_consumed': {
+      return {
+        type,
+        label: t('events.user_msg_consumed'),
+        badgeClass: 'accent',
+        summary: str(data?.text) || undefined,
+        tags,
+        rawJson,
+      }
+    }
     case 'plan_stage_changed': {
       const stage = str(data?.stage_title) || str(data?.stage_label) || str(data?.stage_id)
       const transition = str(data?.transition)

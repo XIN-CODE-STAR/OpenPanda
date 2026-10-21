@@ -625,6 +625,20 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 		OnProgress: func(p askengine.Progress) {
 			send("status", statusEventOf(p))
 		},
+		// What the user types while this turn streams. The queue is drained at
+		// every round boundary, so the note lands in the round after the one
+		// that was running when it was typed — the same contract the TUI's
+		// steer channel gives, and the only channel a task-less turn has.
+		GetSteer: func() string {
+			text, _ := h.drainSteer(sess.ID)
+			return text
+		},
+		// The proof the note actually reached the model: a queued channel write
+		// alone cannot distinguish "delivered next round" from "the turn ended
+		// first". The console upgrades its "queued" note on this event.
+		OnSteerConsumed: func(text string, round int) {
+			send("steer", map[string]any{"text": text, "round": round})
+		},
 	}
 
 	// Every panel session is a workspace conversation: repo sessions run in
@@ -654,6 +668,10 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer h.unregisterSessionAsk(sess.ID, op)
+	// The steer queue lives exactly as long as the turn that drains it. Notes
+	// still in it are dropped with it — the turn is over, and the text is
+	// already on record as part of the user's side of the conversation.
+	defer h.dropSteer(sess.ID)
 	if !send("operation", map[string]string{"operation_id": op.operationID}) {
 		// The operation remains detached from the failed response writer and
 		// continues to persist its final task/session result.

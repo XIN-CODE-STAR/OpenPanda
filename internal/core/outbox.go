@@ -378,7 +378,8 @@ func (c *Core) outboxFlush(ctx context.Context, peer string) {
 		// it. handleCancel is idempotent — a cancel for a task the peer
 		// never received, or one already terminal, is a no-op.
 		for _, e := range cancels {
-			if !c.deliverCancel(flushCtx, peer, e.taskID, e.attempt, e.reason) {
+			accepted, _ := c.deliverCancel(flushCtx, peer, e.taskID, e.attempt, e.reason)
+			if !accepted {
 				continue // still parked; retry on next reconnect
 			}
 			c.cancelOutboxDropKey(flushCtx, e.peer, e.taskID)
@@ -693,6 +694,18 @@ func (c *Core) resumeOutboxDropKey(ctx context.Context, key, taskID string) {
 	}
 }
 
+// resumeOutboxDropTask removes every parked approval for a task, regardless
+// of the destination key it was parked under. Used once the executor's result
+// proves the approval landed: the task id is unique, so any copy is done.
+func (c *Core) resumeOutboxDropTask(ctx context.Context, taskID string) {
+	if c.db == nil || taskID == "" {
+		return
+	}
+	if _, err := c.db.ExecContext(ctx, `DELETE FROM resume_outbox WHERE task_id = ?`, taskID); err != nil {
+		c.logger.Debug("outbox: drop delivered resume", "task", taskID, "err", err)
+	}
+}
+
 // resumeOutboxDrop removes a delivered approval keyed by either form.
 func (c *Core) resumeOutboxDrop(ctx context.Context, peer, taskID string) {
 	if c.db == nil || peer == "" || taskID == "" {
@@ -808,35 +821,39 @@ func (c *Core) supersedeTarget(ctx context.Context, taskID, newTarget string) {
 	if t, terr := c.store.Get(ctx, taskID); terr == nil {
 		attemptID = t.AttemptID
 	}
-	if !c.deliverCancel(ctx, prev, taskID, attemptID, reason) {
+	accepted, relayed := c.deliverCancel(ctx, prev, taskID, attemptID, reason)
+	if !accepted || relayed {
 		c.outboxCancelPersist(ctx, prev, taskID, attemptID, reason)
 	}
 	c.logger.Info("superseded prior dispatch target", "task", taskID,
 		"prev", prev, "new", newTarget)
 }
 
-// deliverCancel places a task_cancel envelope on the wire to peer, returning
-// whether it was accepted by the connection. Shared by the initial send path
-// (forwardCancelDownstream) and the flush path.
-func (c *Core) deliverCancel(ctx context.Context, peer, taskID, attemptID, reason string) bool {
+// deliverCancel places a task_cancel envelope on the wire to peer. accepted
+// is true when a direct/UDP send or a transit handoff took the frame; relayed
+// says the latter, so the initial-cancel path can keep a custody copy while
+// the flush path treats the handoff as its final attempt. Shared by the
+// initial send path (forwardCancelDownstream) and the flush path.
+func (c *Core) deliverCancel(ctx context.Context, peer, taskID, attemptID, reason string) (accepted, relayed bool) {
 	msgID, err := newUUID()
 	if err != nil {
 		c.logger.Warn("outbox: mint cancel id", "task", taskID, "err", err)
-		return false
+		return false, false
 	}
 	env, err := bus.NewEnvelope(bus.MsgTaskCancel, c.nodeID, msgID, bus.TaskCancelPayload{
 		TaskID: taskID, Reason: reason, AttemptID: attemptID,
 	})
 	if err != nil {
 		c.logger.Warn("outbox: build cancel envelope", "task", taskID, "err", err)
-		return false
+		return false, false
 	}
 	env.To = peer
-	if err := c.sendTo(peer, env); err != nil {
+	relayed, err = c.sendToDetail(peer, env)
+	if err != nil {
 		c.logger.Debug("outbox: send cancel", "task", taskID, "peer", peer, "err", err)
-		return false
+		return false, false
 	}
-	return true
+	return true, relayed
 }
 
 // taskOutboxPersist stores a forward task that could not be delivered immediately,

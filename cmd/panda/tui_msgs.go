@@ -58,7 +58,39 @@ type (
 	// It carries no data: there is nothing to fold into the model, and the
 	// pump is not re-armed.
 	droppedMsg struct{}
+
+	// steerAckMsg reports that the round loop folded one steering idea into its
+	// prompt. The enqueue note already said "queued"; this is the only event
+	// that can turn that into "the model has it", because a buffered channel
+	// write proves nothing — the turn can end before anything polls it again.
+	steerAckMsg struct {
+		stream *askStream
+		text   string
+		round  int
+	}
+	// taskRowMsg names the task row this ask created, delivered before that
+	// task runs. A mid-turn Enter needs it to address the board: without it
+	// the only target would be whatever the user last opened in the picker.
+	taskRowMsg struct {
+		stream *askStream
+		taskID string
+	}
 )
+
+// stagedNote is a note this model queued mid-turn and can still escalate. key
+// is the board slot (`user:<seq>`) when the turn is task-backed; empty for a
+// plain answer turn, whose only channel is the in-process steer queue and
+// which therefore cannot be interrupted — the second Enter says so instead of
+// pretending otherwise.
+type stagedNote struct {
+	taskID string
+	key    string
+	text   string
+	// appended is the exact suffix stageNote added to pendingPrompt. Keeping it
+	// lets an edit (or a drop) rewrite that one line instead of stacking every
+	// draft the user typed into the turn's persisted user side.
+	appended string
+}
 
 // askStream carries one in-flight ask: the channel the callbacks write to, the
 // context that cancels it (Esc/interrupt), and the outcome slot. It is created
@@ -149,6 +181,17 @@ func startAsk(engine *askengine.Engine, history []entry.Turn, prompt, workDir, s
 			default:
 				return ""
 			}
+		},
+		// The round loop tells us when a note actually became part of the
+		// prompt — the difference between "accepted into a channel" and
+		// "the model will read it".
+		OnSteerConsumed: func(text string, round int) {
+			s.send(ctx, steerAckMsg{stream: s, text: text, round: round})
+		},
+		// The task this turn is about to run, reported while the row still
+		// has work ahead of it — see StageNote in tui_actions.go.
+		OnTaskRow: func(taskID string) {
+			s.send(ctx, taskRowMsg{stream: s, taskID: taskID})
 		},
 		// OnApproval stays nil: a synchronous yes/no from a Bubble Tea card is not
 		// answerable from this goroutine, so we take the NeedsApproval Result path

@@ -447,6 +447,9 @@ func (c *Core) waitRemoteResult(ctx context.Context, cur Task, ch <-chan bus.Tas
 	for {
 		select {
 		case res := <-ch:
+			// The approval reached the executor and the result is here; a
+			// backup resume parked for a relay handoff has done its job.
+			c.resumeOutboxDropTask(ctx, taskID)
 			final, err := c.store.Get(ctx, taskID)
 			if err != nil {
 				return cur, res, err
@@ -472,6 +475,7 @@ func (c *Core) waitRemoteResult(ctx context.Context, cur Task, ch <-chan bus.Tas
 			if Terminal(t.State) {
 				// A monitor, cancel or concurrent runner already closed the
 				// row: report the real terminal state, not a timeout verdict.
+				c.resumeOutboxDropTask(ctx, taskID)
 				return t, bus.TaskResultPayload{
 					TaskID: t.TaskID, AttemptID: t.AttemptID, State: t.State,
 				}, nil
@@ -595,7 +599,38 @@ func (c *Core) createTask(ctx context.Context, in TaskInput) (Task, string, stri
 			"stages_count": 1,
 		})
 	}
+	notifyTaskCreated(ctx, t)
 	return t, hash, level, nil
+}
+
+// taskObserverKey carries a task-creation observer through a request context.
+// A context value rather than a Core field: the observer belongs to one ask's
+// goroutine, and two concurrent asks (a board submission plus a foreground
+// turn) must not see each other's rows.
+type taskObserverKey struct{}
+
+// WithTaskObserver installs fn to be called once for every task row created
+// under ctx — the only point at which a caller learns the id of a task that is
+// about to run synchronously. A surface needs it before execution starts: by
+// the time Submit returns, the work is over and there is nothing left to
+// steer.
+func WithTaskObserver(ctx context.Context, fn func(Task)) context.Context {
+	if fn == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, taskObserverKey{}, fn)
+}
+
+// notifyTaskCreated fires the context's observer, if any. Best-effort by
+// construction: the callback is a notifier, never a decision, so a panic in it
+// must not abort the task the user asked for.
+func notifyTaskCreated(ctx context.Context, t Task) {
+	fn, _ := ctx.Value(taskObserverKey{}).(func(Task))
+	if fn == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	fn(t)
 }
 
 // runLocal executes a task on this node and returns the final row + result.
@@ -689,6 +724,10 @@ func (c *Core) resumeApproved(ctx context.Context, taskID string, relayUpstream 
 	case ApprovalNeedsChangedInput:
 		return cur, bus.TaskResultPayload{TaskID: cur.TaskID, AttemptID: cur.AttemptID, State: cur.State},
 			fmt.Errorf("resume approved: %w", ErrApprovalNeedsChangedInput)
+	case ApprovalSelfMerge:
+		// A merge proposal's approval is the pipeline — worktree apply, gate,
+		// build, stage, swap — never an agent run.
+		return c.resumeSelfMerge(ctx, cur)
 	case ApprovalResumeExecution, ApprovalAdmissionReview:
 		// Continue below and claim the execution exactly once.
 	default:
@@ -793,7 +832,7 @@ func (c *Core) ContinueReviewed(ctx context.Context, taskID, note string) (Task,
 	if steer == "" {
 		steer = "the operator asked to continue — pick up where the previous round stopped and finish the remaining work"
 	}
-	if err := c.userMessage(ctx, taskID, steer, MsgGradeSteer, "continue"); err != nil {
+	if _, err := c.userMessage(ctx, taskID, steer, nil, MsgGradeSteer, "continue"); err != nil {
 		return cur, err
 	}
 	if err := c.store.RequeueForContinue(ctx, taskID, cur.OwnerNode); err != nil {
@@ -846,14 +885,16 @@ func (c *Core) resumeRemote(ctx context.Context, cur Task, target, answer string
 	if err != nil {
 		return cur, bus.TaskResultPayload{}, fmt.Errorf("mint message id: %w", err)
 	}
-	env, err := bus.NewEnvelope(bus.MsgTaskResume, c.nodeID, msgID, bus.TaskResumePayload{
+	payload := bus.TaskResumePayload{
 		TaskID: taskID, AttemptID: cur.AttemptID, Answer: answer,
-	})
+	}
+	env, err := bus.NewEnvelope(bus.MsgTaskResume, c.nodeID, msgID, payload)
 	if err != nil {
 		return cur, bus.TaskResultPayload{}, fmt.Errorf("build resume: %w", err)
 	}
 	env.To = target
-	if err := c.sendTo(target, env); err != nil {
+	relayed, serr := c.sendToDetail(target, env)
+	if serr != nil {
 		// The executor went away between the refusal and the approval — a
 		// transient flap must not kill the user's explicit consent. Park the
 		// approval in the resume outbox: the next hello from the peer
@@ -865,10 +906,8 @@ func (c *Core) resumeRemote(ctx context.Context, cur Task, target, answer string
 		if lerr := c.store.ClearLease(ctx, taskID); lerr != nil {
 			c.logger.Warn("resume: clear lease for parked approval", "task", taskID, "err", lerr)
 		}
-		c.resumeOutboxPersist(ctx, target, bus.TaskResumePayload{
-			TaskID: taskID, AttemptID: cur.AttemptID, Answer: answer,
-		}, ttl)
-		c.logger.Info("resume parked for executor's next link", "task", taskID, "to", target, "err", err)
+		c.resumeOutboxPersist(ctx, target, payload, ttl)
+		c.logger.Info("resume parked for executor's next link", "task", taskID, "to", target, "err", serr)
 		if !c.sendableTo(target) {
 			// No track can carry the resume at all: holding the caller on the
 			// wait channel would park them for the entire outbox ttl (and then
@@ -890,6 +929,14 @@ func (c *Core) resumeRemote(ctx context.Context, cur Task, target, answer string
 		// The link exists but the write failed transiently: the periodic
 		// outbox sweep redelivers on this same connection, so keep waiting.
 		return c.waitRemoteResult(ctx, cur, ch, "resume")
+	}
+	if relayed {
+		// A relay accepted the frame, but the final hop is unconfirmed. Keep
+		// a resume copy parked: if the executor never sees the approval, the
+		// next flush redelivers it. The result path drops the copy when the
+		// executor answers.
+		c.resumeOutboxPersist(ctx, target, payload, time.Now().Add(c.lease()).Unix())
+		c.logger.Info("resume handed to transit; keeping outbox row", "task", taskID, "to", target)
 	}
 	c.logger.Info("resume forwarded to executor", "task", taskID, "to", target)
 

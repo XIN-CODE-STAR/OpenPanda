@@ -78,6 +78,36 @@ const (
 	// any residual loop.
 	MsgPunchOffer = "punch_offer"
 	MsgPunchReady = "punch_ready"
+	// MsgPunchWant is the auto-punch hint (cross-network mesh M3): the
+	// sender tells the receiver "please send ME a punch_offer" — the fix
+	// for the election's blind end, where only the lexicographically
+	// larger node observed the send failure but the smaller one owns the
+	// offerer role. It relays like punch_offer (TTL-bounded); a receiver
+	// honoring it punches env.From.
+	MsgPunchWant = "punch_want"
+	// MsgTransit is the blind-relay envelope (cross-network mesh design M3):
+	// it carries a sealed inner frame toward a destination the sender cannot
+	// reach directly. Relays read only the payload's outer shell — the
+	// destination's stable key, a decremented TTL and a byte size — never the
+	// contents, which are end-to-end sealed under the destination's X25519
+	// identity (or the member-level mesh seal when the peer published none).
+	MsgTransit = "transit"
+	// MsgDirPull/MsgDirRows are the epidemic directory sync pair
+	// (cross-network mesh design M1). A heartbeat's dir_digest mismatch
+	// prompts the receiver to send dir_pull carrying its id→content_hash
+	// stamp table; the peer answers dir_rows with the differing/missing
+	// signed rows plus a want list of the ids IT lacks, so one exchange
+	// converges both sides. Old nodes ignore both frames — their digest
+	// field is absent, their pull never comes, sync simply never starts.
+	MsgDirPull = "dir_pull"
+	MsgDirRows = "dir_rows"
+	// MsgDialCheck/MsgDialCheckAck are the AutoNAT-style proof (cross-network
+	// mesh M2/P5): a node that wants to CLAIM rendezvous asks peers to dial
+	// its advertised address back. The ability is verified, not asserted —
+	// the claim rides the capability card only after an ack says the dial
+	// actually reached us.
+	MsgDialCheck    = "dial_check"
+	MsgDialCheckAck = "dial_check_ack"
 	// Bluetooth-style LAN pairing (pair_hello is the ONLY frame accepted on
 	// an unauthenticated connection besides hello — it runs an ephemeral
 	// X25519 exchange so the two operators can compare a short code and the

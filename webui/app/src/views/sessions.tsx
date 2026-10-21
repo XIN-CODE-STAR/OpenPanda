@@ -16,11 +16,13 @@ import {
   type NodeInfo,
   type Session,
   type SessionDiff,
+  type SessionNote,
   type SessionTurn,
   type SkillEntry,
   type Task,
 } from '../api/client'
 import { Icon } from '../components/icons'
+import { DiffViewer } from '../components/diff-viewer'
 import { useAsync, useChangeSignal, useLocaleRerender, useVisibleInterval, busSubscribeChange } from '../hooks'
 import { t, locale } from '../i18n'
 import { clockStamp, clockTime } from '../format/time'
@@ -449,6 +451,16 @@ export function SessionsView({
   const [input, setInput] = useState('')
   // Files pasted, dropped or uploaded into the composer, waiting for send.
   const [pending, setPending] = useState<PendingAttachment[]>([])
+  // Notes typed mid-turn that no round has folded yet — the strip above the
+  // composer. A queue with no list is a queue the user cannot see, correct, or
+  // take back.
+  const [notes, setNotes] = useState<SessionNote[]>([])
+  // The note being edited in the strip. Editing happens in place rather than
+  // by pulling the text back into the composer: a pull-back would drop the row
+  // first (or the text would be sent twice) and the re-send would silently
+  // demote an inject back to a queue entry.
+  const [editingNote, setEditingNote] = useState('')
+  const [noteDraft, setNoteDraft] = useState('')
   // True while a file is over the composer, so the box can say so.
   const [dropping, setDropping] = useState(false)
   const [authorize, setAuthorize] = useState(false)
@@ -472,6 +484,19 @@ export function SessionsView({
   }, [activeId])
   const [busy, setBusy] = useState(false)
   const [loadError, setLoadError] = useState('')
+  // Poll the pending strip only while there is something to watch: a live turn
+  // produces notes, and a waiting note disappears the moment a round folds it.
+  // An idle thread with an empty strip costs nothing.
+  useEffect(() => {
+    if (!activeId) {
+      setNotes([])
+      return
+    }
+    void refreshNotes()
+    if (!busy && notes.length === 0) return
+    const id = setInterval(() => void refreshNotes(), 4000)
+    return () => clearInterval(id)
+  }, [activeId, busy, notes.length])
   const [selectedProject, setSelectedProject] = useState(project || '')
   // The directory a brand-new thread will run in, as the composer's footer
   // shows it. It starts as the scope's own work dir and only becomes a real
@@ -1054,6 +1079,126 @@ export function SessionsView({
     }
   }
 
+  /** Type into the turn that is already streaming. Enter while busy used to be
+   *  a silent early return — the composer's own placeholder promised "type an
+   *  addition" and nothing happened. The text now lands on the session's steer
+   *  queue (or the linked task's board), which is the same contract the TUI has
+   *  always had for plain text typed mid-turn.
+   *
+   *  Files ride along: a screenshot dropped into the composer mid-turn uploads
+   *  like any other attachment, and its mention is handed to the note. Refusing
+   *  them (the old behaviour) meant the one gesture that most needs a note — "look
+   *  at this while you work" — was the one gesture that could not be made. */
+  async function sendIntoRunningTurn(text: string, tray: PendingAttachment[]) {
+    const sid = activeId
+    if (!sid || (!text && tray.length === 0)) return
+    try {
+      // Upload before the note so a failed upload leaves the draft intact.
+      let mentions: string[] = []
+      if (tray.length > 0) {
+        const up = await api.uploadSessionFiles(sid, tray.map((p) => p.file))
+        mentions = up.files.map((f) => f.mention)
+      }
+      const r = await api.sendSessionMessage(sid, text, false, mentions)
+      // Only clear once the server accepted it: a refused note is still the
+      // user's text, and losing it to an optimistic clear costs more than the
+      // round trip.
+      setInput('')
+      editorClear(composer.current)
+      setPending([])
+      setCompleteDismissed('')
+      // The server's own words when it has a caveat (no queue consumer, or an
+      // inject that could not interrupt), else the plain outcome.
+      if (r.warning) toast(r.warning)
+      else toast(t('sessions.msgQueued'))
+      void refreshNotes()
+    } catch (err) {
+      toastError(err)
+    }
+  }
+
+  /** The pending strip's list: notes no round has folded yet. Polled rather
+   *  than pushed — the round loop's consumption is a row stamp, not an event
+   *  every surface subscribes to, and a 4s tick costs one small GET. */
+  async function refreshNotes() {
+    const sid = activeId
+    if (!sid) {
+      setNotes([])
+      return
+    }
+    try {
+      const r = await api.sessionNotes(sid)
+      if (sid === activeId) setNotes(r.notes)
+    } catch {
+      // A note list is advisory: a failed read must not paint an error over
+      // the transcript. The next tick retries.
+    }
+  }
+
+  /** Send ▲ on a pending note: escalate it to an inject in place. */
+  async function promoteNote(n: SessionNote) {
+    const sid = activeId
+    if (!sid) return
+    try {
+      const r = await api.promoteSessionNote(sid, n.key)
+      if (r.warning) toast(r.warning)
+      else if (r.status === 'interrupted') toast(t('sessions.noteInjected'))
+      else toast(t('sessions.noteQueuedAhead'))
+      void refreshNotes()
+    } catch (e) {
+      toastError(e)
+    }
+  }
+
+  /** Trash on a pending note: take it back out of the queue. */
+  async function dropNote(n: SessionNote) {
+    const sid = activeId
+    if (!sid) return
+    try {
+      await api.deleteSessionNote(sid, n.key)
+      toast(t('sessions.noteDropped'))
+      void refreshNotes()
+    } catch (e) {
+      toastError(e)
+    }
+  }
+
+  /** Pencil on a pending note: edit the row itself. The slot keeps its queue
+   *  position and its mode — the server rewrites the same note, so a round that
+   *  has not read it yet sees only the corrected wording. */
+  function beginEditNote(n: SessionNote) {
+    setEditingNote(n.key)
+    setNoteDraft(n.text)
+  }
+
+  function cancelEditNote() {
+    setEditingNote('')
+    setNoteDraft('')
+  }
+
+  /** Commit the in-place edit. An emptied row keeps its attachments; a row with
+   *  neither text nor files is refused by the server, so treat that as "nothing
+   *  to save" and close the editor instead of raising an error the user cannot
+   *  act on. */
+  async function saveEditNote(n: SessionNote) {
+    const sid = activeId
+    if (!sid) return
+    const text = noteDraft.trim()
+    const attachments = n.attachments ?? []
+    if (!text && attachments.length === 0) {
+      cancelEditNote()
+      return
+    }
+    try {
+      await api.editSessionNote(sid, n.key, text, attachments)
+      cancelEditNote()
+      toast(t('sessions.noteEdited'))
+      void refreshNotes()
+    } catch (e) {
+      toastError(e)
+    }
+  }
+
   async function send(e?: Event) {
     e?.preventDefault()
     const raw = input.trim()
@@ -1064,7 +1209,11 @@ export function SessionsView({
     const tray = el0 ? pending.filter((p) => livePillKeys(el0).has(p.key)) : pending
     // A tray-only send is a real send: dropping a screenshot and hitting Enter
     // is the whole point, and the prompt then carries nothing but the file.
-    if ((!raw && tray.length === 0) || busy || inflight.current) return
+    if (!raw && tray.length === 0) return
+    if (busy || inflight.current) {
+      void sendIntoRunningTurn(raw, tray)
+      return
+    }
     // A slash line is a command, never a prompt — the REPL's rule.
     if (raw.startsWith('/') && dispatchSlash(raw)) {
       setInput('')
@@ -1222,6 +1371,11 @@ export function SessionsView({
           onReasoning: (text) => patch((m) => ({ ...m, thought: (m.thought ?? '') + text })),
           onDelta: (text) => patch((m) => ({ ...m, text: m.text + text })),
           onStatus: (text, ev) => patch((m) => ({ ...m, status: statusNote(text, ev) })),
+          // The note typed mid-turn reached a round. This is the upgrade from
+          // "queued" to "delivered" — without it the user cannot tell a steer
+          // the model read from one the turn ended before reaching.
+          onSteer: (_text, round) =>
+            patch((m) => ({ ...m, status: t('sessions.steerDelivered', { n: String(round) }) })),
           onOperation: (operationID) => {
             if (inflight.current === ctrl && inflightSid.current === sid) {
               inflightOperation.current = operationID
@@ -1980,6 +2134,107 @@ export function SessionsView({
                 <Icon name="arrow-down" size={16} />
               </button>
             </div>
+          </div>
+        )}
+
+        {/* Notes typed into the running turn, before the box that types into it.
+            They live here rather than in the transcript because they have not
+            been delivered yet: the agent has not read them, so the user can
+            still send one ahead of the round, edit it, or drop it. */}
+        {notes.length > 0 && (
+          <div class="note-strip" data-testid="note-strip">
+            {notes.map((n) => (
+              <div class="note-row" key={n.key} data-mode={n.mode}>
+                <span class={`note-mode ${n.mode === 'inject' ? 'inject' : ''}`}>
+                  {n.mode === 'inject' ? t('sessions.noteModeInject') : t('sessions.noteModeQueue')}
+                </span>
+                {editingNote === n.key ? (
+                  // Editing in place: the row stays where it is in the queue,
+                  // so a note already queued ahead of an inject keeps both its
+                  // position and its mode.
+                  <input
+                    class="note-edit"
+                    value={noteDraft}
+                    autoFocus
+                    aria-label={t('sessions.noteEdit')}
+                    onInput={(e) => setNoteDraft(e.currentTarget.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        void saveEditNote(n)
+                      } else if (e.key === 'Escape') {
+                        e.preventDefault()
+                        cancelEditNote()
+                      }
+                    }}
+                  />
+                ) : (
+                  <span class="note-text" title={n.text} onDblClick={() => beginEditNote(n)}>
+                    {n.text}
+                  </span>
+                )}
+                {n.attachments && n.attachments.length > 0 && (
+                  <span class="note-files" title={n.attachments.join('\n')}>
+                    <Icon name="paperclip" size={11} />
+                    {n.attachments.length}
+                  </span>
+                )}
+                <span class="note-actions">
+                  {editingNote === n.key ? (
+                    <>
+                      <button
+                        type="button"
+                        class="note-act"
+                        title={t('sessions.noteSave')}
+                        aria-label={t('sessions.noteSave')}
+                        onClick={() => void saveEditNote(n)}
+                      >
+                        <Icon name="check" size={13} />
+                      </button>
+                      <button
+                        type="button"
+                        class="note-act"
+                        title={t('sessions.noteCancel')}
+                        aria-label={t('sessions.noteCancel')}
+                        onClick={cancelEditNote}
+                      >
+                        <Icon name="x" size={13} />
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        class="note-act"
+                        title={t('sessions.notePromote')}
+                        aria-label={t('sessions.notePromote')}
+                        onClick={() => void promoteNote(n)}
+                      >
+                        <Icon name="send" size={13} />
+                      </button>
+                      <button
+                        type="button"
+                        class="note-act"
+                        title={t('sessions.noteEdit')}
+                        aria-label={t('sessions.noteEdit')}
+                        onClick={() => beginEditNote(n)}
+                      >
+                        <Icon name="pencil" size={13} />
+                      </button>
+                      <button
+                        type="button"
+                        class="note-act danger"
+                        title={t('sessions.noteDrop')}
+                        aria-label={t('sessions.noteDrop')}
+                        onClick={() => void dropNote(n)}
+                      >
+                        <Icon name="trash" size={13} />
+                      </button>
+                    </>
+                  )}
+                </span>
+              </div>
+            ))}
           </div>
         )}
 
@@ -3109,29 +3364,3 @@ function TaskChain({ taskId }: { taskId: string }) {
   return <EventTimeline events={events} className="task-chain-timeline" />
 }
 
-/** DiffViewer renders git patch lines with syntax coloring for added/deleted lines and hunks. */
-function DiffViewer({ patch }: { patch: string }) {
-  if (!patch) return null
-  const lines = patch.split('\n')
-  return (
-    <pre class="diff-patch diff-patch-view mono">
-      {lines.map((line, idx) => {
-        let cls = 'diff-line'
-        if (line.startsWith('+') && !line.startsWith('+++')) {
-          cls += ' diff-line-add'
-        } else if (line.startsWith('-') && !line.startsWith('---')) {
-          cls += ' diff-line-del'
-        } else if (line.startsWith('@@')) {
-          cls += ' diff-line-hunk'
-        } else if (line.startsWith('diff ') || line.startsWith('index ') || line.startsWith('---') || line.startsWith('+++')) {
-          cls += ' diff-line-meta'
-        }
-        return (
-          <div key={idx} class={cls}>
-            <span class="diff-line-content">{line || ' '}</span>
-          </div>
-        )
-      })}
-    </pre>
-  )
-}

@@ -2,7 +2,7 @@
 
 import type { ComponentChildren } from 'preact'
 import { useMemo, useState } from 'preact/hooks'
-import type { Task, TraceEvent } from '../api/client'
+import type { ScoredCandidate, Task, TraceEvent } from '../api/client'
 import { t } from '../i18n'
 import { orbitPhaseFromTraces, useTraceForTask } from '../hooks'
 import { Icon } from './icons'
@@ -83,11 +83,10 @@ export function TaskTrace({ task }: { task: Task }) {
       })
     }
     if (route) {
-      const chosen = route.target ?? route.chosen ?? route.candidates?.[0]?.node_name
       out.push({
         key: 'route',
         label: t('orbit.step.route'),
-        fact: chosen || undefined,
+        fact: routedName(route),
         state: 'done',
       })
     }
@@ -180,7 +179,14 @@ export function TaskTrace({ task }: { task: Task }) {
       </div>
 
       {running && (
-        <span class="tt-progress" role="img" aria-label={t('orbit.summary.progress', { pct: progress })}>
+        <span
+          class="tt-progress"
+          role="progressbar"
+          aria-valuenow={progress}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-label={t('orbit.summary.progress', { pct: progress })}
+        >
           <span class="tt-progress-fill" style={`--prog:${progress}%`} />
         </span>
       )}
@@ -206,19 +212,20 @@ export function TaskTrace({ task }: { task: Task }) {
           <TraceCell label={t('orbit.step.route')}>
             {route?.candidates?.length ? (
               route.candidates.map((c) => {
-                const chosen = (route.target ?? route.chosen) === c.node_id
+                const chosen = routedId(route) === c.node_id
+                const score = c.score_breakdown?.total ?? c.total_score
                 return (
                   <span key={c.node_id} class={chosen ? 'tt-cand is-chosen' : 'tt-cand'}>
                     <span>{c.node_name ?? c.node_id}</span>
-                    {typeof c.breakdown?.total === 'number' && (
-                      <span class="dim">{c.breakdown.total.toFixed(2)}★</span>
+                    {typeof score === 'number' && (
+                      <span class="dim">{score.toFixed(2)}★</span>
                     )}
                   </span>
                 )
               })
             ) : (
               <span class="dim">
-                {route?.target ?? route?.chosen ?? t('detail.trace.dispatch')}
+                {route ? routedName(route) ?? t('orbit.route.declined') : t('detail.trace.dispatch')}
               </span>
             )}
           </TraceCell>
@@ -269,9 +276,13 @@ interface ClassifyData {
 }
 
 interface RouteData {
+  action?: string
+  /** The wire key the scheduler emits (submit.go); `target`/`chosen` stay as
+   *  fallbacks for traces written before the name settled. */
+  target_node?: string
   target?: string
   chosen?: string
-  candidates?: Array<{ node_id: string; node_name?: string; breakdown?: { total?: number } }>
+  candidates?: ScoredCandidate[]
 }
 
 interface ExecData {
@@ -321,6 +332,23 @@ function progressOf(
     p = Math.min(98, p + (sup.round / budget) * (100 - p) * 0.9)
   }
   return Math.max(0, Math.min(100, Math.round(p)))
+}
+
+/** The node id the route picked, or undefined when the decision was a
+ *  decline or carried no target. */
+function routedId(route: RouteData): string | undefined {
+  return route.target_node ?? route.target ?? route.chosen
+}
+
+/** The picked node as a display name: `target_node` is an id, and the
+ *  candidate list maps it to the name the operator chose. A decline resolves
+ *  to undefined rather than to the top candidate — naming one anyway would
+ *  claim a route that never happened. */
+function routedName(route: RouteData): string | undefined {
+  const id = routedId(route)
+  if (id) return route.candidates?.find((c) => c.node_id === id)?.node_name ?? id
+  if (route.action === 'decline') return undefined
+  return route.candidates?.[0]?.node_name ?? route.candidates?.[0]?.node_id
 }
 
 function firstData<T>(traces: TraceEvent[], type: TraceEvent['type']): T | null {

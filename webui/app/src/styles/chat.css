@@ -3196,3 +3196,110 @@
   flex-direction: column;
   gap: 22px;
 }
+
+/* ---- pending-note strip -------------------------------------------------
+   Notes typed into a running turn, listed between the transcript and the
+   composer: they have not been delivered yet, so each row carries the three
+   things a waiting message needs — send it ahead of the round, fix it, or take
+   it back. One row per note, newest at the bottom (the oldest is the one a
+   round reads first). */
+.note-strip {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 52px 6px;
+}
+.note-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 4px 8px 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.note-row[data-mode='inject'] {
+  border-color: var(--accent, #6b8afd);
+}
+.note-mode {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--bg-hover);
+  color: var(--text-tertiary);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.note-row[data-mode='inject'] .note-mode {
+  background: color-mix(in srgb, var(--accent, #6b8afd) 16%, transparent);
+  color: var(--accent, #6b8afd);
+}
+.note-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+.note-files {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--text-tertiary);
+}
+/* In-place editor for a pending note. It takes the text span's slot so the row
+   does not reflow: the mode badge, the attachment count and the action buttons
+   stay where the user's eye already is. */
+.note-edit {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 1px 6px;
+  border: 1px solid var(--accent, #6b8afd);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  outline: none;
+}
+.note-actions {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0.72;
+  transition: opacity 120ms ease;
+}
+.note-row:hover .note-actions,
+.note-row:focus-within .note-actions {
+  opacity: 1;
+}
+.note-act {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.note-act:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.note-act.danger:hover {
+  background: color-mix(in srgb, var(--danger, #d94a4a) 14%, transparent);
+  color: var(--danger, #d94a4a);
+}

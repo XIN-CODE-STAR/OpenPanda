@@ -5,10 +5,12 @@ package core
 import (
 	"bytes"
 	"context"
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/Xustalis/OpenPanda/internal/bus"
@@ -30,6 +32,12 @@ import (
 // PubKey/EdSig and verify exactly as before, so a mixed-version mesh keeps
 // working — signed content simply cannot be minted or verified for them.
 const nodeKeySetting = "node_ed25519_priv"
+
+// nodeXKeySetting is the X25519 half of the dual-key identity (cross-network
+// mesh design §3): the signing key above attests WHO a node is, this
+// agreement key is what transit frames seal TO. Separate key, separate job —
+// a signing key never does ECDH, and this key never signs.
+const nodeXKeySetting = "node_x25519_priv"
 
 // nodeKeyPair returns this node's Ed25519 identity, lazily generating and
 // persisting it on first use. The private key lives in the settings table so
@@ -63,14 +71,120 @@ func (c *Core) nodeKeyPair() (ed25519.PublicKey, ed25519.PrivateKey, bool) {
 				c.logger.Warn("node key corrupt in settings")
 			}
 		}
+		// X25519 half: same load-or-generate discipline as the Ed25519
+		// half. It materializes inside the same once so an injected Ed25519
+		// identity (ProbePeer) leaves BOTH fields frozen — a probe must not
+		// advertise a throwaway x_pub the real daemon never agreed to.
+		var storedX string
+		xErr := c.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, nodeXKeySetting).Scan(&storedX)
+		switch {
+		case errors.Is(xErr, sql.ErrNoRows):
+			priv, gerr := bus.GenerateX25519()
+			if gerr != nil {
+				c.logger.Warn("node x25519 key generate", "err", gerr)
+				break
+			}
+			if _, werr := c.db.Exec(
+				`INSERT INTO settings (key, value) VALUES (?, ?)`, nodeXKeySetting,
+				hex.EncodeToString(priv.Bytes())); werr != nil {
+				c.logger.Warn("node x25519 key persist", "err", werr)
+				break
+			}
+			c.nodeXPriv = priv
+		case xErr != nil:
+			c.logger.Warn("node x25519 key load", "err", xErr)
+		default:
+			raw, derr := hex.DecodeString(storedX)
+			if derr == nil {
+				c.nodeXPriv, derr = bus.LoadX25519(raw)
+			}
+			if derr != nil {
+				c.logger.Warn("node x25519 key corrupt in settings")
+			}
+		}
 		if c.nodePub != nil {
 			c.recordSelfPubKey(c.nodePub)
+		}
+		if c.nodeXPriv != nil {
+			c.recordSelfXPub(c.nodeXPriv.PublicKey())
 		}
 	})
 	if c.nodePriv == nil {
 		return nil, nil, false
 	}
 	return c.nodePub, c.nodePriv, true
+}
+
+// nodeXKey returns this node's X25519 identity — the key transit frames seal
+// to. It materializes inside nodeKeyPair's once, so callers trigger the same
+// lazy path; a keyless node (no writable store) reports !ok and every
+// transit send degrades to the member-level mesh seal.
+func (c *Core) nodeXKey() (*ecdh.PrivateKey, *ecdh.PublicKey, bool) {
+	if _, _, ok := c.nodeKeyPair(); !ok {
+		return nil, nil, false
+	}
+	if c.nodeXPriv == nil {
+		return nil, nil, false
+	}
+	return c.nodeXPriv, c.nodeXPriv.PublicKey(), true
+}
+
+// peerXPub resolves a peer's advertised X25519 key from the directory —
+// recorded only after the hello's EdSig proved the claimed Ed25519 identity,
+// so the key transit seals to is the one the peer's proven identity carried.
+// A session id resolves through its host node's row, exactly like
+// peerPubKey. Stable "k:<pub>" destinations resolve via the newest row
+// holding that signing key. Returns !ok when the peer never published one
+// (old version or keyless): the caller falls back to the mesh seal.
+func (c *Core) peerXPub(ctx context.Context, nodeID string) (*ecdh.PublicKey, bool) {
+	if c.db == nil || nodeID == "" {
+		return nil, false
+	}
+	var hexKey string
+	var err error
+	if strings.HasPrefix(nodeID, stableIDPrefix) {
+		err = c.db.QueryRowContext(ctx,
+			`SELECT x_pub FROM employee_cache WHERE pub_key = ? AND x_pub != ''
+			 ORDER BY (status = 'online') DESC, last_seen DESC LIMIT 1`,
+			nodeID[len(stableIDPrefix):]).Scan(&hexKey)
+	} else {
+		err = c.db.QueryRowContext(ctx,
+			`SELECT x_pub FROM employee_cache WHERE id = ?`, nodeID).Scan(&hexKey)
+		if err != nil || hexKey == "" {
+			// A session id seals to its host node's x key — the session
+			// shares the host's keypair, so the host row's x_pub is the
+			// right destination key (peerPubKey's base fallback).
+			if base, ok := scheduler.EphemeralBase(nodeID); ok && base != nodeID {
+				err = c.db.QueryRowContext(ctx,
+					`SELECT x_pub FROM employee_cache WHERE id = ?`, base).Scan(&hexKey)
+			}
+		}
+	}
+	if err != nil || hexKey == "" {
+		return nil, false
+	}
+	raw, derr := hex.DecodeString(hexKey)
+	if derr != nil {
+		return nil, false
+	}
+	pub, derr := bus.LoadX25519Pub(raw)
+	if derr != nil {
+		return nil, false
+	}
+	return pub, true
+}
+
+// recordSelfXPub stamps this node's X25519 key on its own directory row —
+// the same write-once-at-materialize pattern as recordSelfPubKey, so local
+// consumers (status, transit self-checks) read the self row the same way as
+// a peer's.
+func (c *Core) recordSelfXPub(pub *ecdh.PublicKey) {
+	if _, err := c.db.Exec(
+		`INSERT INTO employee_cache (id, x_pub, status, last_seen) VALUES (?, ?, 'offline', ?)
+		 ON CONFLICT(id) DO UPDATE SET x_pub = excluded.x_pub`,
+		c.nodeID, hex.EncodeToString(pub.Bytes()), time.Now().Unix()); err != nil {
+		c.logger.Debug("record self x_pub", "err", err)
+	}
 }
 
 // loadNodeKey decodes a stored settings value into the keypair, or nils on
@@ -138,17 +252,28 @@ func (c *Core) peerPubKey(nodeID string) (ed25519.PublicKey, bool) {
 	return ed25519.PublicKey(raw), true
 }
 
-// recordPeerPubKey stores the key a peer proved in its signed hello. The row
-// is upserted rather than inserted-blind so a card-less peer still leaves a
-// resolvable identity behind (UpsertRemote only runs when a card arrives).
-// A bare-HMAC hello carries no key and updates nothing: the stored key keeps
-// attesting what the last signed hello proved.
+// recordPeerPubKey stores the key a peer proved in its signed hello, and the
+// X25519 transit key the same hello advertised — in ONE statement, because
+// two hellos for the same node id can process concurrently on separate conn
+// read loops (a mutual dial's loser, a stale listener answering first): two
+// independent upserts could interleave into a torn row carrying one hello's
+// pub_key beside another's x_pub, and the transit seal would then wrap to a
+// key the pinned identity never advertised. A torn read fails closed (the
+// blob just never opens), but atomicity keeps the row honest by
+// construction. xPubHex is validated here and stored verbatim — a verified
+// hello that advertises none clears the column, which is the honest
+// degradation signal, not an error.
+//
+// The row is upserted rather than inserted-blind so a card-less peer still
+// leaves a resolvable identity behind (UpsertRemote only runs when a card
+// arrives). A bare-HMAC hello carries no key and updates nothing: the stored
+// key keeps attesting what the last signed hello proved.
 //
 // TOFU rule: a key that CHANGES under an existing row clears key_verified —
 // a reinstall, a key rotation and a MITM all look identical from here, and
 // none of them may inherit the human's earlier check. The change is logged
 // loudly: it is exactly the signal a silent overwrite would hide.
-func (c *Core) recordPeerPubKey(ctx context.Context, nodeID, pubKeyHex string) {
+func (c *Core) recordPeerPubKey(ctx context.Context, nodeID, pubKeyHex, xPubHex string) {
 	if pubKeyHex == "" || ledger.SessionRowID(nodeID) {
 		// An ephemeral-suffix id is a client session, not a fleet member:
 		// recording a row per session is exactly how ghost nodes pile up.
@@ -157,6 +282,14 @@ func (c *Core) recordPeerPubKey(ctx context.Context, nodeID, pubKeyHex string) {
 		// anything the session signs.
 		return
 	}
+	// An x_pub that cannot decode is treated as absent: the verified hello
+	// carries it unsigned, so a malformed claim must not stick in the column
+	// transit reads.
+	if raw, err := hex.DecodeString(xPubHex); err != nil || len(raw) == 0 {
+		xPubHex = ""
+	} else if _, err := bus.LoadX25519Pub(raw); err != nil {
+		xPubHex = ""
+	}
 	var existing string
 	_ = c.db.QueryRowContext(ctx, `SELECT COALESCE(pub_key,'') FROM employee_cache WHERE id=?`, nodeID).Scan(&existing)
 	if existing != "" && existing != pubKeyHex {
@@ -164,14 +297,15 @@ func (c *Core) recordPeerPubKey(ctx context.Context, nodeID, pubKeyHex string) {
 			"old", existing[:min(16, len(existing))], "new", pubKeyHex[:min(16, len(pubKeyHex))])
 	}
 	if _, err := c.db.ExecContext(ctx,
-		`INSERT INTO employee_cache (id, pub_key, key_verified, status, last_seen) VALUES (?, ?, 0, 'offline', 0)
+		`INSERT INTO employee_cache (id, pub_key, x_pub, key_verified, status, last_seen) VALUES (?, ?, ?, 0, 'offline', 0)
 		 ON CONFLICT(id) DO UPDATE SET pub_key = excluded.pub_key,
+		     x_pub = excluded.x_pub,
 		     key_verified = CASE WHEN employee_cache.pub_key != excluded.pub_key THEN 0
 		         ELSE employee_cache.key_verified END,
 		     trust = CASE WHEN employee_cache.pub_key != excluded.pub_key
 		         AND employee_cache.trust = 'mesh' THEN 'guarded'
 		         ELSE employee_cache.trust END`,
-		nodeID, pubKeyHex); err != nil {
+		nodeID, pubKeyHex, xPubHex); err != nil {
 		c.logger.Warn("record peer pubkey", "peer", nodeID, "err", err)
 		return
 	}
