@@ -41,6 +41,7 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/sessions"
 	"github.com/Xustalis/OpenPanda/internal/skills"
 	"github.com/Xustalis/OpenPanda/internal/storage"
+	"github.com/Xustalis/OpenPanda/internal/todos"
 	"github.com/Xustalis/OpenPanda/internal/updater"
 	versionpkg "github.com/Xustalis/OpenPanda/internal/version"
 	"github.com/Xustalis/OpenPanda/webui/panel"
@@ -296,6 +297,7 @@ func runWeb(args []string) {
 				return st
 			}(),
 			Reminders:  reminderStore,
+			Todos:      todos.NewStore(db),
 			Push:       pushSvc,
 			Cfg:        cfg,
 			ConfigPath: resolvedConfigPath(*configPath),

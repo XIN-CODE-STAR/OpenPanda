@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { useState } from 'preact/hooks'
-import { api, isTaskStalled, type ApprovalScope, type Task, type TaskEvent } from '../api/client'
+import { api, isTaskStalled, type ApprovalScope, type Task } from '../api/client'
 import { useAsync, useChangeSignal, useLocaleRerender, useVisibleInterval } from '../hooks'
-import { t, locale } from '../i18n'
+import { t } from '../i18n'
 import { formatDuration } from '../format/time'
 import { navigate } from '../nav'
 import { ScopeSelect } from '../components/scope-select'
@@ -11,8 +11,17 @@ import { StateBadge } from '../components/state-badge'
 import { toast, toastError } from '../components/toast'
 import { confirmDialog } from '../components/confirm'
 import { TaskTrace } from '../components/task-trace'
+import {
+  InfoSection,
+  SpecCard,
+  TimelineSection,
+  fmtFull,
+  fmtShort,
+  parseResult,
+  shortId,
+  text,
+} from '../components/task-sections'
 import { DiffViewer } from '../components/diff-viewer'
-import { EventTimeline } from '../components/event-timeline'
 import { Markdown } from '../md/render'
 import { Icon } from '../components/icons'
 import { prettifyJson } from '../format/json'
@@ -154,6 +163,11 @@ export function DetailView({
   // blob has already been read out in the verdict block, and the log's own
   // raw toggle still reaches it.
   const showResult = Boolean(task.result) && resultHasBody(task.result!)
+  // Computed once: the verdict sentence is also the lead line of the output
+  // when a run reported its outcome as prose, and printing it twice — once as
+  // the answer, once as the first line of the panel — is the page's oldest
+  // habit. ResultView drops it from the body when they match.
+  const verdict = verdictOf(task, parkReason)
 
   return (
     <section class="dt">
@@ -303,7 +317,7 @@ export function DetailView({
 
       {/* What happened, first. Everything below this block is the evidence
           for its one sentence. */}
-      <VerdictBlock task={task} fallback={parkReason} />
+      <VerdictBlock verdict={verdict} />
 
       <TaskTrace task={task} />
 
@@ -349,7 +363,7 @@ export function DetailView({
           </section>
         )}
 
-        {showResult && <ResultView raw={task.result!} />}
+        {showResult && <ResultView raw={task.result!} lead={verdict.text} />}
 
         {/* What the run was asked to produce — target, guardrails, scope and
             the bar the supervisor judges against. Without this section the
@@ -456,55 +470,6 @@ export function DetailView({
   )
 }
 
-/** Rows of a long log the page shows before you ask for the rest. */
-const TIMELINE_TAIL = 5
-
-/** The task's event log. A run that failed after forty tool calls has
- *  thousands of pixels of transcript, and the page used to open on all of it:
- *  the result, the brief and the facts sat above a wall you had to scroll
- *  past to reach anything else. Long logs therefore open on their tail — the
- *  part that says how the run ended — with the count and a way to see it all.
- *
- *  The fold trips at the tail size itself. It used to need three times the
- *  tail before it folded at all, so an eighteen-event run — the common case —
- *  printed every row: 963px, 55% of the page, for a log nobody came here to
- *  read top-down. */
-function TimelineSection({
-  events,
-  suppressResult,
-}: {
-  events: TaskEvent[]
-  suppressResult?: boolean
-}) {
-  const [open, setOpen] = useState(false)
-  const long = events.length > TIMELINE_TAIL
-  const shown = long && !open ? events.slice(-TIMELINE_TAIL) : events
-  return (
-    <section class="dt-sec">
-      <div class="dt-sec-head">
-        <h2 class="dt-sec-title">{t('detail.timeline')}</h2>
-        {long && (
-          <>
-            <span class="dt-sec-hint">
-              {open
-                ? t('detail.timeline.count', { n: String(events.length) })
-                : t('detail.timeline.tail', { n: String(TIMELINE_TAIL) })}
-            </span>
-            <button type="button" class="dt-sec-action" onClick={() => setOpen((v) => !v)}>
-              {open ? t('events.collapse') : t('detail.timeline.expand')}
-            </button>
-          </>
-        )}
-      </div>
-      {events.length > 0 ? (
-        <EventTimeline events={shown} suppressResultBody={suppressResult} />
-      ) : (
-        <p class="dim">{t('common.empty')}</p>
-      )}
-    </section>
-  )
-}
-
 // —---------------------------------------------------------------------------
 // Verdict — the one block the page owes the reader first.
 //
@@ -571,9 +536,9 @@ function verdictOf(task: Task, fallbackReason: string): Verdict {
  *  point of the block: a wall of error is what it replaced. */
 const VERDICT_CLAMP = 200
 
-function VerdictBlock({ task, fallback }: { task: Task; fallback: string }) {
+function VerdictBlock({ verdict }: { verdict: Verdict }) {
   const [open, setOpen] = useState(false)
-  const v = verdictOf(task, fallback)
+  const v = verdict
   const long = v.text.length > VERDICT_CLAMP
   const shown = open || !long ? v.text : v.text.slice(0, VERDICT_CLAMP) + '…'
   return (
@@ -608,97 +573,19 @@ function firstLine(s: string): string {
   return line.length > 160 ? line.slice(0, 160) + '…' : line
 }
 
-// —---------------------------------------------------------------------------
-// Info — reference data, folded.
-//
-// These are the values you check once ("which attempt was this, on which
-// node") and never read again. Open, they were the first band under the
-// header: five columns of grey ids ahead of the result. Folded, the header
-// line still carries the four that identify the run.
-// —---------------------------------------------------------------------------
-
-function InfoSection({ task, onOpenTask }: { task: Task; onOpenTask?(id: string): void }) {
-  const [open, setOpen] = useState(false)
-  const summary = [
-    `#${shortId(task.id)}`,
-    task.project || '',
-    task.owner || '',
-    fmtShort(task.created_at),
-  ]
-    .filter(Boolean)
-    .join(' · ')
-  return (
-    <section class="dt-sec">
-      <button
-        type="button"
-        class={'dt-fold' + (open ? ' is-open' : '')}
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-      >
-        <span class="dt-sec-title">{t('detail.info')}</span>
-        <span class="dt-fold-summary">{summary}</span>
-        <Icon name={open ? 'chevron-down' : 'chevron-right'} size={13} class="dt-fold-ico" />
-      </button>
-      {open && (
-        <dl class="dt-facts">
-          <Fact label={t('detail.id')} value={task.id} mono title={task.id} />
-          {task.parent_id && (
-            <div class="dt-fact">
-              <dt>{t('detail.parent')}</dt>
-              <dd>
-                <button
-                  type="button"
-                  class="linklike mono"
-                  onClick={() => onOpenTask?.(task.parent_id)}
-                  title={task.parent_id}
-                >
-                  #{shortId(task.parent_id)}
-                </button>
-              </dd>
-            </div>
-          )}
-          <Fact label={t('detail.project')} value={task.project || '—'} />
-          <Fact label={t('detail.owner')} value={task.owner || '—'} />
-          <Fact label={t('detail.attempt')} value={task.attempt_id || '—'} mono title={task.attempt_id} />
-          <Fact label={t('detail.created')} value={fmtFull(task.created_at)} />
-          <Fact label={t('detail.updated')} value={fmtFull(task.updated_at)} />
-          {task.risk && <Fact label={t('detail.risk')} value={task.risk} />}
-        </dl>
-      )}
-    </section>
-  )
+/** Drops a leading sentence the page has already printed elsewhere — the
+ *  verdict block quotes a done run's opening line, and the output panel then
+ *  opened on the same words. Exact prefix only, and only when a real body
+ *  remains: trimming a 12-character remainder would leave the panel emptier
+ *  than it started. */
+function stripLead(body: string, lead?: string): string {
+  if (!lead) return body
+  const trimmed = body.trimStart()
+  if (!trimmed.startsWith(lead)) return body
+  const rest = trimmed.slice(lead.length).replace(/^[\s。.!！]+/, '')
+  return rest.length > 40 ? rest : body
 }
 
-function Fact({
-  label,
-  value,
-  mono,
-  title,
-}: {
-  label: string
-  value: string
-  mono?: boolean
-  title?: string
-}) {
-  return (
-    <div class="dt-fact">
-      <dt>{label}</dt>
-      <dd class={mono ? 'mono' : ''} title={title ?? value}>
-        {value}
-      </dd>
-    </div>
-  )
-}
-
-/** The task spec (spec_json) as a readable brief: target as prose,
- *  constraints as a checklist, scope as file chips, success as the bar the
- *  supervisor evaluates. Absent or unparseable specs render nothing —
- *  older tasks simply have no brief.
- *
- *  Folded by default, but never silent: the collapsed state still shows the
- *  first sentence of the target, so the page always answers "what was this
- *  asked to do" without a click. Open, the brief was 266px of dense prose
- *  sitting between the result and the log. */
 /** SelfMergeCard renders a self-evolution merge proposal: the signed patch
  *  set's manifest (producer, base, target version, the RECOMPUTED critical
  *  flag) plus each patch file's diff behind an expander — the artifact the
@@ -770,80 +657,6 @@ function SelfMergePatch({ id, name }: { id: string; name: string }) {
   return <DiffViewer patch={data} />
 }
 
-function SpecCard({ spec }: { spec?: string }) {
-  const [open, setOpen] = useState(false)
-  const s = spec ? parseResult(spec) : null
-  if (!s) return null
-  const target = text(s.target)
-  const success = text(s.success_definition)
-  const scope = text(s.scope)
-  const constraints = Array.isArray(s.constraints)
-    ? s.constraints.filter((c): c is string => typeof c === 'string' && c !== '')
-    : []
-  if (!target && !success && !scope && constraints.length === 0) return null
-  const scopeFiles = scope
-    .split(/[,;\n]/)
-    .map((f) => f.trim())
-    .filter(Boolean)
-  return (
-    <section class="dt-sec">
-      <div class="dt-sec-head">
-        <h2 class="dt-sec-title">{t('detail.spec.title')}</h2>
-        {constraints.length > 0 && (
-          <span class="dt-sec-hint">
-            {t('detail.spec.constraints', { n: String(constraints.length) })}
-          </span>
-        )}
-        <button type="button" class="dt-sec-action" onClick={() => setOpen((v) => !v)}>
-          {open ? t('events.collapse') : t('detail.spec.expand')}
-        </button>
-      </div>
-
-      {!open && target && <p class="dt-spec-preview">{target}</p>}
-
-      {open && (
-        <>
-          {target && <p class="dt-spec-target">{target}</p>}
-          {constraints.length > 0 && (
-            <ul class="dt-spec-list">
-              {constraints.map((c, i) => (
-                <li key={i}>
-                  <Icon name="check" size={12} class="dt-spec-ico" />
-                  <span>{c}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-          {(scopeFiles.length > 0 || success) && (
-            <dl class="dt-spec-foot">
-              {scopeFiles.length > 0 && (
-                <>
-                  <dt>{t('detail.spec.scope')}</dt>
-                  <dd>
-                    <span class="dt-spec-files">
-                      {scopeFiles.map((f, i) => (
-                        <code key={i} class="result-file-chip" title={f}>
-                          {f}
-                        </code>
-                      ))}
-                    </span>
-                  </dd>
-                </>
-              )}
-              {success && (
-                <>
-                  <dt>{t('detail.spec.success')}</dt>
-                  <dd>{success}</dd>
-                </>
-              )}
-            </dl>
-          )}
-        </>
-      )}
-    </section>
-  )
-}
-
 /** Whether a result blob carries anything beyond its outcome. The page uses
  *  this to decide if a 执行结果 section is worth drawing at all: a run that
  *  only reported `{"failed": …}` has already been read out in the verdict
@@ -873,7 +686,8 @@ function resultHasBody(raw: string): boolean {
  *
  *  Anything that is not an object we recognise falls back to the raw text —
  *  a half-understood result shown verbatim beats a blank panel. */
-function ResultView({ raw }: { raw: string }) {
+function ResultView({ raw, lead }: { raw: string; lead?: string }) {
+  const [rawOpen, setRawOpen] = useState(false)
   const r = parseResult(raw)
   if (!r) return <RawResult raw={raw} />
 
@@ -882,7 +696,11 @@ function ResultView({ raw }: { raw: string }) {
   const model = text(r.model)
   const executor = text(r.executor)
   const injected = r.injected === true
-  const stdout = text(r.stdout)
+  // The verdict block above already reads out the run's opening sentence
+  // (a done run's verdict *is* the first line of its output). Dropping that
+  // one line here is what stops the page saying the same sentence twice, ten
+  // pixels apart.
+  const stdout = stripLead(text(r.stdout), lead)
   const stderr = text(r.stderr)
   const files = Array.isArray(r.files_changed)
     ? r.files_changed
@@ -890,29 +708,58 @@ function ResultView({ raw }: { raw: string }) {
         .filter((f) => !FILE_NOISE.test(f))
     : []
 
-  const meta = [
-    exit !== null ? t('detail.result.exit', { n: String(exit) }) : '',
-    agent ? t('detail.result.agent', { agent }) : '',
-    model ? t('detail.result.model', { model }) : '',
-    injected ? t('detail.result.injected') : '',
-    executor ? t('detail.result.node', { node: executor }) : '',
-  ].filter(Boolean)
+  // Chips rather than a sentence: the old meta line was three grey phrases of
+  // equal weight sitting one line above a label that looked exactly like them,
+  // so the section opened on three lines nobody could rank. A chip names its
+  // own field, and the exit code carries the tone — a zero is the one fact
+  // that answers "did it work" before anything is read.
+  const chips: Array<{ text: string; tone?: 'ok' | 'bad'; mono?: boolean }> = []
+  if (exit !== null) {
+    chips.push({
+      text: t('detail.result.exit', { n: String(exit) }),
+      tone: exit === 0 ? 'ok' : 'bad',
+      mono: true,
+    })
+  }
+  if (agent) chips.push({ text: t('detail.result.agent', { agent }) })
+  if (model) chips.push({ text: t('detail.result.model', { model }), mono: true })
+  if (injected) chips.push({ text: t('detail.result.injected') })
+  if (executor) chips.push({ text: t('detail.result.node', { node: executor }), mono: true })
 
   // A result that carried nothing but its failure (`{"failed": "..."}`) has
   // already been read out in the verdict block. Rendering an empty section
   // titled 执行结果 with one lone "原始 JSON" toggle under it read as a broken
   // panel — the blob is still reachable from the log's own raw toggle.
-  if (meta.length === 0 && files.length === 0 && !stdout && !stderr) return null
+  if (chips.length === 0 && files.length === 0 && !stdout && !stderr) return null
 
   return (
     <section class="dt-sec">
-      <h2 class="dt-sec-title">{t('detail.result')}</h2>
+      {/* The raw blob used to trail the section as a bulleted "▸ 原始 JSON"
+          line under a full-width button. It is an escape hatch, not content:
+          it belongs on the section's action rail, where every other section
+          keeps its secondary control. */}
+      <div class="dt-sec-head">
+        <h2 class="dt-sec-title">{t('detail.result')}</h2>
+        <button
+          type="button"
+          class="dt-sec-action"
+          aria-expanded={rawOpen}
+          onClick={() => setRawOpen((v) => !v)}
+        >
+          {rawOpen ? t('events.collapse') : t('detail.result.raw')}
+        </button>
+      </div>
+
       <div class="result-view">
-        {meta.length > 0 && (
-          <div class="result-meta">
-            {meta.map((m) => (
-              <span key={m} class="dim">
-                {m}
+        {chips.length > 0 && (
+          <div class="result-chips">
+            {chips.map((c) => (
+              <span
+                key={c.text}
+                class={`result-chip${c.tone ? ` is-${c.tone}` : ''}${c.mono ? ' mono' : ''}`}
+                title={c.text}
+              >
+                {c.text}
               </span>
             ))}
           </div>
@@ -928,14 +775,9 @@ function ResultView({ raw }: { raw: string }) {
         )}
 
         {stdout && <CollapsibleOutput text={stdout} label={t('detail.result.stdout')} />}
-        {stderr && (
-          <CollapsibleOutput text={stderr} label={t('detail.result.stderr')} error />
-        )}
+        {stderr && <CollapsibleOutput text={stderr} label={t('detail.result.stderr')} error />}
 
-        <details class="raw-toggle">
-          <summary class="dim">{t('detail.result.raw')}</summary>
-          <pre class="detail-raw">{prettifyJson(raw)}</pre>
-        </details>
+        {rawOpen && <pre class="detail-raw">{prettifyJson(raw)}</pre>}
       </div>
     </section>
   )
@@ -956,8 +798,11 @@ function RawResult({ raw }: { raw: string }) {
  *  files a task's file list picks up along the way — real on disk, noise on
  *  the card. `.claude` is the adapter's own transcript/snapshot directory:
  *  one run listed thirteen of its files as "changed", none of them the
- *  user's. */
-const FILE_NOISE = /(?:^|\/|\\)(?:\.git|\.svn|\.hg|node_modules|dist|build|__pycache__|\.next|\.cache|\.claude)(?:\/|\\|$)|\.DS_Store$/
+ *  user's. `.codebuddy` and `.codex` are the same thing under the other two
+ *  CLIs — one task's "4 files changed" was three of their logs plus a
+ *  switcher's sqlite. */
+const FILE_NOISE =
+  /(?:^|\/|\\)(?:\.git|\.svn|\.hg|node_modules|dist|build|__pycache__|\.next|\.cache|\.claude|\.codebuddy|\.codex)(?:\/|\\|$)|\.DS_Store$/
 
 const FILE_CHIP_CAP = 12
 
@@ -983,8 +828,17 @@ function FileChips({ files }: { files: string[] }) {
   )
 }
 
-/** Agent output reads as markdown (the adapters report it that way); long
- *  dumps start collapsed so a wall of text never buries the page. */
+/** Agent output reads as markdown (the adapters report it that way) and lives
+ *  in a panel of its own: label, size and copy in a head bar, the prose in a
+ *  body, the fold as a footer band.
+ *
+ *  It used to be a bare label over a wall of text, clamped at 600 characters
+ *  — which cut mid-word — with a full-width bordered button under it that
+ *  read as a stray input field. The clamp is a height now, so the last line
+ *  fades instead of breaking, and the fold is a band that says how much is
+ *  behind it. */
+const OUTPUT_CLAMP_PX = 300
+
 function CollapsibleOutput({
   text,
   label,
@@ -995,40 +849,65 @@ function CollapsibleOutput({
   error?: boolean
 }) {
   const [open, setOpen] = useState(false)
-  const long = text.length > 600
-  const shown = open || !long ? text : text.slice(0, 600) + '…'
+  const [copied, setCopied] = useState(false)
+  // Short outputs are shown whole — folding a four-line report costs a click
+  // and saves nothing.
+  const long = text.length > 700
+  const clamped = long && !open
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1600)
+    } catch {
+      // Clipboard denied (insecure origin, permission): the text is selectable
+      // and a failed copy needs no error of its own.
+    }
+  }
+
   return (
-    <div class="result-block">
-      <span class="dim">{label}</span>
-      {error ? (
-        <pre class="result-err">{shown}</pre>
-      ) : (
-        <div class="result-out">
-          <Markdown text={shown} />
-        </div>
-      )}
+    <div class={`result-panel${error ? ' is-error' : ''}`}>
+      <div class="result-panel-head">
+        <span class="result-panel-label">{label}</span>
+        <span class="result-panel-size">
+          {t('detail.result.chars', { n: text.length.toLocaleString() })}
+        </span>
+        <button
+          type="button"
+          class="result-panel-copy"
+          onClick={copy}
+          aria-label={t('md.copy')}
+          title={t('md.copy')}
+        >
+          {copied ? `✓ ${t('md.copied')}` : t('md.copy')}
+        </button>
+      </div>
+
+      <div
+        class={'result-panel-body' + (clamped ? ' is-clamped' : '')}
+        style={clamped ? `max-height:${OUTPUT_CLAMP_PX}px` : undefined}
+      >
+        {error ? (
+          <pre class="result-err">{text}</pre>
+        ) : (
+          <Markdown text={text} />
+        )}
+      </div>
+
       {long && (
-        <button type="button" class="btn small" onClick={() => setOpen((v) => !v)}>
-          {open ? t('detail.result.collapse') : t('detail.result.expand')}
+        <button
+          type="button"
+          class="result-panel-more"
+          aria-expanded={open}
+          onClick={() => setOpen((v) => !v)}
+        >
+          <span>{open ? t('detail.result.collapse') : t('detail.result.expand')}</span>
+          <Icon name="chevron-down" size={12} />
         </button>
       )}
     </div>
   )
-}
-
-/** Parses a result blob into an object, or returns null when it is not one.
- *  Callers treat null as "show the text as-is". */
-function parseResult(raw: string): Record<string, unknown> | null {
-  try {
-    const v: unknown = JSON.parse(raw)
-    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null
-  } catch {
-    return null
-  }
-}
-
-function text(v: unknown): string {
-  return typeof v === 'string' ? v : ''
 }
 
 /** The failure that parked a task in review: the newest review event carrying
@@ -1042,34 +921,6 @@ function reviewReason(events: { type: string; data?: string }[]): string {
     if (r) return r
   }
   return ''
-}
-
-function fmtFull(iso: string): string {
-  return iso ? new Date(iso).toLocaleString(locale()) : '—'
-}
-
-/** Compact stamp for the header line: the year is noise on a run that started
- *  today, and the seconds never helped anyone. The locale decides field order
- *  and the 12/24-hour cycle rather than a hand-rolled "MM-DD HH:mm" that
- *  reads as 24-hour time to a reader whose locale never shows it. */
-function fmtShort(iso: string): string {
-  if (!iso) return '—'
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return '—'
-  try {
-    return new Intl.DateTimeFormat(locale(), {
-      month: 'numeric',
-      day: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit',
-    }).format(d)
-  } catch {
-    return '—'
-  }
-}
-
-function shortId(id: string): string {
-  return id ? id.slice(0, 8) : '—'
 }
 
 /** Wall-clock the run held the queue. Only for settled tasks: an open one

@@ -27,6 +27,39 @@ import (
 
 // ---- Session CRUD ----
 
+// maxTeam bounds a thread's agent roster. Same ceiling as
+// routing.preferred_agents (16): a roster longer than that is not a team
+// anyone picks by hand, and the list rides every task's spec_json.
+const maxTeam = 16
+
+// cleanTeam trims, dedupes and validates a roster off the wire. Invalid names
+// are rejected instead of dropped: a roster that quietly loses an entry
+// becomes a *smaller* team, and one that loses every entry becomes "no
+// restriction" — either way the thread's work could go to an agent the user
+// never picked.
+func cleanTeam(in []string) ([]string, error) {
+	var out []string
+	seen := make(map[string]bool, len(in))
+	for _, raw := range in {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		if strings.ContainsAny(name, " \t\r\n/\\:") || name == "." || name == ".." {
+			return nil, fmt.Errorf("invalid agent name %q", raw)
+		}
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	if len(out) > maxTeam {
+		return nil, fmt.Errorf("team holds at most %d agents", maxTeam)
+	}
+	return out, nil
+}
+
 // listSessions serves GET /api/sessions — chat sessions, optionally filtered by ?project=.
 func (h *handler) listSessions(w http.ResponseWriter, r *http.Request) {
 	var list []*sessions.Session
@@ -52,8 +85,9 @@ func (h *handler) listSessions(w http.ResponseWriter, r *http.Request) {
 // project is not specified, it inherits the active project if set.
 func (h *handler) createSession(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Title   string `json:"title"`
-		Project string `json:"project"`
+		Title   string   `json:"title"`
+		Project string   `json:"project"`
+		Team    []string `json:"team"`
 	}
 	if r.Body != nil {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -67,10 +101,23 @@ func (h *handler) createSession(w http.ResponseWriter, r *http.Request) {
 			project = act
 		}
 	}
+	team, err := cleanTeam(req.Team)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
 	sess, err := h.sessions.Create(strings.TrimSpace(req.Title), project)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
+	}
+	// The roster is written after creation so the create path stays a single
+	// store call: a thread born with a team is a thread created and then told
+	// who works on it, which is also how the composer's later edits arrive.
+	if len(team) > 0 {
+		if err := h.sessions.SetTeam(sess.ID, team); err == nil {
+			sess, _ = h.sessions.Get(sess.ID)
+		}
 	}
 	if h.worktrees != nil {
 		if path, err := h.worktrees.Ensure(r.Context(), sess.ID); err == nil {
@@ -147,10 +194,14 @@ type patchSessionRequest struct {
 	Title   *string `json:"title,omitempty"`
 	Project *string `json:"project,omitempty"`
 	Pinned  *bool   `json:"pinned,omitempty"`
+	// Team replaces the thread's agent roster. A pointer to a slice so
+	// "absent" (leave the roster alone) and "empty" (clear it — no
+	// restriction) stay distinguishable; the console sends [] to clear.
+	Team *[]string `json:"team,omitempty"`
 }
 
 // patchSession serves PATCH /api/sessions/{id} — updates title, project
-// association, or the pinned flag.
+// association, the pinned flag, or the agent roster.
 func (h *handler) patchSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if h.sessions == nil {
@@ -181,6 +232,17 @@ func (h *handler) patchSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Pinned != nil {
 		if err := h.sessions.SetPinned(id, *req.Pinned); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	if req.Team != nil {
+		team, err := cleanTeam(*req.Team)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := h.sessions.SetTeam(id, team); err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
 		}
@@ -450,6 +512,11 @@ type sessionAskRequest struct {
 	// (id or name) for any task this ask spawns. Empty lets the scheduler
 	// route by capability, which is also the right behavior for plans.
 	Node string `json:"node"`
+	// Agents is the thread's roster as the composer currently shows it. Null
+	// (absent) means "use the roster stored on the session"; an explicit
+	// empty list means "no restriction" — the same distinction PATCH makes,
+	// so a pick made a moment before sending does not need a second request.
+	Agents []string `json:"agents"`
 }
 
 // statusEventOf is the JSON one progress event becomes on the SSE stream.
@@ -525,6 +592,17 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusNotFound, errors.New("no such session"))
 		return
+	}
+	// Who may take this turn's work. The composer sends what is on screen;
+	// a client that knows nothing about rosters (or a resumed thread) gets
+	// the session's own team, so the pick survives a reload and a second
+	// device instead of being a per-request decoration.
+	team := sess.Team
+	if req.Agents != nil {
+		if team, err = cleanTeam(req.Agents); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -692,6 +770,7 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 		WorkDir:   workDir,
 		SessionID: sess.ID,
 		Node:      req.Node,
+		Agents:    team,
 	}, req.Authorize, cb)
 	askDuration := time.Since(askStarted).Milliseconds()
 	if err != nil {
@@ -792,7 +871,11 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 		}
 		turn.Ref = out.TaskID
 	case "plan":
-		turn.Text = "已启动多阶段计划：" + out.PlanGoal + "（" + out.PlanID + "）"
+		// The receipt is the orchestration half of the report: what was
+		// started, how many stages it was cut into, and the id the plan board
+		// answers to. Each stage's own answer arrives as its employee finishes
+		// (the session finalizer, one compact turn per stage).
+		turn.Text = fmt.Sprintf("已启动多阶段计划：%s（%d 个阶段，%s）", out.PlanGoal, len(out.PlanStages), out.PlanID)
 		turn.Ref = out.PlanID
 	default:
 		turn.Text = out.Answer

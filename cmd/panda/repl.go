@@ -52,6 +52,7 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/reminders"
 	"github.com/Xustalis/OpenPanda/internal/sessions"
 	"github.com/Xustalis/OpenPanda/internal/skills"
+	"github.com/Xustalis/OpenPanda/internal/todos"
 	"github.com/Xustalis/OpenPanda/internal/updater"
 	versionpkg "github.com/Xustalis/OpenPanda/internal/version"
 	"github.com/Xustalis/OpenPanda/webui/panel"
@@ -2668,6 +2669,7 @@ func (r *repl) cmdWeb(arg string) {
 			return st
 		}(),
 		Reminders:  reminders.NewStore(r.db),
+		Todos:      todos.NewStore(r.db),
 		Push:       r.push,
 		Cfg:        r.cfg,
 		CfgMu:      &r.cfgMu,

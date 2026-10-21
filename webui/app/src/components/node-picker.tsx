@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'preact/hooks'
 import type { NodeInfo } from '../api/client'
+import { isNodeConnected } from '../format/node-status'
 import { t } from '../i18n'
 import { layerAboveOwnsEscape } from './card-dismiss'
 import { Icon } from './icons'
@@ -97,7 +98,7 @@ export function NodePicker(props: {
               {props.value === '' && <Icon name="check" size={14} class="node-row-check" />}
             </button>
             {props.nodes.map((n) => {
-              const offline = n.status !== 'online'
+              const offline = !isNodeConnected(n.status)
               return (
                 <button
                   key={n.id}

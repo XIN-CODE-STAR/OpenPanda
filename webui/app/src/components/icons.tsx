@@ -43,6 +43,7 @@ export type IconName =
   | 'image'
   | 'kanban'
   | 'lightbulb'
+  | 'list-checks'
   | 'menu'
   | 'message'
   | 'more-horizontal'
@@ -54,6 +55,7 @@ export type IconName =
   | 'pin'
   | 'pin-off'
   | 'plug'
+  | 'plus'
   | 'route'
   | 'search'
   | 'send'
@@ -61,6 +63,7 @@ export type IconName =
   | 'sparkles'
   | 'square-pen'
   | 'trash'
+  | 'users'
   | 'x'
 
 const paths: Record<IconName, JSX.Element> = {
@@ -255,6 +258,18 @@ const paths: Record<IconName, JSX.Element> = {
       <path d="M10 22h4" />
     </>
   ),
+  // 待办: a checklist whose first two rows are already ticked. The rail uses
+  // it for the to-do board, which is the one place in the console where a
+  // row's whole job is "done or not done".
+  'list-checks': (
+    <>
+      <path d="m3 17 2 2 4-4" />
+      <path d="m3 7 2 2 4-4" />
+      <path d="M13 6h8" />
+      <path d="M13 12h8" />
+      <path d="M13 18h8" />
+    </>
+  ),
   menu: (
     <>
       <path d="M4 6h16" />
@@ -335,6 +350,15 @@ const paths: Record<IconName, JSX.Element> = {
       <path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z" />
     </>
   ),
+  // The rail's per-directory "new chat": a bare cross, because it sits in the
+  // same 22px hover slot as the "…" beside it and any container would read as
+  // a second button instead of the mark itself.
+  plus: (
+    <>
+      <path d="M5 12h14" />
+      <path d="M12 5v14" />
+    </>
+  ),
   // The header's orchestration button. Two endpoints joined by one path that
   // snakes between them: the glyph reads as a run — start, hand-off, arrive —
   // rather than as a shape (the old `workflow` was two boxes and an elbow, which
@@ -384,6 +408,16 @@ const paths: Record<IconName, JSX.Element> = {
       <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
       <path d="M10 11v6" />
       <path d="M14 11v6" />
+    </>
+  ),
+  // Lucide's users: two heads, the near one solid-lined and the far one drawn
+  // as its shoulders. It is the composer's roster mark — "who works on this".
+  users: (
+    <>
+      <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+      <circle cx="9" cy="7" r="4" />
+      <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
     </>
   ),
   x: (

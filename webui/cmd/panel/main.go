@@ -29,6 +29,7 @@ import (
 	projectstore "github.com/Xustalis/OpenPanda/internal/projects"
 	"github.com/Xustalis/OpenPanda/internal/reminders"
 	"github.com/Xustalis/OpenPanda/internal/storage"
+	"github.com/Xustalis/OpenPanda/internal/todos"
 	"github.com/Xustalis/OpenPanda/webui/panel"
 	"github.com/Xustalis/OpenPanda/webui/push"
 )
@@ -188,6 +189,7 @@ func main() {
 			ProjectStore: projectstore.NewStore(db),
 			Push:         pushSvc,
 			Reminders:    reminderStore,
+			Todos:        todos.NewStore(db),
 			Cfg:          cfg,
 			ConfigPath:   configPathOrDefault(*configPath),
 			StaticDir:    *staticDir,

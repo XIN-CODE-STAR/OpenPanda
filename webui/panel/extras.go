@@ -65,25 +65,59 @@ func (h *handler) allowedReadRoot(abs string) bool {
 		}
 	}
 	for _, root := range roots {
-		if root == "" {
-			continue
-		}
-		rabs, err := filepath.Abs(root)
-		if err != nil {
-			continue
-		}
-		// A root that is itself a symlink must resolve the same way the
-		// request path does, or the Rel check below compares a resolved
-		// child against an unresolved parent and wrongly rejects.
-		if real, err := filepath.EvalSymlinks(rabs); err == nil {
-			rabs = real
-		}
-		rel, err := filepath.Rel(rabs, abs)
-		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		if underRoot(root, abs) {
 			return true
 		}
 	}
 	return false
+}
+
+// underRoot reports whether abs sits inside root. A root that is itself a
+// symlink must resolve the same way the request path does, or the Rel check
+// compares a resolved child against an unresolved parent and wrongly rejects.
+//
+// Both sides are resolved for the same reason. On Windows the OS temp tree is
+// commonly reached through an 8.3 short name (`C:\Users\RUNNER~1\…`), and
+// EvalSymlinks expands the root to its long form while the request path keeps
+// the short one it was built from — every genuine temp file then compares as
+// outside and the preview 403s. A path that does not exist cannot be resolved,
+// so its parent is: that keeps "missing file" a 404 instead of turning it into
+// a boundary refusal.
+func underRoot(root, abs string) bool {
+	if root == "" {
+		return false
+	}
+	rabs, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	if real, err := filepath.EvalSymlinks(rabs); err == nil {
+		rabs = real
+	}
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = real
+	} else if real, err := filepath.EvalSymlinks(filepath.Dir(abs)); err == nil {
+		abs = filepath.Join(real, filepath.Base(abs))
+	}
+	rel, err := filepath.Rel(rabs, abs)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// allowedImageRoot is allowedReadRoot widened by the OS temp tree.
+//
+// Agents park screenshots in a scratch directory — a verification run writes
+// `%TEMP%/panda_verify/t2-eating.png` and then `Read`s it — and those are
+// exactly the images a transcript wants to show. The extra root is scoped to
+// this endpoint (images only, extension-gated, size-capped): /api/fs/read
+// keeps its stricter list.
+func (h *handler) allowedImageRoot(abs string) bool {
+	if h.allowedReadRoot(abs) {
+		return true
+	}
+	return underRoot(os.TempDir(), abs)
 }
 
 // resolveFsPath normalizes a request path for the fs endpoints: ~ expands,
@@ -243,6 +277,79 @@ func (h *handler) readFile(w http.ResponseWriter, r *http.Request) {
 		"size":      st.Size(),
 		"truncated": truncated,
 	})
+}
+
+// maxImageBytes caps /api/fs/image — a transcript preview, not a file server.
+// 16 MiB holds a full-resolution screenshot; a frame grab that big is already
+// beyond what an inline thumbnail can usefully show.
+const maxImageBytes = 16 << 20
+
+// imageTypes is the extension → wire-type table the preview endpoint serves.
+// SVG is deliberately absent: it is a script-bearing document, and this
+// endpoint answers with the file's own bytes under the same content type.
+var imageTypes = map[string]string{
+	".png":  "image/png",
+	".jpg":  "image/jpeg",
+	".jpeg": "image/jpeg",
+	".gif":  "image/gif",
+	".webp": "image/webp",
+	".bmp":  "image/bmp",
+	".avif": "image/avif",
+}
+
+// getImage serves GET /api/fs/image?path= — the raw bytes behind an inline
+// transcript preview. The timeline shows a tool row's picture instead of its
+// path; the browser cannot put the Bearer token on an <img src>, so the
+// console fetches this and hands the blob to the <img>.
+//
+// The type is taken from the extension and the bytes are sniffed only to
+// catch a mislabelled file; either way the response is served with
+// X-Content-Type-Options: nosniff, so a text file renamed .png cannot be
+// talked into executing as HTML.
+func (h *handler) getImage(w http.ResponseWriter, r *http.Request) {
+	reqPath := strings.TrimSpace(r.URL.Query().Get("path"))
+	if reqPath == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("path is required"))
+		return
+	}
+	absPath, err := h.resolveFsPath(reqPath)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, errors.New("invalid path"))
+		return
+	}
+	// Resolve symlinks before the root check so a link cannot point outside.
+	if real, err := filepath.EvalSymlinks(absPath); err == nil {
+		absPath = real
+	}
+	ctype, ok := imageTypes[strings.ToLower(filepath.Ext(absPath))]
+	if !ok {
+		writeErr(w, http.StatusUnsupportedMediaType, errors.New("not a previewable image type"))
+		return
+	}
+	if !h.allowedImageRoot(absPath) {
+		writeErr(w, http.StatusForbidden, errors.New("path is outside the workspace, memory and temp roots"))
+		return
+	}
+	st, err := os.Stat(absPath)
+	if err != nil || st.IsDir() {
+		writeErr(w, http.StatusNotFound, errors.New("no such file"))
+		return
+	}
+	if st.Size() > maxImageBytes {
+		writeErr(w, http.StatusRequestEntityTooLarge, errors.New("image is too large to preview"))
+		return
+	}
+	f, err := os.Open(absPath)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, errors.New("read failed"))
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", ctype)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "private, max-age=60")
+	// ServeContent brings range/HEAD along for free and seeks the file itself.
+	http.ServeContent(w, r, filepath.Base(absPath), st.ModTime(), f)
 }
 
 // openInFileManager launches the desktop's file browser at dir. It is

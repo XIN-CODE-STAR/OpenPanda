@@ -101,11 +101,13 @@
 .sidebar-history .thread-group-head {
   padding: 6px 2px 3px;
 }
-/* ---- Directory header: fold control + "…" --------------------------------
-   The header used to be the whole row. It now shares the row with a menu
-   trigger, so it gives up its 100% width and lets the label ellipsise into
-   whatever is left — the trigger keeps a fixed 22px slot instead of drifting
-   left or right depending on how deep the directory name runs. */
+/* ---- Directory header: fold control + "+" + "…" ---------------------------
+   The header used to be the whole row. It now shares the row with two
+   triggers — new chat, then the menu — so it gives up its 100% width and lets
+   the label ellipsise into whatever is left. Both triggers keep a fixed 22px
+   slot instead of drifting left or right depending on how deep the directory
+   name runs, which is also what keeps the "+" in the same place on every
+   group. */
 .thread-group-row {
   display: flex;
   align-items: center;
@@ -116,7 +118,8 @@
   min-width: 0;
   width: auto;
 }
-.thread-group-menu {
+.thread-group-menu,
+.thread-group-new {
   flex: none;
   width: 22px;
   height: 22px;
@@ -125,27 +128,33 @@
   border-radius: var(--radius-sm);
   color: var(--text-tertiary);
   /* Hover-only: the header's one line belongs to the directory name, and a
-     permanent "…" on every group turns a list of names into a list of
-     controls. It still answers the keyboard (focus-visible) and stays up
-     while its own menu is open, so nothing becomes unreachable. */
+     permanent "+" and "…" on every group turns a list of names into a list of
+     controls. Both still answer the keyboard (focus-visible) and the menu
+     stays up while it is open, so nothing becomes unreachable. The two share
+     every rule on purpose — a header that reveals one trigger but not the
+     other would make the pair look broken. */
   opacity: 0;
   transition:
     opacity var(--dur-fast) var(--ease),
     background var(--dur-fast) var(--ease),
     color var(--dur-fast) var(--ease);
 }
-/* Touch has no hover to reveal it, so there it is always on. */
+/* Touch has no hover to reveal them, so there they are always on. */
 @media (hover: none) {
-  .thread-group-menu {
+  .thread-group-menu,
+  .thread-group-new {
     opacity: 0.55;
   }
 }
 .thread-group-row:hover .thread-group-menu,
+.thread-group-row:hover .thread-group-new,
 .thread-group-menu:focus-visible,
+.thread-group-new:focus-visible,
 .thread-group-menu.open {
   opacity: 1;
 }
 .thread-group-menu:hover,
+.thread-group-new:hover,
 .thread-group-menu.open {
   background: var(--bg-hover);
   color: var(--text);
@@ -854,10 +863,17 @@
 }
 
 /* ---- Messages -------------------------------------------------------------- */
-
+/* The transcript is a group chat, because a thread has more than one voice in
+   it: you ask, the panda works out how the job splits and who gets it, an
+   employee does it and reports back, and the panda closes the round. So a row
+   is a face, a name, what that speaker is doing here, and a bubble — the four
+   things a chat message has. Who is speaking is derived in
+   components/chat-speaker.ts; the faces live in components/chat-cast.tsx. */
 .msg {
-  display: flex;
-  gap: 12px;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
   margin-bottom: var(--sp-5);
   animation: msg-in var(--dur-med) var(--ease-enter);
 }
@@ -865,57 +881,185 @@
   from { opacity: 0; transform: translateY(5px); }
   to { opacity: 1; transform: none; }
 }
+/* Your own turn sits on the other side: the bubble hugs the right edge and the
+   face follows it, the way every group chat you have used does it. */
+.msg.user {
+  grid-template-columns: minmax(0, 1fr) 32px;
+}
+.msg.user > .msg-ava {
+  grid-column: 2;
+}
 .msg-body {
-  flex: 1;
+  grid-column: 2;
+  grid-row: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-}
-/* Your own words sit on the right of the column and the reply on the left:
-   that is the whole of the discrimination between them. Both are plain text on
-   the page's own background — the tinted block and the raised card turned
-   every message into a box to read inside. */
-/* A question's copy sits *under* its bubble, not beside it: the bubble hugs the
-   right edge, so the row turns into a column and the icon takes the same place
-   a reply's copy does on the other side. */
-.msg.user {
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 0;
+  align-items: flex-start;
+  gap: 5px;
 }
 .msg.user .msg-body {
-  flex: 0 1 auto;
+  grid-column: 1;
   align-items: flex-end;
-  text-align: right;
 }
-.msg.user .bubble-slot-row {
-  justify-content: flex-end;
-}
-.bubble {
-  position: relative;
-  padding: 0;
-  background: transparent;
-  border-radius: 0;
-}
-.bubble.role-user {
-  /* Your question gets a chip; the reply does not. The answer is the product
-     and reads as the page itself, while what you asked is one thing you said
-     once — a bubble says where it starts and stops, and hugs its own text
-     instead of claiming the column. */
-  background: var(--bg-inset);
+
+/* — the face. 32px, one size up from the roster's 26: a transcript is read at
+     a distance, and a face nobody can tell from the next one is decoration. */
+.msg-ava {
+  grid-column: 1;
+  grid-row: 1;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
   border: 1px solid var(--border-soft);
-  border-radius: var(--radius-md);
-  padding: 8px 14px;
-}
-.bubble.role-system {
-  padding: 8px 12px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-raised);
-  border: 1px dashed var(--border);
+  background: var(--bg-inset);
   color: var(--text-secondary);
   font-size: var(--text-sm);
-  border-left-color: var(--text-tertiary);
+  font-weight: 600;
+  line-height: 1;
+  user-select: none;
+}
+/* The mascot is drawn in cream on transparency. On the light theme's white
+   page that body disappears and leaves a handful of black dots where the ears
+   and limbs are — the composer's pet wears a hard 1px rim for exactly this
+   reason, and the avatar borrows it (--panda-rim is transparent in dark). */
+.msg-ava.is-panda {
+  background: transparent;
+  border: 0;
+}
+.msg-ava.is-panda img {
+  display: block;
+  width: 30px;
+  height: 30px;
+  filter: drop-shadow(1px 0 0 var(--panda-rim)) drop-shadow(-1px 0 0 var(--panda-rim))
+    drop-shadow(0 1px 0 var(--panda-rim)) drop-shadow(0 -1px 0 var(--panda-rim));
+}
+/* An employee wears its official mark. The roster's chip is 26px, so it is
+   re-sized here rather than there; the wrapper keeps the grid cell. */
+.msg-ava.is-agent {
+  background: transparent;
+  border: 0;
+}
+.msg-ava.is-agent .team-ava {
+  width: 32px;
+  height: 32px;
+  border-width: 0;
+}
+.msg-ava.is-agent .team-ava.has-logo img {
+  width: 21px;
+  height: 21px;
+}
+
+/* — the head: name, what they are doing, when. The duration used to be a
+     caption with a hairline over the reply; in a chat it sits beside the
+     clock, where a chat puts it. */
+.msg-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0 2px;
+}
+.msg-name {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--text);
+}
+/* The chip says what this speaker is doing in the conversation — 编排, 汇报,
+   总结 — and for an employee it is the state of their job. The wash is a tint
+   of the chip's own ink, so every state colour comes from its one `color`. */
+.msg-role {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 9%, transparent);
+  color: var(--text-tertiary);
+  font-size: 10.5px;
+  line-height: 1.65;
+  white-space: nowrap;
+}
+.msg-role.is-plan {
+  color: var(--accent-2);
+}
+.msg-role.is-summary {
+  color: var(--brand);
+}
+.msg-role.is-think {
+  font-style: italic;
+}
+.msg-role.is-error,
+.msg-role.is-failed,
+.msg-role.is-cancelled,
+.msg-role.is-expired {
+  color: var(--danger);
+}
+.msg-role.is-done {
+  color: var(--good);
+}
+.msg-role.is-review {
+  color: var(--warn);
+}
+.msg-role.is-running,
+.msg-role.is-dispatched,
+.msg-role.is-queued,
+.msg-role.is-submitted,
+.msg-role.is-waiting_context {
+  color: var(--accent-2);
+}
+/* Clock and duration, at the far edge of the head. Tabular digits, so a column
+   of them does not shimmer as the clock changes. */
+.msg-stamp {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* — the bubble. A wash of the page's own ink rather than a second surface: it
+     lifts the message off the page in both themes without introducing a card
+     colour the rest of the console does not know. */
+.msg-bubble {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 9px 13px;
+  border-radius: 12px;
+  border: 1px solid var(--border-soft);
+  background: color-mix(in srgb, var(--text) 4%, var(--bg));
+}
+/* Yours is the deeper of the two: the sides tell apart at a glance, before the
+   faces are read. */
+.msg-bubble.is-you {
+  background: color-mix(in srgb, var(--text) 7.5%, var(--bg));
+}
+/* A message carrying a task card is not a sentence that can hug its text: the
+   card, the cast line and the jump link need a column of their own, or the
+   whole message collapses into a strip two words wide. */
+.msg-bubble.is-wide {
+  width: min(100%, 620px);
+}
+/* The panda's closing roll-up wears the panda's colour: it is the one message
+   whose authority comes from being the panda's. */
+.msg-bubble.is-summary {
+  background: color-mix(in srgb, var(--brand) 6%, var(--bg));
+  border-color: color-mix(in srgb, var(--brand) 24%, transparent);
+}
+/* An employee's live row is a state, not a statement: dashed, because it will
+   be replaced by their report. */
+.msg-bubble.is-progress {
+  border-style: dashed;
+  background: transparent;
 }
 .bubble-slot-row {
   display: flex;
@@ -924,40 +1068,13 @@
   min-width: 0;
   width: 100%;
 }
-.bubble-slot-row.slot-chat {
-  flex: 1;
-  margin: var(--sp-1) 0;
-}
 .bubble-slot-row.slot-meta {
   color: var(--text-tertiary);
   font-size: var(--text-xs);
   flex-wrap: wrap;
 }
-/* The turn's duration, at the head of the reply rather than its foot: it is a
-   caption for the answer below it, and a finished turn reads top-down. A
-   hairline the width of the reading column closes the caption off. The caret
-   is decorative — there is one number to disclose and nothing behind it — so
-   it is aria-hidden rather than a button that would open nothing. */
-.bubble-slot-row.slot-elapsed {
-  align-items: center;
-  justify-content: flex-start;
-  margin: 0 0 var(--sp-3);
-  padding-bottom: var(--sp-2);
-  border-bottom: 1px solid var(--border-soft);
-}
-.elapsed-line {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--text-tertiary);
-  font-size: var(--text-sm);
-}
-.elapsed-caret {
-  font-size: 1.15em;
-  line-height: 1;
-}
-/* Live status at the foot of the bubble, left-aligned: it annotates the
-   message that is still working rather than titling the empty box. */
+/* Live status at the foot of the bubble: it annotates the message that is
+   still working. */
 .bubble-slot-row.slot-status {
   justify-content: flex-start;
   margin-top: 2px;
@@ -1006,6 +1123,182 @@
   font-size: var(--text-lg);
 }
 
+/* ---- The cast, the state, and the round's closing line --------------------- */
+/* The panda's orchestration: who got the job, which stage it is on, how it
+   stands. One row of small print under the dispatch sentence; the task card
+   below it is the paperwork. */
+.msg-cast {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+.msg-cast-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-weight: 600;
+}
+.msg-cast-bot {
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--bg-inset);
+  color: var(--text-tertiary);
+}
+.msg-cast-meta {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+}
+/* A plan's stages, as the panda cut them. */
+.msg-cast-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.msg-cast-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+.msg-cast-stage {
+  flex: none;
+  min-width: 30px;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+}
+.msg-cast-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+/* The state word with its own dot — one colour language everywhere a task
+   state is printed. */
+.msg-cast-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+.msg-report-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+.msg-cast-state.is-done {
+  color: var(--good);
+}
+.msg-cast-state.is-failed,
+.msg-cast-state.is-cancelled,
+.msg-cast-state.is-expired {
+  color: var(--danger);
+}
+.msg-cast-state.is-review {
+  color: var(--warn);
+}
+.msg-cast-state.is-running,
+.msg-cast-state.is-dispatched,
+.msg-cast-state.is-queued,
+.msg-cast-state.is-submitted,
+.msg-cast-state.is-waiting_context,
+.msg-cast-state.is-active {
+  color: var(--accent-2);
+}
+
+/* An employee's report: the job as the bubble's subject, their own closing
+   paragraph under it. The state is on the head's chip. */
+.msg-subject {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--text-md);
+  font-weight: 600;
+  line-height: 1.45;
+}
+/* The panda's roll-up for a finished round. */
+.msg-summary-line {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+.msg-summary-people {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+}
+.msg-summary-what {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+.msg-summary-link {
+  font-size: var(--text-sm);
+}
+
+/* The panda's own reasoning, folded. Open while it is still arriving, shut
+   once the reply lands — by then the answer is what matters. */
+.msg-think {
+  border-left: 2px solid var(--border);
+  padding-left: 8px;
+  color: var(--text-tertiary);
+  font-size: var(--text-sm);
+}
+.msg-think > summary {
+  cursor: pointer;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  user-select: none;
+}
+.msg-think > summary:hover {
+  color: var(--text-secondary);
+}
+.msg-think-text {
+  margin: 6px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.55;
+}
+
+/* The employee's live line, under their face while the job runs. */
+.msg-progress-line {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  word-break: break-word;
+}
+
+/* — the foot: copy, and the model that wrote the answer. Both are footnotes to
+     the message, so both arrive on its hover. */
+.msg-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+  padding: 0 2px;
+}
+
 /* ---- Message actions -------------------------------------------------------- */
 /* Copy belongs to the message it copies and only shows while the pointer is on
    that message: an icon per bubble that is always visible turns the transcript
@@ -1014,51 +1307,21 @@
    The fade rides the button itself, not its row: `:focus-visible` on the button
    can then be the whole keyboard story. On `:focus-within` a mouse click would
    leave the icon hanging on the message until something else took focus. */
-/* A question's copy is a row under its bubble, pulled up so it reads as the
-   bubble's own foot rather than a separate line. */
-.msg-actions {
-  display: flex;
-  align-items: center;
-  flex: 0 0 auto;
-  /* 6px between the clock and the icon: they are one footnote in two parts,
-     and the button's own 22px box already carries 4px of air inside it. */
-  gap: 6px;
-  margin-top: 2px;
-}
-/* The wall clock on a question, to the left of its copy icon. It arrives on the
-   same beat as the icon — both annotate the message rather than belong to it —
-   and keeps its box while hidden (opacity, not display), so revealing it never
-   nudges the icon or the bubble above. */
+/* The clock in a message's head is a chat's own furniture, not a hover
+   affordance: it is always there, one grade quieter than the name. */
 .msg-time {
   color: var(--text-tertiary);
-  font-size: var(--text-sm);
+  font-size: var(--text-xs);
   line-height: 1;
-  /* Fixed-width digits: 08:31 and 11:41 must occupy the same box, or the icon
-     beside them moves a pixel per message as the clock changes. */
+  /* Fixed-width digits: 08:31 and 11:41 must occupy the same box, or the
+     duration beside them moves a pixel per message as the clock changes. */
   font-variant-numeric: tabular-nums;
-  opacity: 0;
-  transition: opacity var(--dur-fast) ease;
 }
-.msg:hover .msg-time {
-  opacity: 1;
-}
-/* No hover to reveal it with on a touch screen, so it is simply shown — the
-   same fallback the copy icon takes. */
-@media (hover: none) {
-  .msg-time {
-    opacity: 1;
-  }
-}
-/* A reply's copy is a row under the prose, on the same left edge. The negative
-   margin swallows the column's own gap, so the affordance costs the reply 22px
-   of height instead of 30 — the icon still sits clear of the last line. */
-.bubble-slot-row.slot-actions {
-  justify-content: flex-start;
-  /* Centred, not baseline: the row now holds a 22px icon and a line of text,
-     and a baseline-aligned button (an inline-flex box has its baseline at its
-     own bottom edge) left the model name hanging above the glyph. */
-  align-items: center;
-  margin-top: calc(-1 * var(--sp-2));
+.msg-dur {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  line-height: 1;
+  white-space: nowrap;
 }
 /* The model that wrote the reply, beside the copy icon. Both are footnotes to
    the answer rather than part of it, so they arrive and leave on the same
@@ -1266,10 +1529,22 @@
    It is a `<button>` now, not a div: lying down is something you ask the pet
    for (a press puts it down, a second press picks it up), and the global
    button reset in base.css already gives the reset every raw button needs. */
-.composer-panda {
+/* The dock the pet hangs from: the pet itself, the roster trigger on its
+   upper-right shoulder, and the hired faces along its right side. It owns the
+   absolute placement that used to sit on `.composer-panda`, so the pet can be
+   a flex item beside its own controls instead of a lone absolutely-positioned
+   button. Same `left`/`bottom` as before, so the ink lands on exactly the
+   pixel it did. */
+.composer-pet {
   position: absolute;
   left: 18px;
   bottom: calc(100% - 6px);
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+}
+.composer-panda {
+  position: relative;
   display: flex;
   align-items: flex-end;
   /* 44px of sprite on a 44px square leaves no hover padding; the +6 below
@@ -1393,7 +1668,10 @@
 }
 .composer-panda.is-bouncing .composer-panda-sprite {
   transform-origin: 50% 86%;
-  animation: panda-squish 0.72s cubic-bezier(0.33, 0, 0.25, 1);
+  /* 0.5s, not 0.72s: the squish has to finish inside the rhythm of a burst of
+     taps. At 0.72s a poke every ~150ms kept restarting the ring at its first
+     frame, so the pet looked pinned flat instead of bouncing. */
+  animation: panda-squish 0.5s cubic-bezier(0.33, 0, 0.25, 1);
 }
 /* A poke at night squashes the lying frame, and the squish pivots on the feet
    — which are at 69% of the box there, not at the standing frame's 86%. Same
@@ -1451,6 +1729,32 @@
   .composer-panda.is-resting .composer-panda-sprite {
     animation: none;
   }
+}
+
+/* ---- The pet's roster: faces on the flank -------------------------------- */
+
+/* The pet's press opens the card (see composer-pet.tsx); there is no trigger
+   beside it. The hired faces are all that shows while the card is shut: the
+   same marks the card lists, worn at the pet's side, so who is on this thread
+   is readable without opening anything. */
+.pet-roster-faces {
+  display: flex;
+  align-items: center;
+  /* Lifted off the pet's feet: at the very bottom the faces read as standing
+     on the box's border, and the border is the pet's line, not theirs. */
+  margin-bottom: 9px;
+}
+.composer-pet .pet-roster-faces .team-ava.mini {
+  width: 22px;
+  height: 22px;
+  box-shadow: 0 0 0 1.5px var(--bg);
+}
+.composer-pet .pet-roster-faces .team-ava.mini + .team-ava.mini {
+  margin-left: -6px;
+}
+.composer-pet .pet-roster-faces .team-ava.mini.has-logo img {
+  width: 14px;
+  height: 14px;
 }
 /* Same width and centring as the transcript above it (see `.chat-log > *`): the
    input box is the last line of the reading column, and a box of a different
@@ -1730,18 +2034,24 @@
   color: var(--text-tertiary);
 }
 /* ---- The picked task, in its own card on the left ------------------------- */
-/* Everything about the task you clicked lives here: identity, the orbit, the
-   brief, the result, the actions. It used to be split — trace card on the left,
-   detail pane under the strips on the right — which made you read one task in
-   two places across the width of the screen. The list next door stays a list
-   and never grows on a click; the reading happens in this card. 360px, the same
-   footprint as the list, so the pair reads as a pair. */
+/* Everything about the task you clicked lives here: identity, the trace strip,
+   the result, the brief, the ids and the log — the task page's sections, in a
+   card. It used to be split — trace card on the left, detail pane under the
+   strips on the right — which made you read one task in two places across the
+   width of the screen. The list next door stays a list and never grows on a
+   click; the reading happens in this card.
+ *
+ * 420px, not the list's 360: this card now carries the page's fact grid and
+ * the page's trace strip, and at 360 both collapse to a single column and
+ * stack 300px taller than they need to. The list keeps its own width, so the
+ * pair is no longer symmetric — the reading pane is the bigger one, which is
+ * what it is. */
 .orch-orch-card {
   display: flex;
   flex-direction: column;
   flex: none;
   gap: 9px;
-  width: min(360px, calc(100vw - 48px));
+  width: min(420px, calc(100vw - 48px));
   max-height: min(86vh, 760px);
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -1752,39 +2062,83 @@
   box-shadow: var(--shadow-lg);
   animation: node-panel-in var(--dur-fast) var(--ease-enter);
 }
-/* The orbit keeps its label: inside a card that is otherwise the task itself,
-   "任务编排" is what separates "what it was asked to do" from "how it ran". */
+/* The task page's own trace strip, mounted at 360px.
+ *
+ * On the page the row is one line: label, steps, tail. Here the steps are the
+ * point of the card, so the row wraps instead of letting `.tt-steps` clip
+ * them (that overflow:hidden is right at 980px and wrong at 360px): the label
+ * and the tail — live line, percentage, fold — take the first line, and the
+ * steps get the whole second one. A third line appears only when the live
+ * line itself is long enough to need it. */
 .orch-orch-trace {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
   padding: 0 4px;
 }
-/* A card inside a card reads as two windows: this card is already one raised
-   plate, so the orbit drops its own background, border and shadow and keeps
-   only its header row and steps. */
-.orch-orch-card .orbit {
-  gap: 6px;
-  padding: 0 2px;
+.orch-orch-card .tt {
+  margin-top: 0;
+  background: var(--bg-inset);
+  border-color: var(--border-soft);
+}
+.orch-orch-card .tt-row {
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 8px 10px;
+}
+.orch-orch-card .tt-label {
+  order: 1;
+}
+.orch-orch-card .tt-tail {
+  order: 2;
+}
+.orch-orch-card .tt-steps {
+  order: 3;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  overflow: visible;
+  row-gap: 3px;
+}
+/* Two cells across at 420px, one on a narrow pane: the page fits all three
+   side by side at 980px, and the cells are what says where the run went. */
+.orch-orch-card .tt-detail {
+  grid-template-columns: repeat(auto-fit, minmax(165px, 1fr));
+  gap: 10px;
+  padding: 10px 11px 11px;
+}
+/* The page's sections, at card spacing: the card already has a 9px flex gap
+   between its children, so the sections keep only their rule and their
+   padding — the 16px margin on top of that gap left holes. */
+.orch-orch-card .dt-sec {
+  margin-top: 0;
+  padding-top: 10px;
+  padding-inline: 4px;
+}
+.orch-orch-card .dt-sec-title {
+  margin-bottom: 6px;
+}
+.orch-orch-card .dt-sec-head {
+  margin-bottom: 6px;
+}
+/* The page's fact grid folds into one column at this width, which is what the
+   band under a folded header wants anyway. */
+.orch-orch-card .dt-facts {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px 16px;
+}
+/* The way out to the full page, on the footer's right edge: the card shows
+   most of what the page does, and the parts it does not — the message box, the
+   delegation tree — are exactly the ones that need the room. */
+.orch-detail-open {
+  margin-left: auto;
+  align-self: center;
+  padding: 0;
   border: 0;
-  border-radius: 0;
   background: none;
-  box-shadow: none;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  cursor: pointer;
 }
-.orch-orch-card .orbit:hover {
-  box-shadow: none;
-}
-/* Tighter than the transcript's strip: 360px minus the card's padding is the
-   whole width, and the summary pills have to share the row with the brand. */
-.orch-orch-card .orbit-head-btn {
-  gap: 6px;
-  padding: 5px 8px;
-}
-.orch-orch-card .orbit-brand-title {
-  font-size: var(--text-md);
-}
-.orch-orch-card .orbit-body {
-  padding: 2px 4px 0;
+.orch-detail-open:hover {
+  color: var(--text);
+  text-decoration: underline;
 }
 /* Narrow panes wrap the trace under the list (see `.orch-flyout`). A list at
    its full 760px would then push the trace past the bottom of the popover, so
@@ -2045,38 +2399,19 @@
 .orch-detail-note.blocked {
   color: var(--warn);
 }
-.orch-detail-sec {
-  padding: 0 4px;
-}
-.orch-detail-label {
-  margin: 0 0 3px;
-  font-size: var(--text-xs);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--text-tertiary);
-}
-.orch-detail-text {
-  margin: 0;
-  font-size: var(--text-sm);
-  line-height: 1.55;
-  color: var(--text-secondary);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-.orch-detail-pre {
-  margin: 0;
-  max-height: 220px;
-  overflow: auto;
-  padding: 8px 9px;
+/* The output panel: the page's markdown, in the card's own frame. Clamped with
+   a fade rather than scrolled — see `ResultBlock`. */
+.orch-detail-result {
+  padding: 8px 10px;
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-sm);
   background: var(--bg-inset);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  line-height: 1.55;
-  color: var(--text-secondary);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  font-size: var(--text-sm);
+}
+.orch-detail-result.is-clamped {
+  max-height: 220px;
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, #000 78%, transparent 100%);
 }
 .orch-detail-foot {
   display: flex;
@@ -2109,6 +2444,9 @@
 }
 .composer-input {
   width: 100%;
+  /* The placeholder pseudo-element is positioned against this box, see the
+     .is-empty rule at the bottom of the file. */
+  position: relative;
   /* Two rows of typing, no more: the context row sits at the bottom of a flat
      box, and extra min-height only pushed the controls up into the air. */
   min-height: 64px;
@@ -2554,6 +2892,340 @@
   color: var(--text-secondary);
 }
 
+/* ---- The roster card ------------------------------------------------------ */
+
+/* The footer's second pick: who works on this thread. The chip reuses the
+   directory pill's shape (`.workdir-btn`) because the two sit on one line and
+   are the same kind of decision — a small, reversible pick that the thread
+   remembers. Only the card is its own: rows carry a face, a name and a job,
+   because a roster is a list of people, not a list of paths. */
+/* The card hangs off the pet (see `.composer-pet`): it opens above the
+   panda's shoulder rather than off a footer chip, and it is anchored to the
+   dock so the trigger and the card move together. `bottom: 100%` is the
+   dock's top edge — already above the sprite — with 8px of air. */
+.team-panel {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  /* One step above the directory card, which also hangs off this corner. */
+  z-index: 31;
+  display: flex;
+  flex-direction: column;
+  width: min(340px, calc(100vw - 48px));
+  max-height: min(52vh, 460px);
+  padding: 6px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  animation: wd-panel-in var(--dur-fast) var(--ease-enter);
+}
+.team-panel-label {
+  margin: 2px 2px 6px;
+  padding-left: 4px;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+.team-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.team-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
+}
+.team-row:hover {
+  background: var(--bg-hover);
+}
+/* A chosen person is marked, not tinted — same rule as the directory card:
+   the tick is the answer, and a coloured row in a column of grey ones reads as
+   the hovered one. The wash is one step of surface so a multi-select list
+   still shows at a glance who is in. */
+.team-row.on {
+  background: var(--bg-active);
+}
+/* Not installed on this node is a fact about the machine, not a reason to
+   hide the person: a team can be hired for work that runs elsewhere. The name
+   steps back one grade and the tag says why. */
+.team-row.off .team-name {
+  color: var(--text-secondary);
+}
+.team-ava {
+  flex: none;
+  display: grid;
+  place-items: center;
+  position: relative;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 1px solid var(--border-soft);
+  background: var(--bg-inset);
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: 1;
+}
+/* The chip's stack: the same faces, at small print. They overlap by a third
+   so three people still fit in the pill's height, and each one is ringed in
+   the chip's own fill — that ring is what separates two adjacent heads.
+   Unlike the 26px row avatar, the mini wears the tint solid: a 9px letter on
+   a 15% wash is invisible, and a face that cannot be read at this size is
+   just a dot. White on the light theme's mid-dark hues, near-black on the
+   dark theme's lifted ones. */
+.team-stack {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+.team-stack .team-ava.mini {
+  width: 18px;
+  height: 18px;
+  border-width: 0;
+  background: var(--tint, var(--bg-inset));
+  color: #fff;
+  font-size: 9px;
+  box-shadow: 0 0 0 1.5px var(--bg-hover);
+}
+:root[data-theme='dark'] .team-stack .team-ava.mini {
+  color: #101013;
+}
+.team-ava.mini + .team-ava.mini {
+  margin-left: -6px;
+}
+.team-stack .team-ava.mini.more {
+  background: var(--bg-inset);
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
+:root[data-theme='dark'] .team-stack .team-ava.mini.more {
+  color: var(--text-tertiary);
+}
+/* On duty: the CLI is installed on this node, so this person can take a task
+   today. The pip rides the avatar's corner rather than a column of its own —
+   the roster's right edge already carries the tick and the not-installed tag,
+   and a third column would push every name into the clamp. */
+.team-duty-dot {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--good);
+  box-shadow: 0 0 0 2px var(--bg-raised);
+}
+.team-row.on .team-duty-dot {
+  box-shadow: 0 0 0 2px var(--bg-active);
+}
+/* Roster skeleton: three rows of the shape the people will take. */
+.team-skel {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.team-skel-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 8px;
+}
+.team-skel-ava {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--bg-inset);
+  animation: team-skel-pulse 1.4s var(--ease) infinite;
+}
+.team-skel-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  flex: 1;
+  min-width: 0;
+}
+.team-skel-line {
+  height: 7px;
+  border-radius: 999px;
+  background: var(--bg-inset);
+  animation: team-skel-pulse 1.4s var(--ease) infinite;
+}
+.team-skel-line.short {
+  width: 30%;
+  height: 6px;
+  opacity: 0.7;
+}
+@keyframes team-skel-pulse {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .team-skel-ava,
+  .team-skel-line {
+    animation: none;
+  }
+}
+/* Five fixed tints, hashed from the agent name (see format/agent-role.ts) so
+   the same person always wears the same colour and two people on one card
+   rarely collide. The tint is a hue, not a theme colour: it must not read as
+   "good" or "warning", only as identity. */
+.team-ava.t0 {
+  --tint: #2f6ca0;
+}
+.team-ava.t1 {
+  --tint: #7a5cc4;
+}
+.team-ava.t2 {
+  --tint: #2e8b57;
+}
+.team-ava.t3 {
+  --tint: #b06a1e;
+}
+.team-ava.t4 {
+  --tint: #a34b6b;
+}
+.team-ava.t0,
+.team-ava.t1,
+.team-ava.t2,
+.team-ava.t3,
+.team-ava.t4 {
+  background: color-mix(in srgb, var(--tint) 15%, transparent);
+  border-color: color-mix(in srgb, var(--tint) 32%, transparent);
+  color: var(--tint);
+}
+/* On the near-black page a 15% wash of a mid-dark hue disappears; the same
+   hues lifted a few steps keep the faces legible without turning them into
+   neon. */
+:root[data-theme='dark'] .team-ava.t0 {
+  --tint: #79b3e0;
+}
+:root[data-theme='dark'] .team-ava.t1 {
+  --tint: #a893e8;
+}
+:root[data-theme='dark'] .team-ava.t2 {
+  --tint: #6cc496;
+}
+:root[data-theme='dark'] .team-ava.t3 {
+  --tint: #d9a35f;
+}
+:root[data-theme='dark'] .team-ava.t4 {
+  --tint: #d98aa6;
+}
+.team-ava.auto {
+  color: var(--text-tertiary);
+}
+/* Official marks: the artwork keeps its own colours, so the plate travels
+   with the file (see format/agent-logo.ts) instead of following the theme. A
+   light plate is app-icon white; a dark one is the ink the near-white marks
+   were drawn for. Both read the same in either theme — this is a brand mark,
+   not a tinted chip. Declared after the tint classes so it wins on equal
+   specificity. */
+.team-ava.has-logo {
+  padding: 0;
+  /* Warm off-white, not pure #fff: on the light theme's white card a pure
+     white plate has no edge at all, and the face dissolves into the row. */
+  background: #f4f4f1;
+  border-color: rgba(0, 0, 0, 0.1);
+}
+.team-ava.has-logo.plate-dark {
+  background: #121316;
+  border-color: rgba(255, 255, 255, 0.16);
+}
+.team-ava.has-logo img {
+  display: block;
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+}
+.team-stack .team-ava.mini.has-logo {
+  background: #f4f4f1;
+  border-color: transparent;
+}
+.team-stack .team-ava.mini.has-logo.plate-dark {
+  background: #121316;
+}
+.team-stack .team-ava.mini.has-logo img {
+  width: 12px;
+  height: 12px;
+}
+.team-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+}
+.team-name {
+  font-size: var(--text-md);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.team-role {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.team-tag {
+  flex: none;
+  padding: 0 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--text-tertiary);
+}
+.team-check {
+  flex: none;
+  color: var(--text);
+}
+.team-empty {
+  margin: 0;
+  padding: 10px 10px 12px;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+/* The hint explains the one thing a reader cannot infer from the rows: that
+   picking people does not pin one of them — the scheduler still matches each
+   job to a skill inside the team. */
+.team-hint {
+  margin: 6px 4px 2px;
+  font-size: var(--text-xs);
+  line-height: 1.45;
+  color: var(--text-tertiary);
+}
+.team-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: none;
+  margin-top: 4px;
+  padding-top: 5px;
+  border-top: 1px solid var(--border-soft);
+}
+
 /* ---- Composer model switch ------------------------------------------------- */
 
 /* The pick sits in the action row's right edge, immediately left of Send.
@@ -2835,9 +3507,22 @@
 }
 
 /* The placeholder. A contenteditable has no placeholder attribute, so the
-   empty state paints it from data-placeholder instead. */
+   empty state paints it from data-placeholder instead.
+
+   It has to be taken out of flow. An in-flow ::before is part of the editor's
+   first line, so an empty editor's caret — which sits at offset 0 of the
+   content, i.e. *behind* the pseudo-element — was laid out at the end of the
+   placeholder string, and the caret blinked after "…换行）" instead of in
+   front of the prompt. Absolute keeps the glyphs where they were and gives
+   the caret its own empty line to start on. The offsets mirror the field's
+   own padding: 2px 10px. */
 .composer-input.is-empty::before {
   content: attr(data-placeholder);
+  position: absolute;
+  top: 2px;
+  left: 10px;
+  right: 10px;
+  overflow: hidden;
   color: var(--text-tertiary);
   pointer-events: none;
 }
@@ -3201,58 +3886,149 @@
    Notes typed into a running turn, listed between the transcript and the
    composer: they have not been delivered yet, so each row carries the three
    things a waiting message needs — send it ahead of the round, fix it, or take
-   it back. One row per note, newest at the bottom (the oldest is the one a
-   round reads first). */
+   it back. One row per note, numbered, oldest first (the oldest is the one a
+   round reads first).
+
+   It is a tray, not a stack of cards. The rows used to be full-bleed cards
+   spanning the whole pane — wider than the input box they sit on and wider
+   than the transcript above them, so the queue read as a detached list that
+   belonged to neither. The tray takes the reading column's width and centring
+   (`.note-tray`, the same 900px as `.composer > *` and `.chat-log > *`) and
+   groups the rows behind one hairline, which is also what lets the list cap
+   its height: four notes used to eat 150px of transcript, and nothing stopped
+   the fifth. */
 .note-strip {
   flex: none;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 0 52px 6px;
+  /* Same lanes as the log and the composer: 52px of prompt rail on the right,
+     plus the header card's lane while one is open, so the tray slides with the
+     column instead of hanging off it. */
+  padding: 0 calc(52px + var(--panel-lane)) 0 var(--sp-6);
+  transition: padding-right var(--dur-med) var(--ease-standard);
+}
+.note-tray {
+  max-width: 900px;
+  margin: 0 auto 2px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-xl);
+  /* Recessed, not raised: the composer below it is the thing you type into and
+     keeps the white card. The tray reads as a shelf the notes are parked on. */
+  background: var(--bg-chrome);
+  overflow: hidden;
+}
+/* Four rows: a normal mid-turn queue is visible whole, and the fifth is where
+   the list starts to scroll instead of growing into the page. */
+.note-list {
+  max-height: 132px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+/* Overflow cue. A capped list that just cut a row in half said nothing about
+   the notes past the edge; the edge that still has rows fades instead. Both
+   flags come from the scroll position (sessions.tsx), so a list that fits has
+   no mask at all and the last row is never dimmed for no reason. */
+.note-list[data-above='true'] {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 14px);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 14px);
+}
+.note-list[data-below='true'] {
+  -webkit-mask-image: linear-gradient(to top, transparent 0, #000 18px);
+  mask-image: linear-gradient(to top, transparent 0, #000 18px);
+}
+.note-list[data-above='true'][data-below='true'] {
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 14px,
+    #000 calc(100% - 18px),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 14px,
+    #000 calc(100% - 18px),
+    transparent 100%
+  );
 }
 .note-row {
+  position: relative;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
-  min-height: 28px;
-  padding: 4px 8px 4px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-raised);
-  font-size: 12px;
-  line-height: 1.5;
+  padding: 6px 10px 6px 8px;
 }
-.note-row[data-mode='inject'] {
-  border-color: var(--accent, #6b8afd);
+.note-row + .note-row {
+  border-top: 1px solid var(--border-soft);
+}
+.note-row:hover {
+  background: var(--bg-hover);
+}
+/* Inject is the exception — it aborts the round in flight rather than waiting
+   for the next one — so it gets the amber edge and the amber chip, and the
+   ordinary queue stays neutral. The old rule outlined the whole row in
+   `--accent`, which is the ink colour: on light it read as a heavy black box
+   and on dark as a white focus ring, i.e. as "selected", not as "urgent". */
+.note-row[data-mode='inject']::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--warn);
+}
+/* Queue position. Delivery order is the whole point of the strip and it was
+   invisible: the rows were interchangeable cards with no answer to "which one
+   does it read first". */
+.note-index {
+  flex: none;
+  width: 13px;
+  padding-top: 2px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
 }
 .note-mode {
   flex: none;
-  padding: 0 5px;
-  border-radius: 4px;
-  background: var(--bg-hover);
+  padding-top: 2px;
+  font-size: var(--text-xs);
+  line-height: 1.45;
   color: var(--text-tertiary);
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  white-space: nowrap;
 }
 .note-row[data-mode='inject'] .note-mode {
-  background: color-mix(in srgb, var(--accent, #6b8afd) 16%, transparent);
-  color: var(--accent, #6b8afd);
+  padding: 0 6px;
+  border-radius: 5px;
+  background: var(--warn-soft);
+  color: var(--warn);
 }
+/* Two lines, not one. A queued note is usually a sentence or two and the old
+   single line ellipsised it at ~40 characters, leaving the tooltip as the only
+   way to read your own message back. */
 .note-text {
   flex: 1 1 auto;
   min-width: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+  font-size: var(--text-sm);
+  line-height: 1.45;
   color: var(--text);
+  overflow-wrap: anywhere;
 }
 .note-files {
   flex: none;
   display: inline-flex;
   align-items: center;
   gap: 2px;
+  padding-top: 2px;
   color: var(--text-tertiary);
+  font-size: var(--text-xs);
 }
 /* In-place editor for a pending note. It takes the text span's slot so the row
    does not reflow: the mode badge, the attachment count and the action buttons
@@ -3260,23 +4036,27 @@
 .note-edit {
   flex: 1 1 auto;
   min-width: 0;
-  padding: 1px 6px;
-  border: 1px solid var(--accent, #6b8afd);
-  border-radius: 5px;
+  padding: 2px 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
   background: var(--bg);
   color: var(--text);
   font: inherit;
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: var(--text-sm);
+  line-height: 1.45;
   outline: none;
 }
+/* The row's three verbs stay on the row — a queue you can only correct by
+   hovering it is a queue that looks read-only — but they sit back at rest and
+   come forward under the pointer or the caret. */
 .note-actions {
   flex: none;
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  opacity: 0.72;
-  transition: opacity 120ms ease;
+  margin-top: -2px;
+  opacity: 0.5;
+  transition: opacity var(--dur-fast) ease;
 }
 .note-row:hover .note-actions,
 .note-row:focus-within .note-actions {
@@ -3296,7 +4076,7 @@
   cursor: pointer;
 }
 .note-act:hover {
-  background: var(--bg-hover);
+  background: var(--bg-active);
   color: var(--text);
 }
 .note-act.danger:hover {

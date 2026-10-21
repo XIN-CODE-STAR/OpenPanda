@@ -31,6 +31,7 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/reminders"
 	"github.com/Xustalis/OpenPanda/internal/sessions"
 	"github.com/Xustalis/OpenPanda/internal/skills"
+	"github.com/Xustalis/OpenPanda/internal/todos"
 	"github.com/Xustalis/OpenPanda/internal/updater"
 	"github.com/Xustalis/OpenPanda/internal/util"
 	"github.com/Xustalis/OpenPanda/webui/push"
@@ -66,7 +67,10 @@ type Deps struct {
 	Worktrees    *sessions.Worktrees
 	SkillStore   *skills.Store    // nil disables the skill approval endpoints
 	Reminders    *reminders.Store // nil disables the reminder endpoints
-	Cfg          *config.Config
+	// Todos is the user's own to-do board (internal/todos). nil disables
+	// /api/todos — the console hides the page rather than 503ing it.
+	Todos *todos.Store
+	Cfg   *config.Config
 	// CfgMu, when set, is the lock the handler borrows for cfg access while no
 	// engine exists — the REPL passes its own fallback mutex so a /web panel
 	// embedded in an engineless session still serializes with the front end.
@@ -107,6 +111,7 @@ func New(d Deps) http.Handler {
 		worktrees:    d.Worktrees,
 		skillStore:   d.SkillStore,
 		reminders:    d.Reminders,
+		todos:        d.Todos,
 		cfg:          d.Cfg,
 		cfgMu: func() *sync.RWMutex {
 			if d.CfgMu != nil {
@@ -205,6 +210,7 @@ func New(d Deps) http.Handler {
 	mux.HandleFunc("GET /api/context", h.getContext)
 	mux.HandleFunc("GET /api/cost", h.getCost)
 	mux.HandleFunc("GET /api/fs/read", h.readFile)
+	mux.HandleFunc("GET /api/fs/image", h.getImage)
 	mux.HandleFunc("GET /api/fs/files", h.listFiles)
 	mux.HandleFunc("POST /api/fs/reveal", h.revealPath)
 	mux.HandleFunc("GET /api/version", h.getVersion)
@@ -233,6 +239,16 @@ func New(d Deps) http.Handler {
 		mux.HandleFunc("GET /api/reminders", h.listReminders)
 		mux.HandleFunc("POST /api/reminders", h.createReminder)
 		mux.HandleFunc("DELETE /api/reminders/{id}", h.deleteReminder)
+	}
+	// 待办: the user's own board, beside the task queue. /start is the one
+	// crossing into the task plane — it enqueues a task and links the rows.
+	if d.Todos != nil {
+		mux.HandleFunc("GET /api/todos", h.listTodos)
+		mux.HandleFunc("POST /api/todos", h.createTodo)
+		mux.HandleFunc("POST /api/todos/reorder", h.reorderTodos)
+		mux.HandleFunc("PATCH /api/todos/{id}", h.patchTodo)
+		mux.HandleFunc("DELETE /api/todos/{id}", h.deleteTodo)
+		mux.HandleFunc("POST /api/todos/{id}/start", h.startTodo)
 	}
 	if d.Cfg != nil {
 		mux.HandleFunc("GET /api/memory", h.getMemory)
@@ -514,8 +530,11 @@ type handler struct {
 	worktrees    *sessions.Worktrees
 	skillStore   *skills.Store
 	reminders    *reminders.Store
-	cfg          *config.Config
-	configPath   string
+	// todos is the user's own to-do board (internal/todos) — notes that only
+	// become tasks when their owner starts them. nil disables the endpoints.
+	todos      *todos.Store
+	cfg        *config.Config
+	configPath string
 	// cardFilePath is where the card API edits capabilities.yaml; empty
 	// means "ask the live engine which card it was built from".
 	cardFilePath string

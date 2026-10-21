@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { useEffect, useState } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import { t } from '../i18n'
 import { PANDA_REST_POSE_MS, isPandaAwake, restingPose } from './panda-rest'
 
@@ -25,8 +25,40 @@ import { PANDA_REST_POSE_MS, isPandaAwake, restingPose } from './panda-rest'
  * Pressing it is a toy: a press squashes it flat and lets it ring back up, the
  * way a jelly toy answers a poke. Every press is that same press — presses are
  * not counted, there is no streak to chase and nothing to remember. The whole
- * interaction leaves the page alone but for the sprite. */
-export function ComposerPanda({ working }: { working: boolean }) {
+ * interaction leaves the page alone but for the sprite.
+ *
+ * The pet also answers for the roster (see composer-pet.tsx), and the
+ * gestures share one button:
+ *
+ *   - a single press opens (or closes) the team card;
+ *   - a quick second press — inside 240ms — is a poke: the pending open is
+ *     cancelled and the squish plays instead, so a poke never flashes a card
+ *     on its way past;
+ *   - a third press in the same rhythm gives up on the window entirely: from
+ *     then on every press squashes immediately, because somebody tapping
+ *     three times in half a second is playing, not navigating. Poking mode
+ *     drops 1.2s after the last press, and the next single click opens the
+ *     card again.
+ *
+ * The first press therefore waits out the double-press window before it acts.
+ * 240ms is the whole trade: shorter and a deliberate double tap lands after
+ * the card already opened, longer and the card feels like it ignored the
+ * click. Without an `onPress` the pet has no second job and pokes at once. */
+export function ComposerPanda({
+  working,
+  onPress,
+  label,
+  expanded,
+}: {
+  working: boolean
+  /** Fired on a single press (after the double-press window). */
+  onPress?(): void
+  /** Accessible name. Defaults to "poke"; the roster passes a name that
+   *  covers both gestures. */
+  label?: string
+  /** Whether the card this press opens is currently open. */
+  expanded?: boolean
+}) {
   /* A counter, not a flag: the animation has to replay on every press, and
      bumping the sprite's `key` remounts it, which is the only reliable way to
      restart a CSS animation that is already on the element (re-adding the same
@@ -70,6 +102,78 @@ export function ComposerPanda({ working }: { working: boolean }) {
     (awake ? (working ? ' is-working' : '') : ' is-resting') +
     (bouncing ? ' is-bouncing' : '')
 
+  /* The press model (see the header):
+       - one press opens the card, after waiting out the double-press window;
+       - a second press inside 240ms is a poke;
+       - a third press in the same rhythm switches the pet into poking mode:
+         from then on every press squashes at once — no window, no card.
+     Poking mode is sticky for as long as the taps keep coming and drops 1.2s
+     after the last one, so a burst stays a toy while the next deliberate
+     click opens the card again.
+
+     `workingRef` exists because the parked single press outlives the render
+     that set it: a turn that starts inside the 240ms window must not let a
+     parked press open a card over the streaming answer. */
+  const tap = useRef<number | null>(null)
+  const poking = useRef(false)
+  const streak = useRef(0)
+  const lastPress = useRef(0)
+  const idle = useRef<number | null>(null)
+  const workingRef = useRef(working)
+  useEffect(() => {
+    workingRef.current = working
+  }, [working])
+  useEffect(
+    () => () => {
+      if (tap.current !== null) window.clearTimeout(tap.current)
+      if (idle.current !== null) window.clearTimeout(idle.current)
+    },
+    [],
+  )
+
+  /** Squash now, cancelling any parked single press. */
+  function squish() {
+    if (tap.current !== null) {
+      window.clearTimeout(tap.current)
+      tap.current = null
+    }
+    setBounce((n) => n + 1)
+  }
+
+  function press() {
+    // While a turn streams the pet is busy cheering, and a squish would fight
+    // the working animation — a press there is ignored rather than queued for
+    // the moment the turn ends. The roster is locked for the same reason.
+    if (working) return
+    // No second job: this pet is only a toy, and a toy answers at once.
+    if (!onPress) {
+      setBounce((n) => n + 1)
+      return
+    }
+    const now = performance.now()
+    streak.current = now - lastPress.current <= 240 ? streak.current + 1 : 1
+    lastPress.current = now
+    // Third tap in one rhythm: the pet is being played with, so stop making
+    // the player wait for a partner press.
+    if (streak.current >= 3) poking.current = true
+    if (idle.current !== null) window.clearTimeout(idle.current)
+    idle.current = window.setTimeout(() => {
+      idle.current = null
+      streak.current = 0
+      poking.current = false
+    }, 1200)
+
+    if (poking.current || tap.current !== null) {
+      squish()
+      return
+    }
+    tap.current = window.setTimeout(() => {
+      tap.current = null
+      if (workingRef.current) return
+      onPress()
+    }, 240)
+  }
+
   return (
     <button
       type="button"
@@ -80,14 +184,10 @@ export function ComposerPanda({ working }: { working: boolean }) {
          a grey bubble over the composer's top-left corner on every pass of
          the pointer. The name still reaches assistive tech through
          `aria-label`, so nothing is lost but the bubble. */
-      aria-label={t('panda.poke')}
-      onClick={() => {
-        // While a turn streams the pet is busy cheering, and a squish would
-        // fight the working animation — a press there is ignored rather than
-        // queued for the moment the turn ends.
-        if (working) return
-        setBounce((n) => n + 1)
-      }}
+      aria-label={label ?? t('panda.poke')}
+      aria-haspopup={onPress ? 'dialog' : undefined}
+      aria-expanded={onPress ? !!expanded : undefined}
+      onClick={press}
     >
       {/* The stage is the mirror: turning over at night flips it, and the
           transition on `transform` walks it through zero width, which reads as

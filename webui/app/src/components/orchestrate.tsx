@@ -4,11 +4,14 @@ import { useEffect, useRef, useState } from 'preact/hooks'
 import { api, type Task } from '../api/client'
 import { useAsync, useChangeSignal } from '../hooks'
 import { t } from '../i18n'
+import { Markdown } from '../md/render'
+import { navigate } from '../nav'
 import { layerAboveOwnsEscape } from './card-dismiss'
 import { confirmDialog } from './confirm'
 import { Icon } from './icons'
-import DecisionOrbit from './orbit'
+import { InfoSection, SpecCard, TimelineSection } from './task-sections'
 import { StateBadge } from './state-badge'
+import { TaskTrace } from './task-trace'
 import { bindStripDrag } from './strip-drag'
 import { fmtElapsed, isActiveState } from './task-activity'
 import { toast, toastError } from './toast'
@@ -38,7 +41,10 @@ import { toast, toastError } from './toast'
  *  of its own, to the *left* of this one: the list says what the thread
  *  produced, the card beside it says how that one task was classified, routed
  *  and run. Two cards, one selection — the trace never describes a task the
- *  list is not pointing at.
+ *  list is not pointing at. A message's 查看任务 link arrives the same way a
+ *  chip does: it opens this card with that task already picked, because the
+ *  answer is two cards away and a page jump used to cost the reader the
+ *  transcript's scroll, its draft and its place in the conversation.
  *
  *  The trace is a sibling rather than a section inside this card because it is
  *  read in a different direction: the list is scanned top-down (and a strip
@@ -78,6 +84,12 @@ export function OrchestrateCard(props: {
    *  device" CTA. Optional so the card still renders before the fleet loads. */
   onlineNodeCount?: number
   selfNodeId?: string
+  /** A task the transcript asked to see: the message's 查看任务 opens this
+   *  card with that task picked instead of leaving for the task page, so
+   *  reading a run never costs the conversation's scroll, draft or context.
+   *  A fresh object per request — that is what lets the same link re-open the
+   *  pane after it was closed. */
+  focusTask?: { id: string } | null
 }) {
   const [picked, setPicked] = useState<string | null>(null)
   // Local nudge after an action: the shared change feed usually arrives a beat
@@ -141,6 +153,14 @@ export function OrchestrateCard(props: {
     if (props.open) return
     setPicked(null)
   }, [props.open])
+
+  // A link in the transcript asks for one task by name: pick it as the chip
+  // would. The request object is new on every click, so a second click on the
+  // same link still re-opens a pane the user closed.
+  useEffect(() => {
+    if (!props.focusTask) return
+    setPicked(props.focusTask.id)
+  }, [props.focusTask])
 
   // Escape puts the detail away first, so one key undoes one step. It is the
   // card's only way out besides the header trigger: an outside click used to
@@ -401,21 +421,21 @@ function OrchChip(props: {
   )
 }
 
-/** The picked task, in the card to the left of the list — everything about it
- *  in one place: what it is (title, state, owner, age), how it was classified,
- *  routed and run (the orbit), what it was asked to do (brief), and what came
- *  back (result), with the actions that still apply.
+/** The picked task, in the card to the left of the list — the task detail page
+ *  in 360px: how it was classified, routed and run (the same 执行链路 strip the
+ *  page draws), what came back, what it was asked to do (任务简报), its ids and
+ *  its log.
  *
- *  This used to be two things in two places: a trace card on the left and a
- *  detail pane stacked under the strips on the right. That split the same task
- *  across the width of the screen — you read "识别图片内容…" on the right and
- *  the steps that produced it on the left, and had to keep both in your head.
- *  One card, one task: the list on the right stays a list (it never grows when
- *  a chip is clicked), and the reading happens here.
- *
- *  The orbit starts expanded — clicking a task already said you wanted to look
- *  — and the card scrolls as a whole, so a long trace and a long result never
- *  fight over the same height. */
+ *  The card used to be a second, thinner view of the same task: its own orbit
+ *  (numbered steps, a brand bar, an action rail) and a JSON blob where the
+ *  brief should be. Reading a task from the chat therefore meant either
+ *  settling for less than the page said, or leaving the conversation for the
+ *  page. It now mounts the page's own sections — `TaskTrace`, `SpecCard`,
+ *  `InfoSection`, `TimelineSection` — so the two surfaces cannot drift: the
+ *  page lays them out at 980px, the card stacks them at 360px, and the only
+ *  thing that changes between them is the width. The message box and the
+ *  delegation tree stay on the page; a task that needs those is a task worth
+ *  opening in full, and the footer still goes there. */
 function OrchTask(props: {
   task: Task
   busy: boolean
@@ -429,7 +449,6 @@ function OrchTask(props: {
   const active = isActiveState(task.state)
   const review = task.state === 'review'
   const blocked = task.approval_disposition === 'needs_changed_input'
-  const brief = task.spec || task.intent || ''
   return (
     <aside class="orch-orch-card" id="orch-detail" role="region" aria-label={t('orch.detail')}>
       <div class="orch-detail-head">
@@ -456,65 +475,138 @@ function OrchTask(props: {
         </p>
       )}
       {/* A task that never went through the dispatcher has no classification,
-          no route and no execution trace — the orbit would be three empty steps
-          under a "大总管" bar that did nothing, so the section is skipped. */}
+          no route and no execution trace, and the strip would draw two empty
+          steps, so the section is skipped. */}
       {hasTrace(task) && (
-        <section class="orch-orch-trace" aria-label={t('orch.trace')}>
-          <p class="orch-detail-label">{t('orch.trace')}</p>
-          <DecisionOrbit
-            task={task}
-            onlineNodeCount={props.onlineNodeCount}
-            selfNodeId={props.selfNodeId}
-            defaultOpen
-          />
-        </section>
-      )}
-      {brief && (
-        <div class="orch-detail-sec">
-          <p class="orch-detail-label">{t('orch.brief')}</p>
-          <p class="orch-detail-text">{brief}</p>
+        <div class="orch-orch-trace">
+          <TaskTrace task={task} defaultOpen />
         </div>
       )}
-      <div class="orch-detail-sec">
-        <p class="orch-detail-label">{t('orch.result')}</p>
-        {task.result ? (
-          <pre class="orch-detail-pre">{task.result}</pre>
-        ) : (
-          <p class="orch-detail-text dim">{t('orch.noResult')}</p>
+      {task.result && <ResultBlock text={resultText(task.result)} />}
+      {/* The page's brief section, with the intent as its fallback: a task
+          dispatched without a spec envelope still has the sentence that
+          started it, and dropping the section for those tasks left the card
+          with no "what was this asked to do" at all. */}
+      <SpecCard spec={task.spec} fallback={taskBrief(task)} />
+      <InfoSection task={task} />
+      <TimelineSection events={task.events ?? []} suppressResult={Boolean(task.result)} tail={4} />
+      {/* The card mirrors the page, but not all of it: the message box, the
+          delegation tree and the sub-agent list are decisions to make about a
+          run, and a 360px flyout is the wrong place to make them. The way out
+          is therefore always here, not only for a task that still has actions
+          — reading it in full should not require closing the card first. */}
+      <div class="orch-detail-foot">
+        {active && (
+          <button class="btn small" disabled={props.busy} onClick={props.onCancel}>
+            {t('orch.cancel')}
+          </button>
         )}
+        {review && (
+          <button
+            class="btn primary small"
+            disabled={props.busy || blocked}
+            title={blocked ? t('detail.needsChangedInputHint') : undefined}
+            onClick={props.onRun}
+          >
+            {t('orch.run')}
+          </button>
+        )}
+        <button
+          type="button"
+          class="orch-detail-open"
+          onClick={() => navigate({ view: 'detail', id: task.id })}
+        >
+          {t('orbit.actions.openTask')} →
+        </button>
       </div>
-      {/* Only the actions that still apply: a finished task has none, and an
-          empty footer row was just a strip of padding under the result. The
-          link out to the full task page is gone with it — this card already
-          shows the brief, the result and the trace, so "go read it elsewhere"
-          was a detour, not an action. */}
-      {(active || review) && (
-        <div class="orch-detail-foot">
-          {active && (
-            <button class="btn small" disabled={props.busy} onClick={props.onCancel}>
-              {t('orch.cancel')}
-            </button>
-          )}
-          {review && (
-            <button
-              class="btn primary small"
-              disabled={props.busy || blocked}
-              title={blocked ? t('detail.needsChangedInputHint') : undefined}
-              onClick={props.onRun}
-            >
-              {t('orch.run')}
-            </button>
-          )}
-        </div>
-      )}
     </aside>
   )
 }
 
+/** The run's output, rendered the way the task page renders it — markdown, not
+ *  a mono dump of the envelope — but clamped instead of scrolled: the card is
+ *  already one scroller, and a second one inside it traps the wheel halfway
+ *  down the flyout. Short output is shown whole; a four-line report does not
+ *  need a fold. */
+function ResultBlock({ text }: { text: string }) {
+  const [open, setOpen] = useState(false)
+  const long = text.length > 700
+  return (
+    <section class="dt-sec">
+      <div class="dt-sec-head">
+        <h2 class="dt-sec-title">{t('orch.result')}</h2>
+        {long && (
+          <button type="button" class="dt-sec-action" onClick={() => setOpen((v) => !v)}>
+            {open ? t('detail.result.collapse') : t('detail.result.expand')}
+          </button>
+        )}
+      </div>
+      <div class={'orch-detail-result' + (long && !open ? ' is-clamped' : '')}>
+        <Markdown text={text} />
+      </div>
+    </section>
+  )
+}
+
+/** What came back, in words.
+ *
+ *  A result blob is `{"ok":true,"exit_code":0,"stdout":"…","files_changed":[…]}`,
+ *  and printing it raw put a wall of escaped JSON where the answer belongs.
+ *  The card shows what the agent actually wrote; the envelope's bookkeeping —
+ *  exit code, changed files, tokens — lives on the task page, which has a
+ *  result view built for it. */
+function resultText(raw: string): string {
+  try {
+    const v: unknown = JSON.parse(raw)
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return raw
+    const r = v as Record<string, unknown>
+    const prose = [r.stdout, r.stderr].filter(
+      (x): x is string => typeof x === 'string' && x.trim() !== '',
+    )
+    if (prose.length) return prose.join('\n\n')
+    if (typeof r.failed === 'string' && r.failed.trim()) return r.failed
+  } catch {
+    // A plain-text result is already the answer.
+  }
+  return raw
+}
+
 /** Whether there is an orchestration story to tell for this task. A task that
  *  was dispatched straight to an agent — or is still being created — has no
- *  classification, no route decision and no execution trace, and the orbit
- *  would render three empty steps under a "大总管" bar that did nothing. */
+ *  classification, no route decision and no execution trace, and the strip
+ *  would draw a single "执行" step under a title that says nothing. */
 function hasTrace(task: Task): boolean {
   return Boolean(task.plan_meta) || (task.traces?.length ?? 0) > 0 || Boolean(task.last_event)
+}
+
+/** What the task was asked to do, in words.
+ *
+ *  `spec` is the dispatcher's machine envelope — `allow_agents`,
+ *  `constraints`, `success_definition`, `user_locale` — and printing it raw
+ *  turned 任务说明 into a two-thousand-character JSON wall that filled the whole
+ *  360px card. `intent` is the sentence the user actually typed, and when it
+ *  exists it *is* the brief. A task without one falls back to the envelope's
+ *  prose fields only. */
+function taskBrief(task: Task): string {
+  const intent = (task.intent ?? '').trim()
+  if (intent) {
+    // The first line is the title the card already shows above this section.
+    const lines = intent.split('\n')
+    const title = (task.title ?? '').trim()
+    if (title && (lines[0] ?? '').trim() === title) lines.shift()
+    const body = lines.join('\n').trim()
+    return body || intent
+  }
+  const spec = (task.spec ?? '').trim()
+  if (!spec) return ''
+  try {
+    const v = JSON.parse(spec) as Record<string, unknown>
+    const prose = ['target', 'goal', 'description', 'prompt', 'success_definition']
+      .map((k) => (typeof v[k] === 'string' ? String(v[k]).trim() : ''))
+      .filter(Boolean)
+    if (prose.length) return prose.join('\n\n')
+  } catch {
+    // A plain-text spec is already the brief.
+  }
+  return spec
 }

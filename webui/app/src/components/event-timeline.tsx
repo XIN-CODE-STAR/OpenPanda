@@ -3,9 +3,10 @@
 import { useState } from 'preact/hooks'
 import type { TaskEvent } from '../api/client'
 import { Markdown } from '../md/render'
-import { blockDepth, formatTaskEvent, toolArgSummary, type AgentBlock } from './event-parser'
+import { blockDepth, formatTaskEvent, imageRefOf, toolArgSummary, type AgentBlock, type ImageRef } from './event-parser'
 import { buildRows } from './event-rows'
 import { Icon } from './icons'
+import { ImagePreview } from './image-preview'
 import { t } from '../i18n'
 
 export interface EventTimelineProps {
@@ -15,8 +16,10 @@ export interface EventTimelineProps {
   /** Drop the body of the *last* result row. The task detail page renders the
    *  same output in its own 执行结果 section directly above the log, and
    *  printing it twice — once as a section, once as the log's final row — was
-   *  half a screen of identical text. The row itself stays, so the log still
-   *  says how the run ended. */
+   *  half a screen of identical text. The row itself stays (with a pointer to
+   *  the section), so the log still says when the result landed. Only the last
+   *  one is suppressed: in a supervised run every earlier round has its own
+   *  output, and the log is the only place that survives. */
   suppressResultBody?: boolean
 }
 
@@ -34,6 +37,24 @@ export function EventTimeline({
   // Pre-format once: lifecycle plumbing events are grouped into a single
   // pipeline row, so the render loop works on groups, not raw events.
   const rows = buildRows(events)
+  // Which row's result body the caller already renders elsewhere. Found by
+  // scanning back for the newest row that carries a result — the page's own
+  // section mirrors that one, not necessarily the final row of the log (a
+  // "session linked" event usually closes it).
+  let mutedResult = -1
+  if (suppressResultBody) {
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const row = rows[i]
+      if (row && row.kind === 'event' && row.formatted.result) {
+        mutedResult = i
+        break
+      }
+    }
+  }
+  // A tool call and its result routinely name the same picture ("Read x.png"
+  // → "File created successfully at: x.png"), and a re-read names it again.
+  // One preview per picture per log: the first row to claim a path owns it.
+  const shownImages = new Set<string>()
   return (
     <div class={`event-timeline-container ${className}`}>
       <ol class="timeline-steps">
@@ -67,6 +88,16 @@ export function EventTimeline({
           const formatted = row.formatted
           const block = formatted.agent
           const depth = block ? blockDepth(block, depths) : 0
+          // The picture this row is about, if it has not been shown already.
+          let image: ImageRef | null = null
+          if (block) {
+            const ref = imageRefOf(block)
+            const key = ref?.path ?? ref?.dataUrl
+            if (ref && key && !shownImages.has(key)) {
+              shownImages.add(key)
+              image = ref
+            }
+          }
           if (formatted.quiet) {
             return (
               <li key={i} class="timeline-step-item type-quiet">
@@ -122,10 +153,18 @@ export function EventTimeline({
                     defaultOpen={defaultOpenThought || i === rows.length - 1}
                   />
                 ) : block ? (
-                  <AgentBlockBody block={block} rawJson={formatted.rawJson} />
+                  <AgentBlockBody block={block} rawJson={formatted.rawJson} image={image} />
                 ) : formatted.result ? (
-                  suppressResultBody && i === rows.length - 1 ? null : (
-                    <ResultCard result={formatted.result} rawJson={formatted.rawJson} />
+                  i === mutedResult ? (
+                    <div class="step-body">
+                      <span class="step-muted-result">{t('detail.result.above')}</span>
+                    </div>
+                  ) : (
+                    <ResultCard
+                      result={formatted.result}
+                      rawJson={formatted.rawJson}
+                      fallback={formatted.summary}
+                    />
                   )
                 ) : (
                   <div class="step-body">
@@ -160,7 +199,16 @@ export function EventTimeline({
  * the everything-is-a-node view: text reads as prose, thinking collapses
  * into a card, tool calls show name + primary argument with the full
  * input behind a toggle, tool results show a bounded preview. */
-function AgentBlockBody({ block, rawJson }: { block: AgentBlock; rawJson?: string }) {
+function AgentBlockBody({
+  block,
+  rawJson,
+  image,
+}: {
+  block: AgentBlock
+  rawJson?: string
+  /** Picture this row owns — see the dedupe in EventTimeline. */
+  image?: ImageRef | null
+}) {
   switch (block.ev) {
     case 'text':
       return (
@@ -187,11 +235,12 @@ function AgentBlockBody({ block, rawJson }: { block: AgentBlock; rawJson?: strin
             )}
           </div>
           {inputJson && <RawJsonToggle raw={inputJson} />}
+          {image && <ImagePreview path={image.path} dataUrl={image.dataUrl} />}
         </div>
       )
     }
     case 'tool_result':
-      return <ToolResultBody block={block} rawJson={rawJson} />
+      return <ToolResultBody block={block} rawJson={rawJson} image={image} />
     case 'transcript_truncated':
       return (
         <div class="step-body">
@@ -213,15 +262,33 @@ function AgentBlockBody({ block, rawJson }: { block: AgentBlock; rawJson?: strin
  *  away — same bargain the thought card and the result card already make.
  *  The fold counts lines, not characters: shell output is mostly short lines,
  *  and 300 characters of `git status` is still twenty rows of text. */
-function ToolResultBody({ block, rawJson }: { block: AgentBlock; rawJson?: string }) {
+function ToolResultBody({
+  block,
+  rawJson,
+  image,
+}: {
+  block: AgentBlock
+  rawJson?: string
+  image?: ImageRef | null
+}) {
   const [open, setOpen] = useState(false)
   const content = block.content ?? ''
   const lines = content.split('\n')
   const long = lines.length > PREVIEW_LINES || content.length > 320
   const preview = lines.slice(0, PREVIEW_LINES).join('\n')
   const shown = open || !long ? content : preview + '…'
+  // Bytes the adapter inlined ARE the result. Printing them would be a wall
+  // of base64, so the picture replaces the text entirely.
+  if (image?.dataUrl) {
+    return (
+      <div class="step-body">
+        <ImagePreview dataUrl={image.dataUrl} />
+      </div>
+    )
+  }
   return (
     <div class="step-body">
+      {image?.path && <ImagePreview path={image.path} />}
       {shown && <pre class={`agent-result ${block.isError ? 'is-error' : ''}`}>{shown}</pre>}
       {long && (
         <button type="button" class="btn small result-expand" onClick={() => setOpen((v) => !v)}>
@@ -322,9 +389,14 @@ function RawJsonToggle({ raw }: { raw: string }) {
 function ResultCard({
   result,
   rawJson,
+  fallback,
 }: {
   result: NonNullable<ReturnType<typeof formatTaskEvent>['result']>
   rawJson?: string
+  /** What the row can still say when the payload carried no output at all —
+   *  a failed run's reason. Without it the card was a badge over a bare
+   *  raw-JSON toggle. */
+  fallback?: string
 }) {
   const [open, setOpen] = useState(false)
   const out = result.stdout ?? ''
@@ -338,6 +410,9 @@ function ResultCard({
         </div>
       )}
       {result.stderr && <pre class="agent-result is-error">{result.stderr}</pre>}
+      {!result.stdout && !result.stderr && fallback && (
+        <div class="step-summary">{fallback}</div>
+      )}
       {long && (
         <button type="button" class="btn small" onClick={() => setOpen((v) => !v)}>
           {open ? t('events.collapse') : t('events.expand')}

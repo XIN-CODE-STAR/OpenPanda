@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'preact/hooks'
 import { api, ApiError, isTaskStalled, type ApprovalScope, type NodeInfo, type Task } from '../api/client'
 import { useAsync, useChangeSignal, useLocaleRerender, useTraceForTask, useVisibleInterval } from '../hooks'
 import { t } from '../i18n'
+import { isNodeConnected } from '../format/node-status'
 import { ScopeSelect } from '../components/scope-select'
 import { StateBadge } from '../components/state-badge'
 import { ErrorState } from '../components/page'
@@ -380,7 +381,7 @@ function NewTaskForm({ projects, onCreated }: { projects: string[]; onCreated():
           >
             <option value="">{t('queue.nodeAuto')}</option>
             {(nodes ?? [])
-              .filter((n) => n.status === 'online')
+              .filter((n) => isNodeConnected(n.status))
               .map((n) => (
                 <option key={n.id} value={n.id}>
                   {n.name || n.id}

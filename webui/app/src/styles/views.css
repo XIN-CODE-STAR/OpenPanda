@@ -1407,14 +1407,24 @@
   border-color: var(--border-soft);
 }
 
+/* A node's dot is a status claim, so its colour has to be earned: neutral
+   until the status says connected, green (with the glow the workspace rail
+   and the sidebar chip already use) once it is. It used to be `--accent`,
+   which is ink in the light theme — a black dot read as "present" and told
+   you nothing about the connection. */
 .node-dot {
   flex: none;
   width: 8px;
   height: 8px;
   border-radius: 999px;
-  background: var(--accent);
-  box-shadow: 0 0 6px var(--accent);
+  background: var(--text-disabled);
+  box-shadow: none;
   margin-right: 2px;
+}
+
+.node-dot.on {
+  background: var(--good);
+  box-shadow: 0 0 6px var(--good);
 }
 
 .node-dot.off {
@@ -1815,10 +1825,12 @@
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(250px, 100%), 1fr));
   gap: var(--sp-4);
-  /* Empty lanes are short; populated ones keep the six-card working set.
-     Stretching every lane to the tallest made three blank columns full-height
-     slabs and pushed the populated lane below the fold on 1024px screens. */
-  align-items: start;
+  /* Every lane is the same height, empty or not — four equal panels read as
+     one board, where a populated lane next to three stubs read as three
+     unfinished widgets (2026-10-21). The row height still comes from the
+     tallest lane, and a populated lane is bounded by `.kanban-list` (the
+     six-card working set), so the stretch cannot run away with the page. */
+  align-items: stretch;
 }
 
 .kanban-col {
@@ -1890,11 +1902,13 @@
   margin-right: calc(-1 * var(--sp-1));
 }
 
-/* An empty lane has nothing to scroll and should not reserve six card slots.
-   The column's own min-height keeps it a usable drop target. */
+/* An empty lane has nothing to scroll and no height of its own: the grid row
+   stretches the column to the board's height, and this list just fills what is
+   left of it so the whole lane — not a 160px stub — is the drop target. */
 .kanban-list[data-empty='true'] {
   height: auto;
   min-height: 0;
+  flex: 1 1 auto;
 }
 
 /* Phones stack the four lanes, so every empty lane pushes the populated one
@@ -3295,6 +3309,12 @@
   color: var(--text-primary);
   font-size: var(--fs-sub);
   letter-spacing: 0.01em;
+  /* The head is a flex row with a `flex: 1 1 auto` pill group beside the
+     brand; without these two the three ideographs were squeezed to their
+     min-content width and stacked into a 2-line vertical column, which is
+     what pushed the pills onto a second row of their own. */
+  white-space: nowrap;
+  flex: none;
 }
 .orbit-summaries {
   display: inline-flex;
@@ -3320,6 +3340,14 @@
 .orbit-sum-pill:hover {
   border-color: var(--hairline-md);
   background: var(--surface-alpha-md);
+}
+/* The live line is the one pill whose text varies in length (a tool call, an
+   agent's sentence, a watchdog note). It takes the row it needs and then
+   ellipsises, instead of pushing the progress pill onto a second line. */
+.orbit-live-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .orbit-sum-pill.pill-review {
   color: var(--semantic-warn);
@@ -3996,7 +4024,7 @@
   background: var(--text-disabled);
   flex-shrink: 0;
 }
-.fleet-node.online  .dot { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+.fleet-node.online  .dot { background: var(--good); box-shadow: 0 0 8px var(--good); }
 .fleet-node.offline .dot { background: var(--text-disabled); }
 .fleet-node .name    { flex: 1; color: var(--text-primary); font-weight: 500; }
 .fleet-node .meta    { color: var(--text-tertiary); white-space: nowrap; font-size: var(--fs-caption); }
@@ -4567,6 +4595,155 @@ pre,
 .result-expand {
   align-self: flex-start;
   margin-top: 4px;
+}
+
+/* Inline picture in a transcript row: a bounded thumbnail that opens full
+   screen. The frame is the affordance — an unframed image reads as page
+   decoration rather than something to click. */
+.img-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  margin-top: 8px;
+  max-width: 100%;
+}
+
+.img-preview-btn {
+  position: relative;
+  display: block;
+  max-width: 100%;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  overflow: hidden;
+  line-height: 0;
+  cursor: zoom-in;
+}
+
+.img-preview-btn img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: min(100%, 420px);
+  max-height: 220px;
+  object-fit: contain;
+}
+
+.img-preview-btn:hover,
+.img-preview-btn:focus-visible {
+  border-color: var(--accent-border);
+}
+
+.img-preview-hint {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: rgba(12, 12, 14, 0.6);
+  color: #fff;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.img-preview-btn:hover .img-preview-hint,
+.img-preview-btn:focus-visible .img-preview-hint {
+  opacity: 1;
+}
+
+.img-preview-name {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.7rem;
+  color: var(--text-tertiary);
+  overflow-wrap: anywhere;
+}
+
+/* Placeholder while the bytes travel: the footprint of a small thumbnail, so
+   the row does not jump when the picture lands. */
+.img-skel {
+  width: 168px;
+  height: 104px;
+  margin-top: 8px;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(90deg, var(--bg-inset), var(--bg-hover), var(--bg-inset));
+  background-size: 200% 100%;
+  animation: img-skel-shimmer 1.1s ease-in-out infinite;
+}
+
+@keyframes img-skel-shimmer {
+  from { background-position: 120% 0; }
+  to { background-position: -20% 0; }
+}
+
+/* A path the panel cannot read (outside the roots, or the agent deleted it)
+   leaves one quiet line — never a broken-image icon. */
+.img-miss {
+  margin-top: 6px;
+  font-size: 0.78rem;
+}
+
+/* Full-screen view. Fixed rather than portalled — the same overlay convention
+   the confirm dialog and the todo sheet follow. */
+.img-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 28px 20px 18px;
+  background: rgba(10, 10, 12, 0.86);
+  backdrop-filter: blur(3px);
+}
+
+.img-lightbox-img {
+  width: auto;
+  height: auto;
+  max-width: 94vw;
+  max-height: 82vh;
+  object-fit: contain;
+  border-radius: 4px;
+  background: #fff;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.5);
+}
+
+.img-lightbox-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 94vw;
+  color: #ececf0;
+}
+
+.img-lightbox-path {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.72rem;
+  opacity: 0.78;
+  overflow-wrap: anywhere;
+}
+
+.img-lightbox-close {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  cursor: pointer;
+}
+
+.img-lightbox-close:hover {
+  background: rgba(255, 255, 255, 0.18);
 }
 
 .step-body {

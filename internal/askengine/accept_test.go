@@ -11,6 +11,7 @@ import (
 
 	"github.com/Xustalis/OpenPanda/internal/config"
 	"github.com/Xustalis/OpenPanda/internal/core"
+	"github.com/Xustalis/OpenPanda/internal/entry"
 	"github.com/Xustalis/OpenPanda/internal/ledger"
 	"github.com/Xustalis/OpenPanda/internal/storage"
 )
@@ -272,5 +273,37 @@ func TestAwaitPlanOutcomeSurfacesNextGate(t *testing.T) {
 	}
 	if res.Approval.TaskID != s2.TaskID {
 		t.Fatalf("approval task = %s, want the parked stage %s", res.Approval.TaskID, s2.TaskID)
+	}
+}
+
+// A plan's stages belong to the conversation that asked for it. The panel's
+// session finalizer reports a settled task back into its thread, so without
+// the link a multi-stage run ended in silence behind the one-line receipt —
+// the thread never learned which employee finished what.
+func TestPlanStagesCarryTheConversation(t *testing.T) {
+	e, store, ctx := newStageTestEngine(t)
+	// Receipt mode: the submit must not sit waiting on a board that no
+	// consumer will ever move in a unit test.
+	e.queueTasks = true
+
+	spec := &entry.PlanSpec{
+		Goal: "ship it",
+		Stages: []entry.PlanStageSpec{
+			{ID: "01-first", Title: "first", Intent: "do the first thing"},
+		},
+	}
+	res, err := e.startClassifiedPlan(ctx, spec, AskScope{SessionID: "sess-42"}, false, StreamCallbacks{})
+	if err != nil {
+		t.Fatalf("startClassifiedPlan: %v", err)
+	}
+	if res == nil || res.Kind != "plan" || len(res.PlanStages) != 1 {
+		t.Fatalf("res = %+v, want a one-stage plan", res)
+	}
+	stage, err := store.Get(ctx, res.PlanStages[0].TaskID)
+	if err != nil {
+		t.Fatalf("read stage: %v", err)
+	}
+	if stage.SessionID != "sess-42" {
+		t.Fatalf("stage session = %q, want the asking conversation", stage.SessionID)
 	}
 }

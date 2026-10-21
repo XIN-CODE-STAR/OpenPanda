@@ -109,6 +109,13 @@ type TaskSpecDetail struct {
 	// toTaskInput's marshal and never reach the executor.
 	ToolsPolicy string `json:"tools_policy,omitempty"`
 	MaxTurns    int    `json:"max_turns,omitempty"`
+	// AllowAgents narrows the agent pool for this task to the named agents —
+	// the thread's team pick, filled by the ask engine from the composer's
+	// roster. It lives in spec for the same reason as ToolsPolicy: spec_json
+	// is what persists on the row and what a delegated task carries to the
+	// executor, so the restriction survives a hop to another node instead of
+	// being a submitter-side suggestion. Empty means no restriction.
+	AllowAgents []string `json:"allow_agents,omitempty"`
 	// ActionSpec is the hardware/software actuator dispatch (§7.2): when the
 	// request drives a declared actuator (a hardware:* ability on a device),
 	// the model names the target actuator, the action verb and the scalar

@@ -76,8 +76,129 @@ export function toolArgSummary(input: unknown): string {
   return ''
 }
 
-/** One transcript row's tree depth, computed in stream order: a tool_use
- * registers its id so later blocks carrying parent=<id> render nested
+/** An image a transcript row can actually show. `path` is a filesystem path
+ *  the console fetches through /api/fs/image; `dataUrl` is bytes the adapter
+ *  already inlined into the event. */
+export interface ImageRef {
+  path?: string
+  dataUrl?: string
+}
+
+const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|avif)$/i
+const DATA_URL_RE = /^data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=\s]+$/i
+/** Path-shaped enough to fetch: no whitespace (a sentence is not a path), and
+ *  no shell metacharacters — `rm -f t*.png` is a command, not a picture. */
+const PATH_SHAPE_RE = /^[^\s"'<>|*?]+$/
+/** Anchored = the token names a location, not just a filename: it starts at
+ *  the root (`/`, `~`) or carries a separator (`C:\a\b.png`, `./a.png`). A
+ *  bare `shot.png` inside prose is a mention, not a path to fetch. */
+const ANCHORED_RE = /^(?:\/|~|[^\s]*[\\/])/
+const PATH_KEYS = ['file_path', 'path', 'filePath', 'notebook_path', 'image_path']
+
+/** The picture a tool row is about, if it is about one.
+ *
+ *  A `Read` of a screenshot carries the path in its input and nothing else —
+ *  the adapter drops the image bytes — so the path is the only handle the
+ *  transcript has on the picture. Results are read too, because a capture tool
+ *  answers "saved to /tmp/shot.png" with no path in the call, and because some
+ *  adapters inline the bytes as a data URL (which must never be printed as
+ *  base64). */
+export function imageRefOf(block: AgentBlock | undefined): ImageRef | null {
+  if (!block) return null
+  if (block.ev === 'tool_use') {
+    const input = block.input
+    if (typeof input === 'string') return pathRef(input)
+    if (!input || typeof input !== 'object') return null
+    const m = input as Record<string, unknown>
+    for (const k of PATH_KEYS) {
+      const v = m[k]
+      if (typeof v === 'string') {
+        const ref = pathRef(v)
+        if (ref) return ref
+      }
+    }
+    return null
+  }
+  if (block.ev !== 'tool_result') return null
+  const content = (block.content ?? '').trim()
+  if (!content) return null
+  if (DATA_URL_RE.test(content)) return { dataUrl: content.replace(/\s+/g, '') }
+  // One line only: a result that merely *mentions* an image among a page of
+  // output ("wrote shot.png, then 40 more files") should not turn the whole
+  // row into a picture. The first image-shaped line wins.
+  for (const line of content.split('\n').slice(0, 8)) {
+    const ref = pathRef(line)
+    if (ref) return ref
+  }
+  return null
+}
+
+/** `pathRef` accepts an image path — absolute, relative, or `~`. A whole line
+ *  that is only a path is taken as-is; inside prose, only an *anchored* token
+ *  counts, so "the shot.png file" never turns into a broken preview. Prose
+ *  around a real path ("saved to /tmp/shot.png") does count. */
+function pathRef(raw: string): ImageRef | null {
+  const s = raw.trim().replace(/^["'`]+|["'`]+$/g, '')
+  if (pathShaped(s)) return { path: s }
+  for (const tok of s.split(/\s+/)) {
+    const t = tok.replace(/^[("'`[]+/, '').replace(/[)"'`\],.;:]+$/, '')
+    if (pathShaped(t) && ANCHORED_RE.test(t)) return { path: t }
+  }
+  return null
+}
+
+/** No whitespace (a sentence is not a path), no glob or shell metacharacters
+ *  (`rm -f t*.png` is a command, not a picture), and an image extension. */
+function pathShaped(s: string): boolean {
+  return s.length > 0 && s.length <= 400 && IMAGE_EXT_RE.test(s) && PATH_SHAPE_RE.test(s)
+}
+
+/** The adapter's silence watchdog emits `no output for 45s — agent still
+ * running` heartbeats. They are still-alive proof rather than work, and they
+ * are English on the wire in every locale — so they are re-worded here instead
+ * of being printed raw into a Chinese transcript. Returns null for any note
+ * that is not a heartbeat. */
+export function silenceNote(note: string | undefined): string | null {
+  const m = /^no output for\s+(.+?)\s*(?:—|–|-)\s*agent still running\s*$/i.exec((note ?? '').trim())
+  const raw = m?.[1] ?? ''
+  if (!raw) return null
+  const secs = parseShortDuration(raw)
+  return t('queue.live.silent', { d: secs === null ? raw : fmtShortDuration(secs) })
+}
+
+/** `45s` / `1m41s` / `2h3m` — the Go short-duration shape the watchdog writes
+ *  — into seconds. Null when the string holds no recognizable unit. */
+function parseShortDuration(s: string): number | null {
+  const re = /(\d+(?:\.\d+)?)(h|m|s|ms)/g
+  let total = 0
+  let hit = false
+  for (let m = re.exec(s); m; m = re.exec(s)) {
+    hit = true
+    const n = Number(m[1])
+    total += m[2] === 'h' ? n * 3600 : m[2] === 'm' ? n * 60 : m[2] === 'ms' ? n / 1000 : n
+  }
+  return hit ? Math.round(total) : null
+}
+
+/** Seconds into the units a heartbeat reads well in: 45s, 2m26s, 1h4m. The
+ *  seconds stay: the watchdog kills a run at `timeouts.silence_s`, so "how
+ *  long has it been quiet" is the number that matters, not a rounded one. */
+function fmtShortDuration(sec: number): string {
+  const su = t('time.unit.s')
+  const mu = t('time.unit.m')
+  const hu = t('time.unit.h')
+  if (sec < 60) return `${sec}${su}`
+  if (sec < 3600) {
+    const m = Math.floor(sec / 60)
+    const r = sec % 60
+    return r ? `${m}${mu}${r}${su}` : `${m}${mu}`
+  }
+  const h = Math.floor(sec / 3600)
+  const r = Math.floor((sec % 3600) / 60)
+  return r ? `${h}${hu}${r}${mu}` : `${h}${hu}`
+}
+
+/** One transcript row's tree depth, computed in stream order: a tool_use * registers its id so later blocks carrying parent=<id> render nested
  * under it — the harness sub-agent tree (Claude Task) shows as a tree.
  * A parent outside the visible window (pagination, truncation) still
  * nests one level rather than pretending to be top-level work. */
@@ -201,8 +322,13 @@ export function formatTaskEvent(type: string, rawData?: string): FormattedEvent 
       stdout: str(inner.stdout),
       stderr: str(inner.stderr),
     }
+    // A failed run often reports `failed`/`error` and nothing else — no
+    // stdout, no stderr. Without lifting that string out here the row's card
+    // rendered empty: a badge, a timestamp and a lone raw-JSON toggle.
+    const reason = str(inner.failed) || str(inner.error)
     const summary =
       str(inner.stderr) ||
+      reason ||
       (dropped ? t('events.resultDropped', { reason: dropped }) : undefined) ||
       (result.stdout ? firstLine(result.stdout) : undefined)
     return {
@@ -463,15 +589,15 @@ export function formatTaskEvent(type: string, rawData?: string): FormattedEvent 
       // still-alive proof, not work. They render as thin dim lines (and the
       // row builder folds a run of them into one) instead of five badge
       // cards shouting that nothing happened.
-      const silent = /^no output for\b/i.test(note)
+      const silence = silenceNote(note)
       return {
         type,
-        label: silent ? note || t('events.progress') : t('events.progress'),
+        label: silence ?? t('events.progress'),
         badgeClass: 'info',
-        summary: silent ? undefined : note || undefined,
+        summary: silence ? undefined : note || undefined,
         tags,
         rawJson,
-        quiet: silent,
+        quiet: Boolean(silence),
       }
     }
     case 'review': {

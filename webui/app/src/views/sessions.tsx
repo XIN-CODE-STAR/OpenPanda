@@ -14,6 +14,7 @@ import {
   type MCPSettings,
   type SessionApprovalState,
   type NodeInfo,
+  type PlanDetail,
   type Session,
   type SessionDiff,
   type SessionNote,
@@ -25,6 +26,7 @@ import { Icon } from '../components/icons'
 import { DiffViewer } from '../components/diff-viewer'
 import { useAsync, useChangeSignal, useLocaleRerender, useVisibleInterval, busSubscribeChange } from '../hooks'
 import { t, locale } from '../i18n'
+import { isNodeConnected } from '../format/node-status'
 import { clockStamp, clockTime } from '../format/time'
 import { navigate, navigateView } from '../nav'
 import { Markdown } from '../md/render'
@@ -37,9 +39,25 @@ import { mergeTailTurn, patchStreaming, slashQuery } from '../components/chatsta
 import { atQuery, expandFileRefs, exportMarkdown, exportFilename, isImageFile, withAttachments } from '../components/attach'
 import { isLiveSession } from '../components/session-guard'
 import { sortSessions, turnsChanged } from '../components/session-list'
+import { splitReportHead } from '../components/report-head'
+import {
+  prettyAgent,
+  speakerOf,
+  stripRefId,
+  trailingRunSummary,
+  type RunSummary,
+} from '../components/chat-speaker'
+import {
+  ChatAvatar,
+  PlanCast,
+  TaskCast,
+  TaskProgress,
+  usePlanBrief,
+  useTaskBrief,
+} from '../components/chat-cast'
 import { ScopeSelect } from '../components/scope-select'
 import { NodePicker } from '../components/node-picker'
-import { ComposerPanda } from '../components/composer-panda'
+import { ComposerPet } from '../components/composer-pet'
 import { OrchestrateCard } from '../components/orchestrate'
 import { DirButton } from '../components/dir-picker'
 import { ModelSelect } from '../components/model-select'
@@ -368,16 +386,7 @@ function LiveElapsed({ from }: { from: number }) {
     const id = setInterval(() => setMs(Date.now() - from), 1000)
     return () => clearInterval(id)
   }, [from])
-  return (
-    <div class="bubble-slot-row slot-elapsed">
-      <span class="elapsed-line">
-        {t('sessions.elapsed', { d: fmtDuration(ms) })}
-        <span class="elapsed-caret" aria-hidden="true">
-          ›
-        </span>
-      </span>
-    </div>
-  )
+  return <span class="msg-dur">{t('sessions.elapsed', { d: fmtDuration(ms) })}</span>
 }
 
 /** One line for a prompt-rail tick's tooltip: a question can be a paragraph,
@@ -417,17 +426,22 @@ async function projectForDir(dir: string): Promise<string> {
 export function SessionsView({
   activeId,
   project,
+  ws,
   onOpenSession,
-  onOpenTask,
   onLogout,
 }: {
   activeId: string | null
   project?: string | null
+  /** The workspace a brand-new thread was handed in from (the history's
+   *  per-directory "+"), by project name. It seeds the composer's directory
+   *  pick and nothing else: unlike `project` it does not scope the rail, so
+   *  the reader keeps the whole history while the next thread already knows
+   *  where it runs. */
+  ws?: string | null
   onOpenSession(id: string): void
   /** Kept for the route's project deep-link: leaving a scope used to be a rail
       control, and the prop survives for callers that still pass it. */
   onExitProject?(): void
-  onOpenTask(id: string): void
   /** The ⌘K palette's logout entry, reused by the composer's `/`
    *  completion so both surfaces run the same command list. */
   onLogout(): void
@@ -455,6 +469,13 @@ export function SessionsView({
   // composer. A queue with no list is a queue the user cannot see, correct, or
   // take back.
   const [notes, setNotes] = useState<SessionNote[]>([])
+  // The strip's scroll box, and whether rows are cut off above / below it. The
+  // list is capped at four rows, so the edges that still hold notes fade — a
+  // queue that silently dropped its fifth note off the bottom read as "only
+  // four were queued".
+  const noteList = useRef<HTMLDivElement>(null)
+  const noteCount = useRef(0)
+  const [noteEdges, setNoteEdges] = useState({ above: false, below: false })
   // The note being edited in the strip. Editing happens in place rather than
   // by pulling the text back into the composer: a pull-back would drop the row
   // first (or the text would be sent twice) and the re-send would silently
@@ -467,6 +488,11 @@ export function SessionsView({
   // The composer's environment pick: empty = let the scheduler route by
   // capability; a node id pins this turn's spawned task to that executor.
   const [nodePref, setNodePref] = useState('')
+  // Who works on this thread — the agent roster, picked in the composer's
+  // footer when the conversation starts and remembered by the session after
+  // that. Empty means no restriction (the scheduler picks the best hand),
+  // which is what every thread had before rosters existed.
+  const [team, setTeam] = useState<string[]>([])
   // Which header card is up: '' | 'node' | 'orch'. One slot, two cards — they
   // hang off the same corner of the bar, so the pane keeps the state for both
   // instead of letting each card decide (two `open` cards would stack).
@@ -476,11 +502,26 @@ export function SessionsView({
   // last reply's line ends. The lane is the same for both cards on purpose:
   // switching from one to the other is a swap in place, not a re-layout.
   const [panel, setPanel] = useState<'' | 'node' | 'orch'>('')
+  // The task a transcript link asked for. Held here, not in the card, because
+  // the click that asks for it is the transcript's: `{ id }` is rebuilt on
+  // every request so a second click on the same 查看任务 still re-opens a pane
+  // the reader had closed.
+  const [focusTask, setFocusTask] = useState<{ id: string } | null>(null)
+  /** Open one task where the reader already is — the orchestration card with
+   *  that task picked, the thread's list beside it. Leaving for the task page
+   *  used to cost the conversation: its scroll, its draft, its place. */
+  function openTaskInPlace(id: string) {
+    setPanel('orch')
+    setFocusTask({ id })
+  }
   // A card belongs to the thread it was opened in. Switching threads closes
   // it: the cards are remounted per session, so a lane kept reserved by the
   // parent would outlive the card that asked for it.
   useEffect(() => {
     setPanel('')
+    // The queue belongs to the thread it was typed in: a counter carried over
+    // from another thread would make the next note look like a removal.
+    noteCount.current = 0
   }, [activeId])
   const [busy, setBusy] = useState(false)
   const [loadError, setLoadError] = useState('')
@@ -497,6 +538,29 @@ export function SessionsView({
     const id = setInterval(() => void refreshNotes(), 4000)
     return () => clearInterval(id)
   }, [activeId, busy, notes.length])
+  // Keep the strip's scroll box honest: follow a note the user just added
+  // (it lands at the end of the queue), leave the list alone when a round
+  // folded one away or the user dropped one, and re-measure the edges whenever
+  // the queue or its height changes.
+  useEffect(() => {
+    const el = noteList.current
+    if (!el) return
+    if (notes.length > noteCount.current) el.scrollTop = el.scrollHeight
+    noteCount.current = notes.length
+    const measure = () => {
+      const above = el.scrollTop > 2
+      const below = el.scrollHeight - el.scrollTop - el.clientHeight > 2
+      setNoteEdges((cur) => (cur.above === above && cur.below === below ? cur : { above, below }))
+    }
+    measure()
+    el.addEventListener('scroll', measure, { passive: true })
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
+    ro?.observe(el)
+    return () => {
+      el.removeEventListener('scroll', measure)
+      ro?.disconnect()
+    }
+  }, [notes.length])
   const [selectedProject, setSelectedProject] = useState(project || '')
   // The directory a brand-new thread will run in, as the composer's footer
   // shows it. It starts as the scope's own work dir and only becomes a real
@@ -682,10 +746,13 @@ export function SessionsView({
     }
   }, [activeProject, session, activeId])
 
-  // The footer's directory readout. A new chat runs in the scope's directory
-  // until the user says otherwise, so the pick has to start there rather than
-  // empty — the readout is a statement first and a control second. Re-seeding
-  // on every new chat is also what drops the previous thread's pick.
+  // The footer's directory readout, and the only two things that can seed it:
+  // the workspace a new thread was handed in from (`ws`, the history's "+"),
+  // or the project this pane was opened *in*. The server's active project used
+  // to seed it too, which is why 新建对话 opened with the last project you had
+  // visited already filled in — a choice you never made, dressed as one you
+  // had. It starts empty now; picking a directory is the reader's call, and a
+  // group's "+" is the shortcut that makes it for them.
   useEffect(() => {
     if (activeId) return
     let live = true
@@ -693,16 +760,19 @@ export function SessionsView({
       .projects()
       .then((pl) => {
         if (!live) return
-        const name = project || selectedProject || pl.active || ''
+        const name = ws || project || ''
         const hit = (pl.detail ?? []).find((d) => d.name === name)
         setPickedDir(hit?.work_dir ?? '')
-        setDirTouched(false)
+        // A directory handed in by the rail is a decision already made, so the
+        // send binds the thread to it. A scope's own directory is only where
+        // the pane happens to sit — it stays the default, not a pick.
+        setDirTouched(!!ws && !!hit?.work_dir)
       })
       .catch(() => {})
     return () => {
       live = false
     }
-  }, [activeId, project, selectedProject])
+  }, [activeId, project, ws])
 
   // A thread opened from the rail answers for its own project: once the pane
   // shows a thread of another project the pick's override has done its job
@@ -724,7 +794,7 @@ export function SessionsView({
   // Orbit's single-node branch keys on REACHABLE devices: an offline row in
   // the directory is not a routing candidate, so it must not suppress the
   // "add a second device" CTA.
-  const onlineNodeCount = nodes.filter((n) => n.status === 'online').length
+  const onlineNodeCount = nodes.filter((n) => isNodeConnected(n.status)).length
 
   // The approval policy this thread's next tier-2 gate will apply — resolved
   // mode plus any standing remembered answer — so the composer can say what a
@@ -774,6 +844,9 @@ export function SessionsView({
       setMsgs([])
       setInput('')
       setPending([])
+      // A brand-new thread starts with no roster: the pick in the footer is
+      // for the conversation about to be created, not the last one.
+      setTeam([])
       editorClear(composer.current)
       // Timings are filed by transcript index, so they belong to the thread
       // that produced them and must not follow the pane to another one.
@@ -792,6 +865,7 @@ export function SessionsView({
       .session(activeId)
       .then((s) => {
         setSession(s)
+        setTeam(s.team ?? [])
         setTurnMs({})
         setLiveFrom(0)
         setMsgs((s.turns ?? []).map((turn, i) => ({ ...turn, k: `srv-${i}` })))
@@ -1049,6 +1123,17 @@ export function SessionsView({
     composer.current?.focus()
   }
 
+  /** Change the thread's roster. A new thread has nothing to store yet — the
+   *  pick rides createSession on the first send. An existing one is patched
+   *  immediately so the roster survives a reload and reaches a second device;
+   *  the ask also carries it every turn, so the patch failing (offline, a
+   *  restarting daemon) costs the memory, never the current turn. */
+  function pickTeam(names: string[]) {
+    setTeam(names)
+    if (!activeId) return
+    api.patchSession(activeId, { team: names }).catch((err: unknown) => toastError(err))
+  }
+
   /** Put a starter prompt in the composer, ready to edit or send. The chip is
    *  a suggestion, not a send button: a replaceable draft is cheaper to
    *  correct than a turn that already left. */
@@ -1266,7 +1351,7 @@ export function SessionsView({
       // chat with attachments needs its thread up front — the same create the
       // send below would have made anyway, one step earlier.
       if (tray.length > 0 && !id) {
-        const s = await api.createSession((raw || tray[0]?.name || '').slice(0, 48), threadProject)
+        const s = await api.createSession((raw || tray[0]?.name || '').slice(0, 48), threadProject, team)
         id = s.id
         setSession(s)
         setSessions((ls) => [s, ...ls])
@@ -1307,7 +1392,7 @@ export function SessionsView({
       ]
       // No thread yet: create one titled after the first prompt.
       if (!id) {
-        const s = await api.createSession(prompt.slice(0, 48), threadProject)
+        const s = await api.createSession(prompt.slice(0, 48), threadProject, team)
         id = s.id
         setSession(s)
         setSessions((ls) => [s, ...ls])
@@ -1422,6 +1507,10 @@ export function SessionsView({
         },
         ctrl.signal,
         nodePref || undefined,
+        // The roster as the composer shows it, every turn: the pick can be
+        // edited mid-thread, and the ask carries the answer rather than
+        // trusting whatever the session stored before the edit landed.
+        team,
       )
       patch((m) => ({ ...m, streaming: false, status: undefined }))
       finishTurn()
@@ -1842,6 +1931,12 @@ export function SessionsView({
   // that exists already knows where it runs, and the legend has been read.
   const newChatPage = !activeId && msgs.length === 0 && !loading
 
+  // The panda closes a round once it is over: it dispatched, the employees
+  // reported, and nothing has been said since. Derived from the turns already
+  // on screen (see `trailingRunSummary`) — nothing new is written to the
+  // transcript, so the model's own history is untouched.
+  const runSummary = busy ? null : trailingRunSummary(msgs)
+
   return (
     <section class="chat">
 
@@ -1959,6 +2054,7 @@ export function SessionsView({
               onOpenChange={(open) => setPanel(open ? 'orch' : '')}
               onlineNodeCount={onlineNodeCount}
               selfNodeId={selfNodeId}
+              focusTask={focusTask}
             />
           </div>
         </header>
@@ -2043,7 +2139,7 @@ export function SessionsView({
             />
           )}
           {msgs.map((m, i) => (
-            <ChatBubble
+            <ChatTurn
               key={m.k}
               msg={m}
               /* The local measurement wins while it is there (it is the only
@@ -2052,9 +2148,10 @@ export function SessionsView({
                  a reload. */
               elapsedMs={turnMs[i] ?? m.duration_ms}
               liveFrom={liveFrom}
-              onOpenTask={onOpenTask}
+              onOpenTask={openTaskInPlace}
             />
           ))}
+          {runSummary && <RunSummaryRow run={runSummary} onOpenTask={openTaskInPlace} />}
         </div>
 
         {/* The prompt rail. A long thread scrolls past dozens of replies and
@@ -2140,101 +2237,117 @@ export function SessionsView({
         {/* Notes typed into the running turn, before the box that types into it.
             They live here rather than in the transcript because they have not
             been delivered yet: the agent has not read them, so the user can
-            still send one ahead of the round, edit it, or drop it. */}
+            still send one ahead of the round, edit it, or drop it.
+            The tray is the reading column's width and the rows are numbered:
+            delivery order is oldest-first, and a stack of identical cards never
+            said which note a round would read next. */}
         {notes.length > 0 && (
           <div class="note-strip" data-testid="note-strip">
-            {notes.map((n) => (
-              <div class="note-row" key={n.key} data-mode={n.mode}>
-                <span class={`note-mode ${n.mode === 'inject' ? 'inject' : ''}`}>
-                  {n.mode === 'inject' ? t('sessions.noteModeInject') : t('sessions.noteModeQueue')}
-                </span>
-                {editingNote === n.key ? (
-                  // Editing in place: the row stays where it is in the queue,
-                  // so a note already queued ahead of an inject keeps both its
-                  // position and its mode.
-                  <input
-                    class="note-edit"
-                    value={noteDraft}
-                    autoFocus
-                    aria-label={t('sessions.noteEdit')}
-                    onInput={(e) => setNoteDraft(e.currentTarget.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault()
-                        void saveEditNote(n)
-                      } else if (e.key === 'Escape') {
-                        e.preventDefault()
-                        cancelEditNote()
-                      }
-                    }}
-                  />
-                ) : (
-                  <span class="note-text" title={n.text} onDblClick={() => beginEditNote(n)}>
-                    {n.text}
-                  </span>
-                )}
-                {n.attachments && n.attachments.length > 0 && (
-                  <span class="note-files" title={n.attachments.join('\n')}>
-                    <Icon name="paperclip" size={11} />
-                    {n.attachments.length}
-                  </span>
-                )}
-                <span class="note-actions">
-                  {editingNote === n.key ? (
-                    <>
-                      <button
-                        type="button"
-                        class="note-act"
-                        title={t('sessions.noteSave')}
-                        aria-label={t('sessions.noteSave')}
-                        onClick={() => void saveEditNote(n)}
-                      >
-                        <Icon name="check" size={13} />
-                      </button>
-                      <button
-                        type="button"
-                        class="note-act"
-                        title={t('sessions.noteCancel')}
-                        aria-label={t('sessions.noteCancel')}
-                        onClick={cancelEditNote}
-                      >
-                        <Icon name="x" size={13} />
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      <button
-                        type="button"
-                        class="note-act"
-                        title={t('sessions.notePromote')}
-                        aria-label={t('sessions.notePromote')}
-                        onClick={() => void promoteNote(n)}
-                      >
-                        <Icon name="send" size={13} />
-                      </button>
-                      <button
-                        type="button"
-                        class="note-act"
-                        title={t('sessions.noteEdit')}
+            <div class="note-tray">
+              <div
+                class="note-list"
+                ref={noteList}
+                role="list"
+                data-above={noteEdges.above ? 'true' : 'false'}
+                data-below={noteEdges.below ? 'true' : 'false'}
+              >
+                {notes.map((n, i) => (
+                  <div class="note-row" key={n.key} role="listitem" data-mode={n.mode}>
+                    <span class="note-index" aria-hidden="true">
+                      {i + 1}
+                    </span>
+                    <span class={`note-mode ${n.mode === 'inject' ? 'inject' : ''}`}>
+                      {n.mode === 'inject' ? t('sessions.noteModeInject') : t('sessions.noteModeQueue')}
+                    </span>
+                    {editingNote === n.key ? (
+                      // Editing in place: the row stays where it is in the queue,
+                      // so a note already queued ahead of an inject keeps both its
+                      // position and its mode.
+                      <input
+                        class="note-edit"
+                        value={noteDraft}
+                        autoFocus
                         aria-label={t('sessions.noteEdit')}
-                        onClick={() => beginEditNote(n)}
-                      >
-                        <Icon name="pencil" size={13} />
-                      </button>
-                      <button
-                        type="button"
-                        class="note-act danger"
-                        title={t('sessions.noteDrop')}
-                        aria-label={t('sessions.noteDrop')}
-                        onClick={() => void dropNote(n)}
-                      >
-                        <Icon name="trash" size={13} />
-                      </button>
-                    </>
-                  )}
-                </span>
+                        onInput={(e) => setNoteDraft(e.currentTarget.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault()
+                            void saveEditNote(n)
+                          } else if (e.key === 'Escape') {
+                            e.preventDefault()
+                            cancelEditNote()
+                          }
+                        }}
+                      />
+                    ) : (
+                      <span class="note-text" title={n.text} onDblClick={() => beginEditNote(n)}>
+                        {n.text}
+                      </span>
+                    )}
+                    {n.attachments && n.attachments.length > 0 && (
+                      <span class="note-files" title={n.attachments.join('\n')}>
+                        <Icon name="paperclip" size={11} />
+                        {n.attachments.length}
+                      </span>
+                    )}
+                    <span class="note-actions">
+                      {editingNote === n.key ? (
+                        <>
+                          <button
+                            type="button"
+                            class="note-act"
+                            title={t('sessions.noteSave')}
+                            aria-label={t('sessions.noteSave')}
+                            onClick={() => void saveEditNote(n)}
+                          >
+                            <Icon name="check" size={13} />
+                          </button>
+                          <button
+                            type="button"
+                            class="note-act"
+                            title={t('sessions.noteCancel')}
+                            aria-label={t('sessions.noteCancel')}
+                            onClick={cancelEditNote}
+                          >
+                            <Icon name="x" size={13} />
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            class="note-act"
+                            title={t('sessions.notePromote')}
+                            aria-label={t('sessions.notePromote')}
+                            onClick={() => void promoteNote(n)}
+                          >
+                            <Icon name="send" size={13} />
+                          </button>
+                          <button
+                            type="button"
+                            class="note-act"
+                            title={t('sessions.noteEdit')}
+                            aria-label={t('sessions.noteEdit')}
+                            onClick={() => beginEditNote(n)}
+                          >
+                            <Icon name="pencil" size={13} />
+                          </button>
+                          <button
+                            type="button"
+                            class="note-act danger"
+                            title={t('sessions.noteDrop')}
+                            aria-label={t('sessions.noteDrop')}
+                            onClick={() => void dropNote(n)}
+                          >
+                            <Icon name="trash" size={13} />
+                          </button>
+                        </>
+                      )}
+                    </span>
+                  </div>
+                ))}
               </div>
-            ))}
+            </div>
           </div>
         )}
 
@@ -2516,15 +2629,20 @@ export function SessionsView({
                 a thread that has not started. Anchored to the box's right edge
                 it stays with the control it belongs to — the box moves when a
                 header card opens, and the pet moves with it. */}
-            <ComposerPanda working={busy} />
+            <ComposerPet
+              working={busy}
+              team={team}
+              onTeam={pickTeam}
+              onManage={() => navigateView('settings:agents')}
+            />
           </div>
           {/* Below the box, on one line: where the thread will run, then the
-              keyboard legend. The legend used to hold the left edge alone;
-              the directory pick takes that spot and the legend steps right,
-              so the two read as one line of small print instead of a control
-              bolted on beside a sentence. Both are new-chat furniture — a
-              thread that exists already knows its directory (the header's
-              mark) and nobody re-reads the legend mid-conversation. */}
+              keyboard legend. The roster used to sit here too; it now hangs
+              off the pet (composer-pet.tsx), so this row is new-chat furniture
+              only — a thread that exists already knows where it runs, and its
+              team is worn beside the panda rather than repeated in small
+              print. A thread with a directory but no legend keeps the row;
+              a thread with neither has no footer at all. */}
           {newChatPage ? (
             <div class="composer-foot">
               <DirButton
@@ -2926,6 +3044,29 @@ function parentPath(p: string): string {
   return trimmed.slice(0, i)
 }
 
+/** A transcript's 查看任务 link opens the orchestration card where the reader
+ *  already is. The href stays real so ⌘/ctrl/shift-click and "open in new tab"
+ *  still reach the full task page — a plain click is the only one that stays
+ *  in the conversation. */
+function inPlaceTaskClick(e: MouseEvent, id: string, open: (id: string) => void) {
+  if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
+  e.preventDefault()
+  open(id)
+}
+
+/** One row of the transcript, drawn the way a group chat draws it.
+ *
+ *  A thread has more than one voice in it: you ask, the panda works out how to
+ *  split the job and who gets it, an employee does it and reports back, and the
+ *  panda closes the round. Drawing all of that as one anonymous column — a
+ *  duration caption, a task card, and a `[done] @agent` line with nobody
+ *  attached — is what made a finished task read like a log file. So a row now
+ *  carries what a chat message carries: a face, a name, what that speaker is
+ *  doing in the conversation, and a bubble of their own.
+ *
+ *  The speaker is derived, never stored (see components/chat-speaker.ts): a
+ *  dispatch turn is the panda orchestrating, a report head that names an
+ *  employee is that employee reporting, and everything else is the panda. */
 function ChatBubble(props: {
   msg: ChatMsg
   onOpenTask(id: string): void
@@ -2938,161 +3079,124 @@ function ChatBubble(props: {
    *  bubble is the streaming one, the timer runs here instead of printing a
    *  fixed number. */
   liveFrom?: number
+  /** The task a dispatch turn handed out, read from the task row itself — the
+   *  only place that names the employee and the stage. */
+  task?: Task | null
+  /** The plan a plan turn started. */
+  plan?: PlanDetail | null
 }) {
-  const { msg, onOpenTask, elapsedMs, liveFrom = 0 } = props
+  const { msg, onOpenTask, elapsedMs, liveFrom = 0, task = null, plan = null } = props
   const [chainOpen, setChainOpen] = useState(false)
 
-  if (msg.role === 'user') {
-    // What you typed is shown back verbatim: rendering the user's own
-    // Markdown would hide the exact text the model received. It is plain text
-    // on the page's own background, right-aligned, with no avatar — which side
-    // of the column you are on is the attribution, so a 你 chip beside it was
-    // saying the same thing twice.
-    return (
-      <div class="msg user">
-        <div class="msg-body bubble role-user">
-          <div class="bubble-slot-row slot-chat">
-            <p class="msg-text u-m-0 u-w-100">{msg.text}</p>
-          </div>
-          {msg.files && msg.files.length > 0 && (
-            <div class="bubble-slot-row slot-meta msg-files">
-              {msg.files.map((f) => {
-                // Images get the picture glyph at 12px: the filled plate needs
-                // one more pixel than the hairline paperclip to read at this
-                // size, and the pair then sits optically level in the chip.
-                const img = isImageFile({ name: f })
-                return (
-                  <span key={f} class="attach-chip mono" title={f}>
-                    <Icon name={img ? 'image' : 'paperclip'} size={img ? 12 : 11} />{' '}
-                    {f.split('/').pop()}
-                  </span>
-                )
-              })}
-            </div>
-          )}
-        </div>
-        {/* Copy sits under the bubble, on the side it hugs — the same place a
-            reply's copy takes under the prose, so the affordance is in one
-            spot per side of the column. The wall clock rides beside it, and
-            both arrive on the message's own hover: the transcript is what the
-            user reads, so a stamp per question would be a column of numbers
-            until the moment it is actually wanted. */}
-        <div class="msg-actions">
-          {msg.ts ? (
-            <time
-              class="msg-time"
-              dateTime={new Date(msg.ts * 1000).toISOString()}
-              title={clockStamp(msg.ts, locale())}
-            >
-              {clockTime(msg.ts, locale())}
-            </time>
-          ) : null}
-          <MessageCopyButton text={msg.text} />
-        </div>
-      </div>
-    )
-  }
-
+  const report = msg.kind === 'error' ? null : splitReportHead(msg.text ?? '')
+  const speaker = speakerOf(msg, report)
   const isTaskKind = msg.kind === 'task' && Boolean(msg.ref)
+  const isPlanKind = msg.kind === 'plan' && Boolean(msg.ref)
+  // The dispatch template appends the task id so the model's history keeps it
+  // (sessions.go). In a chat row the card is the link and a uuid is not a
+  // thing a person reads, so it comes back off.
+  const text = isTaskKind || isPlanKind ? stripRefId(msg.text ?? '', msg.ref) : msg.text ?? ''
   const hasTaskStatus = Boolean(msg.streaming && msg.status)
   const hasThinking = Boolean(msg.streaming && !msg.text && !msg.status)
   // Which model wrote this reply. The live stream carries it on the result;
   // the stored turn carries it after a reload (see `Turn.Model`).
   const replyModel = msg.result?.entry_model || msg.model || ''
-  // Whether the meta lane under the reply has anything to say: a task card, a
-  // gate, a remembered denial, an engine advisory. A plain answer has none of
-  // those, and the empty row still cost the column's 8px gap at the foot of
-  // every reply.
   const hasMeta =
-    isTaskKind ||
     Boolean(msg.result?.needs_approval) ||
     Boolean(msg.result?.denied) ||
     Boolean(msg.result?.consent_scope) ||
     Boolean(msg.result?.warning)
 
-  return (
-    <div class="msg panda">
-      <div class="msg-body bubble role-panda">
-        {/* — slot-elapsed: how long the turn took, above the reply it measured
-              rather than at its foot. It is a caption for what follows — the
-              first thing you read after your own question — and a hairline
-              closes it off from the answer. While the turn is still running
-              the same row carries a live count, so the number never moves
-              house when the reply lands; the live states stay at the foot
-              (slot-status), since those annotate what is happening rather than
-              how long it took. */}
-        {msg.streaming && liveFrom > 0 ? (
-          <LiveElapsed from={liveFrom} />
-        ) : elapsedMs !== undefined ? (
-          <div class="bubble-slot-row slot-elapsed">
-            <span class="elapsed-line">
-              {t('sessions.elapsed', { d: fmtDuration(elapsedMs) })}
-              <span class="elapsed-caret" aria-hidden="true">
-                ›
-              </span>
-            </span>
-          </div>
-        ) : null}
+  const name =
+    speaker.who === 'agent'
+      ? prettyAgent(speaker.agent)
+      : speaker.who === 'user'
+        ? t('sessions.you')
+        : t('sessions.speakerPanda')
+  // An employee's chip is the state of their job — that is what the row is
+  // about. Everyone else's chip names the part they are playing.
+  const chip =
+    report && speaker.role === 'report'
+      ? t(`state.${report.state}`)
+      : t(`sessions.role.${speaker.role}`)
+  const chipState = report && speaker.role === 'report' ? report.state : speaker.role
 
-        {/* — slot-chat: primary copy (markdown / literal error / empty). */}
-        <div class="bubble-slot-row slot-chat u-w-100">
-          {msg.text &&
-            (msg.kind === 'error' ? (
-              <p class="msg-text">{msg.text}</p>
-            ) : (
-              <Markdown text={msg.text} class="msg-text" />
-            ))}
+  return (
+    <div class={`msg ${speaker.who} is-${speaker.role}`}>
+      {speaker.who !== 'user' && <ChatAvatar speaker={speaker} />}
+      <div class="msg-body">
+        {/* — the head: who is talking, what they are doing here, and when.
+              The duration used to sit above the reply as a caption with a
+              hairline under it; in a chat it belongs beside the clock.
+              Your own row keeps only the clock: the face on the right and the
+              side of the column already say who it is, and a name beside them
+              would be saying it a third time. */}
+        <div class="msg-head">
+          {speaker.who !== 'user' && (
+            <>
+              <span class="msg-name">{name}</span>
+              <span class={`msg-role is-${chipState}`}>{chip}</span>
+            </>
+          )}
+          <span class="msg-stamp">
+            {msg.ts ? (
+              <time
+                class="msg-time"
+                dateTime={new Date(msg.ts * 1000).toISOString()}
+                title={clockStamp(msg.ts, locale())}
+              >
+                {clockTime(msg.ts, locale())}
+              </time>
+            ) : null}
+            {msg.streaming && liveFrom > 0 ? (
+              <LiveElapsed from={liveFrom} />
+            ) : elapsedMs !== undefined ? (
+              <span class="msg-dur">{t('sessions.elapsed', { d: fmtDuration(elapsedMs) })}</span>
+            ) : null}
+          </span>
         </div>
 
-        {/* — slot-hints: troubleshooting fold under a classified model error.
-              err_kind is also persisted on the turn, so a reloaded thread
-              shows the same fold the live stream drew. */}
-        {msg.kind === 'error' && msg.err_kind && (
-          <div class="bubble-slot-row slot-hints u-w-100">
-            <ErrHints kind={msg.err_kind} detail={msg.err_detail} />
-          </div>
-        )}
+        <div
+          class={`msg-bubble${speaker.who === 'user' ? ' is-you' : ''}${
+            isTaskKind || isPlanKind ? ' is-wide' : ''
+          }`}
+        >
+          {/* — what the panda is thinking on its way to a plan. It streamed
+                into state and never reached the page before this; a reader who
+                wants to know why the job was cut up the way it was gets to
+                look. Open while it is still arriving, folded once the reply
+                lands, because by then the answer is what matters. */}
+          {msg.thought && (
+            <details class="msg-think" open={Boolean(msg.streaming)}>
+              <summary>{t('sessions.thought')}</summary>
+              <p class="msg-think-text">{msg.thought}</p>
+            </details>
+          )}
 
-        {/* — slot-actions: copy, under the reply and on its left edge where
-              the prose starts. The reply is copied as the Markdown it was
-              written in, the way `/copy` does in the TUI — the rendered text
-              would lose its structure the moment it is pasted anywhere. It
-              stays away while the turn is still streaming: half an answer is
-              not the message.
+          {msg.role === 'user' ? (
+            <p class="msg-text">{msg.text}</p>
+          ) : msg.kind === 'error' ? (
+            <p class="msg-text">{msg.text}</p>
+          ) : report ? (
+            // The employee's report: the job as its subject, their own closing
+            // paragraph under it. The state is on the head's chip.
+            <>
+              {report.title && <p class="msg-subject">{report.title}</p>}
+              {report.body && <Markdown text={report.body} class="msg-text" />}
+            </>
+          ) : (
+            <>
+              {text && <Markdown text={text} class="msg-text" />}
+              {/* The orchestration: who got the job, which stage, how it stands.
+                  For a plan, the stages the panda cut it into. */}
+              {isTaskKind && task && <TaskCast task={task} />}
+              {isPlanKind && plan && <PlanCast plan={plan} />}
+            </>
+          )}
 
-              The model that wrote the reply rides beside the icon, on the same
-              row: both are footnotes to the answer, and the model belongs next
-              to the thing it produced rather than in a lane of its own under
-              the task chrome. The name fades in with the icon on the same
-              hover — one footnote, one beat — and both keep their boxes while
-              hidden (opacity, not display), so revealing them never pushes the
-              prose or the name sideways. */}
-        {msg.text && !msg.streaming && (
-          <div class="bubble-slot-row slot-actions">
-            <MessageCopyButton text={msg.text} markdown={msg.kind !== 'error'} />
-            {/* A task's own card already carries agent (model) @ node in its
-                exec-by line; this is the plain-answer case. The live stream
-                has it on the result, a reloaded thread on the turn itself. */}
-            {!isTaskKind && replyModel && <span class="slot-model">{replyModel}</span>}
-          </div>
-        )}
-
-        {/* Fix-it affordance on a coded error: its own row, so the button
-              sizes to its label instead of stretching the chat lane. */}
-        {msg.kind === 'error' && msg.code === 'model_config' && (
-          <div class="bubble-slot-row slot-meta">
-            <a class="btn small" href="#/settings?tab=models">
-              {t('sessions.fixModel')}
-            </a>
-          </div>
-        )}
-
-        {/* — slot-meta: task card (link + chain) stays below the copy, inside
-              the meta lane so its chrome reads like context, not a separate
-              card. The row only exists when it has something to say: an empty
-              one still costs the column's gap under every plain answer. */}
-        {hasMeta && (
-        <div class="bubble-slot-row slot-meta">
+          {/* — the task card: consent, the chain, the jump into the task. The
+                state badge and the executor line that used to head it are the
+                cast line's job now, one row up. */}
           {isTaskKind && msg.ref && (
             <div class="task-card u-flex-1 u-min-w-0">
               {/* A task that needs consent must be decidable where the user is
@@ -3101,24 +3205,6 @@ function ChatBubble(props: {
                   was never seen. Nothing else may answer it on the user's
                   behalf: this is the web twin of the TUI's approval card. */}
               <TaskApproval taskId={msg.ref} />
-              <span class="badge blue">
-                {t('state.running') === msg.result?.task_state
-                  ? t('sessions.taskCreated')
-                  : msg.result?.task_state || t('sessions.taskCreated')}
-              </span>
-              {/* Execution attribution — which harness ran it, on which node,
-                  with which model — stays subdued next to the state badge so
-                  who did the work is always legible without competing with
-                  the result itself. */}
-              {(msg.result?.agent || msg.result?.executor) && (
-                <span class="dim exec-by">
-                  {msg.result.agent}
-                  {msg.result.model ? ` (${msg.result.model})` : ''}
-                  {msg.result.injected ? ` · ${t('detail.result.injected')}` : ''}
-                  {msg.result.agent && msg.result.executor ? ' @ ' : ''}
-                  {msg.result.executor}
-                </span>
-              )}
               {msg.result?.report && <Markdown text={msg.result.report} class="task-report" />}
               {msg.result?.stdout && <TaskOutput text={msg.result.stdout} />}
               <button class="btn small chain-toggle" onClick={() => setChainOpen((v) => !v)}>
@@ -3126,56 +3212,169 @@ function ChatBubble(props: {
               </button>
               {chainOpen && <TaskChain taskId={msg.ref} />}
               <TaskQuickSend taskId={msg.ref} />
-              <a href={`#/task/${encodeURIComponent(msg.ref)}`} onClick={() => onOpenTask(msg.ref!)}>
+              <a
+                href={`#/task/${encodeURIComponent(msg.ref)}`}
+                onClick={(e) => inPlaceTaskClick(e, msg.ref!, onOpenTask)}
+              >
                 {t('sessions.viewTask')} →
               </a>
             </div>
           )}
+
           {/* The live ask path carries its approval state on the result, not
               through a persisted turn ref — a parked tier-2 task must still
               render its decision card in the same breath it parked in, and a
               remembered answer must say so where the user can see it. */}
-          {msg.result?.needs_approval && msg.result.approval && !msg.ref && (
-            <TaskApproval taskId={msg.result.approval.task_id} preselect={msg.result.approval.scope} />
+          {hasMeta && (
+            <div class="bubble-slot-row slot-meta">
+              {msg.result?.needs_approval && msg.result.approval && !msg.ref && (
+                <TaskApproval
+                  taskId={msg.result.approval.task_id}
+                  preselect={msg.result.approval.scope}
+                />
+              )}
+              {msg.result?.denied && (
+                <span class="badge red">{t('approval.deniedRemembered')}</span>
+              )}
+              {msg.result?.consent_scope && (
+                <span class="dim approval-consent">
+                  {t(`approval.consent.${msg.result.consent_scope}`)}
+                </span>
+              )}
+              {/* Engine advisory — e.g. the dispatch went to a queue nothing
+                  drains. The string arrives server-localized. */}
+              {msg.result?.warning && (
+                <span class="badge yellow">{msg.result.warning}</span>
+              )}
+            </div>
           )}
-          {msg.result?.denied && (
-            <span class="badge red">{t('approval.deniedRemembered')}</span>
+
+          {/* — slot-hints: troubleshooting fold under a classified model error.
+              err_kind is also persisted on the turn, so a reloaded thread
+              shows the same fold the live stream drew. */}
+          {msg.kind === 'error' && msg.err_kind && (
+            <ErrHints kind={msg.err_kind} detail={msg.err_detail} />
           )}
-          {msg.result?.consent_scope && (
-            <span class="dim approval-consent">
-              {t(`approval.consent.${msg.result.consent_scope}`)}
-            </span>
+          {msg.kind === 'error' && msg.code === 'model_config' && (
+            <a class="btn small" href="#/settings?tab=models">
+              {t('sessions.fixModel')}
+            </a>
           )}
-          {/* Engine advisory — e.g. the dispatch went to a queue nothing
-              drains. The string arrives server-localized. */}
-          {msg.result?.warning && (
-            <span class="badge yellow">{msg.result.warning}</span>
+
+          {/* — the live state, at the foot of the bubble: thinking, or what the
+                turn is doing right now. */}
+          {(hasThinking || hasTaskStatus) && (
+            <div class="bubble-slot-row slot-status">
+              {hasThinking && (
+                <span class="status-line u-color-tert">
+                  <span class="spinner" aria-hidden="true" />
+                  {t('sessions.thinking')}
+                </span>
+              )}
+              {hasTaskStatus && (
+                <span class="status-line u-color-tert">
+                  <span class="spinner" aria-hidden="true" />
+                  {msg.status}
+                </span>
+              )}
+            </div>
           )}
         </div>
-        )}
 
-        {/* — slot-status: the live thinking / task status, at the foot of the
-              bubble and left-aligned. While a reply is still forming it reads
-              as a footer on the message that is working. The turn's duration
-              used to report from this same corner; it moved to slot-elapsed,
-              at the head of the reply, because a finished turn reads top-down
-              and the number belongs to the answer, not after it. */}
-        {(hasThinking || hasTaskStatus) && (
-          <div class="bubble-slot-row slot-status">
-            {hasThinking && (
-              <span class="status-line u-color-tert">
-                <span class="spinner" aria-hidden="true" />
-                {t('sessions.thinking')}
-              </span>
-            )}
-            {hasTaskStatus && (
-              <span class="status-line u-color-tert">
-                <span class="spinner" aria-hidden="true" />
-                {msg.status}
-              </span>
+        {/* The reply is copied as the Markdown it was written in, the way
+            `/copy` does in the TUI — the rendered text would lose its
+            structure the moment it is pasted anywhere. It stays away while
+            the turn is still streaming: half an answer is not the message. */}
+        {msg.text && !msg.streaming && (
+          <div class="msg-foot">
+            <MessageCopyButton text={msg.text} markdown={msg.kind !== 'error'} />
+            {/* A task's own card already carries the employee in its cast
+                line; this is the plain-answer case. */}
+            {!isTaskKind && speaker.who === 'panda' && replyModel && (
+              <span class="slot-model">{replyModel}</span>
             )}
           </div>
         )}
+      </div>
+      {speaker.who === 'user' && <ChatAvatar speaker={speaker} />}
+    </div>
+  )
+}
+
+/** A chat row, plus the employee's own progress row while the task it
+ *  dispatched is still running. The task is read once, here, and handed to
+ *  both — the cast line inside the panda's bubble and the progress row under
+ *  it are the same row of the database. */
+function ChatTurn(props: {
+  msg: ChatMsg
+  onOpenTask(id: string): void
+  elapsedMs?: number
+  liveFrom?: number
+}) {
+  const { msg } = props
+  const task = useTaskBrief(msg.kind === 'task' ? msg.ref : undefined)
+  const plan = usePlanBrief(msg.kind === 'plan' ? msg.ref : undefined)
+  return (
+    <>
+      <ChatBubble {...props} task={task} plan={plan} />
+      {task && <TaskProgress task={task} />}
+    </>
+  )
+}
+
+/** The panda's closing line for a round that just finished.
+ *
+ *  The employees have each said what they did; what a round still owes the
+ *  reader is the roll-up — it is over, this many people worked on it, here is
+ *  where the work lives. It is derived from the turns already in the thread
+ *  (see `trailingRunSummary`), not a stored message: nothing new is written to
+ *  the transcript, so the model's own history is untouched. */
+function RunSummaryRow({ run, onOpenTask }: { run: RunSummary; onOpenTask(id: string): void }) {
+  const line =
+    run.state === 'done'
+      ? t('sessions.runSummary.done')
+      : t('sessions.runSummary.ended', { state: t(`state.${run.state}`) })
+  const ref = run.ref
+  const isTaskRef = run.refKind === 'task'
+  const isPlanRef = run.refKind === 'plan'
+  return (
+    <div class="msg panda is-summary">
+      <ChatAvatar speaker={{ who: 'panda', agent: '', role: 'summary' }} />
+      <div class="msg-body">
+        <div class="msg-head">
+          <span class="msg-name">{t('sessions.speakerPanda')}</span>
+          <span class="msg-role is-summary">{t('sessions.role.summary')}</span>
+        </div>
+        <div class="msg-bubble is-summary">
+          <p class="msg-summary-line">
+            <span class={`msg-cast-state is-${run.state}`}>
+              <span class="msg-report-dot" aria-hidden="true" />
+              {line}
+            </span>
+            {run.agents.length > 0 && (
+              <span class="msg-summary-people">
+                {t('sessions.runSummary.people', { n: String(run.agents.length) })}
+              </span>
+            )}
+          </p>
+          {/* A single job is already named by the row above; the recap only
+              earns its line when the round covered more than one. */}
+          {run.titles.length > 1 && <p class="msg-summary-what">{run.titles.join(' · ')}</p>}
+          {ref && isTaskRef && (
+            <a
+              class="msg-summary-link"
+              href={`#/task/${encodeURIComponent(ref)}`}
+              onClick={(e) => inPlaceTaskClick(e, ref, onOpenTask)}
+            >
+              {t('sessions.viewTask')} →
+            </a>
+          )}
+          {ref && isPlanRef && (
+            <a class="msg-summary-link" href="#/control?tab=plans">
+              {t('sessions.castPlan')} →
+            </a>
+          )}
+        </div>
       </div>
     </div>
   )

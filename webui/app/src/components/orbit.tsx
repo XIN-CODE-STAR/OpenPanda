@@ -241,7 +241,7 @@ export default function DecisionOrbit(props: DecisionOrbitProps) {
             {liveLine && (
               <span class="orbit-sum-pill pill-live" role="status">
                 <span class="live-dot beating" aria-hidden="true" />
-                {liveLine}
+                <span class="orbit-live-text">{liveLine}</span>
               </span>
             )}
             {classifyLine && <span class="orbit-sum-pill">{classifyLine}</span>}

@@ -131,6 +131,14 @@ type Session struct {
 	// a user-facing ordering flag only — it does not protect the session
 	// from deletion.
 	Pinned bool `json:"pinned,omitempty"`
+	// Team is the roster of agents (registry/card keys) this thread may hand
+	// work to — the "who works on this" pick the composer makes when a thread
+	// starts. Empty means no restriction: the scheduler routes every task by
+	// capability, exactly as a thread with no pick behaves. It rides the
+	// session rather than the turn because it describes the conversation,
+	// not one message, and a thread reopened on another device must remember
+	// which hands are allowed to touch it.
+	Team []string `json:"team,omitempty"`
 }
 
 // Operation is the latest durable ask operation for a session. It lets a
@@ -237,6 +245,7 @@ func (s *Store) Fork(id string, atTurn int) (*Session, error) {
 		ParentID:  parent.ID,
 		ForkIndex: atTurn,
 		Summary:   parent.Summary,
+		Team:      append([]string(nil), parent.Team...),
 		Turns:     append([]Turn(nil), parent.Turns[:atTurn]...),
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -535,6 +544,23 @@ func (s *Store) SetAgentSession(id, agent, agentSessionID string) error {
 		sess.AgentSessions = make(map[string]string)
 	}
 	sess.AgentSessions[agent] = agentSessionID
+	sess.UpdatedAt = time.Now()
+	return s.save(sess)
+}
+
+// SetTeam records which agents this thread may delegate to. An empty list
+// clears the restriction (the scheduler routes by capability again), which is
+// also what a thread that never picked a team carries.
+func (s *Store) SetTeam(id string, team []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, err := s.load(id)
+	if err != nil {
+		return err
+	}
+	// Copy: the caller keeps its slice (the panel reuses the decoded request
+	// body) and a later mutation must not rewrite a saved thread's roster.
+	sess.Team = append([]string(nil), team...)
 	sess.UpdatedAt = time.Now()
 	return s.save(sess)
 }
