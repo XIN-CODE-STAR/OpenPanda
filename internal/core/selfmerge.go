@@ -322,16 +322,22 @@ func (c *Core) resumeSelfMerge(ctx context.Context, cur Task) (Task, bus.TaskRes
 		return fail(fmt.Errorf("apply build: %w", err))
 	}
 	swapped = true
-	if err := c.selfMgr.Archive(spec.PatchSet, self.StateMerged); err != nil {
-		c.logger.Warn("self: merge applied but archive failed", "set", spec.PatchSet, "err", err)
-	}
 	res := bus.TaskResultPayload{
 		OK: true, TaskID: cur.TaskID, State: StateDone,
 		Stdout: fmt.Sprintf("merged %s → %s; release gate green (%d legs), binary swapped",
 			spec.PatchSet, targetVersion, len(gate.Legs)),
 	}
+	// Complete the review before moving the set: if the row cannot be
+	// settled, the binary is already swapped and the set must stay visibly
+	// in flight (pending), not silently archived as if the merge succeeded.
 	if err := c.store.Complete(ctx, cur.TaskID, c.nodeID, res); err != nil {
 		return fail(fmt.Errorf("mark merged: %w", err))
+	}
+	if err := c.selfMgr.Archive(spec.PatchSet, self.StateMerged); err != nil {
+		c.logger.Warn("self: merge applied but archive failed", "set", spec.PatchSet, "err", err)
+		if merr := c.selfMgr.MarkState(spec.PatchSet, self.StateMerged); merr != nil {
+			c.logger.Warn("self: merge applied but state marker failed", "set", spec.PatchSet, "err", merr)
+		}
 	}
 	c.audit(ctx, cur.TaskID, "self:merge", spec.PatchSet, "applied",
 		fmt.Sprintf("ver=%s (manifest %s) critical=%v", targetVersion, spec.Version, spec.Critical))
