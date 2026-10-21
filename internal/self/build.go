@@ -103,15 +103,18 @@ func (m *Manager) NextVersion(base string) string {
 }
 
 // NoteVersionUsed remembers the counter a built binary was stamped with, so
-// the next stamp is strictly newer than the last one handed out.
-func (m *Manager) NoteVersionUsed(version string) {
+// the next stamp is strictly newer than the last one handed out. The caller
+// must treat a failure as fatal to the merge: a stamp that was not persisted
+// can be handed out again after a purge.
+func (m *Manager) NoteVersionUsed(version string) error {
 	n := selfCounter(version)
 	if n <= 0 {
-		return
+		return nil
 	}
 	if cur := m.loadCounter(); n > cur {
-		m.saveCounter(n)
+		return m.saveCounter(n)
 	}
+	return nil
 }
 
 // selfCounter reads the +self.N suffix off a version stamp.
@@ -144,12 +147,45 @@ func (m *Manager) loadCounter() int {
 	return n
 }
 
-func (m *Manager) saveCounter(n int) {
+// saveCounter persists the high-water mark atomically: write a sibling temp
+// file, fsync it, then rename over the target. A crash mid-write can then
+// leave the temp file behind but never a truncated counter — the counter's
+// whole job is to survive exactly that kind of crash.
+func (m *Manager) saveCounter(n int) error {
 	if n <= 0 {
-		return
+		return nil
 	}
 	if err := os.MkdirAll(m.root, 0o755); err != nil {
-		return
+		return err
 	}
-	_ = os.WriteFile(m.counterPath(), []byte(strconv.Itoa(n)), 0o644)
+	tmp, err := os.CreateTemp(m.root, "version-counter-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op once the rename succeeds
+	if _, err := tmp.WriteString(strconv.Itoa(n)); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, m.counterPath()); err != nil {
+		return err
+	}
+	// The rename itself must reach the disk; a best-effort directory sync is
+	// all the portable API offers.
+	if dir, err := os.Open(m.root); err == nil {
+		_ = dir.Sync()
+		dir.Close()
+	}
+	return nil
 }

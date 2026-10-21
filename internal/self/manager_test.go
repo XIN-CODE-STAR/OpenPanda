@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Xustalis/OpenPanda/internal/version"
 )
 
 // initRepo makes a throwaway git repo with committed content — the "upstream"
@@ -428,7 +430,9 @@ func TestVersionCounterSurvivesPurge(t *testing.T) {
 	if err := m.Archive(set.Manifest.ID, StateMerged); err != nil {
 		t.Fatal(err)
 	}
-	m.NoteVersionUsed("0.0.12-preview+self.2")
+	if err := m.NoteVersionUsed("0.0.12-preview+self.2"); err != nil {
+		t.Fatalf("note version: %v", err)
+	}
 	if err := m.Reset(ctx, true); err != nil {
 		t.Fatalf("reset --purge: %v", err)
 	}
@@ -552,5 +556,76 @@ func TestProducerAdmission(t *testing.T) {
 	}
 	if ProducerAdmitted("", mine, nil) {
 		t.Fatal("without a node key nothing is admitted under self")
+	}
+}
+
+// TestRebaseRecoversConflictedSet pins the recovery path MarkConflicted's
+// contract promises: a set whose apply/gate failed stays in the queue and an
+// operator rebase must be able to lift the marker. Only rejected/merged are
+// terminal.
+func TestRebaseRecoversConflictedSet(t *testing.T) {
+	ctx := context.Background()
+	m, repo := testManager(t)
+	set := mintChange(t, m, repo, "recover.txt", "r\n", "recoverable")
+	if err := m.MarkConflicted(set.Manifest.ID); err != nil {
+		t.Fatalf("mark conflicted: %v", err)
+	}
+	head, err := GitHead(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	if err := m.RebaseOnto(ctx, set.Manifest.ID, head, pub, priv); err != nil {
+		t.Fatalf("rebase of a conflicted set: %v", err)
+	}
+	got, err := m.Get(set.Manifest.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != StatePending {
+		t.Fatalf("state = %v, want pending after the recovery rebase", got.State)
+	}
+}
+
+// TestRebaseRefreshesVersionBase pins that a rebase onto a newer official
+// release re-stamps the version: the built binary must carry the NEW base,
+// not the release line the set was minted on.
+func TestRebaseRefreshesVersionBase(t *testing.T) {
+	ctx := context.Background()
+	m, repo := testManager(t)
+	set := mintChange(t, m, repo, "ver.txt", "v\n", "version base")
+	head, err := GitHead(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := version.Version
+	version.Version = "0.0.13-preview"
+	t.Cleanup(func() { version.Version = old })
+
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	if err := m.RebaseOnto(ctx, set.Manifest.ID, head, pub, priv); err != nil {
+		t.Fatalf("rebase: %v", err)
+	}
+	got, err := m.Get(set.Manifest.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Manifest.Version != "0.0.13-preview" {
+		t.Fatalf("version = %q, want the rebasing binary's base 0.0.13-preview", got.Manifest.Version)
+	}
+}
+
+// TestNoteVersionUsedReportsWriteFailure pins the error contract added with
+// the atomic counter: a high-water mark that cannot be persisted must fail
+// the merge, not disappear into a best-effort write.
+func TestNoteVersionUsedReportsWriteFailure(t *testing.T) {
+	base := t.TempDir()
+	blocker := filepath.Join(base, "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := New(filepath.Join(blocker, "self"), "", slog.New(slog.DiscardHandler))
+	if err := m.NoteVersionUsed("0.0.12-preview+self.4"); err == nil {
+		t.Fatal("an unwritable counter file must report an error")
 	}
 }

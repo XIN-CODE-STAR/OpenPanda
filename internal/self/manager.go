@@ -17,6 +17,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/Xustalis/OpenPanda/internal/version"
 )
 
 // SetState is the patch-set lifecycle, derived from which directory the set
@@ -504,22 +506,29 @@ func (m *Manager) rebaseOntoLocked(ctx context.Context, id, newBase string, pub 
 	if err != nil {
 		return err
 	}
-	// A terminal set stays terminal. Rebasing a rejected set would rewrite
-	// its patches and lift its marker, handing the operator's "no" back to
-	// the queue as a fresh pending set.
-	if set.State != StatePending {
-		return fmt.Errorf("patch set %s is %s — only pending sets can be rebased", id, set.State)
+	// A terminal set stays terminal: a rejected set must not have its patches
+	// rewritten and its marker lifted, handing the operator's "no" back to the
+	// queue as a fresh pending set. Conflicted IS recoverable — MarkConflicted
+	// leaves the set in the queue precisely so the operator can rebase it
+	// after whatever made the earlier apply/gate fail is fixed.
+	if set.State != StatePending && set.State != StateConflicted {
+		return fmt.Errorf("patch set %s is %s — only pending or conflicted sets can be rebased", id, set.State)
 	}
 	if err := m.EnsureWorktree(ctx); err != nil {
 		return err
 	}
 	wt := m.WorktreePath()
 	// Same pinning as Mint: the recorded base must be a commit, not a ref that
-	// will move out from under the archived manifest.
+	// will move out from under the archived manifest. Check the resolved sha
+	// BEFORE the worktree is rewritten, so a repo format the manifest cannot
+	// express (e.g. SHA-256) fails without leaving a half-rewritten set.
 	if out, err := gitOut(ctx, wt, "rev-parse", newBase); err != nil {
 		return fmt.Errorf("resolve base %s: %s", newBase, out)
 	} else {
 		newBase = strings.TrimSpace(out)
+	}
+	if !pinnedBaseRe.MatchString(newBase) {
+		return fmt.Errorf("resolved base %q is not a pinned commit sha", newBase)
 	}
 	if out, err := gitOut(ctx, wt, "reset", "--hard", newBase); err != nil {
 		return fmt.Errorf("worktree reset %s: %s", newBase, out)
@@ -551,6 +560,15 @@ func (m *Manager) rebaseOntoLocked(ctx context.Context, id, newBase string, pub 
 	mf.Base = newBase
 	mf.Files = []string{patch}
 	mf.Digests = digests
+	// The version stamp follows the NEW base. Mint records the release line
+	// it was produced on; after an official update the sweeper rebases the
+	// set onto the new HEAD, and leaving the old stamp in place would build
+	// the new tree with an older version (0.0.12+self.N over 0.0.13).
+	// NextVersion at merge strips the +self.N meta and re-allocates it, so
+	// the counter still comes from the high-water mark.
+	if version.Version != "" {
+		mf.Version = version.Version
+	}
 	// The re-baser signs — so the producer id must become the re-baser's key;
 	// the original producer's signature cannot be forged and must not be
 	// implied. The title preserves who authored the change.
@@ -562,10 +580,19 @@ func (m *Manager) rebaseOntoLocked(ctx context.Context, id, newBase string, pub 
 		return cerr
 	}
 	mf.TouchesCritical = crit
+	if err := mf.Validate(); err != nil {
+		return fmt.Errorf("rebased manifest: %w", err)
+	}
 	mf.Sign(priv)
 	body, _ := json.MarshalIndent(mf, "", "  ")
 	if err := os.WriteFile(filepath.Join(set.Dir, "manifest.json"), body, 0o644); err != nil {
 		return err
+	}
+	// Read the set back through the same path the queue uses: a manifest that
+	// does not load (bad base form, patch digest mismatch) must fail the
+	// rebase, not return success and leave an unreadable directory behind.
+	if _, err := m.Get(id); err != nil {
+		return fmt.Errorf("rebase wrote an unreadable set: %w", err)
 	}
 	return m.ClearConflicted(id)
 }
