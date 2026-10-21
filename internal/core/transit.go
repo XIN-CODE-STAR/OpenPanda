@@ -197,7 +197,11 @@ func (c *Core) sendViaTransit(ctx context.Context, id string, env bus.Envelope) 
 	if conn == nil {
 		return errNoRoute
 	}
-	return conn.Send(tenv)
+	if err := conn.Send(tenv); err != nil {
+		return err
+	}
+	c.mesh.transitTxBytes.Add(int64(len(blob)))
+	return nil
 }
 
 // mustUUID returns a fresh message id, or — on the once-in-forever entropy
@@ -392,9 +396,11 @@ func (c *Core) deliverTransit(ctx context.Context, env bus.Envelope, p bus.Trans
 		plain = p.Inner
 	}
 	if err != nil {
+		c.mesh.transitRefused.Add(1)
 		c.logger.Debug("transit: open failed (tamper or wrong dest)", "from", env.From, "err", err)
 		return
 	}
+	c.mesh.transitRxBytes.Add(int64(len(p.Inner)))
 	var inner transitInner
 	if err := json.Unmarshal(plain, &inner); err != nil {
 		c.logger.Debug("transit: malformed inner", "from", env.From)

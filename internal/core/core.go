@@ -236,6 +236,10 @@ type Core struct {
 	peerTrustHints map[string]string
 	reputationOn   atomic.Bool
 
+	// mesh counts the cross-network plane's traffic (meshmetrics.go): relay
+	// bytes, directory rows exchanged, punch and dial_check outcomes.
+	mesh meshCounters
+
 	// att holds the contact-point bindings for pair-over-transit (P4b):
 	// stable identity → unauthenticated joiner conn, in attclients.go.
 	att attState

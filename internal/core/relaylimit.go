@@ -46,12 +46,10 @@ func (b *relayBudget) reconfigure(maxKbps, maxSessions int) {
 	if maxSessions < 0 {
 		maxSessions = 0
 	}
+	// Lowering the cap never kills in-flight forwards and never rewrites the
+	// live count: acquire refuses new slots until the tally drains below the
+	// new line, and every release still decrements exactly once.
 	b.maxSessions = maxSessions
-	if b.sessions > maxSessions && maxSessions > 0 {
-		// Lowering the cap never kills in-flight forwards; it just stops new
-		// ones until the count drains below the line.
-		b.sessions = maxSessions
-	}
 	b.bytesPerSec = float64(maxKbps) * 125 // kbit/s → byte/s
 	burst := b.burst()
 	b.last = time.Now()

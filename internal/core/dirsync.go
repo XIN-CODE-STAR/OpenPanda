@@ -422,6 +422,7 @@ func (c *Core) sendDirPull(peer, after string) {
 		return
 	}
 	env.To = peer
+	c.mesh.dirPulls.Add(1)
 	if err := c.sendTo(peer, env); err != nil {
 		c.logger.Debug("dir_pull send", "peer", peer, "err", err)
 	}
@@ -575,7 +576,9 @@ func (c *Core) sendDirRows(peer string, rows []json.RawMessage, want []string, c
 	env.To = peer
 	if err := c.sendTo(peer, env); err != nil {
 		c.logger.Debug("dir_rows send", "peer", peer, "err", err)
+		return
 	}
+	c.mesh.dirRowsOut.Add(int64(len(rows)))
 }
 
 // handleDirRows applies each row under the conflict rules, then answers the
@@ -596,6 +599,7 @@ func (c *Core) handleDirRows(ctx context.Context, env bus.Envelope) {
 		}
 	}
 	if applied > 0 {
+		c.mesh.dirRowsIn.Add(int64(applied))
 		c.logger.Debug("dir rows applied", "from", env.From, "n", applied)
 	}
 	// The want reply: our rows for the ids they lack. One page, no cursor —

@@ -121,9 +121,14 @@ func (c *Core) dialCheckAllow(peer string) bool {
 // one friendly node answering five times proves one path, not five.
 func (c *Core) handleDialCheckAck(ctx context.Context, env bus.Envelope) {
 	var p bus.DialCheckAckPayload
-	if err := env.PayloadInto(&p); err != nil || !p.OK {
+	if err := env.PayloadInto(&p); err != nil {
 		return
 	}
+	if !p.OK {
+		c.mesh.dialCheckFail.Add(1)
+		return
+	}
+	c.mesh.dialCheckOK.Add(1)
 	c.rzv.mu.Lock()
 	if c.rzv.provenBy == nil {
 		c.rzv.provenBy = make(map[string]time.Time)

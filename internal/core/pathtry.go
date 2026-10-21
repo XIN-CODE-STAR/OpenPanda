@@ -386,6 +386,7 @@ func (c *Core) autoPunch(ctx context.Context, id string) {
 		c.path.mu.Lock()
 		c.path.punchAt[id] = time.Now()
 		c.path.mu.Unlock()
+		c.mesh.punchAttempts.Add(1)
 		if err := c.PunchPeer(ctx, id); err != nil {
 			c.logger.Debug("auto-punch offer", "peer", id, "err", err)
 		}
@@ -447,7 +448,13 @@ func (c *Core) notePunchAttempt(id string) {
 	changed := false
 	switch {
 	case routed:
-		changed = c.path.punchTries[id] != 0 || c.path.natSuspect[id] != time.Time{}
+		// A punch session that ended with a live route is the success the
+		// counter wants; zero tries means the route was already there.
+		hadAttempt := c.path.punchTries[id] != 0 || c.path.natSuspect[id] != time.Time{}
+		if hadAttempt {
+			c.mesh.punchSucceeded.Add(1)
+		}
+		changed = hadAttempt
 		delete(c.path.punchTries, id)
 		delete(c.path.natSuspect, id)
 	default:
