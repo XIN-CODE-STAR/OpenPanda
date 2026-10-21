@@ -185,12 +185,12 @@ func runSelfMint(args []string) {
 	base := fs.String("base", "HEAD", "git ref the worktree diff is taken against")
 	title := fs.String("title", "", "human summary shown in review (required)")
 	fs.Parse(reorderFlags(fs, args))
-	rejectExtraArgs(fs, "usage: panda self mint --title TEXT [--base REF]")
+	loc := i18n.Detect()
+	rejectExtraArgs(fs, i18n.T(loc, "cli.self.mint.usage"))
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		fatal("load config", err)
 	}
-	loc := i18n.Detect()
 	if strings.TrimSpace(*title) == "" {
 		fatal("mint", fmt.Errorf("%s", i18n.T(loc, "cli.self.mint.title")))
 	}
@@ -291,7 +291,8 @@ func runSelfRebase(args []string) {
 func runSelfRollback(args []string) {
 	fs, configPath := selfFlags("rollback")
 	fs.Parse(reorderFlags(fs, args))
-	rejectExtraArgs(fs, "usage: panda self rollback")
+	loc := i18n.Detect()
+	rejectExtraArgs(fs, i18n.T(loc, "cli.self.rollback.usage"))
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		fatal("load config", err)
@@ -304,7 +305,6 @@ func runSelfRollback(args []string) {
 	if err := updater.RollbackToRelease(); err != nil {
 		fatal("rollback", err)
 	}
-	loc := i18n.Detect()
 	// Audit the rollback on the signed chain — reverting the running binary
 	// is exactly the kind of action the log exists for.
 	_ = core.NewSignedAudit(db).Record(context.Background(), security.Entry{
@@ -321,12 +321,12 @@ func runSelfReset(args []string) {
 	fs, configPath := selfFlags("reset")
 	purge := fs.Bool("purge", false, "also delete every queued and archived patch set")
 	fs.Parse(reorderFlags(fs, args))
-	rejectExtraArgs(fs, "usage: panda self reset [--purge]")
+	loc := i18n.Detect()
+	rejectExtraArgs(fs, i18n.T(loc, "cli.self.reset.usage"))
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		fatal("load config", err)
 	}
-	loc := i18n.Detect()
 	// reset is the escape hatch back to a pure release node: put the retained
 	// release binary back first, then remove the state. It stays available
 	// after the feature was disabled — the state may predate that.
