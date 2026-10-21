@@ -591,6 +591,9 @@ type Core struct {
 	observedIP   string
 	punchMu      sync.Mutex
 	punching     map[string]*punchSession
+	// dir holds the epidemic-directory sync bookkeeping (M1): per-peer pull
+	// rate limiting and continuation-page counts, in dirsync.go.
+	dir dirState
 }
 
 // dtnRelay is one bundle's forwarding record on this node.
@@ -1274,6 +1277,12 @@ func (c *Core) broadcastHeartbeat(ctx context.Context) {
 	if c.node.draining(ctx) {
 		status = "draining"
 	}
+	// M1 epidemic directory: re-mint our signed row (fresh seen_at — churn
+	// free, it sits outside content_hash) then fold the stamp table into the
+	// beat's digest. Peers whose table agrees see a match and stay silent;
+	// a single mismatch costs one dir_pull exchange, converging both sides.
+	c.refreshSelfDirRow(ctx)
+	dirDigest := c.dirDigest(ctx)
 	msgID, err := newUUID()
 	if err != nil {
 		c.logger.Warn("mint heartbeat id", "err", err)
@@ -1285,6 +1294,7 @@ func (c *Core) broadcastHeartbeat(ctx context.Context) {
 		Neighbors:     c.livePeerIDs(), Links: wireLinks,
 		Contacts: c.wireContacts(), Projects: projects,
 		Ver: version.Version, Prov: wireProvenance(),
+		DirDigest: dirDigest,
 	})
 	if err != nil {
 		c.logger.Warn("build heartbeat", "err", err)
@@ -1481,6 +1491,10 @@ func (c *Core) handleHeartbeat(ctx context.Context, env bus.Envelope) {
 			c.logger.Info("peer card updated", "peer", env.From)
 		}
 	}
+	// M1 last: the beat may have just changed our own table (card, adjacency),
+	// so the digest compare runs after every write above — a mismatch then
+	// reflects the post-apply state, not a stale snapshot.
+	c.maybeDirPull(ctx, env.From, p.DirDigest)
 }
 
 // Recover normalizes tasks left active by a previous process instance, then
@@ -2483,6 +2497,10 @@ func (c *Core) dispatch(ctx context.Context, conn *bus.Conn, env bus.Envelope) {
 		c.handleDTNBundle(ctx, env)
 	case bus.MsgTransit:
 		c.handleTransit(ctx, conn, env)
+	case bus.MsgDirPull:
+		c.handleDirPull(ctx, env)
+	case bus.MsgDirRows:
+		c.handleDirRows(ctx, env)
 	case bus.MsgPunchOffer, bus.MsgPunchReady:
 		// Coordination envelopes are relayable: To names the node that must
 		// punch, and an intermediate hop forwards rather than handling. The

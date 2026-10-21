@@ -89,6 +89,7 @@ var migrations = []Migration{
 	{Version: 56, Name: "add_employee_transit_dir", Apply: migrateV56},
 	{Version: 57, Name: "add_employee_prov", Apply: migrateV57},
 	{Version: 58, Name: "add_task_messages_consumed_at", Apply: migrateV58},
+	{Version: 59, Name: "add_employee_dir_row", Apply: migrateV59},
 }
 
 // migrateV58 adds task_messages.consumed_at: the moment the recipient's round
@@ -103,6 +104,28 @@ func migrateV58(tx MigrationExec) error {
 	_, err := tx.Exec(`ALTER TABLE task_messages
 		ADD COLUMN consumed_at INTEGER NOT NULL DEFAULT 0`)
 	return err
+}
+
+// migrateV59 adds the gossip-layer columns directory sync (§2) serves from:
+// dir_row_json is the verbatim canonical row JSON as it arrived (or as we
+// minted it for ourselves), dir_sig its Ed25519 signature extracted for the
+// signed-beats-unsigned conflict compare. Serving the stored bytes keeps a
+// forwarded row's signature verifiable byte-for-byte no matter how the live
+// columns drifted since — the row is a credential, not a view.
+func migrateV59(tx MigrationExec) error {
+	exists, err := tableExistsTx(tx, "employee_cache")
+	if err != nil || !exists {
+		return err
+	}
+	for _, col := range []struct{ name, def string }{
+		{"dir_row_json", "TEXT NOT NULL DEFAULT ''"},
+		{"dir_sig", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := addColumnIfMissingTx(tx, "employee_cache", col.name, col.def); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // migrateV44 adds task_messages: the per-scope message board sibling tasks

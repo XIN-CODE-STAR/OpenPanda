@@ -85,6 +85,15 @@ const (
 	// contents, which are end-to-end sealed under the destination's X25519
 	// identity (or the member-level mesh seal when the peer published none).
 	MsgTransit = "transit"
+	// MsgDirPull/MsgDirRows are the epidemic directory sync pair
+	// (cross-network mesh design M1). A heartbeat's dir_digest mismatch
+	// prompts the receiver to send dir_pull carrying its id→content_hash
+	// stamp table; the peer answers dir_rows with the differing/missing
+	// signed rows plus a want list of the ids IT lacks, so one exchange
+	// converges both sides. Old nodes ignore both frames — their digest
+	// field is absent, their pull never comes, sync simply never starts.
+	MsgDirPull = "dir_pull"
+	MsgDirRows = "dir_rows"
 	// Bluetooth-style LAN pairing (pair_hello is the ONLY frame accepted on
 	// an unauthenticated connection besides hello — it runs an ephemeral
 	// X25519 exchange so the two operators can compare a short code and the

@@ -151,6 +151,8 @@ JSON 重打包）。
 | `agent_yield` | `AgentYieldPayload` | agent 在检查点让出执行 |
 | `dtn_bundle` | `DTNBundlePayload` | 一个 CBOR 编码的 DTN bundle 原样透传（见下） |
 | `transit` | `TransitPayload` | 盲中继帧（跨网段 mesh M3）：`dest`（稳定 `k:<pub>` 或实例 id）+ `ttl` + `seal`（`x25519`\|`mesh`）+ `inner` 密封 blob。中继只见外壳，逐跳转发；终点开封、验内层 Ed25519 认证后按直收分发 |
+| `dir_pull` | `DirPullPayload` | 目录差量同步请求（跨网段 mesh M1）：请求方完整 `id→content_hash` 戳表 + 可选 `after` 续页游标。心跳 `dir_digest` 不匹配才发，30s/对端限速（续页豁免但有页数上限） |
+| `dir_rows` | `DirRowsPayload` | pull 的应答：差量行数组（每行是源节点 Ed25519 签名的规范化 JSON，逐跳原样转发）+ `want`（应答方缺的 id，一次往返双向收敛）+ `cursor`/`more` 分页（双闸：256 行 ∧ 1 MiB 帧体） |
 | `punch_offer` | `PunchOfferPayload` | NAT 打洞协调：会话 nonce + 候选端点 + TTL |
 | `punch_ready` | `PunchOfferPayload` | 应答 offer：回显 nonce，附己方候选端点 |
 | `pair_hello` | `PairHelloPayload` | LAN 配对发起（未认证连接上除 hello 外唯一受理的帧）：会话 id + 临时 X25519 公钥 + Ed25519 身份 + nonce |
@@ -419,6 +421,22 @@ AES-256-GCM）封到目的节点的 `x_pub`，中继只读到 dest+大小+TTL；
 及其 chunk/push 应答）同样不进 transit：请求虽小，应答是 1 MiB 级块，密封后
 必然超过 inner 上限；放行请求只会跳过调用方的链上/枢纽回退，让拉取空等预算。
 数据面应走直连或既有中继路径。
+
+### 流行病目录：`dir_pull`/`dir_rows`（M1）
+
+每拍心跳捎带 `dir_digest`——发送方目录戳表（`id→content_hash`，会话/幽灵行
+除外）排序拼接后的 SHA-256。表一致即零额外帧；不一致才触发 `dir_pull`：
+请求方发自己的全量戳表，应答方差量回 `dir_rows`——对方缺/哈希不同的行
+（≤256 行 ∧ ≤1 MiB，触顶处生成 `cursor` 供 `after` 续页）加上 `want`
+（应答方自己缺的 id），一次往返两侧收敛。行是**凭证不是视图**：源节点
+Ed25519 签名（`sig` 覆盖 seen_at 在内的全部字段，规范化 JSON），逐跳原样
+转发；`content_hash` 覆盖除 `seen_at`/`sig` 外的内容，所以源端重铸
+seen_at 不动 digest。冲突裁决：签名行 > 未签名行，同级取 `seen_at` 新者；
+未来时标按 ±5min 钳制。无签名行可流通（直接观测本来就没签名）但永不写
+身份列（`pub_key`/`x_pub` 只收签名行），且断言能力/地址的分量低于任何
+签名行。自己的行每次心跳现签；拉取双向限速（新鲜 pull 30s/对端，续页
+按会话 ≤8 页）；`learned_via` 记录投递该行的对端。老节点字段缺省、帧型
+不识——同步对它们静默不发生，协议其余部分不变。
 
 ## LAN 发现 beacon 与配对
 

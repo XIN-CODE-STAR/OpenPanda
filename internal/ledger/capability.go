@@ -1030,7 +1030,10 @@ func ForgetPending(db *sql.DB, id string) error {
 // marking it online. Remote nodes are stored with ID-only abilities (no
 // executable commands) since this node never runs their commands directly —
 // it forwards to them. Mirrors Register's ON CONFLICT upsert.
-func UpsertRemote(db *sql.DB, id string, s CapabilitySummary) error {
+// summaryWireJSON explodes a CapabilitySummary into the employee_cache JSON
+// columns. Shared by UpsertRemote (direct hello/heartbeat observation) and
+// UpsertGossiped (epidemic-directory rows) so both paths store the same shape.
+func summaryWireJSON(s CapabilitySummary) (nativeJSON, agentsJSON, manualJSON, capJSON, resJSON, neighborsJSON, linksJSON, contactsJSON, projectsJSON, addrsJSON, relayJSON string, err error) {
 	native := make([]NativeAbility, 0, len(s.NativeIDs)+len(s.ActuatorIDs))
 	for _, nid := range s.NativeIDs {
 		native = append(native, NativeAbility{ID: nid})
@@ -1049,60 +1052,77 @@ func UpsertRemote(db *sql.DB, id string, s CapabilitySummary) error {
 		manual = append(manual, ManualAbility{ID: mid})
 	}
 
-	nativeJSON, err := json.Marshal(native)
+	b, err := json.Marshal(native)
 	if err != nil {
-		return fmt.Errorf("marshal remote native: %w", err)
+		err = fmt.Errorf("marshal remote native: %w", err)
+		return
 	}
-	agentsJSON, err := json.Marshal(agents)
-	if err != nil {
-		return fmt.Errorf("marshal remote agents: %w", err)
+	nativeJSON = string(b)
+	if b, err = json.Marshal(agents); err != nil {
+		err = fmt.Errorf("marshal remote agents: %w", err)
+		return
 	}
-	manualJSON, err := json.Marshal(manual)
-	if err != nil {
-		return fmt.Errorf("marshal remote manual: %w", err)
+	agentsJSON = string(b)
+	if b, err = json.Marshal(manual); err != nil {
+		err = fmt.Errorf("marshal remote manual: %w", err)
+		return
 	}
-	capJSON, err := json.Marshal(s.Capacity)
-	if err != nil {
-		return fmt.Errorf("marshal remote capacity: %w", err)
+	manualJSON = string(b)
+	if b, err = json.Marshal(s.Capacity); err != nil {
+		err = fmt.Errorf("marshal remote capacity: %w", err)
+		return
 	}
-	resJSON, err := json.Marshal(s.ResourceProfile)
-	if err != nil {
-		return fmt.Errorf("marshal remote resource profile: %w", err)
+	capJSON = string(b)
+	if b, err = json.Marshal(s.ResourceProfile); err != nil {
+		err = fmt.Errorf("marshal remote resource profile: %w", err)
+		return
 	}
-	neighborsJSON, err := json.Marshal(s.Neighbors)
-	if err != nil {
-		return fmt.Errorf("marshal remote neighbors: %w", err)
+	resJSON = string(b)
+	if b, err = json.Marshal(s.Neighbors); err != nil {
+		err = fmt.Errorf("marshal remote neighbors: %w", err)
+		return
 	}
-	linksJSON, err := json.Marshal(s.Links)
-	if err != nil {
-		return fmt.Errorf("marshal remote link metrics: %w", err)
+	neighborsJSON = string(b)
+	if b, err = json.Marshal(s.Links); err != nil {
+		err = fmt.Errorf("marshal remote link metrics: %w", err)
+		return
 	}
-	contactsJSON, err := json.Marshal(s.Contacts)
-	if err != nil {
-		return fmt.Errorf("marshal remote contacts: %w", err)
+	linksJSON = string(b)
+	if b, err = json.Marshal(s.Contacts); err != nil {
+		err = fmt.Errorf("marshal remote contacts: %w", err)
+		return
 	}
+	contactsJSON = string(b)
 	// s.Projects stays nil on a peer that predates the field: marshalling the
 	// nil slice still lands as "null" in the column, which decodes to the same
 	// absence — the row simply reads as "unknown residence" until a heartbeat
 	// carrying the list arrives.
-	projectsJSON, err := json.Marshal(s.Projects)
-	if err != nil {
-		return fmt.Errorf("marshal remote projects: %w", err)
+	if b, err = json.Marshal(s.Projects); err != nil {
+		err = fmt.Errorf("marshal remote projects: %w", err)
+		return
 	}
-
-	addrsJSON, err := json.Marshal(s.Addrs)
-	if err != nil {
-		return fmt.Errorf("marshal remote addrs: %w", err)
+	projectsJSON = string(b)
+	if b, err = json.Marshal(s.Addrs); err != nil {
+		err = fmt.Errorf("marshal remote addrs: %w", err)
+		return
 	}
-	relayJSON := ""
+	addrsJSON = string(b)
+	relayJSON = ""
 	if s.Relay != nil {
-		b, rerr := json.Marshal(s.Relay)
-		if rerr != nil {
-			return fmt.Errorf("marshal remote relay: %w", rerr)
+		if b, err = json.Marshal(s.Relay); err != nil {
+			err = fmt.Errorf("marshal remote relay: %w", err)
+			return
 		}
 		relayJSON = string(b)
 	}
+	return
+}
 
+func UpsertRemote(db *sql.DB, id string, s CapabilitySummary) error {
+	nativeJSON, agentsJSON, manualJSON, capJSON, resJSON, neighborsJSON, linksJSON, contactsJSON, projectsJSON, addrsJSON, relayJSON, err := summaryWireJSON(s)
+	if err != nil {
+		return err
+	}
 	kind, identity := s.NodeKind, s.NodeIdentity
 	if kind == "" {
 		kind = "physical"
@@ -1110,7 +1130,68 @@ func UpsertRemote(db *sql.DB, id string, s CapabilitySummary) error {
 	if identity == "" {
 		identity = id
 	}
-	return upsertNode(db, id, s.Device, s.Chip, kind, identity, string(nativeJSON), string(agentsJSON), string(manualJSON), string(capJSON), string(resJSON), string(neighborsJSON), string(linksJSON), string(contactsJSON), string(projectsJSON), string(addrsJSON), relayJSON, s.SchedulerTier, machineClass{OS: s.OS, Form: s.FormFactor})
+	return upsertNode(db, id, s.Device, s.Chip, kind, identity, nativeJSON, agentsJSON, manualJSON, capJSON, resJSON, neighborsJSON, linksJSON, contactsJSON, projectsJSON, addrsJSON, relayJSON, s.SchedulerTier, machineClass{OS: s.OS, Form: s.FormFactor})
+}
+
+// UpsertGossiped applies a directory row that arrived over epidemic sync
+// (M1): the card columns land like UpsertRemote, but freshness is
+// source-minted (lastSeen is the row's seen_at, not our clock) and status is
+// promote-only — a fresh signed row may mark its node online, while nothing
+// gossiped ever demotes a live one: staleness is the local sweep's job, not
+// a foreign claim's.
+func UpsertGossiped(db *sql.DB, id string, s CapabilitySummary, lastSeen int64, online bool) error {
+	nativeJSON, agentsJSON, manualJSON, capJSON, resJSON, neighborsJSON, linksJSON, contactsJSON, projectsJSON, addrsJSON, relayJSON, err := summaryWireJSON(s)
+	if err != nil {
+		return err
+	}
+	kind, identity := s.NodeKind, s.NodeIdentity
+	if kind == "" {
+		kind = "physical"
+	}
+	if identity == "" {
+		identity = id
+	}
+	status := "offline"
+	if online {
+		status = "online"
+	}
+	_, err = db.Exec(`
+		INSERT INTO employee_cache (id, name, department, chip, node_kind, node_identity, native_json, agents_json, manual_json, capacity_json, resource_profile_json, neighbors_json, links_json, contacts_json, projects_json, addrs, relay, status, last_seen, scheduler_tier, os, device_class)
+		VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			name=excluded.name, chip=excluded.chip,
+			node_kind=excluded.node_kind, node_identity=excluded.node_identity,
+			native_json=excluded.native_json, agents_json=excluded.agents_json,
+			manual_json=excluded.manual_json, capacity_json=excluded.capacity_json,
+			resource_profile_json=excluded.resource_profile_json,
+			neighbors_json=CASE WHEN excluded.neighbors_json IN ('','null') THEN employee_cache.neighbors_json
+				ELSE excluded.neighbors_json END,
+			links_json=CASE WHEN excluded.links_json IN ('','null') THEN employee_cache.links_json
+				ELSE excluded.links_json END,
+			contacts_json=CASE WHEN excluded.contacts_json IN ('','null') THEN employee_cache.contacts_json
+				ELSE excluded.contacts_json END,
+			projects_json=CASE WHEN excluded.projects_json='' THEN employee_cache.projects_json
+				ELSE excluded.projects_json END,
+			addrs=CASE WHEN excluded.addrs IN ('','null') THEN employee_cache.addrs
+				ELSE excluded.addrs END,
+			relay=CASE WHEN excluded.relay IN ('','null') THEN employee_cache.relay
+				ELSE excluded.relay END,
+			os=CASE WHEN excluded.os='' THEN employee_cache.os ELSE excluded.os END,
+			device_class=CASE WHEN excluded.device_class='' THEN employee_cache.device_class
+				ELSE employee_cache.device_class END,
+			-- promote-only status and monotone last_seen: gossip can mark a
+			-- fresh node online but never rewinds one we observed more
+			-- recently, and never asserts offline on its own.
+			status=CASE WHEN excluded.status='online' THEN 'online' ELSE employee_cache.status END,
+			last_seen=CASE WHEN excluded.last_seen > COALESCE(employee_cache.last_seen,0)
+				THEN excluded.last_seen ELSE employee_cache.last_seen END,
+			scheduler_tier=excluded.scheduler_tier`,
+		id, s.Device, s.Chip, kind, identity, nativeJSON, agentsJSON, manualJSON, capJSON, resJSON, neighborsJSON, linksJSON, contactsJSON, projectsJSON, addrsJSON, relayJSON, status, lastSeen, s.SchedulerTier, s.OS, s.FormFactor,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert gossiped %s: %w", id, err)
+	}
+	return nil
 }
 
 // Node is a single employee_cache row, decoded.

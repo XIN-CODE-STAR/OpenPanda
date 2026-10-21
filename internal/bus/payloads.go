@@ -149,6 +149,12 @@ type HeartbeatPayload struct {
 	// waiting for a reconnect. Absent on old nodes; receivers leave any
 	// stored stamp alone.
 	Prov string `json:"prov,omitempty"`
+	// DirDigest is the sender's directory table digest (cross-network mesh
+	// M1): SHA-256 over the sorted "id:content_hash" lines of every gossipable
+	// row (session/ghost rows excluded). A receiver whose own digest differs
+	// sends dir_pull — matching digests mean the two tables already agree and
+	// no frames flow. Absent on old nodes; receivers skip the compare.
+	DirDigest string `json:"dir_digest,omitempty"`
 }
 
 // LinkMetric is the wire form of one measured edge weight (§4.1): the round-
@@ -195,6 +201,60 @@ type TransitPayload struct {
 	TTL   int    `json:"ttl"`   // decremented per relay; <=1 dies at the next relay
 	Seal  string `json:"seal"`  // SealX25519 | SealMesh
 	Inner []byte `json:"inner"` // sealed transitInner blob
+}
+
+// DirPullPayload is the differential-sync request (M1): the requester's own
+// id→content_hash stamp table plus an optional resume cursor for paged
+// replies. The responder diffs it against its own table and answers
+// dir_rows — rows the requester lacks or hashes differently on, plus a want
+// list of the ids the RESPONDER lacks, so a single exchange converges both
+// directions.
+type DirPullPayload struct {
+	// Stamps maps directory id → content_hash (hex). Bounded by the sync
+	// cap; a requester with more rows sends the prefix and pages with After.
+	Stamps map[string]string `json:"stamps"`
+	// After resumes a paged reply: only rows with id > After are eligible.
+	// A non-empty After marks the pull as a continuation — the 30s per-peer
+	// pull limit applies to fresh pulls, not to finishing a sync already
+	// underway.
+	After string `json:"after,omitempty"`
+}
+
+// DirRowsPayload carries signed directory rows plus the responder's want
+// list. Rows travel as canonical JSON blobs — each is a credential signed by
+// its owner's Ed25519 key, forwarded byte-for-byte so the signature keeps
+// verifying no matter how many hops it crossed.
+type DirRowsPayload struct {
+	Rows []json.RawMessage `json:"rows,omitempty"`
+	// Want lists the ids the SENDER of this frame still lacks: the receiver
+	// should answer with one dir_rows carrying those rows (and no want of
+	// its own — one round completes the exchange).
+	Want []string `json:"want,omitempty"`
+	// Cursor/More paginate: when the response hit a budget (row count or
+	// byte cap) before the last differing id, Cursor is the last id sent and
+	// More is true; the requester continues with dir_pull{after: cursor}.
+	Cursor string `json:"cursor,omitempty"`
+	More   bool   `json:"more,omitempty"`
+}
+
+// DirRow is the canonical row shape for content hashing and signing (M1 §2).
+// content_hash covers every field EXCEPT seen_at and sig — freshness churn
+// must not defeat the digest — while sig signs everything except itself
+// (seen_at included: a gossiped row's age is source-minted, not attacker-
+// rewritable). Field order here IS the canonical serialization order.
+type DirRow struct {
+	ID        string          `json:"id"`
+	PubKey    string          `json:"pub,omitempty"`
+	XPub      string          `json:"x_pub,omitempty"`
+	Ver       string          `json:"ver,omitempty"`
+	Card      json.RawMessage `json:"card,omitempty"` // CapabilitySummary JSON
+	Addrs     []string        `json:"addrs,omitempty"`
+	Neighbors []string        `json:"neighbors,omitempty"`
+	Links     []LinkMetric    `json:"links,omitempty"`
+	UDPPort   int             `json:"udp_port,omitempty"`
+	Relay     json.RawMessage `json:"relay,omitempty"` // RelayProfile JSON
+	SeenAt    int64           `json:"seen_at"`
+	Sig       string          `json:"sig,omitempty"` // Ed25519 over canonical minus sig
 }
 
 // TaskDelegatePayload is the task handoff (design doc §10.3 example). The
