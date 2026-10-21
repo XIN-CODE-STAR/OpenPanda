@@ -24,14 +24,41 @@ func TestRendezvousProofNeedsDistinctPeers(t *testing.T) {
 		raw, _ := json.Marshal(bus.DialCheckAckPayload{Nonce: "n", OK: true, Proto: "ws"})
 		return bus.Envelope{V: 2, Type: bus.MsgDialCheckAck, From: from, MsgID: "m-" + from, Payload: raw}
 	}
+	c.noteDialProbe("peer-a", "n")
 	c.handleDialCheckAck(ctx, ack("peer-a"))
+	c.noteDialProbe("peer-a", "n")
 	c.handleDialCheckAck(ctx, ack("peer-a"))
 	if c.rendezvousProofValid() {
 		t.Fatal("repeat acks from one peer must not prove the claim")
 	}
+	c.noteDialProbe("peer-b", "n")
 	c.handleDialCheckAck(ctx, ack("peer-b"))
 	if !c.rendezvousProofValid() {
 		t.Fatal("two distinct acks must prove the claim")
+	}
+}
+
+// TestDialCheckAckRequiresIssuedProbe: an ack for a nonce this node never
+// sent is not evidence that anyone dialed us. Without the outstanding-probe
+// check two colluding members could prove an unreachable node's claim.
+func TestDialCheckAckRequiresIssuedProbe(t *testing.T) {
+	ctx := context.Background()
+	c := newCoreOnDB(t, openTestDB(t), "claimant")
+	for _, from := range []string{"peer-a", "peer-b"} {
+		raw, _ := json.Marshal(bus.DialCheckAckPayload{Nonce: "never-sent", OK: true})
+		c.handleDialCheckAck(ctx, bus.Envelope{V: 2, Type: bus.MsgDialCheckAck, From: from, Payload: raw})
+	}
+	if c.rendezvousProofValid() {
+		t.Fatal("unsolicited acks must not prove the claim")
+	}
+	c.noteDialProbe("peer-a", "issued")
+	raw, _ := json.Marshal(bus.DialCheckAckPayload{Nonce: "issued", OK: true})
+	c.handleDialCheckAck(ctx, bus.Envelope{V: 2, Type: bus.MsgDialCheckAck, From: "peer-a", Payload: raw})
+	c.rzv.mu.Lock()
+	_, stillPending := c.rzv.probes[dialProbeKey("peer-a", "issued")]
+	c.rzv.mu.Unlock()
+	if stillPending {
+		t.Fatal("a matched probe must be consumed")
 	}
 }
 
@@ -42,6 +69,7 @@ func TestRendezvousProofExpires(t *testing.T) {
 	c := newCoreOnDB(t, openTestDB(t), "claimant")
 	for _, from := range []string{"peer-a", "peer-b"} {
 		raw, _ := json.Marshal(bus.DialCheckAckPayload{Nonce: "n", OK: true})
+		c.noteDialProbe(from, "n")
 		c.handleDialCheckAck(ctx, bus.Envelope{V: 2, Type: bus.MsgDialCheckAck, From: from, Payload: raw})
 	}
 	if !c.rendezvousProofValid() {
@@ -64,6 +92,7 @@ func TestDialCheckAckRejectsFailure(t *testing.T) {
 	c := newCoreOnDB(t, openTestDB(t), "claimant")
 	for _, from := range []string{"peer-a", "peer-b"} {
 		raw, _ := json.Marshal(bus.DialCheckAckPayload{Nonce: "n", OK: false})
+		c.noteDialProbe(from, "n")
 		c.handleDialCheckAck(ctx, bus.Envelope{V: 2, Type: bus.MsgDialCheckAck, From: from, Payload: raw})
 	}
 	if c.rendezvousProofValid() {

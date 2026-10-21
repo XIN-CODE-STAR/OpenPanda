@@ -118,10 +118,34 @@ func (c *Core) dialCheckAllow(peer string) bool {
 }
 
 // handleDialCheckAck records a confirmation. Distinct peers are what count —
-// one friendly node answering five times proves one path, not five.
+// one friendly node answering five times proves one path, not five. The ack
+// must also answer a probe THIS node sent: a nonce nobody issued is not
+// evidence that anyone could dial us, so it never reaches provenBy.
 func (c *Core) handleDialCheckAck(ctx context.Context, env bus.Envelope) {
 	var p bus.DialCheckAckPayload
-	if err := env.PayloadInto(&p); err != nil {
+	if err := env.PayloadInto(&p); err != nil || p.Nonce == "" || env.From == "" {
+		return
+	}
+	key := dialProbeKey(env.From, p.Nonce)
+	c.rzv.mu.Lock()
+	sentAt, ok := c.rzv.probes[key]
+	if ok {
+		delete(c.rzv.probes, key)
+	}
+	// Bound the pending table even when acks never arrive (a peer that
+	// vanished mid-probe).
+	for k, at := range c.rzv.probes {
+		if time.Since(at) > dialCheckProofTTL {
+			delete(c.rzv.probes, k)
+		}
+	}
+	c.rzv.mu.Unlock()
+	if !ok {
+		c.logger.Debug("dial_check_ack for an unissued probe", "peer", env.From, "nonce", p.Nonce)
+		return
+	}
+	if time.Since(sentAt) > dialCheckProofTTL {
+		c.logger.Debug("dial_check_ack arrived after the probe lease", "peer", env.From)
 		return
 	}
 	if !p.OK {
@@ -152,6 +176,21 @@ func (c *Core) handleDialCheckAck(ctx context.Context, env bus.Envelope) {
 			c.logger.Warn("rendezvous proof lost — the claim is withdrawn")
 		}
 	}
+}
+
+// dialProbeKey identifies one outstanding probe. NUL cannot appear in a
+// peer id or a UUID, so the concatenation is unambiguous.
+func dialProbeKey(peer, nonce string) string { return peer + "\x00" + nonce }
+
+// noteDialProbe records an issued probe before it goes on the wire, so an ack
+// can be matched to a request this node actually made.
+func (c *Core) noteDialProbe(peer, nonce string) {
+	c.rzv.mu.Lock()
+	if c.rzv.probes == nil {
+		c.rzv.probes = make(map[string]time.Time)
+	}
+	c.rzv.probes[dialProbeKey(peer, nonce)] = time.Now()
+	c.rzv.mu.Unlock()
 }
 
 // dialCheckDue reports whether a proof round should run now, and marks it.
@@ -209,6 +248,7 @@ func (c *Core) runDialCheck(ctx context.Context) {
 			continue
 		}
 		env.To = peer
+		c.noteDialProbe(peer, nonce)
 		if err := c.sendTo(peer, env); err != nil {
 			c.logger.Debug("dial_check: probe unroutable", "peer", peer, "err", err)
 		}

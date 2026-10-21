@@ -57,7 +57,12 @@ type rendezvousState struct {
 	// provenBy holds the distinct peers that answered a dial_check, with the
 	// timestamp of their last successful callback; proven is the derived
 	// "enough of them, recently enough" verdict (dialcheck.go).
-	provenBy  map[string]time.Time
+	provenBy map[string]time.Time
+	// probes holds nonces this node sent and still awaits an ack for,
+	// keyed by peer+"\x00"+nonce. An ack for a nonce we never sent proves
+	// nothing: without this a member could assert a callback that never
+	// happened.
+	probes    map[string]time.Time
 	proven    bool
 	lastProof time.Time
 }
