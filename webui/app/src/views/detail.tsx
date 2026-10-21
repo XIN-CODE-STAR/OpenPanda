@@ -11,6 +11,7 @@ import { StateBadge } from '../components/state-badge'
 import { toast, toastError } from '../components/toast'
 import { confirmDialog } from '../components/confirm'
 import { TaskTrace } from '../components/task-trace'
+import { DiffViewer } from '../components/diff-viewer'
 import { EventTimeline } from '../components/event-timeline'
 import { Markdown } from '../md/render'
 import { Icon } from '../components/icons'
@@ -355,6 +356,11 @@ export function DetailView({
             spec only existed as a JSON blob users had to decode. Folded by
             default: it is the task's contract, not its outcome, and read open
             it pushed the result a third of a screen down. */}
+        {/* A self-merge proposal's "spec" IS the patch set — the review the
+            approve button answers is this diff, so it renders ahead of the
+            generic spec card. */}
+        <SelfMergeCard spec={task.spec} />
+
         <SpecCard spec={task.spec} />
 
         {board && board.messages.length > 0 && (
@@ -693,6 +699,77 @@ function Fact({
  *  first sentence of the target, so the page always answers "what was this
  *  asked to do" without a click. Open, the brief was 266px of dense prose
  *  sitting between the result and the log. */
+/** SelfMergeCard renders a self-evolution merge proposal: the signed patch
+ *  set's manifest (producer, base, target version, the RECOMPUTED critical
+ *  flag) plus each patch file's diff behind an expander — the artifact the
+ *  reviewer's approve/reject actually decides on. Only renders for tasks
+ *  whose spec carries the self_merge envelope. */
+function SelfMergeCard({ spec }: { spec?: string }) {
+  const env = spec ? parseResult(spec) : null
+  const setID = env && env.kind === 'self_merge' ? String(env.patchset || '') : ''
+  const [open, setOpen] = useState(false)
+  const [patchOpen, setPatchOpen] = useState<Record<string, boolean>>({})
+  const { data: set } = useAsync(() => (setID ? api.selfEvoSet(setID) : Promise.resolve(null)), [setID])
+  if (!setID || !set) return null
+  return (
+    <section class="dt-sec">
+      <div class="dt-sec-head">
+        <h2 class="dt-sec-title">
+          {t('detail.selfmerge.title')}
+          {set.critical && <span class="badge red">{t('detail.selfmerge.critical')}</span>}
+        </h2>
+        <span class="dt-sec-hint">
+          {set.files.length} {t('detail.selfmerge.patches')}
+          {set.gate_ok ? ` · ${t('detail.selfmerge.gateOk')}` : ` · ${t('detail.selfmerge.gateNone')}`}
+        </span>
+        <button type="button" class="dt-sec-action" onClick={() => setOpen((v) => !v)}>
+          {open ? t('events.collapse') : t('detail.spec.expand')}
+        </button>
+      </div>
+
+      <dl class="dt-spec-foot">
+        <dt>{t('detail.selfmerge.producer')}</dt>
+        <dd class="mono">{set.producer}</dd>
+        <dt>{t('detail.selfmerge.base')}</dt>
+        <dd class="mono">{set.base}</dd>
+        <dt>{t('detail.selfmerge.version')}</dt>
+        <dd class="mono">{set.version}</dd>
+      </dl>
+      {set.critical && set.critical_paths && set.critical_paths.length > 0 && (
+        <p class="gate-error">
+          {t('detail.selfmerge.critical')}: <span class="mono">{set.critical_paths.join(', ')}</span>
+        </p>
+      )}
+
+      {open && (
+        <ul class="diff-files">
+          {set.files.map((f) => (
+            <li key={f}>
+              <button
+                type="button"
+                class="dt-sec-action"
+                onClick={() => setPatchOpen((m) => ({ ...m, [f]: !m[f] }))}
+              >
+                {patchOpen[f] ? '▾' : '▸'}
+              </button>
+              <span class="mono">{f}</span>
+              {patchOpen[f] && <SelfMergePatch id={set.id} name={f} />}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+/** SelfMergePatch lazy-loads one patch file's unified diff. */
+function SelfMergePatch({ id, name }: { id: string; name: string }) {
+  const { data, error } = useAsync(() => api.selfEvoFile(id, name), [id, name])
+  if (error) return <p class="gate-error">{String(error)}</p>
+  if (!data) return <p class="dim">…</p>
+  return <DiffViewer patch={data} />
+}
+
 function SpecCard({ spec }: { spec?: string }) {
   const [open, setOpen] = useState(false)
   const s = spec ? parseResult(spec) : null

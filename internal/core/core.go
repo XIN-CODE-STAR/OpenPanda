@@ -40,6 +40,7 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/scheduler"
 	"github.com/Xustalis/OpenPanda/internal/scheduler/queue"
 	"github.com/Xustalis/OpenPanda/internal/security"
+	"github.com/Xustalis/OpenPanda/internal/self"
 	"github.com/Xustalis/OpenPanda/internal/skills"
 	"github.com/Xustalis/OpenPanda/internal/util"
 	"github.com/Xustalis/OpenPanda/internal/version"
@@ -253,6 +254,15 @@ type Core struct {
 	netPol   networkPolicy
 	polSet   bool
 	relayLim relayBudget
+
+	// selfMgr is the self-evolution patch-set manager (design §2–§5), wired by
+	// SetSelfEvolution when the operator enables the feature. nil disables all
+	// merge proposals — the disposition gate then fails closed. selfOneShot
+	// marks a CLI-shaped process so the merge apply skips its in-process
+	// re-exec.
+	selfMgr       *self.Manager
+	selfOneShot   bool
+	selfProducers string // "self" | "mesh" (self_evolution.producers)
 
 	mu    sync.RWMutex
 	peers map[string]*Peer

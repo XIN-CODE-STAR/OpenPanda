@@ -23,7 +23,7 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/mcp"
 )
 
-var configSections = []string{"model", "mcp", "limits", "routing", "injection", "approval", "delegation"}
+var configSections = []string{"model", "mcp", "limits", "routing", "injection", "approval", "delegation", "self_evolution"}
 
 func isConfigAction(s string) bool {
 	switch s {
@@ -184,6 +184,18 @@ func runConfigGet(section string, args []string) {
 			return
 		}
 		fmt.Println("mode: " + cfg.Approval.NormalizedMode())
+	case "self_evolution":
+		se := cfg.SelfEvolution
+		if jsonOutput {
+			emitJSON(map[string]any{
+				"enabled": se.Enabled, "repo": se.Repo,
+				"producers": se.Producers, "rebase_on_update": se.RebaseOnUpdate,
+				"state_dir": cfg.SelfEvolutionDir(),
+			})
+			return
+		}
+		fmt.Printf("enabled: %v\nrepo: %s\nproducers: %s\nrebase_on_update: %v\nstate_dir: %s\n",
+			se.Enabled, se.Repo, se.Producers, se.RebaseOnUpdate, cfg.SelfEvolutionDir())
 	}
 }
 
@@ -364,6 +376,50 @@ func runConfigSet(section string, args []string) {
 			fatal("config approval set", err)
 		}
 		configSetDone(loc, "approval")
+	case "self_evolution":
+		fs := flag.NewFlagSet("config self_evolution set", flag.ExitOnError)
+		configPath := fs.String("config", cliConfigPath, "path to config.yaml")
+		fs.Parse(reorderFlags(fs, args))
+		if fs.NArg() != 2 {
+			fmt.Fprintln(os.Stderr, "usage: panda config self_evolution set <enabled|rebase_on_update> <true|false> | <repo> <path> | <producers> <self|mesh>")
+			os.Exit(2)
+		}
+		key, raw := fs.Arg(0), fs.Arg(1)
+		path := configWritePath(*configPath)
+		switch key {
+		case "enabled", "rebase_on_update":
+			value, err := strconv.ParseBool(raw)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "panda: self_evolution %s must be true or false, got %q\n", key, raw)
+				os.Exit(2)
+			}
+			if err := config.UpdateSectionFieldBool(path, []string{"self_evolution"}, key, value); err != nil {
+				fatal("config self_evolution set", err)
+			}
+		case "repo", "producers":
+			if key == "producers" && raw != "self" && raw != "mesh" {
+				fmt.Fprintf(os.Stderr, "panda: producers must be self or mesh, got %q\n", raw)
+				os.Exit(2)
+			}
+			if key == "repo" && strings.TrimSpace(raw) == "" {
+				fmt.Fprintln(os.Stderr, "panda: repo must name this node's OpenPanda checkout")
+				os.Exit(2)
+			}
+			if err := config.UpdateSectionField(path, []string{"self_evolution"}, key, raw); err != nil {
+				fatal("config self_evolution set", err)
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "panda: unknown self_evolution key %q (want enabled|repo|producers|rebase_on_update)\n", key)
+			os.Exit(2)
+		}
+		// Reload+validate the result: enabling without repo, or a bad enum,
+		// must fail here rather than at the next daemon start.
+		if cfg, err := config.Load(path); err != nil {
+			fatal("config self_evolution set", err)
+		} else if err := cfg.SelfEvolution.Validate(); err != nil {
+			fatal("config self_evolution set", err)
+		}
+		configSetDone(loc, "self_evolution")
 	}
 }
 

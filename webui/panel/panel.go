@@ -173,6 +173,12 @@ func New(d Deps) http.Handler {
 	mux.HandleFunc("POST /api/pair/initiate", h.initiatePair)
 	mux.HandleFunc("POST /api/pair/answer", h.answerPair)
 	mux.HandleFunc("GET /api/self", h.getSelf)
+	// Self-evolution (design doc §4.2): patch-set queue + diff preview for the
+	// merge-review gate. Read-only — the approve/reject actions ride the
+	// existing task review endpoints since a proposal IS a review task.
+	mux.HandleFunc("GET /api/selfevo", h.getSelfEvo)
+	mux.HandleFunc("GET /api/selfevo/{id}", h.getSelfEvoSet)
+	mux.HandleFunc("GET /api/selfevo/{id}/file", h.getSelfEvoFile)
 	mux.HandleFunc("GET /api/stats", h.getStats)
 	mux.HandleFunc("GET /api/events", h.events)
 	mux.HandleFunc("GET /api/settings/model", h.getModelSettings)

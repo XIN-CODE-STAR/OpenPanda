@@ -50,6 +50,43 @@ type Config struct {
 	UI         UIConfig         `yaml:"ui"`
 	Skills     SkillsConfig     `yaml:"skills"`
 	Sandbox    SandboxConfig    `yaml:"sandbox"`
+	// SelfEvolution is the opt-in self-modification pipeline (design doc
+	// docs/author/2026-10-21). Entirely inert while enabled=false: no
+	// worktree, no queue, no merge proposals.
+	SelfEvolution SelfEvolutionConfig `yaml:"self_evolution"`
+}
+
+// SelfEvolutionConfig gates the self-modification pipeline. Repo is the
+// project's git checkout the merge worktree clones from — it is REQUIRED once
+// enabled (a node cannot produce patches against a tree it cannot see).
+// RebaseOnUpdate lets a self-built node attempt to carry its queued patch
+// sets onto a freshly applied official release; conflicts mark the set
+// conflicted and the node stays on the release binary (design §7 q3).
+// Producers bounds which manifest signers a merge proposal accepts: "self"
+// (only this node's own key) or "mesh" (any peer whose tier admits it — the
+// cross-node transfer is phase-5, the enum is reserved).
+type SelfEvolutionConfig struct {
+	Enabled        bool   `yaml:"enabled"`
+	Repo           string `yaml:"repo"`
+	RebaseOnUpdate bool   `yaml:"rebase_on_update"`
+	Producers      string `yaml:"producers"`
+}
+
+// Validate checks the self-evolution section's enumerations and required
+// fields.
+func (s SelfEvolutionConfig) Validate() error {
+	if !s.Enabled {
+		return nil
+	}
+	switch s.Producers {
+	case "", "self", "mesh":
+	default:
+		return fmt.Errorf("config: self_evolution.producers %q is invalid (want self or mesh)", s.Producers)
+	}
+	if strings.TrimSpace(s.Repo) == "" {
+		return fmt.Errorf("config: self_evolution.repo is required when self_evolution is enabled — point it at this node's OpenPanda checkout")
+	}
+	return nil
 }
 
 // SkillsConfig controls procedural memory and skills hub settings.
@@ -1298,6 +1335,9 @@ func (c *Config) Validate() error {
 	if err := c.Network.Trust.Validate(); err != nil {
 		return err
 	}
+	if err := c.SelfEvolution.Validate(); err != nil {
+		return err
+	}
 	for i, entry := range c.Network.AllowCleartextFor {
 		if err := validateCleartextScope(entry); err != nil {
 			return fmt.Errorf("config: network.allow_cleartext_for[%d] %q: %w", i, entry, err)
@@ -1798,6 +1838,14 @@ func (c *Config) HostStatePaths() []string {
 		}
 	}
 	return out
+}
+
+// SelfEvolutionDir resolves the self-evolution state root — patch-set queue,
+// merge worktree, archive — as a sibling of the database, matching the
+// node-state convention HostStatePaths enumerates. Always returned (even
+// while disabled) so status/doctor can name where state would live.
+func (c *Config) SelfEvolutionDir() string {
+	return filepath.Join(filepath.Dir(c.Storage.DBPath), "self")
 }
 
 // ScratchRoot returns where the node's runtime scratch (per-task dirs, plan

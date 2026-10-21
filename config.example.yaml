@@ -535,3 +535,27 @@ push:
 # ui:
 #   locale: "zh-CN"               # en | zh-CN | ja | es | de
 #   mouse: "select"               # select | scroll
+
+# ── Self-evolution (v0.2.x, opt-in, off by default) ──────────────────────
+# Lets this node merge signed patch sets produced by itself (or, later, mesh
+# peers) through the review queue: `panda self` mints/imports a set, it parks
+# as a review task, and `panda approve` runs the merge — worktree apply,
+# full `make gate`, build, staged swap through the SAME updater path an
+# official release takes. The release-signed binary stays beside the install
+# as panda.release; `panda self rollback` restores it.
+#
+# Requirements are developer-grade: go, git, make, python3, and a C toolchain
+# for the gate's CGO race leg. `panda self doctor` preflights the box.
+# self_evolution:
+#   enabled: false
+#   repo: ""                      # REQUIRED when enabled: this node's OpenPanda
+#                                 # checkout — the merge worktree is a detached
+#                                 # `git worktree add` under <data>/self/.
+#   producers: "self"             # self | mesh — whose signed patch sets a merge
+#                                 # proposal accepts. mesh reserves the phase-5
+#                                 # cross-node transfer; today only this node's
+#                                 # own key mints mergeable sets.
+#   rebase_on_update: true        # after an official update lands on a
+#                                 # self-built node, try rebasing queued sets
+#                                 # onto it; a conflict marks the set and the
+#                                 # node stays on the release binary.

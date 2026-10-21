@@ -14,6 +14,7 @@ import (
 
 	"github.com/Xustalis/OpenPanda/internal/bus"
 	"github.com/Xustalis/OpenPanda/internal/scheduler"
+	"github.com/Xustalis/OpenPanda/internal/self"
 	"github.com/Xustalis/OpenPanda/internal/storage"
 	"github.com/Xustalis/OpenPanda/internal/util"
 )
@@ -832,8 +833,26 @@ func (c *Core) CancelTree(ctx context.Context, taskID string) ([]string, error) 
 // handleCancel cascades it out of review, and an unreachable executor gets it
 // parked for its next hello.
 func (c *Core) RejectTree(ctx context.Context, taskID, reason string) error {
+	// A self-merge rejection retires the patch set with the task (design
+	// §4.2): without the archive the set would sit in the queue forever,
+	// proposable again as if the human had never said no.
+	var selfMergeID string
+	if c.selfMgr != nil {
+		if t, err := c.store.Get(ctx, taskID); err == nil {
+			if spec, ok := SelfMergeSpec(t.SpecJSON); ok {
+				selfMergeID = spec.PatchSet
+			}
+		}
+	}
 	if err := c.store.Reject(ctx, taskID, reason); err != nil {
 		return err
+	}
+	if selfMergeID != "" {
+		if err := c.selfMgr.Archive(selfMergeID, self.StateRejected); err != nil {
+			c.logger.Warn("self: rejected merge could not archive its patch set",
+				"set", selfMergeID, "err", err)
+		}
+		c.audit(ctx, taskID, "self:merge", selfMergeID, "rejected", reason)
 	}
 	c.forwardCancelDownstream(ctx, taskID, "", "rejected by delegator: "+reason)
 	return nil

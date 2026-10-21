@@ -42,6 +42,7 @@ import (
 	projectstore "github.com/Xustalis/OpenPanda/internal/projects"
 	"github.com/Xustalis/OpenPanda/internal/providers"
 	"github.com/Xustalis/OpenPanda/internal/reminders"
+	"github.com/Xustalis/OpenPanda/internal/self"
 	"github.com/Xustalis/OpenPanda/internal/skills"
 	"github.com/Xustalis/OpenPanda/internal/storage"
 )
@@ -1058,6 +1059,12 @@ func (e *Engine) initSchedulerLocked(cardPath string) error {
 	// that leaves tasks stranded when the process exits.
 	sched := core.NewCore(e.db, stableID, card, schedulerTier(e.cfg.Node.ResourceClass), e.logger, e.cfg.Model)
 	sched.SetDelegationLimits(e.cfg.Delegation)
+	// Self-evolution merge approvals may land on this engine (panda approve).
+	// oneShot=true: an engine process must never re-exec itself onto the fresh
+	// binary — the swap's install.RestartDaemon already bounces the service.
+	if e.cfg.SelfEvolution.Enabled {
+		sched.SetSelfEvolution(self.New(e.cfg.SelfEvolutionDir(), e.cfg.SelfEvolution.Repo, e.logger), true, e.cfg.SelfEvolution.Producers)
+	}
 	// Row ownership probe: the identity lock tells a borrowed engine (a CLI
 	// sharing the daemon's stable node id) from the row's owner. A live daemon
 	// holds the lock and heartbeats the row, so a borrowed engine's Shutdown
@@ -2987,6 +2994,12 @@ func (e *Engine) ResumeApproved(ctx context.Context, taskID, workDir string, cb 
 		return &Result{Kind: "task", TaskID: taskID, TaskState: core.StateReview, Stderr: core.ErrApprovalNeedsChangedInput.Error(), ExitCode: 1}
 	case core.ApprovalResumeExecution:
 		// Continue below and execute exactly once under the approval claim.
+	case core.ApprovalSelfMerge:
+		// A self-merge approval IS the pipeline (worktree apply, gate, build,
+		// swap) — no agent run, but it still needs the scheduler core, which
+		// carries the self-evolution manager and the idle/schema gates.
+		// Continue below like ResumeExecution; core.resumeApproved dispatches
+		// on the disposition.
 	default:
 		return &Result{Kind: "task", TaskID: taskID, TaskState: core.StateReview, Stderr: "unknown approval disposition", ExitCode: 1}
 	}

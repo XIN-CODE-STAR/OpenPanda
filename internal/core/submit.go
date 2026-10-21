@@ -720,6 +720,10 @@ func (c *Core) resumeApproved(ctx context.Context, taskID string, relayUpstream 
 	case ApprovalNeedsChangedInput:
 		return cur, bus.TaskResultPayload{TaskID: cur.TaskID, AttemptID: cur.AttemptID, State: cur.State},
 			fmt.Errorf("resume approved: %w", ErrApprovalNeedsChangedInput)
+	case ApprovalSelfMerge:
+		// A merge proposal's approval is the pipeline — worktree apply, gate,
+		// build, stage, swap — never an agent run.
+		return c.resumeSelfMerge(ctx, cur)
 	case ApprovalResumeExecution, ApprovalAdmissionReview:
 		// Continue below and claim the execution exactly once.
 	default:

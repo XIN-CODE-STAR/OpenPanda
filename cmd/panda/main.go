@@ -38,6 +38,7 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/reminders"
 	"github.com/Xustalis/OpenPanda/internal/scheduler"
 	"github.com/Xustalis/OpenPanda/internal/security"
+	"github.com/Xustalis/OpenPanda/internal/self"
 	"github.com/Xustalis/OpenPanda/internal/skills"
 	"github.com/Xustalis/OpenPanda/internal/storage"
 	"github.com/Xustalis/OpenPanda/internal/updater"
@@ -98,7 +99,7 @@ func subcommandNames() []string {
 		"reminder", "detect", "card", "init", "metrics", "heatmap", "audit", "session",
 		"sessions", "memory", "config", "model", "models", "agents", "project",
 		"auth", "rpc",
-		"read", "view", "cat", "md", "markdown", "version", "help", "completion",
+		"read", "view", "cat", "md", "markdown", "version", "help", "completion", "self",
 	}
 }
 
@@ -273,6 +274,23 @@ func runDaemon(args []string) {
 	// The self-tools MCP server spawned from .mcp.json inherits the daemon's
 	// --config choice; empty means its own default discovery.
 	coreNode.SetSelfConfigPath(*configPath)
+	// Self-evolution (opt-in): wire the patch-set manager so self-merge
+	// review approvals run the pipeline in this process. The daemon is NOT
+	// a one-shot — a merge apply re-execs it onto the new binary.
+	if cfg.SelfEvolution.Enabled {
+		coreNode.SetSelfEvolution(self.New(cfg.SelfEvolutionDir(), cfg.SelfEvolution.Repo, logger), false, cfg.SelfEvolution.Producers)
+	}
+	// Startup self-check (design §5): a self-built binary with no release
+	// fallback on disk has no signed escape hatch — say so loudly once per
+	// boot instead of letting the operator discover it mid-incident.
+	if versionpkg.ProvenanceClass() == versionpkg.ProvenanceSelf {
+		if fb := updater.ReleaseFallbackPath(); fb != "" {
+			if _, err := os.Stat(fb); err != nil {
+				logger.Warn("self-built binary with no release fallback",
+					"want", fb, "fix", "apply any official release once, or run `panda update`")
+			}
+		}
+	}
 	// Supervision (上级完成度判定): judge agent results against the task's
 	// success criteria and re-delegate work that isn't complete. A model-less
 	// node skips this — agent tasks finish in one shot as before.
@@ -571,6 +589,14 @@ func runDaemon(args []string) {
 		},
 	}))
 	updateNotice.StartAutoCheck(ctx, 6*time.Hour)
+
+	// Phase-4 coexistence (design §7 q3): after an official update landed and
+	// the daemon restarted onto it, carry queued patch sets forward onto the
+	// repo's new HEAD — a conflict marks the set and the release binary stays
+	// in charge. Runs once per boot; a no-op when nothing is queued.
+	if cfg.SelfEvolution.Enabled && cfg.SelfEvolution.RebaseOnUpdate {
+		guard.Go(logger, "self: rebase sweep", nil, func() { coreNode.SelfRebaseSweep(ctx) })
+	}
 
 	if err := coreNode.Register(ctx); err != nil {
 		fatal("register node", err)

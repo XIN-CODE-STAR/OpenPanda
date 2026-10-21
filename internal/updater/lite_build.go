@@ -8,3 +8,8 @@ package updater
 // ships them under a separate asset name (panda-<v>-lite-<os>-<arch>.tar.gz),
 // so self-update must not pull the full archive over a lite install.
 const liteBuild = true
+
+// LiteBuild reports whether this binary was compiled with -tags lite (the
+// reduced-footprint build). Self-evolution rebuilds use it to keep a lite
+// node lite.
+func LiteBuild() bool { return liteBuild }
