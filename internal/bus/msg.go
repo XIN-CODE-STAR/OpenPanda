@@ -101,6 +101,13 @@ const (
 	// field is absent, their pull never comes, sync simply never starts.
 	MsgDirPull = "dir_pull"
 	MsgDirRows = "dir_rows"
+	// MsgDialCheck/MsgDialCheckAck are the AutoNAT-style proof (cross-network
+	// mesh M2/P5): a node that wants to CLAIM rendezvous asks peers to dial
+	// its advertised address back. The ability is verified, not asserted —
+	// the claim rides the capability card only after an ack says the dial
+	// actually reached us.
+	MsgDialCheck    = "dial_check"
+	MsgDialCheckAck = "dial_check_ack"
 	// Bluetooth-style LAN pairing (pair_hello is the ONLY frame accepted on
 	// an unauthenticated connection besides hello — it runs an ephemeral
 	// X25519 exchange so the two operators can compare a short code and the

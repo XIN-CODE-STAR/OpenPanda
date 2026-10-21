@@ -208,6 +208,24 @@ type TransitPayload struct {
 	Inner []byte `json:"inner"` // sealed transitInner blob
 }
 
+// DialCheckPayload asks the receiver to try reaching this node once, so an
+// advertised rendezvous role is proven rather than claimed. Addr is the ws
+// endpoint to dial (host:port); UDP carries the datagram port for a future
+// STUN-bind probe. Nonce correlates the answer with the request.
+type DialCheckPayload struct {
+	Addr  string `json:"addr"`
+	UDP   int    `json:"udp,omitempty"`
+	Nonce string `json:"nonce"`
+}
+
+// DialCheckAckPayload reports what a dial_check actually achieved. Proto is
+// "ws" for the TCP probe (udp arrives with the datagram-plane variant).
+type DialCheckAckPayload struct {
+	Nonce string `json:"nonce"`
+	OK    bool   `json:"ok"`
+	Proto string `json:"proto,omitempty"`
+}
+
 // PunchWantPayload is the auto-punch request (M3): the sender asks the
 // receiver — the lexicographically-smaller, offerer-elected side — to send
 // it a punch_offer. TTL bounds relay hops the same way punch_offer's does.

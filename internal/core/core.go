@@ -1569,6 +1569,12 @@ func (c *Core) RunMonitor(ctx context.Context) {
 			if due {
 				c.rendezvousEval(ctx)
 			}
+			// M2/P5: keep the rendezvous claim honest — ask a few peers to
+			// dial us back, and let the answer decide whether the capability
+			// card keeps advertising the role.
+			if c.dialCheckDue() {
+				c.runDialCheck(ctx)
+			}
 			// §4.1: RTT samples land after the connect-time refresh, so the
 			// self row's link metrics need the periodic re-publish the tick
 			// provides; and any outbox entry whose peer reconnected between
@@ -2539,6 +2545,10 @@ func (c *Core) dispatch(ctx context.Context, conn *bus.Conn, env bus.Envelope) {
 		c.handleDTNBundle(ctx, env)
 	case bus.MsgTransit:
 		c.handleTransit(ctx, conn, env)
+	case bus.MsgDialCheck:
+		c.handleDialCheck(ctx, env)
+	case bus.MsgDialCheckAck:
+		c.handleDialCheckAck(ctx, env)
 	case bus.MsgDirPull:
 		c.handleDirPull(ctx, env)
 	case bus.MsgDirRows:
@@ -3250,11 +3260,10 @@ func (c *Core) summary() ledger.CapabilitySummary {
 		case "always":
 			// Operator assertion: the card's declaration rides unchanged.
 		default: // "auto"
-			// Claim the role only when a stranger could actually dial us.
-			// A LAN-only address serves the peers already on that segment,
-			// which is precisely not what a rendezvous point is for; the
-			// AutoNAT callback proof (P5) will tighten this further.
-			if r.Rendezvous && !c.hasPublicAddr() {
+			// The claim is evidence-based: peers confirmed they could dial us
+			// back (dial_check), or — before there is anyone to ask — a
+			// globally routable address, which is all a fresh node has.
+			if r.Rendezvous && !c.rendezvousClaimable() {
 				r.Rendezvous = false
 			}
 		}
@@ -3264,6 +3273,17 @@ func (c *Core) summary() ledger.CapabilitySummary {
 	}
 	s.Addrs = c.selfAddrs()
 	return s
+}
+
+// rendezvousClaimable is the auto-mode gate: a live callback proof wins; with
+// no peers to ask, a globally routable address stands in, because a node that
+// just started has no way to earn a proof yet and would otherwise never be
+// able to offer the role.
+func (c *Core) rendezvousClaimable() bool {
+	if c.rendezvousProofValid() {
+		return true
+	}
+	return c.hasPublicAddr() && len(c.livePeerIDs()) == 0
 }
 
 // hasPublicAddr reports whether any advertised dial candidate is globally

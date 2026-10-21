@@ -71,6 +71,9 @@ type pathState struct {
 	// edgeLoad caches each peer's heartbeat-advertised live edge count for
 	// rendezvous scoring — volatile by nature, so it stays in memory.
 	edgeLoad map[string]int
+	// dialProbeAt rate-limits dial_check probes per requesting peer: each one
+	// spends an outbound connection on an address that peer supplied.
+	dialProbeAt map[string]time.Time
 	// loaded marks the one-time read of the persisted nat_suspect state
 	// (settings key natStateSetting). It is lazy rather than wired into
 	// NewCore so embedders that never punch never touch the store.
@@ -185,6 +188,7 @@ func (p *pathState) init() {
 		p.natSuspect = make(map[string]time.Time)
 		p.wantAt = make(map[string]time.Time)
 		p.edgeLoad = make(map[string]int)
+		p.dialProbeAt = make(map[string]time.Time)
 	}
 }
 

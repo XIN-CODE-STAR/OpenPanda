@@ -469,6 +469,15 @@ degraded、outbox/DTN 兜底，不谎报可达性。
 3. **transit → outbox**：阶梯不改变既有的深层回退，只是让中继越来越少
    被需要。
 
+**会合能力是证明出来的（P5）**：节点宣告 `relay.rendezvous` 后，必须向
+≥2 个已认证邻居发 `dial_check{addr,udp,nonce}`，请对方真去拨自己的公网
+地址；对方拨通回 `dial_check_ack{nonce,ok}`。凑够 2 个**不同**对端的成功回执
+才算 proven（证明 30 分钟过期，12 分钟刷新一轮），期间能力卡上才写
+`rendezvous: true`。探测方的闸与可达性阶梯同源：只拨全局可路由地址，
+私网/回环/overlay 一律不拨，每对端每分钟至多一次——这是成员间的互助，
+不是扫描服务。`network.rendezvous: always` 可跳过证明（运维声明），
+`auto` 在没有邻居可问时退化为"有公网地址即可宣告"。
+
 静态 `punch:<id>` 配置路径不变：它是显式 SLA，自动级只是给没有配置
 的对端补上同样的机制；`punchAt`/`punchMaxSessions` 等预算两侧共享。
 

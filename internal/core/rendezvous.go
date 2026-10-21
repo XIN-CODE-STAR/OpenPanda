@@ -54,6 +54,12 @@ type rendezvousState struct {
 	peers    map[string]bool
 	degraded bool
 	lastEval time.Time
+	// provenBy holds the distinct peers that answered a dial_check, with the
+	// timestamp of their last successful callback; proven is the derived
+	// "enough of them, recently enough" verdict (dialcheck.go).
+	provenBy  map[string]time.Time
+	proven    bool
+	lastProof time.Time
 }
 
 // rendezvousCandidate is one scored row.
