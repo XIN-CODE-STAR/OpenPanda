@@ -93,7 +93,7 @@ func main() {
 func subcommandNames() []string {
 	return []string{
 		"daemon", "serve", "ask", "repl", "chat", "web", "voice",
-		"install", "uninstall", "update", "upgrade", "doctor", "status", "nodes", "pair", "queue",
+		"install", "uninstall", "update", "upgrade", "doctor", "status", "nodes", "pair", "join", "queue",
 		"task", "plan", "cancel", "approve", "reject", "logs", "skill", "mcp",
 		"reminder", "detect", "card", "init", "metrics", "heatmap", "audit", "session",
 		"sessions", "memory", "config", "model", "models", "agents", "project",

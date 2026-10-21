@@ -50,6 +50,8 @@ func dispatchSub(sub string, args []string) {
 		}
 	case "pair":
 		runPair(args)
+	case "join":
+		runJoin(args)
 	case "queue":
 		runQueue(args)
 	case "task":

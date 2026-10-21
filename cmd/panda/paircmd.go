@@ -335,8 +335,9 @@ func runNodesDisconnect(args []string) {
 func runNodesInvite(args []string) {
 	fs := flag.NewFlagSet("nodes invite", flag.ExitOnError)
 	configPath := fs.String("config", cliConfigPath, "path to config.yaml")
+	asURI := fs.Bool("uri", false, "print a panda://join URI instead of the three-step guide")
 	fs.Parse(reorderFlags(fs, args))
-	rejectExtraArgs(fs, "usage: panda nodes invite")
+	rejectExtraArgs(fs, "usage: panda nodes invite [--uri]")
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -355,7 +356,36 @@ func runNodesInvite(args []string) {
 		}
 		fmt.Println(i18n.T(i18n.Detect(), "cli.nodes.secret.gen"))
 	}
+	if *asURI {
+		printJoinURI(os.Stdout, *configPath, cfg)
+		return
+	}
 	printJoinGuide(i18n.Detect(), cfg)
+}
+
+// printJoinURI prints the one-line join form (cross-network mesh §2): the
+// contact address this node listens on plus its stable Ed25519 identity, so
+// the joiner can refuse a secret that does not come from THIS machine. The
+// shared secret is still never printed — the pairing ceremony carries it.
+func printJoinURI(w io.Writer, configPath string, cfg *config.Config) {
+	loc := i18n.Detect()
+	addr := cfg.Network.ListenAddr
+	if host, port, err := net.SplitHostPort(addr); err == nil && (host == "" || isLoopbackHost(host)) {
+		// A wildcard or loopback bind is not dialable from elsewhere; leave
+		// the host for the operator rather than printing an unusable URI.
+		addr = "<this-machine>:" + port
+	}
+	spec := &core.JoinSpec{Bootstraps: []string{addr}}
+	if db, _, err := panelStore(cfg); err == nil {
+		if pub, _, ok := core.LoadNodeKey(db); ok && len(pub) > 0 {
+			spec.Introducer = hex.EncodeToString(pub)
+		}
+		db.Close()
+	}
+	fmt.Fprintln(w, i18n.T(loc, "cli.nodes.invite.uri"))
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "  "+spec.URI())
+	fmt.Fprintln(w)
 }
 
 // runPair implements `panda pair` — Bluetooth-style LAN pairing:

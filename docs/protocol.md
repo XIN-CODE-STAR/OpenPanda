@@ -472,6 +472,29 @@ degraded、outbox/DTN 兜底，不谎报可达性。
 静态 `punch:<id>` 配置路径不变：它是显式 SLA，自动级只是给没有配置
 的对端补上同样的机制；`punchAt`/`punchMaxSessions` 等预算两侧共享。
 
+### `panda://join` 冷启动 URI（P4a）
+
+零信息 = 零发现，这是物理不是缺陷，所以入网只需要**一个可敲门的地址**：
+
+```
+panda://join?b=203.0.113.5:7836&b=node.example.com:7836&k=k:<pub>&c=482913
+```
+
+| 字段 | 语义 |
+|---|---|
+| `b` | 可重复的接触点地址（`host:port` 或 `ws(s)://`）。任意在线成员都可充当，无专用服务器；按序尝试直到一个应答。 |
+| `k` | 引入者的稳定 Ed25519 身份。`pair_ready` 回的 `pub` 不匹配则跳过该接触点——接触点可以是任何人，**引入者不能**。 |
+| `c` | 期望的配对码（SAS，`482913` 与 `482-913` 等价）。给出即自动比对，不匹配直接中止：这就是 MITM 判定，没有留给人眼跳过。 |
+
+流程复用既有配对仪式：拨 `b` → `pair_hello`/`pair_ready` → 两端显示同一
+SAS → 引入者人工确认 → `pair_secret` 带密封密钥回程 → 落地为
+`network.shared_secret` + 该 `b` 进 `peers`。URI 只加了两道**收密前**的闸
+（`k`/`c`），不改配对协议本身。`panda nodes invite --uri` 打印的本机 URI
+就是 `panda join` 解析的那一行（往返有单测）。
+
+跨 NAT 的接触点（`b` 与 joiner 双向不可达）需要 pair 帧走 transit 中继，
+属 P4b；在它落地前，`b` 必须是 joiner 能直拨的地址。
+
 ## LAN 发现 beacon 与配对
 
 发现面不在信封体系内，是独立的 UDP 广播（`internal/core/discovery.go`，

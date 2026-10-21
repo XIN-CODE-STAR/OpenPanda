@@ -548,9 +548,14 @@ func (e *PairRejected) Error() string { return "pairing refused: " + e.Reason }
 // key exchange and leaves the session waiting on the responder's human;
 // WaitSecret blocks until the sealed secret arrives or the answer is no.
 type PairClient struct {
-	conn      *bus.Conn
-	Session   string // initiator-minted session id
-	Code      string // SAS both screens must show
+	conn    *bus.Conn
+	Session string // initiator-minted session id
+	Code    string // SAS both screens must show
+	// PeerPub is the responder's Ed25519 identity (hex) from pair_ready.
+	// A join URI's k= field is checked against it before any secret moves —
+	// that check is what makes a bootstrap address a contact point rather
+	// than a trusted introducer.
+	PeerPub   string
 	dh        []byte
 	nonce     []byte
 	respNonce []byte
@@ -648,6 +653,7 @@ func DialPair(ctx context.Context, dialAddr, selfID, name, listenAddr string, pu
 	return &PairClient{
 		conn:      conn,
 		Session:   session,
+		PeerPub:   hex.EncodeToString(respPub),
 		Code:      pairSAS(initKey.PublicKey().Bytes(), respX, pub, respPub, nonce, respNonce, dh),
 		dh:        dh,
 		nonce:     nonce,
