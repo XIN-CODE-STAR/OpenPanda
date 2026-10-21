@@ -11,12 +11,14 @@
 
 | 检查 | 结果 |
 |---|---|
-| `make gate-all`（fmt / vet / staticcheck / govulncheck / build / adapter-test / test / race-focused / web-gate / TUI PTY） | 通过（见 §5 的逐项记录） |
+| `make gate-all` 非 race 腿（fmt / vet / staticcheck / govulncheck / build / adapter-test / test） | 通过 |
+| 竞态检测（core / commander / bus / storage / askengine / scheduler / panel） | 通过；无 `DATA RACE`（core 560s，panel 139s） |
+| Web 控制台（`make web-gate`：typecheck + 227 个单测 + 生产构建） | 通过 |
+| TUI 真实 PTY 契约（mouse + exit） | 通过 |
 | `govulncheck` | No vulnerabilities found |
 | 适配器契约（68 例） | 68 passed |
-| 竞态检测（core / commander / bus / storage / askengine / scheduler / panel） | 无 `DATA RACE` |
-| Web 控制台（typecheck + 单测 + 生产构建） | 通过 |
-| TUI 真实 PTY 契约 | 通过 |
+
+> 说明：首次 `make gate-all` 的 race 阶段与本机**另一个并发 Claude 会话**的同一套测试抢用固定端口（`bind: address already in use: 127.0.0.1:17947`、`:17837` bad handshake）。该套件退出后单独复跑 `make race-focused` 全绿；上述 race 结果是清场后的结果。
 
 ---
 
@@ -104,7 +106,7 @@ e2e-relay（本机第二实例，127.0.0.1:17846）
 
 ## 5. 发布检查清单
 
-- [x] `make gate-all` 通过（fmt / vet / staticcheck / govulncheck / build / adapter / test / race / web / TUI PTY）
+- [x] 门禁全部通过：fmt / vet / staticcheck / govulncheck / build / adapter / test / race（清场复跑）/ web（227 例）/ TUI PTY
 - [x] 真实双设备跨网与三节点多跳任务通过（含 3 MiB 输入哈希一致）
 - [x] CLI `panda version` → `v0.1.0 Constellation`
 - [x] 控制台侧车 API 与静态页面可访问
