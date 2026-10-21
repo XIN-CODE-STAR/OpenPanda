@@ -34,6 +34,10 @@ func selfTestRepo(t *testing.T) string {
 	run("init", "-q", "-b", "main")
 	run("config", "user.email", "test@panda")
 	run("config", "user.name", "test")
+	// Keep the bytes as written: the Windows runner's default autocrlf would
+	// rewrite the worktree file to CRLF, so the diff (and the patch applied
+	// from it) would carry CRLF where the fixture wrote LF.
+	run("config", "core.autocrlf", "false")
 	if err := os.WriteFile(filepath.Join(repo, "foo.txt"), []byte("v0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
