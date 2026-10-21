@@ -851,6 +851,11 @@ func (c *Core) RejectTree(ctx context.Context, taskID, reason string) error {
 		if err := c.selfMgr.Archive(selfMergeID, self.StateRejected); err != nil {
 			c.logger.Warn("self: rejected merge could not archive its patch set",
 				"set", selfMergeID, "err", err)
+			// Keep the rejection durable in place: a pending marker would let
+			// the set be proposed again as if the human never said no.
+			if merr := c.selfMgr.MarkRejected(selfMergeID); merr != nil {
+				c.logger.Warn("self: rejected merge could not be marked", "set", selfMergeID, "err", merr)
+			}
 		}
 		c.audit(ctx, taskID, "self:merge", selfMergeID, "rejected", reason)
 	}

@@ -5,6 +5,7 @@ package self
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -343,6 +344,44 @@ func TestRebaseOnto(t *testing.T) {
 	}
 	if err := m.RebaseOnto(ctx, "nope", newHead, pub, priv); err == nil {
 		t.Fatal("rebase of a missing set must error")
+	}
+}
+
+// TestWorktreeLockSerializes pins the cross-process guard: a second holder is
+// refused while the first is live, and the release makes it available again.
+func TestWorktreeLockSerializes(t *testing.T) {
+	ctx := context.Background()
+	m, _ := testManager(t)
+	release, err := m.AcquireWorktreeLock(ctx)
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	if _, err := m.AcquireWorktreeLock(ctx); !errors.Is(err, ErrWorktreeBusy) {
+		t.Fatalf("second acquire = %v, want ErrWorktreeBusy", err)
+	}
+	release()
+	release2, err := m.AcquireWorktreeLock(ctx)
+	if err != nil {
+		t.Fatalf("re-acquire after release: %v", err)
+	}
+	release2()
+}
+
+// TestRejectedMarkerBlocksApply pins the local fallback for a failed archive:
+// a rejected set stays in queue/ but can never apply or be proposed.
+func TestRejectedMarkerBlocksApply(t *testing.T) {
+	ctx := context.Background()
+	m, repo := testManager(t)
+	set := mintChange(t, m, repo, "rej.txt", "r\n", "reject me")
+	if err := m.MarkRejected(set.Manifest.ID); err != nil {
+		t.Fatalf("mark rejected: %v", err)
+	}
+	got, err := m.Get(set.Manifest.ID)
+	if err != nil || got.State != StateRejected {
+		t.Fatalf("state = %v err=%v, want rejected", got.State, err)
+	}
+	if err := m.Apply(ctx, set.Manifest.ID); err == nil {
+		t.Fatal("a rejected set must not apply")
 	}
 }
 

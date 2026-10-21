@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/config"
 	"github.com/Xustalis/OpenPanda/internal/ledger"
 	"github.com/Xustalis/OpenPanda/internal/self"
+	"github.com/Xustalis/OpenPanda/internal/updater"
 )
 
 // selfTestRepo makes a throwaway git checkout the self manager can worktree.
@@ -155,6 +157,117 @@ func TestProposeSelfMergeParksReview(t *testing.T) {
 	}
 	if err := c.store.Approve(ctx, task.TaskID); !errors.Is(err, ErrIllegal) {
 		t.Fatalf("bare store approve of a self-merge = %v, want ErrIllegal", err)
+	}
+}
+
+// fakeSelfUpdater records the stage/apply calls the merge pipeline makes.
+type fakeSelfUpdater struct {
+	stageVersion string
+	applied      bool
+}
+
+func (f *fakeSelfUpdater) StageLocal(_, version string) error { f.stageVersion = version; return nil }
+func (f *fakeSelfUpdater) Apply(context.Context) error        { f.applied = true; return nil }
+
+// TestSelfMergePipelineCompletesAndArchives exercises the approval pipeline
+// with the gate/build/swap seams stubbed: claim → apply → gate → stage →
+// archive → complete. It also pins the merge-time version allocation.
+func TestSelfMergePipelineCompletesAndArchives(t *testing.T) {
+	ctx := context.Background()
+	repo := selfTestRepo(t)
+	mgr := self.New(t.TempDir(), repo, testLogger())
+	c := newSelfTestCore(t, "merge-node", "mesh", mgr)
+	pub, priv, ok := c.nodeKeyPair()
+	if !ok {
+		t.Fatal("node key unavailable")
+	}
+	set := mintTestSet(t, mgr, pub, priv, "merge me")
+	task, err := c.ProposeSelfMerge(ctx, set.Manifest.ID)
+	if err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+
+	oldGuard, oldGate, oldStage, oldUpd, oldRestart := selfSwapGuard, selfRunGate, selfStageTree, selfNewUpdater, selfRestart
+	t.Cleanup(func() {
+		selfSwapGuard, selfRunGate, selfStageTree, selfNewUpdater, selfRestart = oldGuard, oldGate, oldStage, oldUpd, oldRestart
+	})
+	selfSwapGuard = func() error { return nil }
+	selfRunGate = func(context.Context, string) self.GateDigest {
+		return self.GateDigest{OK: true, Legs: []self.GateLeg{{Name: "stub", OK: true}}}
+	}
+	selfStageTree = func(*self.Manager, context.Context, string, string, string) error { return nil }
+	fake := &fakeSelfUpdater{}
+	selfNewUpdater = func(updater.Options) selfUpdater { return fake }
+	selfRestart = func(*slog.Logger, bool) {}
+
+	final, res, err := c.ResumeApproved(ctx, task.TaskID)
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if final.State != StateDone || !res.OK {
+		t.Fatalf("final state=%s res=%+v, want done", final.State, res)
+	}
+	if !fake.applied || fake.stageVersion != "0.0.12-preview+self.1" {
+		t.Fatalf("updater calls: applied=%v version=%q", fake.applied, fake.stageVersion)
+	}
+	got, err := mgr.Get(set.Manifest.ID)
+	if err != nil || got.State != self.StateMerged {
+		t.Fatalf("patch set state = %v err=%v, want merged", got.State, err)
+	}
+}
+
+// TestRejectSelfMergeArchivesSet pins the other half: a reject retires the
+// patch set so it cannot be proposed again.
+func TestRejectSelfMergeArchivesSet(t *testing.T) {
+	ctx := context.Background()
+	repo := selfTestRepo(t)
+	mgr := self.New(t.TempDir(), repo, testLogger())
+	c := newSelfTestCore(t, "reject-node", "mesh", mgr)
+	pub, priv, ok := c.nodeKeyPair()
+	if !ok {
+		t.Fatal("node key unavailable")
+	}
+	set := mintTestSet(t, mgr, pub, priv, "reject me")
+	task, err := c.ProposeSelfMerge(ctx, set.Manifest.ID)
+	if err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	if err := c.RejectTree(ctx, task.TaskID, "not this one"); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	got, err := mgr.Get(set.Manifest.ID)
+	if err != nil || got.State != self.StateRejected {
+		t.Fatalf("patch set state = %v err=%v, want rejected", got.State, err)
+	}
+}
+
+// TestProposeSelfMergeRefusesStaleBase pins the freshness gate: Apply resets
+// the worktree to the manifest's base, so approving a set after HEAD moved
+// would build the old tree plus the patch and swap it over newer commits.
+func TestProposeSelfMergeRefusesStaleBase(t *testing.T) {
+	ctx := context.Background()
+	repo := selfTestRepo(t)
+	mgr := self.New(t.TempDir(), repo, testLogger())
+	c := newSelfTestCore(t, "stale-node", "mesh", mgr)
+	pub, priv, ok := c.nodeKeyPair()
+	if !ok {
+		t.Fatal("node key unavailable")
+	}
+	set := mintTestSet(t, mgr, pub, priv, "stale change")
+
+	// Move the repo's HEAD forward without touching the worktree.
+	if err := os.WriteFile(filepath.Join(repo, "newer.txt"), []byte("new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-qm", "newer"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s (%v)", args, out, err)
+		}
+	}
+	if _, err := c.ProposeSelfMerge(ctx, set.Manifest.ID); err == nil {
+		t.Fatal("a set whose base is stale must not be proposable")
 	}
 }
 

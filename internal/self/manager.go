@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
@@ -72,6 +73,72 @@ func (m *Manager) Repo() string { return m.repo }
 // WorktreePath is where the merge worktree lives.
 func (m *Manager) WorktreePath() string { return filepath.Join(m.root, "worktree") }
 
+// LockPath is the cross-process worktree lock. It lives beside the worktree
+// so `panda self reset` removes it with the rest of the state.
+func (m *Manager) LockPath() string { return filepath.Join(m.root, "worktree.lock") }
+
+// mergeLockStale bounds how long a lock can go without a heartbeat before a
+// crashed holder is presumed dead. The holder refreshes the mtime every
+// mergeLockBeat while it works.
+const (
+	mergeLockStale = 5 * time.Minute
+	mergeLockBeat  = 30 * time.Second
+)
+
+// ErrWorktreeBusy reports that another process/goroutine holds the worktree
+// lock. Callers should skip rather than mark a patch set conflicted: the set
+// is fine, the worktree is merely occupied.
+var ErrWorktreeBusy = errors.New("self-evolution worktree is busy")
+
+// AcquireWorktreeLock serializes every operation that touches the merge
+// worktree — apply, rebase, mint and reset — across processes (the daemon and
+// a `panda approve`/`panda self` CLI share the same state root). It fails
+// rather than blocking: a busy worktree is an operator-visible condition.
+func (m *Manager) AcquireWorktreeLock(ctx context.Context) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(m.root, 0o755); err != nil {
+		return nil, err
+	}
+	path := m.LockPath()
+	for attempt := 0; attempt < 2; attempt++ {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err == nil {
+			fmt.Fprintf(f, "%d %d\n", os.Getpid(), time.Now().Unix())
+			f.Close()
+			stop := make(chan struct{})
+			go func() {
+				t := time.NewTicker(mergeLockBeat)
+				defer t.Stop()
+				for {
+					select {
+					case <-stop:
+						return
+					case now := <-t.C:
+						_ = os.Chtimes(path, now, now)
+					}
+				}
+			}()
+			return func() {
+				close(stop)
+				_ = os.Remove(path)
+			}, nil
+		}
+		if !os.IsExist(err) {
+			return nil, err
+		}
+		st, serr := os.Stat(path)
+		if serr == nil && time.Since(st.ModTime()) > mergeLockStale {
+			// A crashed holder's lock: the heartbeat stopped.
+			_ = os.Remove(path)
+			continue
+		}
+		return nil, fmt.Errorf("%w (%s) — another merge/rebase is running", ErrWorktreeBusy, path)
+	}
+	return nil, fmt.Errorf("%w (%s) — another merge/rebase is running", ErrWorktreeBusy, path)
+}
+
 func (m *Manager) queueDir() string   { return filepath.Join(m.root, "queue") }
 func (m *Manager) archiveDir() string { return filepath.Join(m.root, "archive") }
 
@@ -116,10 +183,14 @@ func (m *Manager) Queue() ([]Set, error) {
 			}
 			st := top.state
 			if st == "" {
+				// archive/: the marker decides the terminal state.
 				st = markerState(dir)
-			}
-			if st == "" {
-				st = StateMerged
+				if st == "" {
+					st = StateMerged
+				}
+			} else if m := markerState(dir); m != "" {
+				// queue/: a conflicted or rejected marker overrides pending.
+				st = m
 			}
 			crit, hits := criticalOrFailClosed(dir, mf.Files)
 			out = append(out, Set{Manifest: mf, Dir: dir, State: st, Critical: crit, CriticalPaths: hits})
@@ -155,8 +226,8 @@ func (m *Manager) Get(id string) (Set, error) {
 				if st = markerState(dir); st == "" {
 					st = StateMerged
 				}
-			} else if markerState(dir) == StateConflicted {
-				st = StateConflicted
+			} else if m := markerState(dir); m != "" {
+				st = m
 			}
 			crit, hits := criticalOrFailClosed(dir, mf.Files)
 			return Set{Manifest: mf, Dir: dir, State: st, Critical: crit, CriticalPaths: hits}, nil
@@ -190,6 +261,15 @@ func (m *Manager) Import(src string) (Set, error) {
 // Mint assembles a patch set from the worktree's diff against baseRef, signs
 // it with the node key, and queues it — the producing half of the pipeline.
 func (m *Manager) Mint(ctx context.Context, baseRef, title, version string, pub ed25519.PublicKey, priv ed25519.PrivateKey, gate GateDigest) (Set, error) {
+	release, err := m.AcquireWorktreeLock(ctx)
+	if err != nil {
+		return Set{}, err
+	}
+	defer release()
+	return m.mintLocked(ctx, baseRef, title, version, pub, priv, gate)
+}
+
+func (m *Manager) mintLocked(ctx context.Context, baseRef, title, version string, pub ed25519.PublicKey, priv ed25519.PrivateKey, gate GateDigest) (Set, error) {
 	if err := m.EnsureWorktree(ctx); err != nil {
 		return Set{}, err
 	}
@@ -274,11 +354,23 @@ func (m *Manager) Archive(id string, state SetState) error {
 // visible in the queue (the operator decides: rebase it, or reject it to the
 // archive) but can never be proposed for merge while marked.
 func (m *Manager) MarkConflicted(id string) error {
+	return m.MarkState(id, StateConflicted)
+}
+
+// MarkRejected retires a queued set in place. It is the fallback when moving
+// the directory into archive/ fails: without a marker the rejected set would
+// stay proposable, as if the human had never said no.
+func (m *Manager) MarkRejected(id string) error {
+	return m.MarkState(id, StateRejected)
+}
+
+// MarkState writes the one-word state marker a queued set carries.
+func (m *Manager) MarkState(id string, state SetState) error {
 	dir := filepath.Join(m.queueDir(), id)
 	if _, err := os.Stat(dir); err != nil {
 		return fmt.Errorf("no queued patch set %q", id)
 	}
-	return os.WriteFile(filepath.Join(dir, ".state"), []byte(StateConflicted), 0o644)
+	return os.WriteFile(filepath.Join(dir, ".state"), []byte(state), 0o644)
 }
 
 // ClearConflicted lifts the marker after a successful rebase — a set that
@@ -317,6 +409,18 @@ func (m *Manager) EnsureWorktree(ctx context.Context) error {
 // The worktree is reset hard to the manifest's base first: each set lands on
 // a clean, declared foundation, never on top of a previous set's leftovers.
 func (m *Manager) Apply(ctx context.Context, id string) error {
+	release, err := m.AcquireWorktreeLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return m.ApplyLocked(ctx, id)
+}
+
+// ApplyLocked is Apply for a caller that already holds the worktree lock —
+// the merge pipeline holds it across apply→gate→build→swap, so its Apply
+// must not deadlock on a second acquisition.
+func (m *Manager) ApplyLocked(ctx context.Context, id string) error {
 	set, err := m.Get(id)
 	if err != nil {
 		return err
@@ -351,6 +455,15 @@ func (m *Manager) Apply(ctx context.Context, id string) error {
 // the rebased set with its own key and notes the origin in the title. This
 // node's approval gate then sees exactly one signer to judge: the re-baser.
 func (m *Manager) RebaseOnto(ctx context.Context, id, newBase string, pub ed25519.PublicKey, priv ed25519.PrivateKey) error {
+	release, err := m.AcquireWorktreeLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return m.rebaseOntoLocked(ctx, id, newBase, pub, priv)
+}
+
+func (m *Manager) rebaseOntoLocked(ctx context.Context, id, newBase string, pub ed25519.PublicKey, priv ed25519.PrivateKey) error {
 	set, err := m.Get(id)
 	if err != nil {
 		return err
@@ -418,6 +531,11 @@ func (m *Manager) RebaseOnto(ctx context.Context, id, newBase string, pub ed2551
 // Reset removes the worktree and (optionally) every queued/archived set —
 // the `panda self reset` escape hatch back to "no self-evolution state".
 func (m *Manager) Reset(ctx context.Context, purgeQueue bool) error {
+	release, err := m.AcquireWorktreeLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	wt := m.WorktreePath()
 	if _, err := os.Stat(wt); err == nil {
 		if m.repo != "" {

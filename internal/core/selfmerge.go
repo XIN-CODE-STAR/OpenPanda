@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -66,6 +67,70 @@ func (c *Core) SelfManager() *self.Manager { return c.selfMgr }
 // a node that never opted into self-evolution.
 var ErrSelfMergeDisabled = fmt.Errorf("self_evolution is not enabled on this node")
 
+// Pipeline seams: the release gate and the build/swap step are slow and
+// environment-dependent, so tests replace them to exercise the rest of the
+// approval pipeline (claim → apply → gate → stage → archive → complete).
+var (
+	selfRunGate   = self.RunGate
+	selfStageTree = func(m *self.Manager, ctx context.Context, wt, stage, version string) error {
+		return m.StageTree(ctx, wt, stage, version)
+	}
+	selfNewUpdater = func(opts updater.Options) selfUpdater { return updater.New(opts) }
+	selfRestart    = updater.RestartAfterSwap
+)
+
+// selfUpdater is the slice of updater.Manager the merge pipeline uses.
+type selfUpdater interface {
+	StageLocal(root, version string) error
+	Apply(ctx context.Context) error
+}
+
+// selfBaseCurrent refuses to propose/merge a set whose recorded base is no
+// longer the repo HEAD. Apply resets the worktree to that base, so a stale
+// set would build the old tree plus the patch and swap it over newer commits
+// — a silent rollback. The boot-time rebase sweep is not sufficient: HEAD can
+// move while the daemon is up, and the sweep is optional.
+func (c *Core) selfBaseCurrent(ctx context.Context, set self.Set) error {
+	repo := c.selfMgr.Repo()
+	if repo == "" {
+		return nil // config validation requires it when enabled; tests may omit
+	}
+	head, err := self.GitHead(ctx, repo)
+	if err != nil {
+		return fmt.Errorf("resolve repo HEAD: %w", err)
+	}
+	if !self.SameRef(ctx, repo, set.Manifest.Base, head) {
+		return fmt.Errorf("patch set %s targets base %s but the repo is at %s — rebase it first: panda self rebase %s %s",
+			set.Manifest.ID, shortSHA(set.Manifest.Base), shortSHA(head), set.Manifest.ID, head)
+	}
+	return nil
+}
+
+func shortSHA(s string) string {
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
+}
+
+// selfVersionBase strips build metadata so NextVersion can count from the
+// release line rather than from a stamp a previous proposal already claimed.
+func selfVersionBase(v string) string {
+	if i := strings.Index(v, "+"); i >= 0 {
+		v = v[:i]
+	}
+	if v == "" {
+		v = version.Version
+		if i := strings.Index(v, "+"); i >= 0 {
+			v = v[:i]
+		}
+	}
+	if v == "" {
+		v = "0.0.0"
+	}
+	return v
+}
+
 // ProposeSelfMerge turns a queued patch set into a review-gated merge task
 // (design §4.2): a human approve runs the pipeline, a reject archives the
 // set. The proposal carries the manifest's recomputed critical flag so the
@@ -86,6 +151,9 @@ func (c *Core) ProposeSelfMerge(ctx context.Context, patchSetID string) (Task, e
 	if !c.producerTrusted(set.Manifest.Producer) {
 		return Task{}, fmt.Errorf("patch set %s is signed by %s, which self_evolution.producers=%q does not admit on this node",
 			patchSetID, set.Manifest.Producer, c.producersMode())
+	}
+	if err := c.selfBaseCurrent(ctx, set); err != nil {
+		return Task{}, err
 	}
 	spec := selfMergeSpec{
 		Kind:     specKindSelfMerge,
@@ -185,17 +253,29 @@ func (c *Core) resumeSelfMerge(ctx context.Context, cur Task) (Task, bus.TaskRes
 		return fail(fmt.Errorf("patch set %s is signed by %s, which self_evolution.producers=%q does not admit",
 			spec.PatchSet, set.Manifest.Producer, c.producersMode()))
 	}
+	if err := c.selfBaseCurrent(ctx, set); err != nil {
+		return fail(err)
+	}
 	// Re-derive the critical flag from the patches on disk — the manifest's
 	// claim was advisory; the merge decision keys on what is actually there.
 	if set.Critical && !spec.Critical {
 		return fail(fmt.Errorf("patch set now touches critical paths (%s) — re-mint and re-review it", strings.Join(set.CriticalPaths, ", ")))
 	}
-	if err := c.selfMgr.Apply(ctx, spec.PatchSet); err != nil {
+	// One merge at a time, across processes: two approved sets share the
+	// same worktree, and applying/gating one under the other resets files
+	// mid-build. The lock is held through swap; a crashed holder is cleared
+	// by its heartbeat without marking any set conflicted.
+	release, lerr := c.selfMgr.AcquireWorktreeLock(ctx)
+	if lerr != nil {
+		return fail(lerr)
+	}
+	defer release()
+	if err := c.selfMgr.ApplyLocked(ctx, spec.PatchSet); err != nil {
 		_ = c.selfMgr.MarkConflicted(spec.PatchSet)
 		return fail(fmt.Errorf("apply patches: %w", err))
 	}
 	wt := c.selfMgr.WorktreePath()
-	gate := self.RunGate(ctx, wt)
+	gate := selfRunGate(ctx, wt)
 	if !gate.OK {
 		_ = c.selfMgr.MarkConflicted(spec.PatchSet)
 		last := ""
@@ -204,40 +284,54 @@ func (c *Core) resumeSelfMerge(ctx context.Context, cur Task) (Task, bus.TaskRes
 		}
 		return fail(fmt.Errorf("release gate failed in merge worktree: %s", last))
 	}
+	// The manifest's version was a target chosen at mint time; two queued
+	// sets can carry the same stamp. Allocate the next free +self.N here,
+	// under the worktree lock, so the swapped binary's provenance is unique.
+	targetVersion := c.selfMgr.NextVersion(selfVersionBase(spec.Version))
 	stage, err := os.MkdirTemp("", "openpanda-selfbuild-")
 	if err != nil {
 		return fail(err)
 	}
 	defer os.RemoveAll(stage)
-	if err := c.selfMgr.StageTree(ctx, wt, stage, spec.Version); err != nil {
+	if err := selfStageTree(c.selfMgr, ctx, wt, stage, targetVersion); err != nil {
 		return fail(err)
 	}
-	upd := updater.New(updater.Options{
+	upd := selfNewUpdater(updater.Options{
 		Current:     version.Version,
 		Logger:      c.logger,
-		NoRestart:   c.selfOneShot,
+		NoRestart:   true, // the pipeline restarts only after bookkeeping
 		Idle:        func(ctx context.Context) bool { return c.idleExcept(ctx, cur.TaskID) },
 		SchemaFloor: c.schemaFloor,
+		// A service bounce inside applyRelease would kill this process before
+		// Archive/Complete ran; defer it until the review row is settled.
+		SkipDaemonRestart: true,
 	})
-	if err := upd.StageLocal(stage, spec.Version); err != nil {
+	if err := upd.StageLocal(stage, targetVersion); err != nil {
 		return fail(fmt.Errorf("stage build: %w", err))
 	}
+	swapped := false
+	defer func() {
+		if swapped {
+			selfRestart(c.logger, c.selfOneShot)
+		}
+	}()
 	if err := upd.Apply(ctx); err != nil {
 		return fail(fmt.Errorf("apply build: %w", err))
 	}
+	swapped = true
 	if err := c.selfMgr.Archive(spec.PatchSet, self.StateMerged); err != nil {
 		c.logger.Warn("self: merge applied but archive failed", "set", spec.PatchSet, "err", err)
 	}
 	res := bus.TaskResultPayload{
 		OK: true, TaskID: cur.TaskID, State: StateDone,
 		Stdout: fmt.Sprintf("merged %s → %s; release gate green (%d legs), binary swapped",
-			spec.PatchSet, spec.Version, len(gate.Legs)),
+			spec.PatchSet, targetVersion, len(gate.Legs)),
 	}
 	if err := c.store.Complete(ctx, cur.TaskID, c.nodeID, res); err != nil {
 		return fail(fmt.Errorf("mark merged: %w", err))
 	}
 	c.audit(ctx, cur.TaskID, "self:merge", spec.PatchSet, "applied",
-		fmt.Sprintf("ver=%s critical=%v", spec.Version, spec.Critical))
+		fmt.Sprintf("ver=%s (manifest %s) critical=%v", targetVersion, spec.Version, spec.Critical))
 	final, gerr := c.store.Get(ctx, cur.TaskID)
 	return final, res, gerr
 }
@@ -332,6 +426,10 @@ func (c *Core) SelfRebaseSweep(ctx context.Context) {
 			return
 		}
 		if err := c.selfMgr.RebaseOnto(ctx, s.Manifest.ID, head, pub, priv); err != nil {
+			if errors.Is(err, self.ErrWorktreeBusy) {
+				c.logger.Info("self: rebase sweep skipped — worktree busy", "set", s.Manifest.ID)
+				return
+			}
 			c.logger.Warn("self: rebase onto new base failed — set marked conflicted",
 				"set", s.Manifest.ID, "base", head, "err", err)
 			_ = c.selfMgr.MarkConflicted(s.Manifest.ID)

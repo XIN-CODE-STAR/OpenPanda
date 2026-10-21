@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -74,7 +75,10 @@ func applyRelease(ctx context.Context, m *Manager, s *stagedRelease) error {
 	// the node kernel, not just for this console process. Apply gated on the
 	// shared store being idle, so the bounce cannot interrupt in-flight work.
 	// Best-effort — a hand-run daemon or an unregistered service is normal.
-	install.RestartDaemon()
+	// A caller that must finish bookkeeping first (self-evolution) defers it.
+	if !m.opts.SkipDaemonRestart {
+		install.RestartDaemon()
+	}
 
 	// Restart on a slight delay so the HTTP apply response can flush before
 	// the process image is replaced. If NoRestart is requested (CLI one-shot),
@@ -83,6 +87,26 @@ func applyRelease(ctx context.Context, m *Manager, s *stagedRelease) error {
 		guard.Go(m.opts.Logger, "updater: delayed restart", nil, func() { delayedRestart(m) })
 	}
 	return nil
+}
+
+// RestartAfterSwap bounces the daemon after a swap whose caller deferred the
+// restart to finish its own bookkeeping. A one-shot CLI must not re-exec
+// itself; the service bounce is still the daemon's path back to the new
+// image. A hand-run daemon falls through to the delayed self-exec.
+func RestartAfterSwap(logger *slog.Logger, oneShot bool) {
+	install.RestartDaemon()
+	if oneShot {
+		return
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	guard.Go(logger, "updater: delayed restart", nil, func() {
+		time.Sleep(300 * time.Millisecond)
+		if err := restartSelf(); err != nil {
+			logger.Error("update: restart failed", "err", err)
+		}
+	})
 }
 
 // runningBinary returns the executable path, resolved through symlinks, so the
