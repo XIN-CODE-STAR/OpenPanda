@@ -445,6 +445,23 @@ func (c *Core) claimForRun(ctx context.Context, taskID, intent string, plan *com
 		unlock()
 		return Task{}, nil, fmt.Errorf("load task: %w", err)
 	}
+	// A row that is queued but owned by this node is a claim whose runner is
+	// still alive: task recovery's dispatched → queued branch moved it back
+	// underneath us (Recover runs at startup, and the scheduler's first pass
+	// can claim a row before recovery has finished). The claim is still ours
+	// — the scheduler's resource-key registry holds the task's keys for the
+	// run's duration, so no other runner can take it — so restore the state
+	// the run expects rather than refusing the row ("cannot run task in state
+	// queued") and losing the task.
+	if task.State == StateQueued {
+		if rerr := c.store.ReclaimClaimed(ctx, taskID, c.nodeID); rerr == nil {
+			if fresh, gerr := c.store.Get(ctx, taskID); gerr == nil {
+				task = fresh
+			}
+		} else {
+			c.logger.Warn("queue: reclaim claimed task", "task", taskID, "err", rerr)
+		}
+	}
 	// §7.2: an actuator plan's argv is a template — fill {intent}/{action}/
 	// {param:<name>} from the task's action_spec before anything runs. A
 	// substitution failure means the spec and the card disagree, which no

@@ -13,6 +13,7 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"os/signal"
@@ -520,26 +521,9 @@ func runDaemon(args []string) {
 		}
 	})
 
-	// Task recovery FIRST: it normalizes the rows the previous process left
-	// behind (running → resumed/failed, dispatched → queued, submitted →
-	// queued). The queue scheduler must not be running yet: its first pass
-	// claims queued rows (queued → dispatched) and hands them to a runner,
-	// and Recover's dispatched → queued branch would then move that very row
-	// back under the runner, which refuses it ("cannot run task in state
-	// queued") and the task is lost. Recovering before the scheduler starts
-	// means every row it touches is still untouched by this process.
-	if n, err := coreNode.Recover(ctx); err != nil {
-		logger.Warn("task recovery failed", "err", err)
-	} else if n > 0 {
-		logger.Info("recovered tasks from previous run", "count", n)
-	}
-
-	// Queue scheduler (panel queue redesign): adopt queued-and-scheduled tasks
-	// in policy order (drag seq → priority → FIFO) when resources allow. Runs
-	// alongside the daemon so enqueued tasks execute even without the panel.
-	// StartQueueScheduler spawns its loop internally; a panic there still
-	// crashes the process (internal/core is not wrapped here by design).
-	coreNode.StartQueueScheduler(ctx)
+	// Task recovery FIRST, then the queue scheduler: the order is
+	// load-bearing (see recoverThenStartQueue).
+	recoverThenStartQueue(ctx, logger, coreNode)
 
 	// Dreaming (design §17.3): consolidate the daily logs into long-term memory
 	// in the background — only while the node is idle, at most once per day.
@@ -815,6 +799,37 @@ func fatal(step string, err error) {
 		failJSON(1, step, err.Error())
 	}
 	failf(1, "panda: %s: %v\n", step, err)
+}
+
+// recoverThenStartQueue runs the daemon's two queue-related startup steps in
+// the one order that keeps a recovered task alive.
+//
+// Task recovery normalizes the rows the previous process left behind (running
+// → resumed/failed, dispatched → queued, submitted → queued). The queue
+// scheduler then adopts queued work in policy order (drag seq → priority →
+// FIFO) and hands each claim to a runner.
+//
+// The order is load-bearing. The scheduler's first pass claims a queued row
+// (queued → dispatched) and hands it to a runner; if recovery ran afterwards,
+// its dispatched → queued branch would move that very row back under the
+// runner. The runner used to refuse a row that is not in a runnable state
+// ("cannot run task in state queued") and the task died as failed — which is
+// exactly the task recovery exists to save.
+//
+// Two things prevent that now. This order is the first: recovering before
+// the scheduler starts means every row recovery touches is still untouched by
+// this process. And the runner reclaims its own claim if recovery lands
+// inside the claim→run window anyway (internal/core's ReclaimClaimed), so
+// the invariant holds even if the two steps are reordered.
+func recoverThenStartQueue(ctx context.Context, logger *slog.Logger, c *core.Core) {
+	if n, err := c.Recover(ctx); err != nil {
+		logger.Warn("task recovery failed", "err", err)
+	} else if n > 0 {
+		logger.Info("recovered tasks from previous run", "count", n)
+	}
+	// StartQueueScheduler spawns its loop internally; a panic there still
+	// crashes the process (internal/core is not wrapped here by design).
+	c.StartQueueScheduler(ctx)
 }
 
 // fatalMsg is fatal for a rejected argument rather than a failed operation:
