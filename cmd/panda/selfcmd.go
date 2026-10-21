@@ -15,6 +15,7 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/cliui"
 	"github.com/Xustalis/OpenPanda/internal/config"
 	"github.com/Xustalis/OpenPanda/internal/core"
+	"github.com/Xustalis/OpenPanda/internal/i18n"
 	"github.com/Xustalis/OpenPanda/internal/ledger"
 	"github.com/Xustalis/OpenPanda/internal/security"
 	"github.com/Xustalis/OpenPanda/internal/self"
@@ -23,13 +24,14 @@ import (
 )
 
 // runSelf implements `panda self <verb>` — the self-evolution pipeline's
-// operator surface (design doc docs/plans/design-self-evolution.md). All verbs are local:
-// the queue, worktree and archive live under <data>/self/, and the only
-// mutation with cross-process effect is `propose`, which parks a review task
-// on the shared store for `panda approve` / the console to settle.
+// operator surface (design doc docs/plans/design-self-evolution.md). All
+// verbs are local: the queue, worktree and archive live under <data>/self/,
+// and the only mutation with cross-process effect is `propose`, which parks
+// a review task on the shared store for `panda approve` / the console.
 func runSelf(args []string) {
+	loc := i18n.Detect()
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: panda self <status|queue|doctor|mint|propose|rebase|rollback|reset> [args]")
+		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.self.usage"))
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -50,8 +52,8 @@ func runSelf(args []string) {
 	case "reset":
 		runSelfReset(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "panda self: unknown verb %q\n", args[0])
-		fmt.Fprintln(os.Stderr, "usage: panda self <status|queue|doctor|mint|propose|rebase|rollback|reset>")
+		fmt.Fprintf(os.Stderr, i18n.T(loc, "cli.self.unknown")+"\n", args[0])
+		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.self.usage"))
 		os.Exit(2)
 	}
 }
@@ -81,32 +83,33 @@ func runSelfStatus(args []string) {
 	if err != nil {
 		fatal("load config", err)
 	}
+	loc := i18n.Detect()
 	p := pal()
 	mgr := selfManager(cfg, false)
-	fmt.Println(p.Bold("self-evolution"))
-	fmt.Printf("  enabled:    %v\n", cfg.SelfEvolution.Enabled)
-	fmt.Printf("  provenance: %s\n", versionpkg.ProvenanceClass())
-	fmt.Printf("  state dir:  %s\n", mgr.Root())
-	fmt.Printf("  repo:       %s\n", orDash(cfg.SelfEvolution.Repo))
+	fmt.Println(p.Bold(i18n.T(loc, "cli.self.status.title")))
+	fmt.Printf("  %-12s %v\n", i18n.T(loc, "cli.self.status.enabled")+":", cfg.SelfEvolution.Enabled)
+	fmt.Printf("  %-12s %s\n", i18n.T(loc, "cli.self.status.provenance")+":", versionpkg.ProvenanceClass())
+	fmt.Printf("  %-12s %s\n", i18n.T(loc, "cli.self.status.statedir")+":", mgr.Root())
+	fmt.Printf("  %-12s %s\n", i18n.T(loc, "cli.self.status.repo")+":", orDash(cfg.SelfEvolution.Repo))
 	if fb := updater.ReleaseFallbackPath(); fb != "" {
-		mark := "present"
+		mark := i18n.T(loc, "cli.self.status.present")
 		if _, err := os.Stat(fb); err != nil {
-			mark = "MISSING — the first release-channel update creates it"
+			mark = i18n.T(loc, "cli.self.status.missing")
 		}
-		fmt.Printf("  rollback:   %s (%s)\n", fb, mark)
+		fmt.Printf("  %-12s %s (%s)\n", i18n.T(loc, "cli.self.status.rollback")+":", fb, mark)
 	}
 	if _, err := os.Stat(filepath.Join(mgr.WorktreePath(), ".git")); err == nil {
-		fmt.Printf("  worktree:   %s\n", mgr.WorktreePath())
+		fmt.Printf("  %-12s %s\n", i18n.T(loc, "cli.self.status.worktree")+":", mgr.WorktreePath())
 	}
 	sets, err := mgr.Queue()
 	if err != nil {
 		fatal("read queue", err)
 	}
 	if len(sets) == 0 {
-		fmt.Println("  queue:      empty")
+		fmt.Printf("  %-12s %s\n", i18n.T(loc, "cli.self.status.queue")+":", i18n.T(loc, "cli.self.status.empty"))
 		return
 	}
-	fmt.Println("  queue:")
+	fmt.Printf("  %s:\n", i18n.T(loc, "cli.self.status.queue"))
 	for _, s := range sets {
 		printSetLine(p, s)
 	}
@@ -127,7 +130,7 @@ func runSelfQueue(args []string) {
 	}
 	p := pal()
 	if len(sets) == 0 {
-		fmt.Println(p.Muted("no patch sets"))
+		fmt.Println(p.Muted(i18n.T(i18n.Detect(), "cli.self.queue.empty")))
 		return
 	}
 	for _, s := range sets {
@@ -138,7 +141,7 @@ func runSelfQueue(args []string) {
 func printSetLine(p cliui.Palette, s self.Set) {
 	crit := ""
 	if s.Critical {
-		crit = " " + p.Warn("[critical]")
+		crit = " " + p.Warn(i18n.T(i18n.Detect(), "cli.self.mint.critical"))
 	}
 	fmt.Printf("  %-22s %-10s %-26s %s%s\n", s.Manifest.ID, s.State, s.Manifest.Version, s.Manifest.Title, crit)
 }
@@ -154,6 +157,7 @@ func runSelfDoctor(args []string) {
 	mgr := selfManager(cfg, false)
 	checks := mgr.Doctor(context.Background())
 	p := pal()
+	loc := i18n.Detect()
 	bad := 0
 	for _, c := range checks {
 		mark := p.MarkOK()
@@ -168,7 +172,7 @@ func runSelfDoctor(args []string) {
 		fmt.Println(line)
 	}
 	if bad > 0 {
-		fmt.Println(p.Warn(fmt.Sprintf("%d check(s) missing — the merge gate cannot run here yet", bad)))
+		fmt.Println(p.Warn(fmt.Sprintf(i18n.T(loc, "cli.self.doctor.missing"), bad)))
 		os.Exit(1)
 	}
 }
@@ -186,8 +190,9 @@ func runSelfMint(args []string) {
 	if err != nil {
 		fatal("load config", err)
 	}
+	loc := i18n.Detect()
 	if strings.TrimSpace(*title) == "" {
-		fatal("mint", fmt.Errorf("--title is required — the review gate shows it"))
+		fatal("mint", fmt.Errorf("%s", i18n.T(loc, "cli.self.mint.title")))
 	}
 	mgr := selfManager(cfg, true)
 	db, _, err := panelStore(cfg)
@@ -204,16 +209,21 @@ func runSelfMint(args []string) {
 	if err != nil {
 		fatal("mint", err)
 	}
-	fmt.Printf("queued %s → %s%s\n", set.Manifest.ID, set.Manifest.Version, critNote(set))
-	fmt.Println(pal().Muted("review with: panda self propose " + set.Manifest.ID))
+	note := ""
+	if set.Critical {
+		note = i18n.T(loc, "cli.self.mint.critical")
+	}
+	fmt.Printf(i18n.T(loc, "cli.self.mint.queued")+"\n", set.Manifest.ID, set.Manifest.Version, note)
+	fmt.Println(pal().Muted(fmt.Sprintf(i18n.T(loc, "cli.self.mint.hint"), set.Manifest.ID)))
 }
 
 func runSelfPropose(args []string) {
 	fs, configPath := selfFlags("propose")
 	fs.Parse(reorderFlags(fs, args))
 	id := strings.TrimSpace(strings.Join(fs.Args(), " "))
+	loc := i18n.Detect()
 	if id == "" {
-		fmt.Fprintln(os.Stderr, "usage: panda self propose <patchset-id|dir>")
+		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.self.propose.usage"))
 		os.Exit(2)
 	}
 	cfg, err := config.Load(*configPath)
@@ -228,7 +238,7 @@ func runSelfPropose(args []string) {
 		if err != nil {
 			fatal("import patch set", err)
 		}
-		fmt.Println(pal().Muted("imported " + set.Manifest.ID))
+		fmt.Println(pal().Muted(fmt.Sprintf(i18n.T(loc, "cli.self.propose.imported"), set.Manifest.ID)))
 		id = set.Manifest.ID
 	}
 	db, _, err := panelStore(cfg)
@@ -241,16 +251,17 @@ func runSelfPropose(args []string) {
 	if err != nil {
 		fatal("propose", err)
 	}
-	fmt.Printf("merge proposal %s parked for review\n", t.TaskID)
-	fmt.Println(pal().Muted(fmt.Sprintf("review: panda task show %s · approve: panda approve %s", t.TaskID, t.TaskID)))
+	fmt.Printf(i18n.T(loc, "cli.self.propose.parked")+"\n", t.TaskID)
+	fmt.Println(pal().Muted(fmt.Sprintf(i18n.T(loc, "cli.self.propose.hint"), t.TaskID, t.TaskID)))
 }
 
 func runSelfRebase(args []string) {
 	fs, configPath := selfFlags("rebase")
 	fs.Parse(reorderFlags(fs, args))
 	rest := fs.Args()
+	loc := i18n.Detect()
 	if len(rest) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: panda self rebase <patchset-id> <new-base-ref>")
+		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.self.rebase.usage"))
 		os.Exit(2)
 	}
 	cfg, err := config.Load(*configPath)
@@ -270,7 +281,7 @@ func runSelfRebase(args []string) {
 	if err := mgr.RebaseOnto(context.Background(), rest[0], rest[1], pub, priv); err != nil {
 		fatal("rebase", err)
 	}
-	fmt.Printf("%s rebased onto %s\n", rest[0], rest[1])
+	fmt.Printf(i18n.T(loc, "cli.self.rebase.done")+"\n", rest[0], rest[1])
 }
 
 // runSelfRollback restores the retained release binary over the current one —
@@ -293,6 +304,7 @@ func runSelfRollback(args []string) {
 	if err := updater.RollbackToRelease(); err != nil {
 		fatal("rollback", err)
 	}
+	loc := i18n.Detect()
 	// Audit the rollback on the signed chain — reverting the running binary
 	// is exactly the kind of action the log exists for.
 	_ = core.NewSignedAudit(db).Record(context.Background(), security.Entry{
@@ -301,8 +313,8 @@ func runSelfRollback(args []string) {
 		Result: "applied",
 		Detail: "restored " + updater.ReleaseFallbackPath() + " over " + versionpkg.Version,
 	})
-	fmt.Println("restored " + updater.ReleaseFallbackPath())
-	fmt.Println(pal().Muted("restart the daemon to run it (launchd/systemd: restart the service)"))
+	fmt.Println(fmt.Sprintf(i18n.T(loc, "cli.self.rollback.restored"), updater.ReleaseFallbackPath()))
+	fmt.Println(pal().Muted(i18n.T(loc, "cli.self.rollback.restart")))
 }
 
 func runSelfReset(args []string) {
@@ -314,21 +326,26 @@ func runSelfReset(args []string) {
 	if err != nil {
 		fatal("load config", err)
 	}
-	// reset is the escape hatch back to a pure release node (design §5): put
-	// the retained release binary back first, then remove the state. It stays
-	// available after the feature was disabled — the state may predate that.
+	loc := i18n.Detect()
+	// reset is the escape hatch back to a pure release node: put the retained
+	// release binary back first, then remove the state. It stays available
+	// after the feature was disabled — the state may predate that.
 	mgr := selfManager(cfg, false)
 	if versionpkg.ProvenanceClass() == versionpkg.ProvenanceSelf {
 		if err := updater.RollbackToRelease(); err != nil {
-			fmt.Println(pal().Warn("release binary not restored: " + err.Error()))
+			fmt.Println(pal().Warn(fmt.Sprintf(i18n.T(loc, "cli.self.reset.restoreFailed"), err)))
 		} else {
-			fmt.Println("restored " + updater.ReleaseFallbackPath())
+			fmt.Println(fmt.Sprintf(i18n.T(loc, "cli.self.reset.restored"), updater.ReleaseFallbackPath()))
 		}
 	}
 	if err := mgr.Reset(context.Background(), *purge); err != nil {
 		fatal("reset", err)
 	}
-	fmt.Println("self-evolution state cleared" + map[bool]string{true: " (worktree + all sets)", false: " (worktree)"}[*purge])
+	suffix := i18n.T(loc, "cli.self.reset.worktree")
+	if *purge {
+		suffix = i18n.T(loc, "cli.self.reset.purged")
+	}
+	fmt.Println(fmt.Sprintf(i18n.T(loc, "cli.self.reset.cleared"), suffix))
 }
 
 // selfCore builds the minimal Core a CLI verb needs — propose parks a row on
@@ -346,11 +363,4 @@ func selfCore(cfg *config.Config, db *sql.DB, oneShot bool) *core.Core {
 	c := core.NewCore(db, nodeID, card, schedulerTier(cfg.Node.ResourceClass), logger, cfg.Model)
 	c.SetSelfEvolution(self.New(cfg.SelfEvolutionDir(), cfg.SelfEvolution.Repo, logger), oneShot, cfg.SelfEvolution.Producers)
 	return c
-}
-
-func critNote(s self.Set) string {
-	if s.Critical {
-		return "  [touches critical paths]"
-	}
-	return ""
 }
