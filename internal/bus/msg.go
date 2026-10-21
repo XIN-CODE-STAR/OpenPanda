@@ -78,6 +78,13 @@ const (
 	// any residual loop.
 	MsgPunchOffer = "punch_offer"
 	MsgPunchReady = "punch_ready"
+	// MsgTransit is the blind-relay envelope (cross-network mesh design M3):
+	// it carries a sealed inner frame toward a destination the sender cannot
+	// reach directly. Relays read only the payload's outer shell — the
+	// destination's stable key, a decremented TTL and a byte size — never the
+	// contents, which are end-to-end sealed under the destination's X25519
+	// identity (or the member-level mesh seal when the peer published none).
+	MsgTransit = "transit"
 	// Bluetooth-style LAN pairing (pair_hello is the ONLY frame accepted on
 	// an unauthenticated connection besides hello — it runs an ephemeral
 	// X25519 exchange so the two operators can compare a short code and the

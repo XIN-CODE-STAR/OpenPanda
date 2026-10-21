@@ -100,7 +100,12 @@ type TaskMessage struct {
 	Body        string `json:"body"`
 	SentAt      int64  `json:"sent_at"`
 	RecvAt      int64  `json:"recv_at"`
-	ExpiresAt   int64  `json:"expires_at"`
+	// ConsumedAt is when the recipient's round loop folded this slot into its
+	// prompt; 0 = still waiting. RecvAt cannot answer that: it is stamped on
+	// arrival, so a just-posted note already reads "received". Surfaces use
+	// this one to draw "waiting for the next round" apart from "already read".
+	ConsumedAt int64 `json:"consumed_at"`
+	ExpiresAt  int64 `json:"expires_at"`
 }
 
 // msgLabel is the human-readable name a board line shows for a sender: its
@@ -166,16 +171,63 @@ func (s *TaskStore) PutTaskMessage(ctx context.Context, m TaskMessage) error {
 		expires = now + int64(msgBoardTTL/time.Second)
 	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO task_messages
-		(scope, sender, rcpt, sender_seq, sender_label, grade, body, sent_at, recv_at, expires_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?)
+		(scope, sender, rcpt, sender_seq, sender_label, grade, body, sent_at, recv_at, consumed_at, expires_at)
+		VALUES (?,?,?,?,?,?,?,?,?,0,?)
 		ON CONFLICT(scope, sender, rcpt) DO UPDATE SET
 			sender_seq=excluded.sender_seq, sender_label=excluded.sender_label,
 			grade=excluded.grade, body=excluded.body, sent_at=excluded.sent_at,
-			recv_at=excluded.recv_at, expires_at=excluded.expires_at
+			recv_at=excluded.recv_at, consumed_at=0, expires_at=excluded.expires_at
 		WHERE excluded.sender_seq > task_messages.sender_seq`,
 		m.Scope, m.Sender, m.Rcpt, m.SenderSeq, m.SenderLabel, m.Grade, m.Body,
 		m.SentAt, recv, expires)
 	return err
+}
+
+// MarkTaskMessageConsumed records that the recipient folded this slot into a
+// prompt. Best-effort: the round has already read the note, so a failed write
+// costs one stale "waiting" badge, never a lost message — callers log at debug
+// and carry on. Guarded by (scope, sender, sender_seq) so a slow write can
+// never mark a newer post as read.
+func (s *TaskStore) MarkTaskMessageConsumed(ctx context.Context, scope, sender string, seq int64) error {
+	if s == nil || scope == "" || sender == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE task_messages SET consumed_at=?
+		WHERE scope=? AND sender=? AND sender_seq=? AND consumed_at=0`,
+		time.Now().Unix(), scope, sender, seq)
+	return err
+}
+
+// PendingNoteCounts reports, per task id, how many user notes on that task's
+// own board are still waiting for a round. One grouped query over live boards
+// rather than a probe per row: the queue picker and the board card both need
+// this for every row they paint, and a per-row round trip is the N+1 that
+// makes a 50-row list feel slow. Grades are not filtered — a status note and a
+// steer both sit there unread until a round folds them, and both are what the
+// user typed.
+func (s *TaskStore) PendingNoteCounts(ctx context.Context) (map[string]int, error) {
+	if s == nil {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT scope, COUNT(*) FROM task_messages
+		WHERE consumed_at=0 AND expires_at > ? AND (sender=? OR sender LIKE ?)
+		GROUP BY scope`, time.Now().Unix(), "user", userSenderPrefix+"%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var scope string
+		var n int
+		if err := rows.Scan(&scope, &n); err != nil {
+			return out, err
+		}
+		if id, ok := strings.CutPrefix(scope, "task:"); ok && id != "" {
+			out[id] += n
+		}
+	}
+	return out, rows.Err()
 }
 
 // NextMsgSeq returns the seq a sender's next post on this scope should carry:
@@ -196,7 +248,7 @@ func (s *TaskStore) NextMsgSeq(ctx context.Context, scope, sender string) int64 
 // a rendered board reads chronologically.
 func (s *TaskStore) TaskMessages(ctx context.Context, scope string) ([]TaskMessage, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT scope, sender, rcpt, sender_seq,
-		sender_label, grade, body, sent_at, recv_at FROM task_messages
+		sender_label, grade, body, sent_at, recv_at, consumed_at FROM task_messages
 		WHERE scope=? AND expires_at > ? ORDER BY sent_at ASC, sender ASC`,
 		scope, time.Now().Unix())
 	if err != nil {
@@ -207,7 +259,7 @@ func (s *TaskStore) TaskMessages(ctx context.Context, scope string) ([]TaskMessa
 	for rows.Next() {
 		var m TaskMessage
 		if err := rows.Scan(&m.Scope, &m.Sender, &m.Rcpt, &m.SenderSeq,
-			&m.SenderLabel, &m.Grade, &m.Body, &m.SentAt, &m.RecvAt); err != nil {
+			&m.SenderLabel, &m.Grade, &m.Body, &m.SentAt, &m.RecvAt, &m.ConsumedAt); err != nil {
 			return out, err
 		}
 		out = append(out, m)
@@ -251,6 +303,11 @@ func (c *Core) drainTaskMessages(ctx context.Context, task Task, seen msgSeen) [
 				continue
 			}
 			seen[k] = m.SenderSeq
+			// Stamp the delivery on the row so a console in another process can
+			// stop drawing this note as unread (see MarkTaskMessageConsumed).
+			if err := c.store.MarkTaskMessageConsumed(ctx, m.Scope, m.Sender, m.SenderSeq); err != nil && c.logger != nil {
+				c.logger.Debug("mark board note consumed", "task", task.TaskID, "err", err)
+			}
 			lines = append(lines, c.formatBoardLine(ctx, m))
 		}
 	}

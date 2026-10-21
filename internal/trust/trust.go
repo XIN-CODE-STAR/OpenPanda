@@ -156,6 +156,17 @@ type AcceptPolicy struct {
 	// node that runs an agent harness for semi-trusted work must assume
 	// those are exposed too (sandbox.mode is the hard bound).
 	ModelCreds string
+	// SelfSigned decides how work whose ORIGIN runs a self-evolution-built
+	// binary (provenance "self") is treated at this tier: "honor" weighs
+	// its consent like a release-signed build's, "strip" drops its consent
+	// grant the same way ForeignConsent does — the task lands on the
+	// restricted tool face and irreversibles park locally — and "refuse"
+	// declines the delegate outright. Provenance is self-asserted
+	// bookkeeping, so this is a conservative dial on honest nodes, not an
+	// attestation check. Mesh defaults to honor (pre-feature behaviour);
+	// guarded to strip; open to refuse — moot there while DelegateOrigin
+	// already refuses all its work.
+	SelfSigned string
 }
 
 // Accept modes, the policy-LLM settings, and the foreign-consent handling.
@@ -173,6 +184,10 @@ const (
 
 	CredsProvide  = "provide"
 	CredsWithhold = "withhold"
+
+	SelfSignedHonor  = "honor"
+	SelfSignedStrip  = "strip"
+	SelfSignedRefuse = "refuse"
 )
 
 // contextRank orders the exposure levels of context_level.
@@ -224,11 +239,11 @@ func DefaultSend(l Level) SendPolicy {
 func DefaultAccept(l Level) AcceptPolicy {
 	switch l {
 	case Guarded:
-		return AcceptPolicy{DelegateOrigin: true, Mode: AcceptAuto, PolicyLLM: LLMOff, ForeignConsent: ConsentStrip, ModelCreds: CredsWithhold}
+		return AcceptPolicy{DelegateOrigin: true, Mode: AcceptAuto, PolicyLLM: LLMOff, ForeignConsent: ConsentStrip, ModelCreds: CredsWithhold, SelfSigned: SelfSignedStrip}
 	case Open:
-		return AcceptPolicy{DelegateOrigin: false, Mode: AcceptRefuse, PolicyLLM: LLMOff, ForeignConsent: ConsentStrip, ModelCreds: CredsWithhold}
+		return AcceptPolicy{DelegateOrigin: false, Mode: AcceptRefuse, PolicyLLM: LLMOff, ForeignConsent: ConsentStrip, ModelCreds: CredsWithhold, SelfSigned: SelfSignedRefuse}
 	default:
-		return AcceptPolicy{DelegateOrigin: true, Mode: AcceptAuto, PolicyLLM: LLMOff, ForeignConsent: ConsentHonor, ModelCreds: CredsProvide}
+		return AcceptPolicy{DelegateOrigin: true, Mode: AcceptAuto, PolicyLLM: LLMOff, ForeignConsent: ConsentHonor, ModelCreds: CredsProvide, SelfSigned: SelfSignedHonor}
 	}
 }
 

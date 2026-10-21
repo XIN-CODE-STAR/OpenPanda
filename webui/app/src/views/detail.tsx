@@ -3,7 +3,8 @@
 import { useState } from 'preact/hooks'
 import { api, isTaskStalled, type ApprovalScope, type Task, type TaskEvent } from '../api/client'
 import { useAsync, useChangeSignal, useLocaleRerender, useVisibleInterval } from '../hooks'
-import { t } from '../i18n'
+import { t, locale } from '../i18n'
+import { formatDuration } from '../format/time'
 import { navigate } from '../nav'
 import { ScopeSelect } from '../components/scope-select'
 import { StateBadge } from '../components/state-badge'
@@ -145,7 +146,9 @@ export function DetailView({
   // broken button — the user clicks it, nothing happens, and the reason sits
   // hundreds of pixels below the fold.
   const blocked = task.state === 'review' && task.approval_disposition === 'needs_changed_input'
-  const parkReason = blocked ? reviewReason(task.events ?? []) : ''
+  // Read for every review state, not only the blocked banner: the verdict
+  // block falls back to it when the result carries no reason of its own.
+  const parkReason = task.state === 'review' ? reviewReason(task.events ?? []) : ''
   // Whether the result carries anything worth a section. A `{"failed": …}`
   // blob has already been read out in the verdict block, and the log's own
   // raw toggle still reaches it.
@@ -371,6 +374,17 @@ export function DetailView({
                   {m.grade !== 'status' && (
                     <span class={`badge ${m.grade === 'steer' ? 'blue' : 'dim'}`}>{m.grade}</span>
                   )}
+                  {/* Delivery state, on the user's own notes only: a note lands
+                      on the board the moment it is posted, so without this the
+                      row reads "queued" forever and "did the agent see it?"
+                      has no answer on screen. consumed_at is stamped by the
+                      round that folded the note into its prompt. */}
+                  {(m.sender === 'user' || m.sender.startsWith('user:')) &&
+                    (m.consumed_at ? (
+                      <span class="badge dim">{t('detail.board.read')}</span>
+                    ) : (
+                      <span class="badge yellow">{t('detail.board.pending')}</span>
+                    ))}
                   <span class="dt-board-body">{m.body}</span>
                   <span class="dim dt-board-time">
                     {m.sent_at ? fmtShort(new Date(m.sent_at * 1000).toISOString()) : ''}
@@ -954,18 +968,27 @@ function reviewReason(events: { type: string; data?: string }[]): string {
 }
 
 function fmtFull(iso: string): string {
-  return iso ? new Date(iso).toLocaleString() : '—'
+  return iso ? new Date(iso).toLocaleString(locale()) : '—'
 }
 
 /** Compact stamp for the header line: the year is noise on a run that started
- *  today, and the seconds never helped anyone. */
+ *  today, and the seconds never helped anyone. The locale decides field order
+ *  and the 12/24-hour cycle rather than a hand-rolled "MM-DD HH:mm" that
+ *  reads as 24-hour time to a reader whose locale never shows it. */
 function fmtShort(iso: string): string {
   if (!iso) return '—'
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return '—'
-  const p = (n: number) => String(n).padStart(2, '0')
-  const md = `${p(d.getMonth() + 1)}-${p(d.getDate())}`
-  return `${md} ${p(d.getHours())}:${p(d.getMinutes())}`
+  try {
+    return new Intl.DateTimeFormat(locale(), {
+      month: 'numeric',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    }).format(d)
+  } catch {
+    return '—'
+  }
 }
 
 function shortId(id: string): string {
@@ -978,10 +1001,5 @@ function elapsedLabel(created: string, updated: string, open: boolean): string {
   if (open || !created || !updated) return ''
   const ms = new Date(updated).getTime() - new Date(created).getTime()
   if (!Number.isFinite(ms) || ms <= 0) return ''
-  const s = Math.round(ms / 1000)
-  if (s < 60) return `${s}s`
-  const m = Math.floor(s / 60)
-  if (m < 60) return `${m}m ${s % 60}s`
-  const h = Math.floor(m / 60)
-  return `${h}h ${m % 60}m`
+  return formatDuration(ms)
 }

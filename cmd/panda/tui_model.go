@@ -160,6 +160,11 @@ type tuiModel struct {
 	// taskListState is the state filter the open task picker was built with
 	// ("" = all), so a watch event can rebuild the list in place.
 	taskListState string
+	// focusTask is the task the user last opened from the queue picker — the
+	// default target for `/queue` and `/inject`, which otherwise have no way to
+	// know which of a dozen rows the user means. Empty until a task is chosen;
+	// the commands fall back to requiring an explicit id.
+	focusTask string
 
 	// Onboarding state
 	onboardingStep onboardingStep

@@ -976,9 +976,9 @@ func TestSystemEndpoints(t *testing.T) {
 	db := newMigratedDB(t)
 	h := New(Deps{Store: newTestStore(t), DB: db, StaticDir: t.TempDir(), Token: testToken})
 
-	// Version mirrors the internal version string.
+	// Version mirrors the internal version string and build provenance.
 	code, out := doJSON(t, h, authedReq(http.MethodGet, "/api/version", nil))
-	if code != http.StatusOK || out["version"] != versionpkg.Version {
+	if code != http.StatusOK || out["version"] != versionpkg.Version || out["provenance"] != versionpkg.ProvenanceClass() {
 		t.Fatalf("version = %d %v", code, out)
 	}
 

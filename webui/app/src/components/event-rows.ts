@@ -46,9 +46,13 @@ export function buildRows(events: TaskEvent[]): TimelineRow[] {
     // (and its raw payload) behind a ×N chip instead of painting eight
     // identical rows. Ordinary progress notes are NOT folded: two different
     // notes ("bash: inspect…", "write: plans/…") are two different facts even
-    // though they share the 执行进度 label.
+    // though they share the 执行进度 label. Nor may a retry merge across an
+    // open pipeline run: `tail` is the last *flushed* row, so folding while
+    // `pipe` is open would order a newer event before the lifecycle strip it
+    // actually follows.
     const tail = rows[rows.length - 1]
     if (
+      !pipe &&
       isRetryNote(formatted) &&
       tail?.kind === 'event' &&
       tail.event.type === ev.type &&

@@ -12,6 +12,7 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/config"
 	"github.com/Xustalis/OpenPanda/internal/ledger"
 	"github.com/Xustalis/OpenPanda/internal/trust"
+	"github.com/Xustalis/OpenPanda/internal/version"
 )
 
 // TestPeerTrustOfDefaultsMesh: absent any assertion every peer resolves to
@@ -79,12 +80,12 @@ func TestKeyChangeDemotesMesh(t *testing.T) {
 	ctx := context.Background()
 	c := pinCore(t, "self", "marker")
 	pub, _, _ := bus.GenerateNodeKey()
-	c.recordPeerPubKey(ctx, "peer", hex.EncodeToString(pub))
+	c.recordPeerPubKey(ctx, "peer", hex.EncodeToString(pub), "")
 	if err := ledger.SetPeerTrust(c.db, "peer", string(trust.Mesh)); err != nil {
 		t.Fatal(err)
 	}
 	pub2, _, _ := bus.GenerateNodeKey()
-	c.recordPeerPubKey(ctx, "peer", hex.EncodeToString(pub2))
+	c.recordPeerPubKey(ctx, "peer", hex.EncodeToString(pub2), "")
 	lvl, _ := ledger.PeerTrust(c.db, "peer")
 	if lvl != string(trust.Guarded) {
 		t.Fatalf("key change trust = %q, want guarded", lvl)
@@ -409,5 +410,148 @@ func TestArtifactPullTrustGate(t *testing.T) {
 	}
 	if !c.artifactPullTrustOK(ctx, "t-missing", "mesh-puller") {
 		t.Fatal("mesh puller was gated on an unknown task id")
+	}
+}
+
+// TestProvenanceWireHelpers pins the send-side stamp and the intake
+// whitelist: an unstamped dev build advertises "unsigned" explicitly so it
+// is distinguishable from a pre-provenance peer that sends nothing, and
+// peer-supplied garbage folds to "" before it can reach a row or a policy
+// check.
+func TestProvenanceWireHelpers(t *testing.T) {
+	if got := wireProvenance(); got != version.ProvenanceUnsigned {
+		t.Fatalf("dev build wire provenance = %q, want %q", got, version.ProvenanceUnsigned)
+	}
+	for _, ok := range []string{version.ProvenanceRelease, version.ProvenanceSelf, version.ProvenanceUnsigned} {
+		if got := sanitizePeerProv(ok); got != ok {
+			t.Fatalf("sanitizePeerProv(%q) = %q, rejected a defined class", ok, got)
+		}
+	}
+	for _, bad := range []string{"", "forged", "RELEASE", "self-signed"} {
+		if got := sanitizePeerProv(bad); got != "" {
+			t.Fatalf("sanitizePeerProv(%q) = %q, want empty", bad, got)
+		}
+	}
+}
+
+// TestPeerProvenanceResolution: the row stamp resolves through every id
+// form the wire may carry — the instance id itself, an ephemeral session id
+// (host node's row), and the stable k:<pub> identity (newest instance
+// holding the key, online first). Unknown peers read as "" — never self.
+func TestPeerProvenanceResolution(t *testing.T) {
+	c := pinCore(t, "self", "marker")
+	pub, _, _ := bus.GenerateNodeKey()
+	pubHex := hex.EncodeToString(pub)
+	if _, err := c.db.Exec(`INSERT INTO employee_cache (id, pub_key, prov, status, last_seen) VALUES
+		('host-1', ?, 'self', 'online', 100),
+		('host-2', ?, 'unsigned', 'offline', 50)`, pubHex, pubHex); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.peerProvenance("host-1"); got != "self" {
+		t.Fatalf("instance prov = %q, want self", got)
+	}
+	if got := c.peerProvenance("k:" + pubHex); got != "self" {
+		t.Fatalf("stable prov = %q, want newest instance self", got)
+	}
+	// A session id never gets its own row — its host's build applies.
+	if got := c.peerProvenance("host-1-1f3a2b4c"); got != "self" {
+		t.Fatalf("session prov = %q, want host self", got)
+	}
+	if got := c.peerProvenance("never-seen"); got != "" {
+		t.Fatalf("unknown peer prov = %q, want empty", got)
+	}
+	if got := c.peerProvenance(""); got != "" {
+		t.Fatalf("empty id prov = %q, want empty", got)
+	}
+}
+
+// TestAdmitDelegateSelfSignedRefuse: an origin running a self-built binary
+// is refused at a tier whose self_signed rule says refuse — release-signed
+// and unprovenanced (legacy) origins pass the same gate unchanged, and the
+// guarded default (strip) still admits since refuse is opt-in.
+func TestAdmitDelegateSelfSignedRefuse(t *testing.T) {
+	ctx := context.Background()
+	c := pinCore(t, "self", "marker")
+	if _, err := c.db.Exec(`INSERT INTO employee_cache (id, trust, prov) VALUES
+		('self-built', 'guarded', 'self'),
+		('released', 'guarded', 'release'),
+		('legacy', 'guarded', ''),
+		('relay', 'guarded', 'release')`); err != nil {
+		t.Fatal(err)
+	}
+	c.SetTrustConfig(config.TrustConfig{Accept: config.TrustAcceptConfig{
+		Guarded: config.TrustAcceptPolicy{Mode: "auto", SelfSigned: "refuse"},
+	}})
+	v := c.admitDelegate(ctx, "t1", bus.TaskDelegatePayload{TaskID: "t1"}, nil, "self-built")
+	if v.admit || v.code != bus.DeclineCodeTrustRefused {
+		t.Fatalf("self-signed verdict = %+v, want decline trust_policy_refused", v)
+	}
+	// Origin judged through chain[0], not the sender: a release relay
+	// forwarding a self-built origin's task still refuses.
+	v = c.admitDelegate(ctx, "t2", bus.TaskDelegatePayload{TaskID: "t2"},
+		[]string{"self-built", "relay"}, "relay")
+	if v.admit || v.code != bus.DeclineCodeTrustRefused {
+		t.Fatalf("relayed self-signed origin = %+v, want decline", v)
+	}
+	// Same verdict through the stable k: identity form.
+	pub, _, _ := bus.GenerateNodeKey()
+	pubHex := hex.EncodeToString(pub)
+	if _, err := c.db.Exec(`INSERT INTO employee_cache (id, pub_key, prov) VALUES ('inst-9', ?, 'self')`, pubHex); err != nil {
+		t.Fatal(err)
+	}
+	v = c.admitDelegate(ctx, "t3", bus.TaskDelegatePayload{TaskID: "t3"},
+		[]string{"k:" + pubHex, "relay"}, "relay")
+	if v.admit || v.code != bus.DeclineCodeTrustRefused {
+		t.Fatalf("stable-id self-signed origin = %+v, want decline", v)
+	}
+	for _, sender := range []string{"released", "legacy"} {
+		if v := c.admitDelegate(ctx, "t4", bus.TaskDelegatePayload{TaskID: "t4"}, nil, sender); !v.admit {
+			t.Fatalf("%s verdict = %+v, want admit", sender, v)
+		}
+	}
+	// The guarded default is strip, not refuse: a self-built origin still
+	// admits — refuse must be configured explicitly.
+	c.SetTrustConfig(testTrustConfig("auto", "off"))
+	if v := c.admitDelegate(ctx, "t5", bus.TaskDelegatePayload{TaskID: "t5"}, nil, "self-built"); !v.admit {
+		t.Fatalf("default self_signed=strip verdict = %+v, want admit", v)
+	}
+}
+
+// TestForeignConsentStrippedSelfSigned: with foreign_consent honored, the
+// self_signed rule is the only stripper — a self-built origin's tier-2
+// grant drops while a release-signed origin's identical grant survives,
+// and self_signed=honor restores parity for the same-owner case.
+func TestForeignConsentStrippedSelfSigned(t *testing.T) {
+	ctx := context.Background()
+	c := pinCore(t, "self", "marker")
+	if _, err := c.db.Exec(`INSERT INTO employee_cache (id, trust, prov) VALUES
+		('self-built', 'guarded', 'self'),
+		('released', 'guarded', 'release')`); err != nil {
+		t.Fatal(err)
+	}
+	c.SetTrustConfig(config.TrustConfig{Accept: config.TrustAcceptConfig{
+		Guarded: config.TrustAcceptPolicy{Mode: "auto", ForeignConsent: "honor"},
+	}})
+	strip, why := c.foreignConsentStripped(ctx, nil, "self-built")
+	if !strip || why == "" {
+		t.Fatal("self-built guarded origin's consent must strip under default self_signed")
+	}
+	if strip, _ = c.foreignConsentStripped(ctx, nil, "released"); strip {
+		t.Fatal("release origin's consent must not strip when foreign_consent=honor")
+	}
+	// The mesh-tier path never reaches the rule: mesh honors everything.
+	if strip, _ = c.foreignConsentStripped(ctx, nil, "mesh-peer"); strip {
+		t.Fatal("mesh origin must never be stripped")
+	}
+	c.SetTrustConfig(config.TrustConfig{Accept: config.TrustAcceptConfig{
+		Guarded: config.TrustAcceptPolicy{Mode: "auto", ForeignConsent: "honor", SelfSigned: "honor"},
+	}})
+	if strip, _ = c.foreignConsentStripped(ctx, nil, "self-built"); strip {
+		t.Fatal("self_signed=honor must not strip the self-built origin's consent")
+	}
+	// And foreign_consent=strip still dominates either way.
+	c.SetTrustConfig(testTrustConfig("auto", "off"))
+	if strip, _ = c.foreignConsentStripped(ctx, nil, "released"); !strip {
+		t.Fatal("foreign_consent=strip default must strip even a release origin's consent")
 	}
 }

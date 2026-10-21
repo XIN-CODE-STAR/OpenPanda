@@ -315,16 +315,17 @@ function OrchRow(props: {
     onRun(): void
   }
 }) {
-  // Re-bound when the row goes from empty to filled: the strip element only
-  // exists in the filled branch, so a listener attached on mount would never
-  // have had anything to attach to.
-  const strip = useRef<HTMLDivElement>(null)
+  // Bound to the element's own lifetime, not to the task count: the strip
+  // only exists in the filled branch, and rebinding on every list change
+  // would tear the listeners down mid-gesture — a task arriving over SSE
+  // during a drag could then drop the press and let the release click
+  // through to the chip.
+  const [strip, setStrip] = useState<HTMLDivElement | null>(null)
   useEffect(() => {
-    const el = strip.current
-    if (!el) return
+    if (!strip) return
     // The grid runs downwards: two tiles wide, four in view.
-    return bindStripDrag(el, 'y')
-  }, [props.tasks.length])
+    return bindStripDrag(strip, 'y')
+  }, [strip])
   return (
     <section class="orch-sec">
       <p class="orch-sec-head">
@@ -334,7 +335,7 @@ function OrchRow(props: {
       {props.tasks.length === 0 ? (
         <p class="orch-sec-slot">{props.empty}</p>
       ) : (
-        <div class="orch-grid" ref={strip}>
+        <div class="orch-grid" ref={setStrip}>
           {props.tasks.map((task) => (
             <OrchChip key={task.id} {...props.chipProps(task)} />
           ))}

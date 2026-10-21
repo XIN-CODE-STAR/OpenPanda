@@ -772,9 +772,10 @@ func fatalMsg(msg string) {
 func printVersion(_ []string) {
 	if jsonOutput {
 		info := map[string]any{
-			"version":  versionpkg.Version,
-			"codename": versionpkg.Codename,
-			"schema":   storage.LatestVersion(),
+			"version":    versionpkg.Version,
+			"codename":   versionpkg.Codename,
+			"schema":     storage.LatestVersion(),
+			"provenance": versionpkg.ProvenanceClass(),
 		}
 		// db_schema lets a probe (self-updater, install.sh) learn the data
 		// directory's current schema from this binary alone — the value that
@@ -786,7 +787,15 @@ func printVersion(_ []string) {
 		emitJSON(info)
 		return
 	}
-	fmt.Printf("panda %s\n", versionpkg.Display())
+	line := versionpkg.Display()
+	// A build from a channel other than release says so in the human line —
+	// an operator must be able to tell a self-evolution binary apart at a
+	// glance (release and unsigned dev need no mark: they are the ordinary
+	// cases).
+	if p := versionpkg.ProvenanceClass(); p != versionpkg.ProvenanceRelease && p != versionpkg.ProvenanceUnsigned {
+		line += " (" + p + ")"
+	}
+	fmt.Printf("panda %s\n", line)
 }
 
 // printUsage lists the subcommands as a grouped command tree — `panda help`

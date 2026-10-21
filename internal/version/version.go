@@ -31,6 +31,44 @@ var Codename = "Constellation"
 // as "发布于 …" and falls back to omitting the line when it is empty.
 var ReleaseDate = "2026-10-19"
 
+// Build provenance classes — which channel produced a binary. They ride the
+// wire as hello/heartbeat `prov`. The unset default normalizes to
+// ProvenanceUnsigned ("unsigned") rather than disappearing, so a dev/local
+// build is distinguishable from a pre-provenance peer that sends no field at
+// all.
+const (
+	ProvenanceRelease  = "release"  // official release-packaged build
+	ProvenanceSelf     = "self"     // self-evolution pipeline build (self-asserted)
+	ProvenanceUnsigned = "unsigned" // Provenance unset — a dev/local build
+)
+
+// Provenance stamps which channel produced THIS binary. Release packaging
+// injects ProvenanceRelease via
+//
+//	-X github.com/Xustalis/OpenPanda/internal/version.Provenance=release
+//
+// and a self-evolution build may inject ProvenanceSelf; an ordinary
+// `make build` leaves it empty — the unsigned tier. It is self-asserted
+// metadata, not an attestation: a modified node can claim anything, so
+// peers treat it as honest-node bookkeeping for trust policy
+// (accept.<tier>.self_signed) and fleet display, while the locally asserted
+// trust tier stays the real security boundary.
+var Provenance = ""
+
+// ProvenanceClass is the single normalizer every surface (wire, version
+// --json, /api/version) reports through: a defined class passes through;
+// anything else — the unset default or an unrecognized injected stamp —
+// reports ProvenanceUnsigned. Dev builds therefore say "unsigned"
+// explicitly rather than omitting the mark, so a peer can tell them apart
+// from pre-provenance peers that send nothing at all.
+func ProvenanceClass() string {
+	switch Provenance {
+	case ProvenanceRelease, ProvenanceSelf:
+		return Provenance
+	}
+	return ProvenanceUnsigned
+}
+
 // ReleasePubKey is the Ed25519 public key (hex or base64) the self-update
 // path trusts to sign checksums.txt. The compiled-in default below is the
 // official OpenPanda release channel's key, so every build — release or a

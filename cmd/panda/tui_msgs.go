@@ -58,6 +58,16 @@ type (
 	// It carries no data: there is nothing to fold into the model, and the
 	// pump is not re-armed.
 	droppedMsg struct{}
+
+	// steerAckMsg reports that the round loop folded one steering idea into its
+	// prompt. The enqueue note already said "queued"; this is the only event
+	// that can turn that into "the model has it", because a buffered channel
+	// write proves nothing — the turn can end before anything polls it again.
+	steerAckMsg struct {
+		stream *askStream
+		text   string
+		round  int
+	}
 )
 
 // askStream carries one in-flight ask: the channel the callbacks write to, the
@@ -149,6 +159,12 @@ func startAsk(engine *askengine.Engine, history []entry.Turn, prompt, workDir, s
 			default:
 				return ""
 			}
+		},
+		// The round loop tells us when a note actually became part of the
+		// prompt — the difference between "accepted into a channel" and
+		// "the model will read it".
+		OnSteerConsumed: func(text string, round int) {
+			s.send(ctx, steerAckMsg{stream: s, text: text, round: round})
 		},
 		// OnApproval stays nil: a synchronous yes/no from a Bubble Tea card is not
 		// answerable from this goroutine, so we take the NeedsApproval Result path

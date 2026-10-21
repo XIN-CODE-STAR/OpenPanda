@@ -362,11 +362,15 @@ type TrustSendPolicy struct {
 // reach the agent subprocess that origin's work runs in (withhold is the
 // default: a semi-trusted peer's task text must not read this node's API
 // keys out of env; provide for the same-owner case).
+// self_signed: honor|strip|refuse — how work whose origin runs a
+// self-evolution-built binary is treated at this tier (strip drops its
+// consent grant like foreign_consent; refuse declines the delegate).
 type TrustAcceptPolicy struct {
 	Mode           string `yaml:"mode"`
 	PolicyLLM      string `yaml:"policy_llm"`
 	ForeignConsent string `yaml:"foreign_consent"`
 	ModelCreds     string `yaml:"model_creds"`
+	SelfSigned     string `yaml:"self_signed"`
 }
 
 // TrustConfig carries the per-tier trust-zone tables. Only guarded is
@@ -415,6 +419,11 @@ func (t TrustConfig) Validate() error {
 	case "", "withhold", "provide":
 	default:
 		return fmt.Errorf("config: network.trust.accept.guarded.model_creds %q is invalid (want withhold or provide)", t.Accept.Guarded.ModelCreds)
+	}
+	switch t.Accept.Guarded.SelfSigned {
+	case "", "honor", "strip", "refuse":
+	default:
+		return fmt.Errorf("config: network.trust.accept.guarded.self_signed %q is invalid (want honor, strip, or refuse)", t.Accept.Guarded.SelfSigned)
 	}
 	return nil
 }
@@ -465,6 +474,9 @@ func (t TrustConfig) AcceptPolicyFor(l trust.Level) trust.AcceptPolicy {
 	}
 	if g.ModelCreds != "" {
 		p.ModelCreds = g.ModelCreds
+	}
+	if g.SelfSigned != "" {
+		p.SelfSigned = g.SelfSigned
 	}
 	return p
 }

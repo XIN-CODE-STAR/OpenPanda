@@ -208,9 +208,9 @@ export interface ScoredCandidate {
   node_id: string
   node_name?: string
   // total_score is the flat numeric ranking (§3.1.1 short path); consumers
-  // that want the "why" read breakdown.*. Both are populated on the wire.
+  // that want the "why" read score_breakdown.*. Both are populated on the wire.
   total_score: number
-  breakdown: ScoreBreakdown
+  score_breakdown: ScoreBreakdown
 }
 
 export interface TraceEvent {
@@ -411,6 +411,10 @@ export interface TaskBoardMessage {
   body: string
   sent_at: number
   recv_at: number
+  /** When the task's round loop folded this note into its prompt; 0 = still
+   *  waiting. recv_at cannot answer that (it is stamped on arrival), so this
+   *  is the only field that separates "queued" from "read". */
+  consumed_at?: number
 }
 
 export interface ApprovalOperation {
@@ -887,6 +891,18 @@ export const api = {
    *  accepted. */
   taskBoardMessages(id: string): Promise<{ task_id: string; messages: TaskBoardMessage[] }> {
     return request('GET', `/api/tasks/${encodeURIComponent(id)}/messages`)
+  },
+
+  /** Type into a thread while its turn streams — the composer's queue/inject
+   *  pair. A thread whose task is still live takes the durable board path
+   *  (the response then carries its task_id); a plain answer turn rides the
+   *  streaming ask's steer channel, which only exists while the turn runs. */
+  sendSessionMessage(
+    id: string,
+    text: string,
+    inject: boolean,
+  ): Promise<TaskMessageResult> {
+    return request('POST', `/api/sessions/${encodeURIComponent(id)}/messages`, { text, inject })
   },
 
   /** Persist a drag: ids arrive top-to-bottom and get seq 1..n. */
@@ -2060,6 +2076,11 @@ export interface AskStreamHandlers {
   onStatus(text: string, ev?: AskStatusEvent): void
   onOperation(operationID: string): void
   onResult(r: AskResult): void
+  /** A note the round loop actually folded into its prompt, with the round that
+   *  carries it. The note was accepted earlier (POST /api/sessions/{id}/messages);
+   *  this event is the proof it reached the model, so the console can stop
+   *  calling it "queued". Fires zero or more times per turn. */
+  onSteer?(text: string, round: number): void
   /** `code` carries the panel's machine reason when one exists —
    *  "model_config" marks the fix-in-settings class of failure. */
   onError(message: string, code?: string, info?: AskErrorInfo): void
@@ -2096,6 +2117,7 @@ export async function askSessionStream(
       else if (event === 'delta') h.onDelta(payload.text ?? '')
       else if (event === 'status') h.onStatus(payload.text ?? '', payload as AskStatusEvent)
       else if (event === 'operation') h.onOperation(payload.operation_id ?? '')
+      else if (event === 'steer') h.onSteer?.(payload.text ?? '', payload.round ?? 0)
       else if (event === 'result') h.onResult(payload as AskResult)
       else if (event === 'error')
         h.onError(payload.message ?? 'unknown error', payload.code || undefined, {

@@ -43,6 +43,11 @@ var traceEventTypes = map[string]bool{
 	"judge_start":        true,
 	"supervise":          true,
 	"result":             true,
+	// User messages, both halves: the post and the round that folded it. The
+	// live stream is where "queued" becomes "read" without a page reload, so a
+	// console that never subscribed here could only poll for it.
+	"user_msg":          true,
+	"user_msg_consumed": true,
 }
 
 // traceDataClip bounds any string inside a pushed trace's data object. Tool

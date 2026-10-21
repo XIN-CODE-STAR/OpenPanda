@@ -201,6 +201,73 @@ func TestReplTaskSendWarnsDeadQueue(t *testing.T) {
 	}
 }
 
+// TestReplQueueAndInjectAsCommands pins the two send modes as first-class
+// commands rather than only a `task send --inject` flag: an incomplete line
+// reports the usage (never a silent no-op), the queue form lands a durable
+// status note on the task's own board, and the inject form refuses without an
+// engine instead of claiming it aborted a round it cannot even see.
+func TestReplQueueAndInjectAsCommands(t *testing.T) {
+	r, st := newOpsTestRepl(t)
+	nodeID := core.RuntimeNodeID(r.cfg.Node.Name, r.cfg.Node.Kind, r.cfg.Node.EffectiveIdentity())
+	task, err := st.Create(context.Background(), "", "", "queue target", nodeID, []string{nodeID})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	usage := i18n.T(i18n.English, "cli.task.note.usage")
+	for _, line := range []string{
+		"/queue", "/inject",
+		"/queue " + task.TaskID, "/inject " + task.TaskID,
+	} {
+		if out := dispatchCapture(t, r, line); !strings.Contains(out, usage) {
+			t.Errorf("%s without text should print the usage line, got %q", line, out)
+		}
+	}
+
+	// /queue is a store write, not an exec: the confirmation names the task and
+	// the note is on the board by the time the command returns.
+	out := dispatchCapture(t, r, "/queue "+task.TaskID+" read the README before the next edit")
+	if want := i18n.Tf(i18n.English, "cli.task.send.queued", "id", task.TaskID); !strings.Contains(out, want) {
+		t.Fatalf("/queue should confirm the delivery, got %q (want %q)", out, want)
+	}
+	msgs, err := st.TaskMessages(context.Background(), "task:"+task.TaskID)
+	if err != nil {
+		t.Fatalf("board: %v", err)
+	}
+	var notes []core.TaskMessage
+	for _, m := range msgs {
+		if strings.HasPrefix(m.Sender, "user:") {
+			notes = append(notes, m)
+		}
+	}
+	if len(notes) != 1 {
+		t.Fatalf("one /queue should leave exactly one user note, got %d (%+v)", len(notes), notes)
+	}
+	if notes[0].Body != "read the README before the next edit" {
+		t.Fatalf("the note should carry the whole text, got %q", notes[0].Body)
+	}
+	if notes[0].Grade != core.MsgGradeStatus {
+		t.Fatalf("/queue must post a status note (read at the next round), got grade %q", notes[0].Grade)
+	}
+
+	// /inject is only honest when this seat's engine runs the task. With no
+	// engine the command says so and writes nothing — a note claiming an
+	// interrupt that never happened is worse than a refusal.
+	out = dispatchCapture(t, r, "/inject "+task.TaskID+" stop and re-read")
+	if !strings.Contains(out, i18n.T(i18n.English, "repl.approval.noEngine")) {
+		t.Fatalf("/inject without an engine should refuse, got %q", out)
+	}
+	msgs, err = st.TaskMessages(context.Background(), "task:"+task.TaskID)
+	if err != nil {
+		t.Fatalf("board: %v", err)
+	}
+	for _, m := range msgs {
+		if strings.HasPrefix(m.Sender, "user:") && strings.Contains(m.Body, "stop and re-read") {
+			t.Fatalf("a refused /inject must not reach the board: %+v", m)
+		}
+	}
+}
+
 func TestReplNodesRemove(t *testing.T) {
 	r, _ := newOpsTestRepl(t)
 	out := dispatchCapture(t, r, "/nodes remove ghost-node")

@@ -47,6 +47,16 @@ func applyRelease(ctx context.Context, m *Manager, s *stagedRelease) error {
 	if err := replaceBinary(newBin, dst); err != nil {
 		return fmt.Errorf("replace binary: %w", err)
 	}
+	// Keep the latest official-release binary on disk as the self-evolution
+	// rollback target (design §5): after every RELEASE-channel swap the fresh
+	// binary is copied beside the install as panda.release. A StageLocal
+	// (self-built) apply deliberately skips this — a self build overwriting
+	// the fallback would leave nothing signed to roll back to.
+	if !s.local {
+		if err := copyFile(newBin, ReleaseFallbackPath(), 0o755); err != nil {
+			m.opts.Logger.Warn("update: release fallback copy failed", "err", err)
+		}
+	}
 
 	// Refresh the agent adapters and voice sidecars beside the running binary.
 	// They are secondary to the binary, so a failure here is logged, not fatal
@@ -86,6 +96,70 @@ func runningBinary() string {
 		return resolved
 	}
 	return exe
+}
+
+// ReleaseFallbackPath is where the last applied official-release binary is
+// kept for `panda self rollback` — a sibling of the running binary named
+// panda.release (panda.release.exe on Windows). The resource manifest sync
+// only touches adapters/ and extensions/voice/, so the file survives every
+// update; Windows' SweepResidue only targets .old sidecars, likewise.
+func ReleaseFallbackPath() string {
+	bin := runningBinary()
+	if bin == "" {
+		return ""
+	}
+	name := "panda.release"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	return filepath.Join(filepath.Dir(bin), name)
+}
+
+// RollbackToRelease swaps the retained release binary back over the running
+// install — the escape hatch for a self-built binary gone wrong. It uses the
+// same atomic replaceBinary the update path does. The caller handles process
+// restart (applyRelease's delayedRestart/install.RestartDaemon are not
+// invoked here — a CLI rollback asks the operator or bounces the service).
+func RollbackToRelease() error {
+	fallback := ReleaseFallbackPath()
+	if fallback == "" {
+		return fmt.Errorf("cannot locate the running binary")
+	}
+	if _, err := os.Stat(fallback); err != nil {
+		return fmt.Errorf("no release fallback at %s — nothing signed to roll back to (run a release-channel update first)", fallback)
+	}
+	dst := runningBinary()
+	if dst == "" {
+		return fmt.Errorf("cannot locate the running binary")
+	}
+	if err := checkSelfRollbackSchema(fallback); err != nil {
+		return err
+	}
+	if err := replaceBinary(fallback, dst); err != nil {
+		return fmt.Errorf("restore release binary: %w", err)
+	}
+	return nil
+}
+
+// checkSelfRollbackSchema refuses a rollback whose fallback binary predates
+// the data directory's schema floor — rolling back to a binary that cannot
+// open the store bricks the node as surely as a bad update would.
+func checkSelfRollbackSchema(fallback string) error {
+	out, err := exec.Command(fallback, "version", "--json").Output()
+	if err != nil {
+		return fmt.Errorf("probe fallback binary: %w", err)
+	}
+	var info struct {
+		Schema   int `json:"schema"`
+		DBSchema int `json:"db_schema"`
+	}
+	if err := json.Unmarshal(out, &info); err != nil {
+		return fmt.Errorf("probe fallback binary: unreadable version JSON")
+	}
+	if info.Schema > 0 && info.DBSchema > info.Schema {
+		return fmt.Errorf("release fallback supports schema v%d but the data directory is at v%d — rollback refused", info.Schema, info.DBSchema)
+	}
+	return nil
 }
 
 // checkStagedSchema guards the swap: the staged binary must support at least

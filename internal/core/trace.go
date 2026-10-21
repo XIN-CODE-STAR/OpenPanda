@@ -46,6 +46,12 @@ const (
 	// mode=queue (next-round context) or mode=inject (leads the next round,
 	// interrupting the in-flight one when live).
 	EvUserMsg = "user_msg"
+	// EvUserMsgConsumed records the other half of that delivery: the round that
+	// actually folded the note into its prompt. Without it the trace says a
+	// message was posted and nothing says whether the model ever saw it — the
+	// gap a "queued forever" console cannot distinguish from "queued, read next
+	// round".
+	EvUserMsgConsumed = "user_msg_consumed"
 )
 
 // EvTrace records one trace event. Errors are downgraded to a warning log: a

@@ -65,6 +65,67 @@ func TestNodeStamps(t *testing.T) {
 	}
 }
 
+// TestSetNodeProvIfChanged pins the same cheap-beat contract for build
+// provenance: a stamped value lands, an empty field (old node) leaves the
+// stamp alone, and an honest re-stamp (self → unsigned on a dev swap)
+// overwrites.
+func TestSetNodeProvIfChanged(t *testing.T) {
+	db := openLedgerDB(t)
+	seedRow(t, db, "n1", "key1", "online", 100)
+
+	// Pre-column/legacy default: no stamp reported yet.
+	if got := PeerProvenance(db, "n1"); got != "" {
+		t.Fatalf("fresh row prov = %q, want empty", got)
+	}
+	if err := SetNodeProvIfChanged(db, "n1", "self"); err != nil {
+		t.Fatalf("set prov: %v", err)
+	}
+	if got := PeerProvenance(db, "n1"); got != "self" {
+		t.Fatalf("prov = %q, want self", got)
+	}
+	// An empty prov after a real stamp must not erase it (old-node hello).
+	if err := SetNodeProvIfChanged(db, "n1", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := PeerProvenance(db, "n1"); got != "self" {
+		t.Fatalf("empty prov erased the stamp: %q", got)
+	}
+	// A swap back to a dev build restamps honestly.
+	if err := SetNodeProvIfChanged(db, "n1", "unsigned"); err != nil {
+		t.Fatal(err)
+	}
+	if got := PeerProvenance(db, "n1"); got != "unsigned" {
+		t.Fatalf("restamp prov = %q, want unsigned", got)
+	}
+	if got := PeerProvenance(db, "missing"); got != "" {
+		t.Fatalf("missing row prov = %q, want empty", got)
+	}
+	if got := PeerProvenance(nil, "n1"); got != "" {
+		t.Fatalf("nil db prov = %q, want empty", got)
+	}
+}
+
+// TestProvSurvivesCardUpsert pins the write-path interaction provenance
+// depends on: a capability re-upsert (hello card refresh, heartbeat card)
+// rewrites the directory row through upsertNode's explicit column list and
+// must not disturb a stamped prov — otherwise every refresh would erase the
+// mark the trust policy reads.
+func TestProvSurvivesCardUpsert(t *testing.T) {
+	db := openLedgerDB(t)
+	if err := UpsertRemote(db, "peer-x", CapabilitySummary{Device: "peer-x"}); err != nil {
+		t.Fatalf("initial upsert: %v", err)
+	}
+	if err := SetNodeProvIfChanged(db, "peer-x", "self"); err != nil {
+		t.Fatalf("stamp prov: %v", err)
+	}
+	if err := UpsertRemote(db, "peer-x", CapabilitySummary{Device: "peer-x", Chip: "m4"}); err != nil {
+		t.Fatalf("re-upsert: %v", err)
+	}
+	if got := PeerProvenance(db, "peer-x"); got != "self" {
+		t.Fatalf("prov after card upsert = %q, want self", got)
+	}
+}
+
 // TestMarkVerified pins the TOFU gate: verifying a row with no proven key is
 // refused — an empty pub_key row has nothing to have compared, and blessing
 // a later first-seen key would attach trust to a key nobody looked at.

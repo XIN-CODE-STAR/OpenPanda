@@ -193,6 +193,11 @@ func init() {
 		{"clear", "chat", "cmd.clear", (*repl).cmdClear},
 		{"tasks", "tasks", "cmd.tasks", (*repl).cmdTasks},
 		{"task", "tasks", "cmd.task", (*repl).cmdTask},
+		// The two send modes under their own names — the vocabulary the TUI,
+		// the web console and Claude Code/Codex all use. `/task send
+		// [--inject]` stays as the flag form.
+		{"queue", "tasks", "cmd.queue", (*repl).cmdQueue},
+		{"inject", "tasks", "cmd.inject", (*repl).cmdInject},
 		{"cancel", "tasks", "cmd.cancel", (*repl).cmdCancel},
 		{"delete", "tasks", "cmd.delete", (*repl).cmdDelete},
 		{"approve", "tasks", "cmd.approve", (*repl).cmdApprove},

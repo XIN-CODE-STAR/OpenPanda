@@ -13,7 +13,7 @@ VERSION ?= $(shell sed -n 's/^var Version = "\(.*\)"/\1/p' internal/version/vers
 # LDFLAGS_DEV below: stripped symbols, no version override — they keep the
 # version.Version source value (including the -beta / -rc suffixes that a
 # VERSION override here would strip).
-RELEASE_LDFLAGS := -s -w -X github.com/Xustalis/OpenPanda/internal/version.Version=$(VERSION)
+RELEASE_LDFLAGS := -s -w -X github.com/Xustalis/OpenPanda/internal/version.Version=$(VERSION) -X github.com/Xustalis/OpenPanda/internal/version.Provenance=release
 # A pinned release key bakes its public half into release binaries so the
 # self-update path verifies checksums.txt.sig by default. Same knob as
 # scripts/package.sh (which additionally signs checksums.txt itself).

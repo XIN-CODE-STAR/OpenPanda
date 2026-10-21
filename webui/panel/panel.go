@@ -258,6 +258,9 @@ func New(d Deps) http.Handler {
 		mux.HandleFunc("DELETE /api/sessions/{id}", h.deleteSession)
 		mux.HandleFunc("POST /api/sessions/{id}/fork", h.forkSession)
 		mux.HandleFunc("POST /api/sessions/{id}/ask", h.sessionAsk)
+		// Type into the thread while the agent works — the queue/inject pair
+		// the composer promises (see session_msg.go).
+		mux.HandleFunc("POST /api/sessions/{id}/messages", h.sendSessionMessage)
 		mux.HandleFunc("GET /api/sessions/{id}/approval", h.getSessionApproval)
 		mux.HandleFunc("DELETE /api/sessions/{id}/approval", h.clearSessionApproval)
 		mux.HandleFunc("POST /api/sessions/{id}/cancel", h.sessionCancel)
@@ -508,6 +511,13 @@ type handler struct {
 	askMu         sync.Mutex
 	askGeneration uint64
 	activeAsks    map[string]sessionOperation
+
+	// steerMu guards steers: one bounded queue per session holding what the
+	// user typed while that session's turn streams. It is the console's twin of
+	// the TUI's askStream.steer channel — the only delivery path for a plain
+	// answer turn, which has no task row to land a durable note on.
+	steerMu sync.Mutex
+	steers  map[string]chan string
 
 	approvalMu         sync.Mutex
 	approvalOperations map[string]approvalOperation
@@ -866,9 +876,11 @@ func (h *handler) attachLastEvents(ctx context.Context, tasks []taskJSON) {
 	}
 }
 
-// visibleTraceTypes is the 8-track set the decision-orbit component paints.
+// visibleTraceTypes is the track set the decision-orbit component paints.
 // Mirrors the map in events.go (same package, kept here so getTask's filter
-// is obvious without chasing a separate file).
+// is obvious without chasing a separate file). user_msg belongs here: the
+// whole point of the strip is "what is happening to this task right now", and
+// a queued or injected user note that never shows up reads as dropped input.
 var visibleTraceTypes = map[string]bool{
 	"reasoning":          true,
 	"classify_result":    true,
@@ -879,6 +891,8 @@ var visibleTraceTypes = map[string]bool{
 	"tier2_triggered":    true,
 	"plan_stage_changed": true,
 	"artifact_transfer":  true,
+	"user_msg":           true,
+	"user_msg_consumed":  true,
 }
 
 // getTask serves one task's full row plus its event timeline.

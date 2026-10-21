@@ -279,6 +279,12 @@ func (m tuiModel) buildTaskItems(state string) []SelectionItem {
 	})
 	ordered := append(append(append(inflight, queued...), parked...), terminal...)
 
+	// Unread user notes, counted per task in one grouped read. This is the
+	// "your message is still waiting" signal the list owed the user: a note
+	// silently sits on the board until the next round folds it, and a picker
+	// that shows only states made that wait invisible.
+	pending, _ := m.r.store.PendingNoteCounts(m.r.commandContext())
+
 	items := make([]SelectionItem, 0, len(ordered))
 	for i, t := range ordered {
 		title := t.Title
@@ -291,6 +297,14 @@ func (m tuiModel) buildTaskItems(state string) []SelectionItem {
 				snippet += " · "
 			}
 			snippet += t.OwnerNode
+		}
+		if n := pending[t.TaskID]; n > 0 {
+			tag := i18n.Tf(m.loc, "tui.task.pendingN", "n", strconv.Itoa(n))
+			if snippet != "" {
+				snippet = tag + " · " + snippet
+			} else {
+				snippet = tag
+			}
 		}
 		items = append(items, SelectionItem{
 			Index:   i + 1,
@@ -363,6 +377,75 @@ func (m *tuiModel) refreshTasksList() {
 // result the answer refers to.
 func (m tuiModel) followUpTask(t core.Task) (tea.Model, tea.Cmd) {
 	return m.askTurn(taskFollowupText(m.loc, t), "")
+}
+
+// noteTarget resolves which task a /queue or /inject line addresses, and
+// returns the note text with that prefix stripped. An explicit leading id wins
+// when it names a real row; otherwise the whole argument is the text and the
+// task is the one last opened from the picker. That fallback is what makes the
+// bare form usable: "open the running task, type /queue fix it" is the gesture,
+// and demanding a 36-character id in the middle of a conversation is not.
+func (m tuiModel) noteTarget(arg string) (id, text string) {
+	arg = strings.TrimSpace(arg)
+	first, rest, hasRest := strings.Cut(arg, " ")
+	rest = strings.TrimSpace(rest)
+	if hasRest && rest != "" && m.taskExists(first) {
+		return first, rest
+	}
+	return m.focusTask, arg
+}
+
+// taskExists reports whether the store knows this id — the guard that keeps a
+// note starting with a word like "this" from being read as a task id.
+func (m tuiModel) taskExists(id string) bool {
+	if id == "" || m.r == nil || m.r.store == nil {
+		return false
+	}
+	_, err := m.r.store.Get(m.r.commandContext(), id)
+	return err == nil
+}
+
+// sendTaskNote delivers one user note into a task: /queue (the agent reads it at
+// its next round, nothing is interrupted) or /inject (the same note, plus
+// aborting the in-flight round when THIS process runs it).
+//
+// It runs inline rather than through the exec pump. There is no `panda queue`
+// or `panda inject` CLI verb to dispatch, and the write is a couple of rows —
+// backgrounding it would spawn a subprocess and freeze the input box for no
+// work. Inline also means it works mid-turn, which is exactly when a user wants
+// to steer.
+func (m tuiModel) sendTaskNote(arg string, inject bool) (tea.Model, tea.Cmd) {
+	engine := m.engine
+	if engine == nil && m.r != nil {
+		engine = m.r.engine.Load()
+	}
+	if engine == nil {
+		return m, m.printBlock(block{kind: blockError, body: i18n.T(m.loc, "tui.error.noModel")})
+	}
+	id, text := m.noteTarget(arg)
+	if id == "" {
+		return m, m.printBlock(block{kind: blockNote, body: i18n.T(m.loc, "tui.task.note.noTask")})
+	}
+	if text == "" {
+		return m, m.printBlock(block{kind: blockError, body: i18n.T(m.loc, "tui.task.note.usage")})
+	}
+	status, warn, err := engine.SendTaskMessage(context.Background(), id, text, inject)
+	if err != nil {
+		return m, m.printBlock(block{kind: blockError, body: err.Error()})
+	}
+	m.focusTask = id
+	// Report the outcome, not a blanket "sent": "interrupted" and "queued" are
+	// different promises, and the warning (no consumer, or an inject that could
+	// not reach the running process) is the whole reason this returns one.
+	key := "cli.task.send.queued"
+	if status == "interrupted" {
+		key = "cli.task.send.interrupted"
+	}
+	body := i18n.Tf(m.loc, key, "id", shortID(id))
+	if warn != "" {
+		body += " — " + warn
+	}
+	return m, m.printBlock(block{kind: blockNote, body: body})
 }
 
 // followUpTaskRef is the typed-command path (/task followup <id>): resolve
@@ -535,6 +618,10 @@ func (m tuiModel) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if !ok {
 				return m, nil
 			}
+			// Remember the choice: /queue and /inject default to the task the
+			// user just opened, which is the only way those commands can work
+			// without a 36-character id in the middle of a conversation.
+			m.focusTask = t.TaskID
 			if taskSettled(t.State) {
 				return m.followUpTask(t)
 			}

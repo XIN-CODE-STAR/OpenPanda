@@ -265,6 +265,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.onProgress(msg)
+	case steerAckMsg:
+		if msg.stream == nil || msg.stream != m.stream || msg.stream.detached {
+			return m, nil
+		}
+		note := block{kind: blockNote, body: m.th.accent.Render("💡 ") +
+			i18n.Tf(m.loc, "tui.steer.delivered", "n", strconv.Itoa(msg.round), "text", msg.text)}
+		return m, tea.Batch(m.printBlock(note), waitForActivity(msg.stream))
 	case doneMsg:
 		return m.onDone(msg)
 	case resumedMsg:
@@ -1156,6 +1163,11 @@ func (m tuiModel) submitDuringTurn(text string) (tea.Model, tea.Cmd) {
 			m.chatHistory.clear()
 		}
 		return m, tea.ClearScreen
+	case "queue", "inject":
+		// A note into a task is a store write, not a turn: it runs inline
+		// while this turn streams, which is precisely when a user wants it.
+		// Backgrounding it would look for a CLI verb that does not exist.
+		return m.sendTaskNote(arg, name == "inject")
 	}
 	if m.turnNeedsForeground(name, arg) {
 		return m.enqueuePending(text)
@@ -1300,6 +1312,12 @@ func (m tuiModel) submitSlash(name, arg, text string) (tea.Model, tea.Cmd) {
 		if fields := strings.Fields(arg); len(fields) > 0 && fields[0] == "followup" {
 			return m.followUpTaskRef(strings.Join(fields[1:], " "))
 		}
+	case "queue", "inject":
+		// The two send modes as first-class commands. No `panda queue` /
+		// `panda inject` verb exists, so falling through to the exec pump would
+		// dispatch a command that cannot resolve — this is a store write, and it
+		// runs inline (see sendTaskNote).
+		return m.sendTaskNote(arg, name == "inject")
 	case "tasks":
 		// "watch" streams the live board through exec; "clear" is destructive
 		// and needs a y/N the exec goroutine cannot read — it gets the shared

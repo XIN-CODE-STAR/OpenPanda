@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import { t } from '../i18n/index.ts'
+
 /** Relative timestamps for list rows ("3 分钟前", "昨天").
  *
  *  Intl rather than an i18n key set: a relative-time ladder is a locale
@@ -81,4 +83,19 @@ function stampDate(ts: number | undefined): Date | null {
   if (!ts || ts <= 0) return null
   const at = new Date(ts * 1000)
   return Number.isFinite(at.getTime()) ? at : null
+}
+
+/** "5d 3h" / "2h 05m" / "12m" / "45s" — compact human duration, units
+ *  localized so CJK locales read 天/小时/分钟/秒 instead of latin letters.
+ *  Whole days drop the zero hour ("3d", not "3d 0h"). */
+export function formatDuration(ms: number): string {
+  const s = Math.max(1, Math.round(ms / 1000))
+  const d = Math.floor(s / 86400)
+  const h = Math.floor((s % 86400) / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  if (d > 0) return h > 0 ? `${d}${t('time.unit.d')} ${h}${t('time.unit.h')}` : `${d}${t('time.unit.d')}`
+  if (h > 0) return `${h}${t('time.unit.h')} ${String(m).padStart(2, '0')}${t('time.unit.m')}`
+  if (m > 0) return `${m}${t('time.unit.m')}`
+  return `${sec}${t('time.unit.s')}`
 }

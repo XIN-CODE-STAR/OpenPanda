@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { api, type DirectoryListing } from '../api/client'
 import { t } from '../i18n'
+import { layerAboveOwnsEscape } from './card-dismiss'
 import { Icon } from './icons'
 import { lastPathSegment, suggestProjectName } from './dir-utils'
 import { useModalFocus } from './modal-focus'
@@ -212,7 +213,7 @@ export function DirButton({
       }
     }
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return
+      if (e.key !== 'Escape' || layerAboveOwnsEscape('.wd-panel')) return
       e.stopPropagation()
       setOpen(false)
       setQuery('')

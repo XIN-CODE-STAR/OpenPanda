@@ -66,6 +66,16 @@ func TestUserMessageModes(t *testing.T) {
 	if len(lines) != 1 || !strings.Contains(lines[0], "also update the README") {
 		t.Fatalf("drain after queue = %v", lines)
 	}
+	// The fold is stamped on the row, not only in the in-memory seen-set: a
+	// console in another process reads consumed_at to draw "waiting for the
+	// next round" apart from "already read", and the seen-set is invisible to
+	// it.
+	if got := consumedAt(t, c, tk.TaskID, "also update the README"); got == 0 {
+		t.Fatal("drained queue note must be stamped consumed")
+	}
+	if got := consumedAt(t, c, tk.TaskID, "stop editing; check the logs first"); got != 0 {
+		t.Fatalf("steer note must stay unread until takeSteer, consumed_at=%d", got)
+	}
 	if again := c.drainTaskMessages(ctx, task, seen); len(again) != 0 {
 		t.Fatalf("drain replayed seen note: %v", again)
 	}
@@ -84,6 +94,9 @@ func TestUserMessageModes(t *testing.T) {
 	}
 	if c.steerUnseen(ctx, tk.TaskID, seen) {
 		t.Fatal("steer must read seen after takeSteer")
+	}
+	if got := consumedAt(t, c, tk.TaskID, "stop editing; check the logs first"); got == 0 {
+		t.Fatal("taken steer note must be stamped consumed")
 	}
 
 	// inject with a live round: the registered cancel fires and the caller
@@ -122,6 +135,56 @@ func TestUserMessageModes(t *testing.T) {
 	}
 	if _, err := c.InjectUserMessage(ctx, tk.TaskID, "late"); err == nil {
 		t.Fatal("inject must refuse a terminal task")
+	}
+}
+
+// consumedAt reads one note's delivery stamp off the board, failing when the
+// body is absent — a silent 0 would make the "must be stamped" assertions pass
+// for the wrong reason.
+func consumedAt(t *testing.T, c *Core, taskID, body string) int64 {
+	t.Helper()
+	msgs, err := c.store.TaskMessages(context.Background(), "task:"+taskID)
+	if err != nil {
+		t.Fatalf("read board: %v", err)
+	}
+	for _, m := range msgs {
+		if m.Body == body {
+			return m.ConsumedAt
+		}
+	}
+	t.Fatalf("board has no note %q", body)
+	return 0
+}
+
+// TestPendingNoteCounts pins the badge source both pickers read: unread user
+// notes counted per task, and the count dropping to zero once a round folds
+// them. A stale count is worse than no count — it tells the user their note is
+// still queued when the agent already read it.
+func TestPendingNoteCounts(t *testing.T) {
+	c := queueTestCore(t)
+	ctx := context.Background()
+	tk := steerTestTask(t, c)
+	if err := c.QueueUserMessage(ctx, tk.TaskID, "first"); err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	if err := c.QueueUserMessage(ctx, tk.TaskID, "second"); err != nil {
+		t.Fatalf("queue 2: %v", err)
+	}
+	counts, err := c.store.PendingNoteCounts(ctx)
+	if err != nil {
+		t.Fatalf("pending counts: %v", err)
+	}
+	if got := counts[tk.TaskID]; got != 2 {
+		t.Fatalf("pending notes = %d, want 2 (map=%v)", got, counts)
+	}
+	task, _ := c.store.Get(ctx, tk.TaskID)
+	c.drainTaskMessages(ctx, task, msgSeen{})
+	counts, err = c.store.PendingNoteCounts(ctx)
+	if err != nil {
+		t.Fatalf("pending counts after drain: %v", err)
+	}
+	if got := counts[tk.TaskID]; got != 0 {
+		t.Fatalf("pending notes after drain = %d, want 0", got)
 	}
 }
 

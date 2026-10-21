@@ -20,6 +20,7 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/entry"
 	"github.com/Xustalis/OpenPanda/internal/i18n"
 	"github.com/Xustalis/OpenPanda/internal/providers"
+	"github.com/Xustalis/OpenPanda/internal/scheduler"
 	"github.com/Xustalis/OpenPanda/internal/scheduler/queue"
 	"github.com/Xustalis/OpenPanda/internal/skills"
 )
@@ -1325,6 +1326,7 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 			"agent":      plan.Agent,
 			"adapter":    plan.Adapter,
 			"model":      activeModel,
+			"node_name":  scheduler.NodeNamePart(c.nodeID),
 			"authorized": task.Authorized,
 			"restricted": restricted,
 			"tier":       plan.Tier,

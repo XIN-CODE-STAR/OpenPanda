@@ -45,7 +45,7 @@ cd "$ROOT"
 VERSION="${1:-${VERSION:-0.0.11}}"
 VERSION="${VERSION#v}"
 VERSION_PKG="github.com/Xustalis/OpenPanda/internal/version"
-LDFLAGS="-s -w -X ${VERSION_PKG}.Version=${VERSION}"
+LDFLAGS="-s -w -X ${VERSION_PKG}.Version=${VERSION} -X ${VERSION_PKG}.Provenance=release"
 
 # Bake the release public key into the binaries so `panda update` verifies
 # checksums.txt.sig by default instead of trusting checksums fetched over the

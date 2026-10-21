@@ -1054,6 +1054,37 @@ export function SessionsView({
     }
   }
 
+  /** Type into the turn that is already streaming. Enter while busy used to be
+   *  a silent early return — the composer's own placeholder promised "type an
+   *  addition" and nothing happened. The text now lands on the session's steer
+   *  queue (or the linked task's board), which is the same contract the TUI has
+   *  always had for plain text typed mid-turn.
+   *
+   *  Attachments are refused rather than dropped: a file belongs to a full turn
+   *  (it uploads into the worktree and is replayed into the prompt), and this
+   *  path has no turn to attach it to. */
+  async function sendIntoRunningTurn(text: string, withFiles: boolean) {
+    const sid = activeId
+    if (!sid || !text) return
+    if (withFiles) {
+      toast(t('sessions.msgNoFiles'))
+      return
+    }
+    try {
+      const r = await api.sendSessionMessage(sid, text, false)
+      setInput('')
+      editorClear(composer.current)
+      setCompleteDismissed('')
+      // The server's own words when it has a caveat (no queue consumer, or an
+      // inject that could not interrupt), else the plain outcome.
+      if (r.warning) toast(r.warning)
+      else toast(t('sessions.msgQueued'))
+    } catch (err) {
+      // A refused note is still the user's text — leave it in the box.
+      toastError(err)
+    }
+  }
+
   async function send(e?: Event) {
     e?.preventDefault()
     const raw = input.trim()
@@ -1064,7 +1095,11 @@ export function SessionsView({
     const tray = el0 ? pending.filter((p) => livePillKeys(el0).has(p.key)) : pending
     // A tray-only send is a real send: dropping a screenshot and hitting Enter
     // is the whole point, and the prompt then carries nothing but the file.
-    if ((!raw && tray.length === 0) || busy || inflight.current) return
+    if (!raw && tray.length === 0) return
+    if (busy || inflight.current) {
+      void sendIntoRunningTurn(raw, tray.length > 0)
+      return
+    }
     // A slash line is a command, never a prompt — the REPL's rule.
     if (raw.startsWith('/') && dispatchSlash(raw)) {
       setInput('')
@@ -1222,6 +1257,11 @@ export function SessionsView({
           onReasoning: (text) => patch((m) => ({ ...m, thought: (m.thought ?? '') + text })),
           onDelta: (text) => patch((m) => ({ ...m, text: m.text + text })),
           onStatus: (text, ev) => patch((m) => ({ ...m, status: statusNote(text, ev) })),
+          // The note typed mid-turn reached a round. This is the upgrade from
+          // "queued" to "delivered" — without it the user cannot tell a steer
+          // the model read from one the turn ended before reaching.
+          onSteer: (_text, round) =>
+            patch((m) => ({ ...m, status: t('sessions.steerDelivered', { n: String(round) }) })),
           onOperation: (operationID) => {
             if (inflight.current === ctrl && inflightSid.current === sid) {
               inflightOperation.current = operationID

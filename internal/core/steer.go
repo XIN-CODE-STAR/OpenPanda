@@ -166,6 +166,18 @@ func (c *Core) takeSteer(ctx context.Context, taskID string, seen msgSeen) strin
 			continue
 		}
 		seen[k] = m.SenderSeq
+		// Write the delivery back to the row. The in-memory seen-set is the
+		// round loop's own cursor and nothing else can read it, so a console in
+		// another process — the web panel, a remote daemon — would otherwise
+		// keep drawing this note as "waiting for the next round" forever.
+		// Best-effort by design: the note has already been read here, and a
+		// failed stamp costs a stale badge, never a message.
+		if err := c.store.MarkTaskMessageConsumed(ctx, m.Scope, m.Sender, m.SenderSeq); err != nil && c.logger != nil {
+			c.logger.Debug("mark steer consumed", "task", taskID, "err", err)
+		}
+		c.EvTrace(ctx, taskID, EvUserMsgConsumed, map[string]any{
+			"mode": "inject", "seq": m.SenderSeq, "text": m.Body,
+		})
 		return strings.TrimSpace(m.Body)
 	}
 	return ""

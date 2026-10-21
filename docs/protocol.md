@@ -125,7 +125,7 @@ JSON 重打包）。
 
 | `type` | 负载结构 | 说明 |
 |---|---|---|
-| `hello` | `HelloPayload` | 连接时声明身份：`card` 摘要 + HMAC `sig`（绑 `ts`/`nonce`）+ Ed25519 `pub_key`/`ed_sig` + `udp_port` + `caps` + `authoritative` |
+| `hello` | `HelloPayload` | 连接时声明身份：`card` 摘要 + HMAC `sig`（绑 `ts`/`nonce`）+ Ed25519 `pub_key`/`ed_sig` + X25519 `x_pub` + `udp_port` + `caps` + `authoritative` |
 | `hello_reject` | `HelloRejectPayload` | 握手失败时服务端在断连前给出的唯一回执：`reason` ∈ `auth`/`identity`/`replay` |
 | `join` | — | 加入（常量定义在 `bus`，处理在核心层） |
 | `heartbeat` | `HeartbeatPayload` | 状态 + 容量；可顺带最新能力卡 `card` |
@@ -150,6 +150,7 @@ JSON 重打包）。
 | `agent_grant` | `AgentGrantPayload` | 租约锁授权/拒绝（§5.2，`denied` 区分显式拒绝与无应答） |
 | `agent_yield` | `AgentYieldPayload` | agent 在检查点让出执行 |
 | `dtn_bundle` | `DTNBundlePayload` | 一个 CBOR 编码的 DTN bundle 原样透传（见下） |
+| `transit` | `TransitPayload` | 盲中继帧（跨网段 mesh M3）：`dest`（稳定 `k:<pub>` 或实例 id）+ `ttl` + `seal`（`x25519`\|`mesh`）+ `inner` 密封 blob。中继只见外壳，逐跳转发；终点开封、验内层 Ed25519 认证后按直收分发 |
 | `punch_offer` | `PunchOfferPayload` | NAT 打洞协调：会话 nonce + 候选端点 + TTL |
 | `punch_ready` | `PunchOfferPayload` | 应答 offer：回显 nonce，附己方候选端点 |
 | `pair_hello` | `PairHelloPayload` | LAN 配对发起（未认证连接上除 hello 外唯一受理的帧）：会话 id + 临时 X25519 公钥 + Ed25519 身份 + nonce |
@@ -165,7 +166,13 @@ JSON 重打包）。
 监听端口，0 = 无 UDP 面）、`caps`（可选线能力清单：`sessaead` 会话加密、
 `binart` 二进制数据帧——不认识某项能力的对端只是不启用它）、
 `authoritative`（声明发送进程持有节点身份锁，同 id 仲裁让真正的 daemon 从
-借用引擎的兄弟进程手里收回对端边）。能力摘要刻意以原始 JSON 透传，让传输层
+借用引擎的兄弟进程手里收回对端边）、`x_pub`（X25519 身份公钥 hex——双钥
+身份的另一半：Ed25519 签名、X25519 做 transit 密钥协商；仅在该 hello 的
+EdSig 验过后才入目录 `x_pub` 列，旧对端不带此字段、发往它们的 transit 退化为
+成员级 mesh 密封）、`prov`（构建出处：`release`|`self`|`unsigned`——
+version.Provenance 戳，自声明且在签名域外，接收方白名单化后落目录行，
+供 `accept.<tier>.self_signed` 信任策略权衡自建二进制的任务来源；
+缺席 = 不认识该字段的旧节点）。能力摘要刻意以原始 JSON 透传，让传输层
 与持有 `CapabilitySummary` 类型的 ledger 包解耦。hello **应答**额外带
 `you`——对端观察到本连接来源 IP，是白送的反射地址发现（不签名：篡改它只
 换来错误的候选列表，打洞握手本身会识破）。
@@ -189,7 +196,9 @@ hello 校验失败时服务端回 `hello_reject`（`reason`：`auth` 签名/密�
   （空数组 = 无计划），字段缺席才表示旧节点；
 - `projects`：本机持有 checkout 的项目名（驻留路由打分的输入）；
 - `ver`：本机版本号，mid-release 升级不必等重连就刷新对端目录行
-  （fleet 面板的版本错位告警即拿它与自身构建对比）。
+  （fleet 面板的版本错位告警即拿它与自身构建对比）；
+- `prov`：构建出处（`release`|`self`|`unsigned`），同 hello 镜像——
+  mid-life 换二进制（update apply、self-build）不等重连就刷新目录行。
 
 ### `task_delegate`
 任务移交（§10.3 示例）。除 `task_id` / `parent_id` / `project` / `title` /
@@ -387,6 +396,29 @@ TTL 期满。同一规则约束 `artifact_push` 的收方。
 结果，统一在 UDP 监听端口——打洞永远从共享 socket 喷出，NAT 开的洞就是监听
 口）。`punch_ready` 回显 nonce 并附己方候选，双方同时开喷。`network.peers` 里
 `punch:<node-id>` 形态的条目触发这条路径；打通的端点成为 `sendTo` 的回退路由。
+
+### 盲中继：`transit`
+`sendTo` 直连与打洞路由都不通时的兜底（跨网段 mesh 设计 M3）。外层信封是
+普通 `transit` 帧，`env.From`/`msg_id` 走逐跳重写与去重（同 punch 中继纪律），
+`env.To` 记最终目的地；`TransitPayload` 是**中继唯一可读的外壳**——`dest`
+（优先稳定键 `k:<pub>`，经目录解析当前实例）、`ttl`（`TransitMaxTTL=6` 逐跳递减，
+耗尽即弃）、`seal` 级别、`inner` 密封 blob（≤1 MiB）。
+
+`inner` 密封内容 = `{env, pub, sig}`：原信封字节 + 发送方 Ed25519 对内层字节的
+认证（`panda-transit-inner-v1` 域前缀），所以中继改不动 `From`/`MsgID`/负载。
+`pub`/`sig` 是必需字段，无签名的内层直接丢弃；实例/会话 id 必须能经目录行
+绑定到同一签名密钥。未钉住的 id 只放行 heartbeat 与 punch 协调帧作为首次
+接触，任务/结果/授权类帧必须先由签名 hello 建立身份，避免幽灵 id 借用默认
+mesh 信任。
+两级密封：`x25519` 用 ECIES（临时 X25519 公钥前缀 + HKDF 绑双方公钥 +
+AES-256-GCM）封到目的节点的 `x_pub`，中继只读到 dest+大小+TTL；目的端没发布
+`x_pub` 时退化 `mesh` 级——HKDF(mesh 密钥 + dest 绑定) ，任何成员都能开，
+发送方记 `transit_degraded` 审计。hello `caps` 里 `e2et` 宣告可当被密封目的地
+（发布了 `x_pub`），`trnz` 宣告会替成员转发；转发只走 WS conn（UDP 1400B 装
+不下），hello/pair 类 conn 绑定帧永远不可被密封进内层。工件面（`artifact_fetch`
+及其 chunk/push 应答）同样不进 transit：请求虽小，应答是 1 MiB 级块，密封后
+必然超过 inner 上限；放行请求只会跳过调用方的链上/枢纽回退，让拉取空等预算。
+数据面应走直连或既有中继路径。
 
 ## LAN 发现 beacon 与配对
 

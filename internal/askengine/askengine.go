@@ -527,9 +527,18 @@ func (e *Engine) SendTaskMessage(ctx context.Context, taskID, text string, injec
 		}
 		status = "queued"
 	}
-	if t, terr := core.NewSigningTaskStore(e.db, e.logger).Get(ctx, taskID); terr == nil &&
-		t.State == core.StateQueued && !e.queueConsumerAlive(ctx) {
-		return status, i18n.T(e.Locale(), "cli.queue.noConsumer"), nil
+	if t, terr := core.NewSigningTaskStore(e.db, e.logger).Get(ctx, taskID); terr == nil {
+		if t.State == core.StateQueued && !e.queueConsumerAlive(ctx) {
+			return status, i18n.T(e.Locale(), "cli.queue.noConsumer"), nil
+		}
+		// An inject only aborts a round this process is running — the cancel
+		// handle lives in memory (steer.go). When the row is running somewhere
+		// else the note still queued for the next round, which is fine, but
+		// silently reporting the same "queued" a same-process inject reports
+		// would tell the user they cut the round short when nothing was cut.
+		if inject && status == "queued" && t.State == core.StateRunning {
+			return status, i18n.T(e.Locale(), "cli.task.send.injectNoInterrupt"), nil
+		}
 	}
 	return status, "", nil
 }
@@ -1266,6 +1275,12 @@ type StreamCallbacks struct {
 	// GetSteer is polled at the start of each round to consume user steering ideas
 	// injected at runtime, appending them to conversation turns.
 	GetSteer func() string
+	// OnSteerConsumed fires once per idea GetSteer handed over, with the round
+	// that will carry it. A surface that accepted a note has only proved it
+	// reached a channel; this is the proof the model will see it, and without
+	// it "已注入" is a claim the caller cannot back up — the last round of a
+	// turn can start and finish before anything polls the channel again.
+	OnSteerConsumed func(text string, round int)
 }
 
 // ProgressKind names what the engine is about to do.
@@ -1777,6 +1792,11 @@ rounds:
 					steerPrefix = "[Steering]: "
 				}
 				turns = append(turns, entry.Turn{Role: "user", Content: steerPrefix + idea})
+				// Tell the surface the note is now this round's input — the
+				// moment "queued" becomes "delivered".
+				if cb.OnSteerConsumed != nil {
+					cb.OnSteerConsumed(idea, round)
+				}
 			}
 		}
 		trackReasoning := func(chunk string) {

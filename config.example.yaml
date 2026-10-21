@@ -161,6 +161,19 @@ network:
   #                                # finds nothing. provide for the
   #                                # same-owner case only — a guarded peer
   #                                # you nevertheless trust with keys.
+  #       self_signed: "strip"     # honor | strip | refuse — how work whose
+  #                                # ORIGIN runs a self-evolution-built
+  #                                # binary is treated. strip (default)
+  #                                # drops its tier-2 consent grant like
+  #                                # foreign_consent does: the task lands on
+  #                                # the restricted tool face and
+  #                                # irreversibles park for local review.
+  #                                # refuse declines the delegate outright;
+  #                                # honor weighs its consent like a
+  #                                # release-signed build's. Provenance is
+  #                                # self-asserted — this is a conservative
+  #                                # dial on honest nodes, not an
+  #                                # attestation check.
 
   # ── DTN contact plan: scheduled transmission windows ─────────────────────
   # For links that are predictably up only at times — a nightly batch host, a

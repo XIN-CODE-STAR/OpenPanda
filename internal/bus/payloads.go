@@ -27,14 +27,30 @@ func unixNow() int64 { return time.Now().Unix() }
 // indistinguishable from a replay. Old peers send none and are verified
 // against the two-field form.
 type HelloPayload struct {
-	NodeID string          `json:"node_id"`
-	Ver    string          `json:"ver"`
+	NodeID string `json:"node_id"`
+	Ver    string `json:"ver"`
+	// Prov is the sender's build provenance (release | self | unsigned) —
+	// the version.ProvenanceClass stamp. Absent means a pre-provenance peer
+	// that does not send the field; a current dev build sends "unsigned"
+	// explicitly. Self-asserted and outside the signature domain, like Ver:
+	// honest-node bookkeeping the receiver's trust policy reads
+	// (accept.<tier>.self_signed), never a security proof — the locally
+	// asserted tier stays the boundary.
+	Prov   string          `json:"prov,omitempty"`
 	Card   json.RawMessage `json:"card,omitempty"`
 	Ts     int64           `json:"ts,omitempty"`    // unix seconds, bound into Sig
 	Nonce  string          `json:"nonce,omitempty"` // per-dial random, bound into Sig when present
 	Sig    string          `json:"sig"`
 	PubKey string          `json:"pub_key,omitempty"` // Ed25519 public key hex (cryptographic identity)
 	EdSig  string          `json:"ed_sig,omitempty"`  // Ed25519 signature over NodeID:Ts:Nonce
+	// XPub is the node's X25519 identity key (hex) — the second half of the
+	// dual-key identity (cross-network mesh design §3): Ed25519 signs,
+	// X25519 agrees transit keys. It is self-asserted like UDPPort: only
+	// recorded after the hello's EdSig verified the claimed Ed25519 key, and
+	// a peer that lies about its own x_pub only breaks sealing TO itself.
+	// Peers that predate the field send nothing and transit to them
+	// degrades to the member-level mesh seal.
+	XPub string `json:"x_pub,omitempty"`
 	// UDPPort advertises the sender's datagram-plane listener (farsky). A
 	// peer that cannot hold a TCP session to us can still be reached by a
 	// punch: combine this port with the IP we observe its connection coming
@@ -128,6 +144,11 @@ type HeartbeatPayload struct {
 	// fleet panel's version-skew warning diffs against its own build.
 	// Absent on old nodes; receivers leave any stored stamp alone.
 	Ver string `json:"ver,omitempty"`
+	// Prov mirrors HelloPayload.Prov on every beat so a mid-life binary
+	// swap (update apply, self-build) refreshes the directory row without
+	// waiting for a reconnect. Absent on old nodes; receivers leave any
+	// stored stamp alone.
+	Prov string `json:"prov,omitempty"`
 }
 
 // LinkMetric is the wire form of one measured edge weight (§4.1): the round-
@@ -154,6 +175,26 @@ type Contact struct {
 	End     int64  `json:"end"`
 	RateBps int64  `json:"rate_bps,omitempty"`
 	Period  int64  `json:"period,omitempty"`
+}
+
+// TransitMaxTTL bounds how many relay hops a transit frame may spend. Six
+// matches the design's relay budget: long enough for a re-forwarded path
+// through a sparse graph, short enough that a loop dies quickly on top of
+// the msg-id dedup that kills the two-hop case outright.
+const TransitMaxTTL = 6
+
+// TransitPayload is the outer shell of a transit frame (cross-network mesh
+// design M3/§3). A relay reads ONLY this: where the frame is headed, how
+// many hops it has left, which seal level wraps the body, and the sealed
+// body itself. Inner is the AEAD blob (nonce‖ciphertext, plus the ephemeral
+// key prefix under the x25519 level) carrying a transitInner — the original
+// envelope plus the sender's Ed25519 attestation binding env.From to its
+// identity. The blob never rides plaintext; relays are blind by design.
+type TransitPayload struct {
+	Dest  string `json:"dest"`  // stable "k:<pub>" identity or instance id
+	TTL   int    `json:"ttl"`   // decremented per relay; <=1 dies at the next relay
+	Seal  string `json:"seal"`  // SealX25519 | SealMesh
+	Inner []byte `json:"inner"` // sealed transitInner blob
 }
 
 // TaskDelegatePayload is the task handoff (design doc §10.3 example). The
