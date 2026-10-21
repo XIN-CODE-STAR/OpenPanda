@@ -87,7 +87,7 @@ func TestApplyDirRowSignedLands(t *testing.T) {
 		Device: "ghost", NodeKind: "physical",
 		NativeIDs: []string{"sys:info"}, Addrs: []string{"10.9.9.9:7836"},
 	})
-	raw, pub := mintDirRow(t, "ghost", time.Now().Unix(), func(r *bus.DirRow) {
+	raw, _ := mintDirRow(t, "ghost", time.Now().Unix(), func(r *bus.DirRow) {
 		r.Card = card
 		r.XPub = hex.EncodeToString(make([]byte, 32))
 		r.Addrs = []string{"10.9.9.9:7836"}
@@ -95,8 +95,10 @@ func TestApplyDirRowSignedLands(t *testing.T) {
 	if !c.applyDirRow(ctx, raw, "via-peer") {
 		t.Fatal("signed fresh row rejected")
 	}
-	if got := dirField(t, c, "ghost", "pub_key"); got != pub {
-		t.Fatalf("pub_key = %q, want %q", got, pub)
+	// Gossip may not mint the first identity pin for a non-stable id; the
+	// direct hello is the only attestation that binds "ghost" to a key.
+	if got := dirField(t, c, "ghost", "pub_key"); got != "" {
+		t.Fatalf("gossip row wrote a first pub_key %q", got)
 	}
 	if got := dirField(t, c, "ghost", "dir_sig"); got == "" {
 		t.Fatal("dir_sig not stored")
@@ -109,6 +111,63 @@ func TestApplyDirRowSignedLands(t *testing.T) {
 	}
 	if got := dirField(t, c, "ghost", "name"); got != "ghost" {
 		t.Fatalf("card not applied: name = %q", got)
+	}
+}
+
+// TestApplyDirRowIdentityBinding pins the two identity rules: gossip cannot
+// establish a first pin for a non-stable id, and a k:<pub> row must be signed
+// by that same pub. Both close the impersonation path where a member binds a
+// victim id to its own key and then passes transit's From check.
+func TestApplyDirRowIdentityBinding(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().Unix()
+	c := newCoreOnDB(t, openTestDB(t), "node-a")
+
+	// 1. Non-stable id: signed row lands, but writes no pub_key.
+	raw, _ := mintDirRow(t, "ghost", now, nil)
+	if !c.applyDirRow(ctx, raw, "p") {
+		t.Fatal("signed gossip row rejected")
+	}
+	if got := dirField(t, c, "ghost", "pub_key"); got != "" {
+		t.Fatalf("gossip minted first pub_key %q", got)
+	}
+
+	// 2. A verified hello pins the id; a later gossip row with the SAME key
+	//    may refresh the pin (the row's signature is still just self-claim,
+	//    but it no longer introduces a new binding).
+	helloPub, helloPriv, err := bus.GenerateNodeKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.recordPeerPubKey(ctx, "hello-node", hex.EncodeToString(helloPub), "")
+	refresh := &bus.DirRow{ID: "hello-node", PubKey: hex.EncodeToString(helloPub), SeenAt: now}
+	bus.SignDirRow(helloPriv, refresh)
+	if !c.applyDirRow(ctx, bus.CanonicalDirRowBytes(refresh), "p") {
+		t.Fatal("same-key refresh after a hello pin rejected")
+	}
+	if got := dirField(t, c, "hello-node", "pub_key"); got != hex.EncodeToString(helloPub) {
+		t.Fatalf("refresh lost the pinned key: %q", got)
+	}
+
+	// 3. Stable k:<pub> id signed by a different key is dropped outright.
+	otherPub, otherPriv, err := bus.GenerateNodeKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := &bus.DirRow{ID: stableIDPrefix + hex.EncodeToString(helloPub), PubKey: hex.EncodeToString(otherPub), SeenAt: now}
+	bus.SignDirRow(otherPriv, bad)
+	if c.applyDirRow(ctx, bus.CanonicalDirRowBytes(bad), "p") {
+		t.Fatal("k:<pub> row signed by a different key applied")
+	}
+
+	// 4. The matching stable row is accepted and pins its own key.
+	good := &bus.DirRow{ID: stableIDPrefix + hex.EncodeToString(helloPub), PubKey: hex.EncodeToString(helloPub), SeenAt: now}
+	bus.SignDirRow(helloPriv, good)
+	if !c.applyDirRow(ctx, bus.CanonicalDirRowBytes(good), "p") {
+		t.Fatal("self-certifying stable row rejected")
+	}
+	if got := dirField(t, c, stableIDPrefix+hex.EncodeToString(helloPub), "pub_key"); got != hex.EncodeToString(helloPub) {
+		t.Fatalf("stable row did not pin its key: %q", got)
 	}
 }
 
@@ -316,12 +375,16 @@ func TestDirSyncEndToEnd(t *testing.T) {
 	ad := registerAndListen(t, ctx, a, "127.0.0.1:18140")
 	linkPair(t, ctx, b, a, "127.0.0.1:18140", ad)
 
-	// Seed a signed third-party row into A's directory.
+	// Seed a signed third-party row into A's directory. Identity pins travel
+	// only for self-certifying stable ids; a device-name id would need a
+	// direct hello to establish its key.
 	card, _ := json.Marshal(ledger.CapabilitySummary{Device: "ghost", NodeKind: "physical", NativeIDs: []string{"sys:info"}})
-	raw, gpub := mintDirRow(t, "ghost", time.Now().Unix(), func(r *bus.DirRow) {
+	raw, gpub := mintDirRow(t, "placeholder", time.Now().Unix(), func(r *bus.DirRow) {
+		r.ID = stableIDPrefix + r.PubKey
 		r.Card = card
 		r.XPub = hex.EncodeToString(make([]byte, 32))
 	})
+	ghostID := stableIDPrefix + gpub
 	if !a.applyDirRow(ctx, raw, "seed") {
 		t.Fatal("seed row rejected")
 	}
@@ -330,7 +393,7 @@ func TestDirSyncEndToEnd(t *testing.T) {
 	b.sendDirPull("da", "")
 	pollPub := func() string {
 		var v string
-		_ = b.db.QueryRow(`SELECT COALESCE(pub_key,'') FROM employee_cache WHERE id='ghost'`).Scan(&v)
+		_ = b.db.QueryRow(`SELECT COALESCE(pub_key,'') FROM employee_cache WHERE id=?`, ghostID).Scan(&v)
 		return v
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -340,10 +403,10 @@ func TestDirSyncEndToEnd(t *testing.T) {
 	if got := pollPub(); got != gpub {
 		t.Fatalf("B never learned ghost's key: %q", got)
 	}
-	if got := dirField(t, b, "ghost", "learned_via"); got != "da" {
+	if got := dirField(t, b, ghostID, "learned_via"); got != "da" {
 		t.Fatalf("learned_via = %q, want da", got)
 	}
-	if got := dirField(t, b, "ghost", "dir_sig"); got == "" {
+	if got := dirField(t, b, ghostID, "dir_sig"); got == "" {
 		t.Fatal("row lost its signature in transit")
 	}
 	// Want direction: A should have learned B's self row back.

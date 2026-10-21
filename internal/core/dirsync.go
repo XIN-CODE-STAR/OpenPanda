@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -633,6 +634,14 @@ func (c *Core) applyDirRow(ctx context.Context, raw json.RawMessage, via string)
 		c.logger.Debug("dir row sig invalid", "id", row.ID, "via", via)
 		return false
 	}
+	// A stable id is self-certifying: k:<pub> must be signed by <pub>.
+	// Otherwise a member could sign a row naming another node's stable id
+	// with its own key and have the identity write below pin it.
+	if signed && strings.HasPrefix(row.ID, stableIDPrefix) &&
+		!strings.EqualFold(row.ID, stableIDPrefix+row.PubKey) {
+		c.logger.Debug("dir row stable-id/key mismatch", "id", row.ID, "via", via)
+		return false
+	}
 	now := time.Now().Unix()
 	seenAt := row.SeenAt
 	if seenAt > now+int64(dirFutureSkew.Seconds()) {
@@ -671,7 +680,16 @@ func (c *Core) applyDirRow(ctx context.Context, raw json.RawMessage, via string)
 	// Identity writes are signature-gated: the row's Ed25519 proof binds
 	// pub and x_pub as one claim, recorded through the same atomic upsert a
 	// verified hello uses (with its key-change verification reset).
-	if signed && row.PubKey != "" {
+	//
+	// A gossip row may REFRESH an existing pin, or establish one for a
+	// self-certifying k:<pub> id, but it may never mint the first pin for a
+	// non-stable id: the signature proves "the holder of this key claims
+	// this id", not that the id belongs to that key. Without this rule any
+	// member could bind another node's id to its own key before a verified
+	// hello arrives, and transit's From check would then trust forged
+	// frames as that node.
+	mayPin := strings.HasPrefix(row.ID, stableIDPrefix) || (found && incPub != "")
+	if signed && row.PubKey != "" && mayPin {
 		c.recordPeerPubKey(ctx, row.ID, row.PubKey, row.XPub)
 	}
 	// Store the canonical row into the gossip layer so re-serving keeps the
