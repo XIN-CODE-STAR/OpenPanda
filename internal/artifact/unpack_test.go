@@ -87,6 +87,35 @@ func TestWriteRegularReplacesReadOnlyDestination(t *testing.T) {
 	}
 }
 
+// TestWriteRegularIgnoresPlantedStagingLink: the staging file used to be named
+// path+".partial" — fixed and therefore guessable. An archive that ships an
+// entry "x" could rely on a symlink already sitting at "x.partial" (planted by
+// the same archive one entry earlier, or left by an earlier extraction) and
+// have the write stream through it into a file outside the destination. The
+// staging name is random and created O_EXCL now, so a planted link is neither
+// followed nor reused.
+func TestWriteRegularIgnoresPlantedStagingLink(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("untouched"), 0o644); err != nil {
+		t.Fatalf("seed outside file: %v", err)
+	}
+	path := filepath.Join(dir, "entry")
+	if err := os.Symlink(outside, path+".partial"); err != nil {
+		t.Skipf("symlinks unavailable here: %v", err)
+	}
+
+	if _, err := writeRegular(strings.NewReader("payload"), path, 0o644, int64(len("payload"))); err != nil {
+		t.Fatalf("writeRegular: %v", err)
+	}
+	if got, err := os.ReadFile(outside); err != nil || string(got) != "untouched" {
+		t.Fatalf("write went through the planted .partial link: outside = %q (%v)", got, err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "payload" {
+		t.Fatalf("entry = %q (%v), want the entry's own bytes", got, err)
+	}
+}
+
 // TestWriteRegularKeepsExecBitsOnWindowsMode pins the cross-platform project
 // contract: a packer that cannot express POSIX exec bits ships every file at
 // 0666, and adopting that tree over a POSIX checkout must not turn every

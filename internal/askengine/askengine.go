@@ -99,6 +99,17 @@ type Options struct {
 	// it off: the flap a short-lived REPL causes on peers outweighs the
 	// benefit (and a co-resident daemon makes the row borrowed anyway).
 	MeshNode bool
+	// LocalOnly marks a process that writes to the store and exits: `panda
+	// task add`, `task send`, `task continue`. Such a command needs the
+	// schema, the card and the task store — not a network presence. Opening
+	// the LAN-discovery socket for the milliseconds between argv and exit
+	// buys nothing (nobody can pair with a process that is already gone) and
+	// costs real things: a wildcard UDP bind on every short command, a
+	// `bind: address already in use` warning when several run at once or a
+	// daemon holds the port, and a one-shot peer dial whose conns are torn
+	// down before a single hello completes. LocalOnly skips both; everything
+	// a write needs (schema, store, card, identity key) still happens.
+	LocalOnly bool
 	// ConfigPath is the file cfg was loaded from — the same path the caller
 	// passed to config.Load. It joins the sandbox's write-deny set so a
 	// sandboxed subprocess cannot rewrite the node's own configuration.
@@ -211,6 +222,8 @@ type Engine struct {
 	asyncPeers bool
 	// meshNode mirrors Options.MeshNode.
 	meshNode bool
+	// localOnly mirrors Options.LocalOnly.
+	localOnly bool
 	// replyASCII mirrors Options.ReplyASCII (per-engine classify option).
 	replyASCII bool
 	// locale is the user's active UI/prompt locale. localeMu guards both
@@ -912,6 +925,7 @@ func New(ctx context.Context, cfg *config.Config, opts Options) (*Engine, error)
 		awaitQueued:    opts.AwaitQueued,
 		asyncPeers:     opts.AsyncPeers,
 		meshNode:       opts.MeshNode,
+		localOnly:      opts.LocalOnly,
 		replyASCII:     opts.ReplyASCII,
 		cardPath:       opts.CardPath,
 		configPath:     config.ResolvePath(opts.ConfigPath),
@@ -1125,7 +1139,8 @@ func (e *Engine) initSchedulerLocked(cardPath string) error {
 	// turned the sandbox off resets the process-wide base policy instead of
 	// leaving the previous mode armed.
 	if backend := commander.SetSandboxConfig(e.cfg.Sandbox,
-		commander.ProtectedPaths(e.cfg, e.configPath, cardPath)); e.cfg.Sandbox.NormalizedMode() != "off" {
+		commander.ProtectedPaths(e.cfg, e.configPath, cardPath),
+		commander.SecretReadDenyPaths(e.cfg, e.configPath, cardPath)); e.cfg.Sandbox.NormalizedMode() != "off" {
 		if backend == "" {
 			e.logger.Warn("sandbox mode configured but no backend on this platform",
 				"mode", e.cfg.Sandbox.NormalizedMode())
@@ -1170,7 +1185,7 @@ func (e *Engine) initSchedulerLocked(cardPath string) error {
 	// nothing else. A borrowed engine skips it entirely: the daemon holds
 	// the socket already.
 	sched.EnsureNodeKey()
-	if ownsRow && e.cfg.Network.DiscoveryAddr != "off" {
+	if ownsRow && !e.localOnly && e.cfg.Network.DiscoveryAddr != "off" {
 		// Auto-dial only for a mesh-owning process (web console, sidecar): a
 		// long-lived owner behaves like the daemon. An interactive seat is
 		// short-lived, so edges it opens would flap for peers on every exit —
@@ -1260,6 +1275,12 @@ func (e *Engine) initSchedulerLocked(cardPath string) error {
 		// SyncPeers above already owns every configured outbound edge (with
 		// reconnect keepalive), so the one-shot dial pass below would only
 		// double-dial into the arbitration it exists to deduplicate.
+		return nil
+	}
+	if e.localOnly {
+		// A write-and-exit command has no use for a live edge: the task it
+		// just enqueued is routed by whatever daemon or console owns the
+		// queue, and a conn this process opened would close with it.
 		return nil
 	}
 	peerAddrs := e.cfg.Network.PeerAddrs()

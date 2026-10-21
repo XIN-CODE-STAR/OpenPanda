@@ -59,8 +59,7 @@ func runVoice(args []string) {
 	}
 	loc := i18n.Detect()
 	if !modelConfigured(cfg) {
-		fmt.Fprintln(os.Stderr, "panda: "+i18n.T(loc, "cli.voice.needModel"))
-		os.Exit(2)
+		fail(2, "panda: "+i18n.T(loc, "cli.voice.needModel"))
 	}
 
 	// SIGINT/SIGTERM cancels the context, which kills the sidecar mid-capture
@@ -110,8 +109,7 @@ func runVoice(args []string) {
 			// on the next round, so it stops the loop instead of spinning on it,
 			// respawning python forever behind a silent prompt.
 			if !t.Timeout {
-				fmt.Fprintln(os.Stderr, "panda: "+i18n.Tf(loc, "cli.voice.unavailable", "err", firstLine(t.Err)))
-				os.Exit(1)
+				fail(1, "panda: "+i18n.Tf(loc, "cli.voice.unavailable", "err", firstLine(t.Err)))
 			}
 			if *once {
 				fmt.Println(i18n.T(loc, "cli.voice.noWake"))

@@ -31,8 +31,7 @@ import (
 func runSelf(args []string) {
 	loc := i18n.Detect()
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.self.usage"))
-		os.Exit(2)
+		fail(2, i18n.T(loc, "cli.self.usage"))
 	}
 	switch args[0] {
 	case "status":
@@ -52,9 +51,7 @@ func runSelf(args []string) {
 	case "reset":
 		runSelfReset(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, i18n.T(loc, "cli.self.unknown")+"\n", args[0])
-		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.self.usage"))
-		os.Exit(2)
+		failf(2, i18n.T(loc, "cli.self.unknown")+"\n"+i18n.T(loc, "cli.self.usage")+"\n", args[0])
 	}
 }
 
@@ -223,8 +220,7 @@ func runSelfPropose(args []string) {
 	id := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	loc := i18n.Detect()
 	if id == "" {
-		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.self.propose.usage"))
-		os.Exit(2)
+		fail(2, i18n.T(loc, "cli.self.propose.usage"))
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -261,8 +257,7 @@ func runSelfRebase(args []string) {
 	rest := fs.Args()
 	loc := i18n.Detect()
 	if len(rest) != 2 {
-		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.self.rebase.usage"))
-		os.Exit(2)
+		fail(2, i18n.T(loc, "cli.self.rebase.usage"))
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {

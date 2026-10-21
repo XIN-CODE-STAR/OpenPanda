@@ -134,9 +134,7 @@ func runMemory(args []string) {
 	case "help", "-h", "--help":
 		memoryUsage()
 	default:
-		fmt.Fprintln(os.Stderr, "panda: "+i18n.Tf(i18n.Detect(), "cli.unknownNamed", "kind", "memory verb", "name", verb))
-		memoryUsage()
-		os.Exit(2)
+		failUsage(2, "panda: "+i18n.Tf(i18n.Detect(), "cli.unknownNamed", "kind", "memory verb", "name", verb), memoryUsage)
 	}
 }
 
@@ -250,8 +248,7 @@ func runMemoryGet(args []string) {
 	raw := fs.Bool("raw", false, "output raw unrendered text")
 	fs.Parse(reorderFlags(fs, args))
 	if fs.Arg(0) == "" {
-		fmt.Fprintln(os.Stderr, "usage: panda memory get [--raw] <name>")
-		os.Exit(2)
+		fail(2, "usage: panda memory get [--raw] <name>")
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -289,8 +286,7 @@ func runMemorySet(args []string) {
 	filePath := fs.String("file", "", "read the new content from this file (default: stdin)")
 	fs.Parse(reorderFlags(fs, args))
 	if fs.Arg(0) == "" {
-		fmt.Fprintln(os.Stderr, "usage: panda memory set <name> [--file F]  (content from stdin otherwise)")
-		os.Exit(2)
+		fail(2, "usage: panda memory set <name> [--file F]  (content from stdin otherwise)")
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -302,8 +298,7 @@ func runMemorySet(args []string) {
 		fatal("memory", err)
 	}
 	if !target.writable || target.save == nil {
-		fmt.Fprintln(os.Stderr, i18n.Tf(loc, "cli.memory.readonly", "name", target.name))
-		os.Exit(1)
+		fail(1, i18n.Tf(loc, "cli.memory.readonly", "name", target.name))
 	}
 
 	var data []byte
@@ -334,8 +329,7 @@ func runMemoryRm(args []string) {
 	configPath := fs.String("config", cliConfigPath, "path to config.yaml")
 	fs.Parse(reorderFlags(fs, args))
 	if fs.Arg(0) == "" {
-		fmt.Fprintln(os.Stderr, "usage: panda memory rm topic:<name>")
-		os.Exit(2)
+		fail(2, "usage: panda memory rm topic:<name>")
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -347,8 +341,7 @@ func runMemoryRm(args []string) {
 		fatal("memory", err)
 	}
 	if target.remove == nil {
-		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.memory.rmTopicOnly"))
-		os.Exit(1)
+		fail(1, i18n.T(loc, "cli.memory.rmTopicOnly"))
 	}
 	if err := target.remove(); err != nil {
 		fatal("delete memory", err)

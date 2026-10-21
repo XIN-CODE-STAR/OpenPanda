@@ -36,8 +36,7 @@ func runRead(args []string) {
 	if target == "" || target == "-" {
 		// Read from standard input if piped or explicitly asked
 		if target == "" && stdinIsTTY() {
-			fmt.Fprintln(os.Stderr, "usage: panda read [--raw] [--width N] <file | ->")
-			os.Exit(2)
+			fail(2, "usage: panda read [--raw] [--width N] <file | ->")
 		}
 		data, err = io.ReadAll(os.Stdin)
 		if err != nil {

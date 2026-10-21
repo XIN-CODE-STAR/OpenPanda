@@ -86,8 +86,7 @@ func runCompletion(args []string) {
 		out = powershellCompletion()
 	default:
 		fmt.Fprintln(os.Stderr, "usage: panda completion bash|zsh|fish|powershell")
-		fmt.Fprintln(os.Stderr, "  prints the completion script — e.g. `source <(panda completion zsh)`")
-		os.Exit(2)
+		fail(2, "  prints the completion script — e.g. `source <(panda completion zsh)`")
 	}
 	fmt.Print(out)
 }

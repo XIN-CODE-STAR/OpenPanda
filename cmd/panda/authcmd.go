@@ -40,9 +40,7 @@ func runAuth(args []string) {
 	case "help", "-h", "--help":
 		authUsage()
 	default:
-		fmt.Fprintln(os.Stderr, "panda: "+i18n.Tf(i18n.Detect(), "cli.unknownNamed", "kind", "auth verb", "name", verb))
-		authUsage()
-		os.Exit(2)
+		failUsage(2, "panda: "+i18n.Tf(i18n.Detect(), "cli.unknownNamed", "kind", "auth verb", "name", verb), authUsage)
 	}
 }
 
@@ -61,13 +59,11 @@ func runAuthLogin(args []string) {
 	fs.Parse(reorderFlags(fs, args))
 	provider := strings.TrimSpace(fs.Arg(0))
 	if provider == "" {
-		fmt.Fprintln(os.Stderr, "usage: panda auth login <provider>")
-		os.Exit(2)
+		fail(2, "usage: panda auth login <provider>")
 	}
 	p, err := auth.Lookup(provider)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "panda: "+i18n.Tf(i18n.Detect(), "cli.unknownNamedOpts", "kind", "provider", "name", provider, "opts", strings.Join(auth.ProviderIDs(), ", ")))
-		os.Exit(2)
+		fail(2, "panda: "+i18n.Tf(i18n.Detect(), "cli.unknownNamedOpts", "kind", "provider", "name", provider, "opts", strings.Join(auth.ProviderIDs(), ", ")))
 	}
 	verifier, challenge, state, err := auth.NewPKCE()
 	if err != nil {
@@ -160,8 +156,7 @@ func runAuthLogout(args []string) {
 	fs.Parse(reorderFlags(fs, args))
 	provider := strings.TrimSpace(fs.Arg(0))
 	if provider == "" {
-		fmt.Fprintln(os.Stderr, "usage: panda auth logout <provider>")
-		os.Exit(2)
+		fail(2, "usage: panda auth logout <provider>")
 	}
 	store := auth.OpenStore(auth.DefaultStateDir())
 	if err := store.Delete(provider); err != nil {

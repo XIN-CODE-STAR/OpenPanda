@@ -5,8 +5,10 @@ package artifact
 import (
 	"archive/tar"
 	"compress/gzip"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -38,6 +40,14 @@ import (
 //     before the disk does).
 func Unpack(r io.Reader, dst string) (Manifest, error) {
 	return unpack(r, dst, 0, 0, nil)
+}
+
+// UnpackLimited is Unpack with the receiver-side bounds a wire-supplied pack
+// must have: an actor that sends the bytes can always lie about their size,
+// and a compression bomb expands inside this process's disk budget. limit
+// bounds decompressed output, minFree keeps that many bytes free.
+func UnpackLimited(r io.Reader, dst string, limit, minFree int64) (Manifest, error) {
+	return unpack(r, dst, limit, minFree, nil)
 }
 
 // unpack is Unpack with an explicit byte limit, a free-space watermark, and
@@ -306,6 +316,37 @@ func ancestorsInside(root, path string) error {
 	return nil
 }
 
+// createTempBeside creates the empty staging file writeRegular renames onto
+// path, returning its name and an open handle.
+//
+// The name is random rather than path+".partial" because a fixed staging name
+// is a pre-planted link away from an arbitrary write: an archive shipping an
+// entry "x" would have the extraction open "x.partial", and if that name
+// already existed as a symlink to /etc/passwd the entry's bytes would stream
+// through it. O_EXCL turns the name into a claim rather than a lookup — an
+// existing anything at that name fails the create instead of being followed —
+// and the random suffix makes the claim unguessable, so the archive cannot
+// pre-place it either. O_CREATE with the archive's mode (not os.CreateTemp's
+// 0600) keeps the umask semantics the caller's manifest depends on.
+func createTempBeside(path string, mode os.FileMode) (string, *os.File, error) {
+	dir, base := filepath.Split(path)
+	for attempt := 0; attempt < 32; attempt++ {
+		var salt [8]byte
+		if _, err := rand.Read(salt[:]); err != nil {
+			return "", nil, err
+		}
+		name := filepath.Join(dir, base+".panda-"+hex.EncodeToString(salt[:])+".partial")
+		f, err := os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_EXCL, mode)
+		if err == nil {
+			return name, f, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return "", nil, err
+		}
+	}
+	return "", nil, fmt.Errorf("artifact: no unused staging name beside %q", path)
+}
+
 // writeRegular streams exactly size bytes into path through a temp file and an
 // atomic rename, so a partially written file never appears at the final name —
 // and never at a name a concurrent reader might pick up as complete. It
@@ -328,13 +369,13 @@ func writeRegular(r io.Reader, path string, mode os.FileMode, size int64) (os.Fi
 			mode |= fi.Mode().Perm() & 0o111
 		}
 	}
-	tmp := path + ".partial"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	tmp, f, err := createTempBeside(path, mode)
 	if err != nil {
 		return mode, err
 	}
-	// What actually landed can differ from the request (umask; a stale
-	// .partial from a crashed run keeps its own mode under O_TRUNC).
+	// What actually landed can differ from the request: the umask filters the
+	// mode at create time, and the manifest must describe the file a verifier
+	// will stat rather than the mode the archive asked for.
 	landed := mode
 	if fi, err := f.Stat(); err == nil {
 		landed = fi.Mode().Perm()

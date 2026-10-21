@@ -8,6 +8,8 @@ package defense
 
 import (
 	"errors"
+	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -595,6 +597,11 @@ var irreversibleVerbs = map[string]bool{
 	// machine unable to boot, which no later command can fix from inside it.
 	"fdisk": true, "parted": true, "sfdisk": true, "swapoff": true,
 	"diskutil": true, "hdiutil": true, "tmutil": true, "asr": true,
+	// killall5 is the shutdown-script spelling of "kill every process", which
+	// takes the machine's availability with it. killall/pkill BY NAME stay
+	// Tier 1 — a killed worker can be restarted — and only their init/all
+	// forms gate (see killsInitOrEverything).
+	"killall5": true,
 	// Power state: the task's own machine stops answering. loginctl terminates
 	// sessions and powers off through the same seat; busctl reaches every
 	// method on the system bus, including the power verbs — neither has a
@@ -769,6 +776,26 @@ var commandArgRisks = map[string]func(args []string) bool{
 	// them. See downloadWritesFile for the flag forms.
 	"curl": downloadWritesFile,
 	"wget": downloadWritesFile,
+
+	// The next group is the "recoverable verb, unrecoverable form" set the
+	// policy comment warns about. cp/chmod/chown/mv/ln/tee/kill are routine and
+	// stay Tier 1 for ordinary arguments — a node that must ask before it can
+	// copy a file is useless. What is NOT routine is aiming them at the paths
+	// the operating system itself needs, or at init: overwriting /etc/passwd,
+	// chmod -R 000 /, or kill -9 1 leaves a machine no later command can fix,
+	// which is exactly the Tier 2 test. Each scanner below is written to fire on
+	// that form and only that form.
+	"cp":      writesSystemPath,
+	"mv":      moveTouchesSystemPath,
+	"install": installEscalates,
+	"ln":      linkOverwritesSystemPath,
+	"tee":     writesSystemPath,
+	"chmod":   chmodEscalates,
+	"chown":   recursiveOnSystemPath,
+	"chgrp":   recursiveOnSystemPath,
+	"kill":    killsInitOrEverything,
+	"killall": killsInitOrEverything,
+	"pkill":   killsInitOrEverything,
 
 	// ssh's payload is a remote command line the positional scan never
 	// reaches, plus -o ProxyCommand which executes LOCALLY. Both get the
@@ -1277,6 +1304,264 @@ func hasAnyShortFlagPrefix(flags ...string) func(args []string) bool {
 	}
 }
 
+// systemPathRoots are the directories the running operating system needs in
+// order to stay a working system: its accounts, its binaries, its libraries,
+// its boot state and its device nodes. Overwriting something under one of them
+// is the Tier 2 case this group of scanners exists for — there is no copy of
+// /etc/passwd anywhere for a later command to restore.
+//
+// The list is deliberately narrower than "anything outside the working
+// directory". /usr/local and /opt are where locally-installed software lives
+// and where a normal deploy writes, so they are absent: gating them would put
+// an approval prompt in front of `install -m 755 build/tool /usr/local/bin/`,
+// which is exactly the approval fatigue the policy avoids. /tmp, /var/tmp and
+// $HOME are likewise ordinary scratch space.
+var systemPathRoots = []string{
+	"/etc", "/bin", "/sbin", "/lib", "/lib32", "/lib64",
+	"/usr/bin", "/usr/sbin", "/usr/lib", "/usr/lib32", "/usr/lib64",
+	"/usr/include", "/boot", "/dev", "/proc", "/sys",
+	// macOS: the sealed system volume and the system-wide library domain.
+	"/System", "/Library", "/private/etc", "/private/var/db",
+	// Windows: the OS directory and the program directories.
+	`C:\Windows`, `C:\Program Files`, `C:\Program Files (x86)`,
+	`C:\ProgramData`,
+}
+
+// isSystemPath reports whether p names a path under (or equal to) one of
+// systemPathRoots, or the filesystem root itself. It cleans the path first so
+// "/etc/../etc/passwd" and "/etc//passwd" resolve the same, but it does NOT
+// resolve symlinks: the decision has to be made from the argv alone, before
+// anything is executed, and a path that reaches /etc through a symlink is the
+// same loss.
+func isSystemPath(p string) bool {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return false
+	}
+	// A destination written as "dir/" is the directory itself.
+	p = filepath.Clean(p)
+	if p == "/" || p == `\` {
+		return true
+	}
+	sep := string(filepath.Separator)
+	for _, root := range systemPathRoots {
+		root = filepath.Clean(root)
+		if p == root || strings.HasPrefix(p, root+sep) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasShortFlag reports whether a single-letter flag appears in args, including
+// inside a cluster: "-sf" carries both -s and -f, which a plain equality or
+// prefix test misses. Long flags are matched exactly, with an optional "=value".
+func hasShortFlag(args []string, letter string) bool {
+	for _, a := range args {
+		if a == "" || a == "--" {
+			continue
+		}
+		if strings.HasPrefix(a, "--") {
+			if a == "--"+letter {
+				return true
+			}
+			continue
+		}
+		if a[0] != '-' {
+			continue
+		}
+		if strings.ContainsRune(a[1:], rune(letter[0])) {
+			return true
+		}
+	}
+	return false
+}
+
+// lastPositional returns the final argument that is not a flag and not the
+// value of a value-taking flag — the destination slot for cp/mv/ln/install and
+// the target slot for tee.
+func lastPositional(args []string) string {
+	var last string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "" || a == "--" {
+			continue
+		}
+		if a[0] == '-' && a != "-" {
+			continue
+		}
+		last = a
+	}
+	return last
+}
+
+// allPositional returns every argument that is not a flag.
+func allPositional(args []string) []string {
+	out := make([]string, 0, len(args))
+	for _, a := range args {
+		if a == "" || a == "--" {
+			continue
+		}
+		if a[0] == '-' && a != "-" {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// writesSystemPath is the cp/tee shape: the command only reads its sources, so
+// only the destination decides the tier.
+func writesSystemPath(args []string) bool {
+	return isSystemPath(lastPositional(args))
+}
+
+// moveTouchesSystemPath is the mv shape. mv differs from cp in that it removes
+// the source, so moving a system file away is as destructive as writing over
+// one: `mv /etc/passwd /tmp/x` leaves the machine without an account database
+// just as surely as `mv x /etc/passwd` leaves it with a wrong one.
+func moveTouchesSystemPath(args []string) bool {
+	for _, a := range allPositional(args) {
+		if isSystemPath(a) {
+			return true
+		}
+	}
+	return false
+}
+
+// recursiveOnSystemPath is the chown/chgrp shape: ownership changes are
+// recoverable one file at a time, but -R against / or /etc rewrites the system
+// in place, and a machine whose files are all owned by the wrong user does not
+// boot. Non-recursive chown of a single file stays Tier 1.
+func recursiveOnSystemPath(args []string) bool {
+	if !hasShortFlag(args, "R") && !hasAnyArg("--recursive")(args) {
+		return false
+	}
+	for _, a := range allPositional(args) {
+		if isSystemPath(a) {
+			return true
+		}
+	}
+	return false
+}
+
+// chmodEscalates catches the two chmod forms that are a blank cheque.
+//
+//   - A mode that sets setuid or setgid turns an ordinary binary into one that
+//     runs as its owner, which is privilege escalation however it is spelled
+//     ("u+s", "4755", "2755"). This fires with or without -R because the
+//     escalation is in the mode, not the recursion.
+//   - A recursive chmod against a system path rewrites the permissions of the
+//     whole machine, which is the same unrecoverable state -R chown produces.
+//
+// `chmod -R 777 .` stays Tier 1: the target is the working directory, and
+// re-running the chmod with a sane mode fixes it.
+func chmodEscalates(args []string) bool {
+	for _, a := range args {
+		if a == "" || a[0] == '-' {
+			continue
+		}
+		if modeSetsPrivilegeBits(a) {
+			return true
+		}
+	}
+	return recursiveOnSystemPath(args)
+}
+
+// modeSetsPrivilegeBits reports whether a chmod mode argument sets setuid,
+// setgid or sticky. Handles both spellings: octal ("4755", "04755", "2755")
+// and symbolic ("u+s", "g+s", "+s", "a=rwxs").
+func modeSetsPrivilegeBits(mode string) bool {
+	if mode == "" {
+		return false
+	}
+	if v, err := strconv.ParseUint(mode, 8, 32); err == nil {
+		// Only digits: 04000 setuid, 02000 setgid, 01000 sticky.
+		return v&0o7000 != 0
+	}
+	lower := strings.ToLower(mode)
+	return strings.Contains(lower, "+s") || strings.Contains(lower, "=s")
+}
+
+// installEscalates catches `install` creating a setuid/setgid binary — the
+// classic local root: `install -m 4755 ./pwn /usr/local/bin/pwn` drops a
+// setuid-root executable into a PATH directory. An ordinary deploy
+// (`install -m 755 tool /usr/local/bin/tool`) stays Tier 1, and a copy onto a
+// system path is caught by the same destination test cp uses.
+func installEscalates(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "-m" || a == "--mode":
+			if i+1 < len(args) && modeSetsPrivilegeBits(args[i+1]) {
+				return true
+			}
+		case strings.HasPrefix(a, "--mode="):
+			if modeSetsPrivilegeBits(a[len("--mode="):]) {
+				return true
+			}
+		case strings.HasPrefix(a, "-m") && len(a) > 2:
+			// Attached spelling: -m4755
+			if modeSetsPrivilegeBits(a[2:]) {
+				return true
+			}
+		}
+	}
+	return writesSystemPath(args)
+}
+
+// linkOverwritesSystemPath catches `ln -sf /dev/null /etc/passwd` and its
+// siblings: a forced symlink onto a system path replaces the target with a
+// pointer to whatever the attacker chose. Without -f ln refuses to clobber an
+// existing file, so the plain form is left alone.
+func linkOverwritesSystemPath(args []string) bool {
+	if !hasShortFlag(args, "f") && !hasAnyArg("--force")(args) {
+		return false
+	}
+	return isSystemPath(lastPositional(args))
+}
+
+// killTargetsAreFatal lists the process names whose death takes the machine
+// with it — init and its per-platform aliases.
+var killTargetsAreFatal = map[string]bool{
+	"1": true, "init": true, "systemd": true, "launchd": true,
+}
+
+// killAllSpellings are the patterns that match every process on the box.
+var killAllSpellings = map[string]bool{
+	"": true, ".": true, "*": true, ".*": true, "^.*": true, "^.*$": true,
+	".*$": true, "^.": true, "-1": true,
+}
+
+// killsInitOrEverything catches the kill family's unrecoverable forms: killing
+// init (or the platform's equivalent) stops the machine, and a match-everything
+// pattern does the same in one line. `kill 1234` and `pkill node` are ordinary
+// supervision and stay Tier 1 — a killed worker can be restarted, which is why
+// the whole family is not gated.
+func killsInitOrEverything(args []string) bool {
+	for _, a := range args {
+		if a == "" {
+			continue
+		}
+		lower := strings.ToLower(strings.TrimSpace(a))
+		if killTargetsAreFatal[lower] {
+			return true
+		}
+		// "-1" is the all-processes spelling but reads as a flag; check it
+		// before the flag filter below.
+		if a == "-1" {
+			return true
+		}
+		if a[0] == '-' {
+			continue
+		}
+		if killAllSpellings[lower] {
+			return true
+		}
+	}
+	return false
+}
+
 // subcommandIn returns a scanner that is true when the first positional
 // argument is one of subs.
 func subcommandIn(subs ...string) func(args []string) bool {
@@ -1547,6 +1832,18 @@ func attachedShortValue(arg string, letter rune) (string, bool) {
 	return "", false
 }
 
+// destructiveCodeTokens are language-level deletion primitives. They are not
+// commands, so they never appear in irreversibleVerbs, but they destroy data
+// exactly like `rm` does — `perl -e 'unlink "/etc/passwd"'` is the same loss as
+// `rm /etc/passwd` and used to grade Tier 1 because the token "unlink" matched
+// nothing. The multi-character spellings are matched as whole tokens by
+// codeTokens, which splits on quotes, parens and dots-as-separators via the
+// punctuation list; the dotted forms are covered by irreversibleCodePatterns.
+var destructiveCodeTokens = map[string]bool{
+	"unlink": true, "unlinkat": true, "rmtree": true, "remove_tree": true,
+	"rm_rf": true, "removetree": true, "rmtree_sync": true,
+}
+
 // codeEscalates reports whether interpreter code reaches an irreversible
 // operation. It is the classifier for anything that runs code rather than doing
 // work itself: `bash -c`, `python -c`, `cmd /c`, an opaque wrapper's joined argv.
@@ -1558,7 +1855,7 @@ func attachedShortValue(arg string, letter rune) (string, bool) {
 func codeEscalates(code string) bool {
 	lower := strings.ToLower(code)
 	for _, tok := range codeTokens(lower) {
-		if irreversibleVerbs[tok] {
+		if irreversibleVerbs[tok] || destructiveCodeTokens[tok] {
 			return true
 		}
 	}

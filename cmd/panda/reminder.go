@@ -48,9 +48,7 @@ func runReminder(args []string) {
 	case "rm", "remove", "del":
 		reminderRemove(rest)
 	default:
-		fmt.Fprintln(os.Stderr, i18n.Tf(i18n.Detect(), "cli.reminder.unknown", "cmd", sub))
-		reminderUsage()
-		os.Exit(2)
+		failUsage(2, i18n.Tf(i18n.Detect(), "cli.reminder.unknown", "cmd", sub), reminderUsage)
 	}
 }
 
@@ -122,22 +120,17 @@ func reminderAdd(args []string) {
 	message := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	loc := i18n.Detect()
 	if message == "" {
-		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.reminder.noMessage"))
-		reminderUsage()
-		os.Exit(2)
+		failUsage(2, i18n.T(loc, "cli.reminder.noMessage"), reminderUsage)
 	}
 	if (*after == "") == (*at == "") {
-		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.reminder.oneFlag"))
-		reminderUsage()
-		os.Exit(2)
+		failUsage(2, i18n.T(loc, "cli.reminder.oneFlag"), reminderUsage)
 	}
 
 	var due time.Time
 	if *after != "" {
 		dur, err := time.ParseDuration(*after)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, i18n.Tf(loc, "cli.reminder.badAfter", "value", *after, "err", err.Error()))
-			os.Exit(2)
+			fail(2, i18n.Tf(loc, "cli.reminder.badAfter", "value", *after, "err", err.Error()))
 		}
 		due = time.Now().Add(dur)
 	} else {
@@ -148,8 +141,7 @@ func reminderAdd(args []string) {
 			}
 		}
 		if due.IsZero() {
-			fmt.Fprintln(os.Stderr, i18n.Tf(loc, "cli.reminder.badAt", "value", *at))
-			os.Exit(2)
+			fail(2, i18n.Tf(loc, "cli.reminder.badAt", "value", *at))
 		}
 	}
 
@@ -157,8 +149,7 @@ func reminderAdd(args []string) {
 	if *every != "" {
 		d, derr := time.ParseDuration(*every)
 		if derr != nil || d <= 0 {
-			fmt.Fprintln(os.Stderr, i18n.Tf(loc, "cli.reminder.badEvery", "value", *every))
-			os.Exit(2)
+			fail(2, i18n.Tf(loc, "cli.reminder.badEvery", "value", *every))
 		}
 		repeat = d
 	}
@@ -194,13 +185,11 @@ func reminderRemove(args []string) {
 	fs.Parse(reorderFlags(fs, args))
 	idRaw := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	if idRaw == "" {
-		fmt.Fprintln(os.Stderr, "usage: panda reminder rm [--config PATH] <id>")
-		os.Exit(2)
+		fail(2, "usage: panda reminder rm [--config PATH] <id>")
 	}
 	id, err := strconv.ParseInt(idRaw, 10, 64)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, i18n.Tf(i18n.Detect(), "cli.reminder.badID", "id", idRaw))
-		os.Exit(2)
+		fail(2, i18n.Tf(i18n.Detect(), "cli.reminder.badID", "id", idRaw))
 	}
 
 	cfg, err := config.Load(*configPath)
@@ -218,8 +207,7 @@ func reminderRemove(args []string) {
 		fatal("remove reminder", err)
 	}
 	if !ok {
-		fmt.Fprintln(os.Stderr, i18n.Tf(i18n.Detect(), "cli.reminder.notFound", "id", strconv.FormatInt(id, 10)))
-		os.Exit(1)
+		fail(1, i18n.Tf(i18n.Detect(), "cli.reminder.notFound", "id", strconv.FormatInt(id, 10)))
 	}
 	if jsonOutput {
 		emitJSON(map[string]any{"id": id, "status": "removed"})

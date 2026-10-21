@@ -47,6 +47,15 @@ import (
 
 var version = versionpkg.Version
 
+// websocketBindGrace is how long the daemon tolerates a WebSocket bind failure
+// before giving up. The tolerance exists for one real case: a same-identity
+// engine that claimed the node row while this daemon was down still holds the
+// socket and will release it when it exits. Beyond that window the address
+// belongs to something that is not going away, and a daemon that cannot accept
+// peers must exit non-zero rather than sit in a warning loop that a supervisor
+// reads as healthy.
+const websocketBindGrace = 60 * time.Second
+
 func main() {
 	// A Windows self-update renames the running image to <exe>.old because the
 	// locked file cannot be replaced in place; the fresh process sweeps that
@@ -64,16 +73,18 @@ func main() {
 	}
 	args := extractGlobalFlags(os.Args[1:])
 	sub, args := parseSubcommand(args)
-	// An explicit --config pointing at a file that isn't there used to fall
-	// back to defaults silently — the typo then surfaced as a misleading
-	// "no API key configured" error. init is exempt: its --config is the
-	// write target and must NOT exist yet. The warning names where the node
-	// would look without the flag, so "wrong path" and "no config yet" read
-	// as different problems.
+	// An explicit --config pointing at a file that isn't there is a usage
+	// error, not a warning. It used to warn and continue with defaults, which
+	// produced the worst possible failure: reads came from the DEFAULT config
+	// while writes went to the typo'd path (configWritePath honors the flag),
+	// so `panda nodes add --config node-b.yaml` with a typo listed node A's
+	// peers and then wrote node B's edit into a brand-new file next to nothing.
+	// Stopping here keeps one config in play. init is exempt: its --config is
+	// the write target and must NOT exist yet.
 	if cliConfigPath != "" && sub != "init" {
 		if _, err := os.Stat(cliConfigPath); err != nil {
 			loc := i18n.Detect()
-			fmt.Fprintf(os.Stderr, "panda: %s\n", i18n.Tf(loc, "cli.configMissing",
+			fatalMsg(i18n.Tf(loc, "cli.configMissing",
 				"path", cliConfigPath, "err", err.Error(), "usual", config.ResolvePath("")))
 		}
 	}
@@ -367,7 +378,8 @@ func runDaemon(args []string) {
 	// shared with the embedded engine via commander.ProtectedPaths.
 	if mode := cfg.Sandbox.NormalizedMode(); mode != "off" {
 		protected := commander.ProtectedPaths(cfg, *configPath, *cardPath)
-		if backend := commander.SetSandboxConfig(cfg.Sandbox, protected); backend == "" {
+		secrets := commander.SecretReadDenyPaths(cfg, *configPath, *cardPath)
+		if backend := commander.SetSandboxConfig(cfg.Sandbox, protected, secrets); backend == "" {
 			logger.Warn("sandbox mode configured but no backend on this platform",
 				"mode", mode)
 		} else {
@@ -705,19 +717,29 @@ func runDaemon(args []string) {
 		logger.Warn("websocket disabled: network.shared_secret is not set and could not be generated (refusing to accept unauthenticated peers)")
 	} else {
 		guard.Go(logger, "daemon: websocket listener", cancel, func() {
-			for {
+			// A bind failure here is usually a custody dispute, not a dead end:
+			// a same-identity engine that claimed the node row while this
+			// daemon was down holds the socket until it exits or demotes
+			// itself. Dying instantly would hand the box to the stray, so the
+			// loop waits — but only for websocketBindGrace. After that the
+			// address is not coming free (a different program owns it, or the
+			// port is privileged), and a daemon that never binds must exit
+			// non-zero instead of logging "core started" and retrying forever
+			// while a supervisor reads it as healthy.
+			deadline := time.Now().Add(websocketBindGrace)
+			for attempt := 1; ; attempt++ {
 				err := coreNode.Listen(ctx, cfg.Network.ListenAddr)
 				if err == nil || ctx.Err() != nil {
 					serveErr <- err
 					return
 				}
-				// A bind failure here is usually a custody dispute, not a dead
-				// end: a same-identity engine that claimed the node row while
-				// this daemon was down holds the socket until it exits or
-				// demotes itself. Dying hands the box to the stray — keep
-				// retrying; the authoritative outbound dials reclaim the
-				// edges in the meantime.
-				logger.Warn("websocket listen failed, retrying", "err", err)
+				if time.Now().After(deadline) {
+					serveErr <- fmt.Errorf("listen %s after %d attempts over %s: %w",
+						cfg.Network.ListenAddr, attempt, websocketBindGrace, err)
+					return
+				}
+				logger.Warn("websocket listen failed, retrying",
+					"err", err, "attempt", attempt, "give_up_in", time.Until(deadline).Round(time.Second).String())
 				select {
 				case <-ctx.Done():
 					serveErr <- nil
@@ -781,8 +803,10 @@ func memoryLimits(cfg *config.Config) memory.Limits {
 }
 
 func fatal(step string, err error) {
-	fmt.Fprintf(os.Stderr, "panda: %s: %v\n", step, err)
-	os.Exit(1)
+	if jsonOutput {
+		failJSON(1, step, err.Error())
+	}
+	failf(1, "panda: %s: %v\n", step, err)
 }
 
 // fatalMsg is fatal for a rejected argument rather than a failed operation:
@@ -791,8 +815,7 @@ func fatal(step string, err error) {
 // subcommand path already use, so a script can tell "you asked wrong" (2) from
 // "it went wrong" (1).
 func fatalMsg(msg string) {
-	fmt.Fprintf(os.Stderr, "panda: %s\n", msg)
-	os.Exit(2)
+	fail(2, "panda: "+msg)
 }
 
 // printVersion implements `panda version [--json]`. The JSON form reports the

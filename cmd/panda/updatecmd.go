@@ -85,8 +85,7 @@ func runUpdate(args []string) {
 		loc := i18n.Detect()
 		p := palFor(os.Stderr)
 		fmt.Fprintf(os.Stderr, "panda: %s %s\n", i18n.T(loc, "cli.unknownSub"), p.Command("update "+action))
-		fmt.Fprintf(os.Stderr, "  %s %s | %s\n", i18n.T(loc, "cli.help.more"), p.Command("panda update check"), p.Command("panda update apply"))
-		os.Exit(2)
+		failf(2, "  %s %s | %s\n", i18n.T(loc, "cli.help.more"), p.Command("panda update check"), p.Command("panda update apply"))
 	}
 }
 

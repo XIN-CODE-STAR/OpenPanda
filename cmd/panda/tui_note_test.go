@@ -234,9 +234,9 @@ func TestTUISendNoteWithoutEngineNamesTheGap(t *testing.T) {
 }
 
 // TestTUIMidTurnQueueDoesNotBecomeSteeringText pins the routing split while a
-// turn is live: plain text steers the model, a /command is an ask of its own.
-// A task note must take the command path — pushing it into the steer channel
-// would feed "queue <id> text" to the model as prose.
+// turn is live: plain text becomes the user's next turn, a /command is an ask
+// of its own. A task note must take the command path — letting it fall through
+// to the pending queue would hand "queue <id> text" to the next turn as prose.
 func TestTUIMidTurnQueueDoesNotBecomeSteeringText(t *testing.T) {
 	m, st, nodeID := newNoteTUI(t, true)
 	task := queueTestTask(t, st, nodeID, "mid-turn target")
@@ -246,11 +246,12 @@ func TestTUIMidTurnQueueDoesNotBecomeSteeringText(t *testing.T) {
 	m.stream = newTestStream(&cancelled)
 
 	next, _ := m.sendTurnInput("/queue " + task.TaskID + " switch to the v2 endpoint")
-	if got := next.(tuiModel); got.mode != modeAsking {
+	got := next.(tuiModel)
+	if got.mode != modeAsking {
 		t.Fatalf("a mid-turn note must not end the turn, got mode %v", got.mode)
 	}
-	if len(m.stream.steer) != 0 {
-		t.Fatalf("a /command must not be injected as steering text, steer queue holds %d", len(m.stream.steer))
+	if len(got.pendingInputs) != 0 {
+		t.Fatalf("a /command must not be queued as next-turn text: %+v", got.pendingInputs)
 	}
 	notes := userNotes(t, st, task.TaskID)
 	if len(notes) != 1 || notes[0].Body != "switch to the v2 endpoint" {
@@ -303,134 +304,116 @@ func TestTUITaskPickerMarksUnreadNotes(t *testing.T) {
 	}
 }
 
-// TestTUISteerAckReportsDelivery is the ack half of steering: enqueueing into a
-// buffered channel proves nothing (the turn can end before the next poll), so
-// only the round loop's own callback can turn "queued" into "the model has it".
-// An ack from a superseded stream must be dropped, not painted over the new turn.
-func TestTUISteerAckReportsDelivery(t *testing.T) {
-	m := newTestTUI(t)
+// TestTUIMidTurnEnterQueuesAsNextTurn is the contract the redesign exists for:
+// text typed while a turn runs becomes the user's NEXT turn. It must not join
+// the streaming prompt — which made one sentence reach the model twice and
+// rewrote the persisted transcript to say the user had typed something they had
+// not — and it must not touch the task board, which made plain typing
+// indistinguishable from an explicit /queue.
+func TestTUIMidTurnEnterQueuesAsNextTurn(t *testing.T) {
+	m, st, nodeID := newNoteTUI(t, true)
+	task := queueTestTask(t, st, nodeID, "running target")
+	m.mode = modeAsking
+	m.streamTask = task.TaskID
+	m.stream = newTestStream(new(bool))
+	m.pendingPrompt = "the original request"
+
+	for _, line := range []string{"first follow-up", "second follow-up"} {
+		next, _ := m.sendTurnInput(line)
+		m = next.(tuiModel)
+	}
+
+	if len(m.pendingInputs) != 2 {
+		t.Fatalf("both lines must queue, got %+v", m.pendingInputs)
+	}
+	if m.pendingInputs[0] != "first follow-up" || m.pendingInputs[1] != "second follow-up" {
+		t.Fatalf("the queue must preserve submission order: %+v", m.pendingInputs)
+	}
+	// The queue is the only place a queued line lives until it becomes a turn.
+	if m.pendingPrompt != "the original request" {
+		t.Fatalf("a queued line leaked into the in-flight prompt: %q", m.pendingPrompt)
+	}
+	if notes := userNotes(t, st, task.TaskID); len(notes) != 0 {
+		t.Fatalf("plain Enter must not write the task board, got %+v", notes)
+	}
+	if m.mode != modeAsking {
+		t.Fatalf("queueing must not end the turn, mode=%v", m.mode)
+	}
+}
+
+// TestTUICtrlXInterruptsAndLeads: ctrl+x is the "send now" gesture. It cuts the
+// running turn short and puts the draft at the head of the queue, so the next
+// thing that runs is the line the user just wrote. It is deliberately not
+// alt+enter — that chord is the universal newline.
+func TestTUICtrlXInterruptsAndLeads(t *testing.T) {
+	m, _, _ := newNoteTUI(t, false)
 	cancelled := false
 	m.mode = modeAsking
 	m.stream = newTestStream(&cancelled)
+	m.pendingInputs = []string{"already waiting"}
 
-	// The command is a batch with the pump re-arm, which blocks by design — the
-	// committed block is what carries the text, so inspect that instead.
-	first, _ := m.Update(steerAckMsg{stream: m.stream, text: "use tabs", round: 3})
-	if got := first.(tuiModel); got.mode != modeAsking {
-		t.Fatalf("an ack is transcript noise, not a state change, got mode %v", got.mode)
-	}
-	if body := lastBlock(first.(tuiModel)).body; !strings.Contains(body, "round 3") ||
-		!strings.Contains(body, "use tabs") {
-		t.Fatalf("the ack should name the round and the text, got %q", body)
-	}
+	m.ta.SetValue("lead with this")
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlX})
+	got := next.(tuiModel)
 
-	// A stale stream (the previous ask) must not print over the live one.
-	before := len(m.chatHistory.blocks)
-	dropped, cmd := m.Update(steerAckMsg{stream: newTestStream(&cancelled), text: "stale", round: 9})
-	if got := len(dropped.(tuiModel).chatHistory.blocks); got != before {
-		t.Fatalf("an ack from another stream must be dropped, block count %d → %d", before, got)
+	if !cancelled {
+		t.Fatal("ctrl+x must interrupt the running turn")
 	}
-	if cmd != nil {
-		t.Fatalf("a dropped ack should schedule nothing, got %v", cmd)
+	if got.ta.Value() != "" {
+		t.Fatalf("the injected line must leave the input box, got %q", got.ta.Value())
 	}
-
-	// A detached stream is equally stale: its turn was released.
-	m.stream.detached = true
-	before = len(m.chatHistory.blocks)
-	released, _ := m.Update(steerAckMsg{stream: m.stream, text: "late", round: 4})
-	if got := len(released.(tuiModel).chatHistory.blocks); got != before {
-		t.Fatalf("an ack from a released stream must be dropped, block count %d → %d", before, got)
+	// The injected line went first and the drain kept going, so nothing is left
+	// parked: had it been appended instead of spliced, the head would still be
+	// "already waiting" and the queue would not be empty.
+	if len(got.pendingInputs) != 0 {
+		t.Fatalf("the injected line should lead, so the whole queue dispatches: %+v", got.pendingInputs)
+	}
+	if want := i18n.Tf(i18n.English, "tui.queue.injecting", "text", "lead with this"); !strings.Contains(collectPrinted(cmd), want) {
+		t.Fatalf("inject note = %q, want %q", collectPrinted(cmd), want)
 	}
 }
 
-// TestTUIEnterQueuesThenPromotes is the two-step gesture the footer advertises:
-// Enter while a task runs queues the note, and Enter again on the same draft
-// escalates that same note instead of posting a second one. One board row
-// before and after — the round must never read the words twice.
-func TestTUIEnterQueuesThenPromotes(t *testing.T) {
-	m, st, nodeID := newNoteTUI(t, true)
-	task := queueTestTask(t, st, nodeID, "steer target")
+// TestTUICtrlDDropsTailOnly: ctrl+d retracts the most recently queued line and
+// nothing else. The head is already being dispatched as the foreground frees,
+// so pulling it would race the dispatcher.
+func TestTUICtrlDDropsTailOnly(t *testing.T) {
+	m, _, _ := newNoteTUI(t, false)
 	m.mode = modeAsking
-	m.stream = &askStream{steer: make(chan string, 4)}
-	m.streamTask = task.TaskID
+	m.stream = newTestStream(new(bool))
+	m.pendingInputs = []string{"keep", "drop me"}
 
-	next, cmd := m.sendTurnInput("use tabs, not spaces")
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
 	got := next.(tuiModel)
-	if got.staged == nil {
-		t.Fatal("the first Enter should stage a note so the second can escalate it")
+	if len(got.pendingInputs) != 1 || got.pendingInputs[0] != "keep" {
+		t.Fatalf("ctrl+d must drop exactly the tail: %+v", got.pendingInputs)
 	}
-	if got.staged.taskID != task.TaskID || got.staged.key == "" {
-		t.Fatalf("staged note = %+v, want a board slot on %s", got.staged, task.TaskID)
-	}
-	if want := i18n.Tf(i18n.English, "tui.note.queued", "id", shortID(task.TaskID)); !strings.Contains(collectPrinted(cmd), want) {
-		t.Fatalf("queue confirmation = %q, want %q", collectPrinted(cmd), want)
-	}
-	notes := userNotes(t, st, task.TaskID)
-	if len(notes) != 1 || notes[0].Grade != core.MsgGradeStatus {
-		t.Fatalf("board after Enter = %+v, want one status note", notes)
-	}
-	// The steer channel is untouched: this path went to the durable board.
-	if len(m.stream.steer) != 0 {
-		t.Fatalf("a task-backed note should not also hit the steer channel")
+	if want := i18n.Tf(i18n.English, "tui.queue.dropped", "text", "drop me"); !strings.Contains(collectPrinted(cmd), want) {
+		t.Fatalf("drop note = %q, want %q", collectPrinted(cmd), want)
 	}
 
-	next, cmd = got.sendTurnInput("use tabs, not spaces")
+	next, _ = got.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
 	got = next.(tuiModel)
-	if got.staged != nil {
-		t.Fatalf("the promotion should close the staged note, still %+v", got.staged)
+	if len(got.pendingInputs) != 0 {
+		t.Fatalf("ctrl+d on a one-item queue must empty it: %+v", got.pendingInputs)
 	}
-	if want := i18n.Tf(i18n.English, "tui.note.promoted", "id", shortID(task.TaskID)); !strings.Contains(collectPrinted(cmd), want) {
-		t.Fatalf("promote confirmation = %q, want %q", collectPrinted(cmd), want)
+
+	// A no-op retract still says so, rather than reading as a silent success.
+	before := len(got.chatHistory.blocks)
+	next, cmd = got.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	if n := len(next.(tuiModel).chatHistory.blocks); n <= before {
+		t.Fatal("ctrl+d on an empty queue should say there is nothing to retract")
 	}
-	notes = userNotes(t, st, task.TaskID)
-	if len(notes) != 1 {
-		t.Fatalf("the second Enter posted a duplicate: %+v", notes)
-	}
-	if notes[0].Grade != core.MsgGradeSteer {
-		t.Fatalf("grade after promotion = %q, want steer", notes[0].Grade)
-	}
-	// The turn persists the user side once, not once per Enter.
-	if n := strings.Count(got.pendingPrompt, "use tabs, not spaces"); n != 1 {
-		t.Fatalf("pendingPrompt carries the note %d times, want 1: %q", n, got.pendingPrompt)
+	if want := i18n.T(i18n.English, "tui.queue.nothing"); !strings.Contains(collectPrinted(cmd), want) {
+		t.Fatalf("empty-queue note = %q, want %q", collectPrinted(cmd), want)
 	}
 }
 
-// TestTUIEnterTwiceWithoutTaskStaysHonest covers the task-less turn: its only
-// channel delivers at the next round boundary, so the second Enter must say it
-// cannot interrupt rather than faking an inject — and must not queue the text
-// again.
-func TestTUIEnterTwiceWithoutTaskStaysHonest(t *testing.T) {
-	m, _, _ := newNoteTUI(t, true)
-	m.mode = modeAsking
-	m.stream = &askStream{steer: make(chan string, 4)}
-
-	next, _ := m.sendTurnInput("go faster")
-	got := next.(tuiModel)
-	if got.staged == nil || got.staged.key != "" {
-		t.Fatalf("staged note = %+v, want a keyless (steer-channel) note", got.staged)
-	}
-	if len(m.stream.steer) != 1 {
-		t.Fatalf("steer channel holds %d notes, want 1", len(m.stream.steer))
-	}
-
-	next, cmd := got.sendTurnInput("go faster")
-	if len(m.stream.steer) != 1 {
-		t.Fatalf("the second Enter queued the text again (%d notes)", len(m.stream.steer))
-	}
-	if want := i18n.T(i18n.English, "tui.note.noAbort"); !strings.Contains(collectPrinted(cmd), want) {
-		t.Fatalf("second Enter = %q, want the cannot-interrupt note %q", collectPrinted(cmd), want)
-	}
-	if next.(tuiModel).staged == nil {
-		t.Fatal("the note stays staged: nothing was delivered early")
-	}
-}
-
-// TestTUITaskRowBindsMidTurnNotes pins the id plumbing: the engine reports the
-// row before it runs, and that id — not whatever the picker last opened — is
-// what a mid-turn note targets.
-func TestTUITaskRowBindsMidTurnNotes(t *testing.T) {
+// TestTUITaskRowBindsExplicitQueue pins the id plumbing that still matters: the
+// engine reports the row before it runs, and that id — not whatever the picker
+// last opened — is the default target for an explicit /queue.
+func TestTUITaskRowBindsExplicitQueue(t *testing.T) {
 	m, st, nodeID := newNoteTUI(t, true)
-	stream := &askStream{steer: make(chan string, 4)}
+	stream := newTestStream(new(bool))
 	m.mode = modeAsking
 	m.stream = stream
 	m.focusTask = queueTestTask(t, st, nodeID, "stale picker target").TaskID
@@ -441,10 +424,9 @@ func TestTUITaskRowBindsMidTurnNotes(t *testing.T) {
 	if got.streamTask != running.TaskID {
 		t.Fatalf("streamTask = %q, want %q", got.streamTask, running.TaskID)
 	}
-	next, _ = got.sendTurnInput("look at the failing test")
-	got = next.(tuiModel)
-	if got.staged == nil || got.staged.taskID != running.TaskID {
-		t.Fatalf("note targeted %+v, want the running task", got.staged)
+	_, _ = got.sendTurnInput("/queue look at the failing test")
+	if notes := userNotes(t, st, running.TaskID); len(notes) != 1 || notes[0].Body != "look at the failing test" {
+		t.Fatalf("the note should land on the running row, got %+v", notes)
 	}
 	if notes := userNotes(t, st, m.focusTask); len(notes) != 0 {
 		t.Fatalf("the stale picker target got the note: %+v", notes)
@@ -452,140 +434,10 @@ func TestTUITaskRowBindsMidTurnNotes(t *testing.T) {
 
 	// A row announced by an ask the user already released must not retarget
 	// anything: its work is over.
-	stale := &askStream{steer: make(chan string, 4), detached: true}
+	stale := newTestStream(new(bool))
+	stale.detached = true
 	next, _ = m.Update(taskRowMsg{stream: stale, taskID: "some-other-task"})
 	if got := next.(tuiModel); got.streamTask != "" {
 		t.Fatalf("a detached stream retargeted the turn: %q", got.streamTask)
-	}
-}
-
-// TestTUICtrlDRetractsQueuedNote is the delete half of the gesture: the note the
-// last Enter queued can be taken back before the round reads it. The board has
-// to lose the row (not just the highlight) and the turn's pending prompt has to
-// lose the line too, or the transcript would keep claiming a note nobody can
-// see — the same drift the stale-write guard exists to prevent.
-func TestTUICtrlDRetractsQueuedNote(t *testing.T) {
-	m, st, nodeID := newNoteTUI(t, true)
-	task := queueTestTask(t, st, nodeID, "retract target")
-	m.mode = modeAsking
-	m.stream = &askStream{steer: make(chan string, 4)}
-	m.streamTask = task.TaskID
-
-	next, _ := m.sendTurnInput("use tabs, not spaces")
-	got := next.(tuiModel)
-	if got.staged == nil {
-		t.Fatal("precondition: the first Enter should stage a note")
-	}
-	if n := len(userNotes(t, st, task.TaskID)); n != 1 {
-		t.Fatalf("board before retract = %d notes, want 1", n)
-	}
-
-	next, cmd := got.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
-	got = next.(tuiModel)
-	if got.staged != nil {
-		t.Fatalf("ctrl+d left the note staged: %+v", got.staged)
-	}
-	if notes := userNotes(t, st, task.TaskID); len(notes) != 0 {
-		t.Fatalf("the retracted note is still on the board: %+v", notes)
-	}
-	if strings.Contains(got.pendingPrompt, "use tabs, not spaces") {
-		t.Fatalf("pendingPrompt kept the retracted line: %q", got.pendingPrompt)
-	}
-	if want := i18n.Tf(i18n.English, "tui.note.dropped", "id", shortID(task.TaskID)); !strings.Contains(collectPrinted(cmd), want) {
-		t.Fatalf("retract confirmation = %q, want %q", collectPrinted(cmd), want)
-	}
-
-	// A second ctrl+d has nothing to take back. Saying so keeps the key from
-	// reading as a silent success on a note that was already read by the round.
-	before := len(got.chatHistory.blocks)
-	again, cmd := got.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
-	if n := len(again.(tuiModel).chatHistory.blocks); n <= before {
-		t.Fatal("a no-op retract should still say there is nothing to retract")
-	}
-	if want := i18n.T(i18n.English, "tui.note.nothing"); !strings.Contains(collectPrinted(cmd), want) {
-		t.Fatalf("second ctrl+d = %q, want %q", collectPrinted(cmd), want)
-	}
-}
-
-// TestTUIReEnterEditsStagedNote: a changed draft aimed at the same task rewrites
-// the queued note in place instead of posting beside it. Two rows would let the
-// round read both the wrong text and its correction, and the user only ever
-// meant one of them.
-func TestTUIReEnterEditsStagedNote(t *testing.T) {
-	m, st, nodeID := newNoteTUI(t, true)
-	task := queueTestTask(t, st, nodeID, "edit target")
-	m.mode = modeAsking
-	m.stream = &askStream{steer: make(chan string, 4)}
-	m.streamTask = task.TaskID
-
-	next, _ := m.sendTurnInput("use tabs")
-	got := next.(tuiModel)
-	if got.staged == nil || got.staged.key == "" {
-		t.Fatalf("precondition: staged note = %+v, want a board slot", got.staged)
-	}
-	key := got.staged.key
-
-	next, cmd := got.sendTurnInput("use spaces")
-	got = next.(tuiModel)
-	notes := userNotes(t, st, task.TaskID)
-	if len(notes) != 1 {
-		t.Fatalf("re-Enter posted a second note: %+v", notes)
-	}
-	if notes[0].Body != "use spaces" {
-		t.Fatalf("board body = %q, want the corrected text", notes[0].Body)
-	}
-	if notes[0].Grade != core.MsgGradeStatus {
-		t.Fatalf("editing a queued note must not escalate it: grade %q", notes[0].Grade)
-	}
-	if got.staged == nil || got.staged.key != key || got.staged.text != "use spaces" {
-		t.Fatalf("staged after edit = %+v, want the same slot with the new text", got.staged)
-	}
-	if strings.Contains(got.pendingPrompt, "use tabs") || !strings.Contains(got.pendingPrompt, "use spaces") {
-		t.Fatalf("pendingPrompt kept the old wording: %q", got.pendingPrompt)
-	}
-	if want := i18n.Tf(i18n.English, "tui.note.updated", "id", shortID(task.TaskID)); !strings.Contains(collectPrinted(cmd), want) {
-		t.Fatalf("edit confirmation = %q, want %q", collectPrinted(cmd), want)
-	}
-}
-
-// TestTUIClearedDraftStartsANewNote: once the draft that was queued is gone
-// (Esc, or emptied by hand), the next thing typed is a new note. Without that
-// rule stageNote's "a changed draft on the same slot is a correction" would
-// quietly overwrite the note the user had already confirmed — the round would
-// then read only the second message.
-func TestTUIClearedDraftStartsANewNote(t *testing.T) {
-	m, st, nodeID := newNoteTUI(t, true)
-	task := queueTestTask(t, st, nodeID, "second note target")
-	m.mode = modeAsking
-	m.stream = &askStream{steer: make(chan string, 4)}
-	m.streamTask = task.TaskID
-
-	m.ta.SetValue("use tabs")
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	got := next.(tuiModel)
-	if got.staged == nil {
-		t.Fatal("precondition: Enter should queue the first note")
-	}
-
-	// Esc clears the box: that draft is finished, so its note stops being the
-	// one the next Enter would escalate or rewrite.
-	next, _ = got.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	got = next.(tuiModel)
-	if got.staged != nil {
-		t.Fatalf("clearing the draft left the note staged: %+v", got.staged)
-	}
-
-	got.ta.SetValue("also add the changelog line")
-	next, _ = got.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	got = next.(tuiModel)
-	notes := userNotes(t, st, task.TaskID)
-	if len(notes) != 2 {
-		t.Fatalf("board has %d notes, want the second one added: %+v", len(notes), notes)
-	}
-	if notes[0].Body != "use tabs" {
-		t.Fatalf("the first note was rewritten instead of kept: %q", notes[0].Body)
-	}
-	if got.staged == nil || got.staged.text != "also add the changelog line" {
-		t.Fatalf("staged after the second Enter = %+v", got.staged)
 	}
 }

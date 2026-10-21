@@ -382,15 +382,22 @@ func (m tuiModel) followUpTask(t core.Task) (tea.Model, tea.Cmd) {
 // noteTarget resolves which task a /queue or /inject line addresses, and
 // returns the note text with that prefix stripped. An explicit leading id wins
 // when it names a real row; otherwise the whole argument is the text and the
-// task is the one last opened from the picker. That fallback is what makes the
-// bare form usable: "open the running task, type /queue fix it" is the gesture,
-// and demanding a 36-character id in the middle of a conversation is not.
+// task is the one this turn is running, falling back to the one last opened
+// from the picker.
+//
+// The running row outranks the picker on purpose: it is the work on screen, and
+// it is what "the thing I am watching" means. The picker fallback is what makes
+// the bare form usable at all — "open the task, type /queue fix it" is the
+// gesture, and demanding a 36-character id mid-conversation is not.
 func (m tuiModel) noteTarget(arg string) (id, text string) {
 	arg = strings.TrimSpace(arg)
 	first, rest, hasRest := strings.Cut(arg, " ")
 	rest = strings.TrimSpace(rest)
 	if hasRest && rest != "" && m.taskExists(first) {
 		return first, rest
+	}
+	if m.streamTask != "" && m.taskExists(m.streamTask) {
+		return m.streamTask, arg
 	}
 	return m.focusTask, arg
 }
@@ -448,161 +455,27 @@ func (m tuiModel) sendTaskNote(arg string, inject bool) (tea.Model, tea.Cmd) {
 	return m, m.printBlock(block{kind: blockNote, body: body})
 }
 
-// stageNote lands a plain-text Enter typed while a turn runs. This is the
-// queue half of the TUI's queue-and-inject pair: the note goes to the running
-// task's board (durable, visible on /tasks) when this turn has a task row, and
-// to the in-process steer channel otherwise. The draft stays in the box on
-// purpose — pressing Enter again on it is the escalate gesture.
-func (m tuiModel) stageNote(text string) (tea.Model, tea.Cmd) {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return m, nil
-	}
-	target := m.streamTask
-	if target == "" {
-		target = m.focusTask
-	}
-	if eng := m.noteEngine(); eng != nil && target != "" && m.taskExists(target) {
-		suffix := "\n" + i18n.T(m.loc, "tui.turn.steerPrefix") + text
-		// A changed draft on the same board slot is an edit, not a second
-		// message: the note the user already queued is the thing they are
-		// correcting, and posting beside it would leave the round reading both.
-		if s := m.staged; s != nil && s.key != "" && s.taskID == target {
-			if err := eng.EditTaskNote(context.Background(), target, s.key, text, nil); err == nil {
-				m.pendingPrompt = strings.TrimSuffix(m.pendingPrompt, s.appended) + suffix
-				m.staged = &stagedNote{taskID: target, key: s.key, text: text, appended: suffix}
-				return m, m.printBlock(block{
-					kind: blockNote,
-					body: m.th.accent.Render("📥 ") +
-						i18n.Tf(m.loc, "tui.note.updated", "id", shortID(target)),
-				})
-			}
-			// The edit was refused (the round read it meanwhile): fall through
-			// and queue the corrected text as its own note.
-		}
-		res, err := eng.SendTaskNote(context.Background(), target, text, nil, false)
-		if err == nil {
-			m.staged = &stagedNote{taskID: target, key: res.Sender, text: text, appended: suffix}
-			// The note rides inside pendingPrompt so the turn persists the user
-			// side it belongs to; appending it to convo here would leave an
-			// unpaired user turn in the replayed history.
-			m.pendingPrompt += suffix
-			return m, m.printBlock(block{
-				kind: blockNote,
-				body: m.th.accent.Render("📥 ") +
-					i18n.Tf(m.loc, "tui.note.queued", "id", shortID(target)),
-			})
-		}
-		// The board refused (terminal row, another node's executor, a dead
-		// consumer). Fall back to the in-process channel rather than dropping
-		// the words, and say which promise the fallback makes.
-		return m.stageSteer(text, err.Error())
-	}
-	return m.stageSteer(text, "")
-}
-
-// disarmStaged closes the edit-and-escalate window for the note just queued.
-// It fires when the draft that opened that window is gone — Esc, or the box
-// emptied by hand. Without it, clearing the box and typing the next note would
-// silently rewrite the queued one, because stageNote reads a changed draft on
-// the same task as a correction of it: right while the user is still fixing
-// that draft, wrong the moment they start a new note. The note stays queued;
-// only the shortcut to rewrite or escalate it ends.
-func (m *tuiModel) disarmStaged() {
-	m.staged = nil
-}
-
-// stageSteer queues a note on the streaming ask's own channel — the only
-// delivery path a task-less answer turn has. why, when set, explains why the
-// durable board path was not used.
-func (m tuiModel) stageSteer(text, why string) (tea.Model, tea.Cmd) {
-	if m.stream == nil || !m.stream.injectSteer(text) {
-		return m, m.printBlock(block{kind: blockError, body: i18n.T(m.loc, "tui.steer.full")})
-	}
-	suffix := "\n" + i18n.T(m.loc, "tui.turn.steerPrefix") + text
-	m.staged = &stagedNote{text: text, appended: suffix}
-	m.pendingPrompt += suffix
-	body := m.th.accent.Render("💡 ") + i18n.Tf(m.loc, "tui.turn.steered", "idea", text)
-	if why != "" {
-		body += " — " + why
-	}
-	return m, m.printBlock(block{kind: blockNote, body: body})
-}
-
-// promoteStaged is the second Enter: escalate the note just queued instead of
-// posting it again. A board note is rewritten in place with the steer grade
-// (the round reads it once, as this round's directive); a steer-channel note
-// has no earlier delivery point to offer, and saying so is better than
-// pretending the round was cut short.
-func (m tuiModel) promoteStaged() (tea.Model, tea.Cmd) {
-	s := m.staged
-	if s == nil {
-		return m, nil
-	}
-	if s.key == "" {
-		return m, m.printBlock(block{kind: blockNote, body: i18n.T(m.loc, "tui.note.noAbort")})
-	}
-	eng := m.noteEngine()
-	if eng == nil {
-		return m, m.printBlock(block{kind: blockError, body: i18n.T(m.loc, "tui.error.noModel")})
-	}
-	status, warn, err := eng.PromoteTaskNote(context.Background(), s.taskID, s.key)
-	if err != nil {
-		return m, m.printBlock(block{kind: blockError, body: err.Error()})
-	}
-	m.staged = nil
-	m.ta.Reset()
-	m.ta.SetHeight(1)
-	key := "tui.note.promoted"
-	if status == "interrupted" {
-		key = "tui.note.interrupted"
-	}
-	body := m.th.accent.Render("⚡ ") + i18n.Tf(m.loc, key, "id", shortID(s.taskID))
-	if warn != "" {
-		body += " — " + warn
-	}
-	return m, m.printBlock(block{kind: blockNote, body: body})
-}
-
-// dropStaged retracts the note the last Enter queued — the delete half of the
-// strip the web composer shows. A board note is deleted outright; a
-// steer-channel note has already left for the round loop and cannot be
-// recalled, which the reply says rather than clearing the stage.
-func (m tuiModel) dropStaged() (tea.Model, tea.Cmd) {
-	s := m.staged
-	if s == nil {
-		return m, m.printBlock(block{kind: blockNote, body: i18n.T(m.loc, "tui.note.nothing")})
-	}
-	if s.key == "" {
-		return m, m.printBlock(block{kind: blockNote, body: i18n.T(m.loc, "tui.note.dropSteer")})
-	}
-	eng := m.noteEngine()
-	if eng == nil {
-		return m, m.printBlock(block{kind: blockError, body: i18n.T(m.loc, "tui.error.noModel")})
-	}
-	if err := eng.DeleteTaskNote(context.Background(), s.taskID, s.key); err != nil {
-		return m, m.printBlock(block{kind: blockError, body: err.Error()})
-	}
-	m.pendingPrompt = strings.TrimSuffix(m.pendingPrompt, s.appended)
-	m.staged = nil
-	return m, m.printBlock(block{
-		kind: blockNote,
-		body: i18n.Tf(m.loc, "tui.note.dropped", "id", shortID(s.taskID)),
-	})
-}
-
-// noteEngine resolves the engine the way sendTaskNote does: the model's own
-// copy first (tests and embedded TUI), then the repl's atomic slot.
-func (m tuiModel) noteEngine() *askengine.Engine {
-	if m.engine != nil {
-		return m.engine
-	}
-	if m.r != nil {
-		return m.r.engine.Load()
-	}
-	return nil
-}
-
+// Mid-turn text is not routed from here on purpose.
+//
+// There are two queue surfaces in the TUI and they must not be confused:
+//
+//	/queue <id> text, /inject <id> text
+//	    Address a TASK, through the durable board (sendTaskNote above). The
+//	    note survives this process, is visible in /tasks, and is read by
+//	    whichever round owns the row — possibly another node's executor.
+//
+//	Enter, Ctrl+X (enqueuePending / injectQueued in tui_update.go)
+//	    Address the CONVERSATION. The line becomes the user's next turn and
+//	    lives only in this front end's pending queue.
+//
+// What used to live here — stageNote and its stagedNote bookkeeping — blurred
+// the two: a plain Enter mid-turn wrote the board *and* appended
+// "[Steering idea]: ..." to the prompt already streaming, so the model read
+// one sentence twice and the persisted transcript was rewritten to say the
+// user had typed something they had not. Pressing Enter twice on a changed
+// draft rewrote the same board slot instead of queueing a second message, so
+// three notes typed in one turn collapsed to the last one. Both are gone: a
+// queued message is the user's NEXT input, never a late edit to their last.
 // followUpTaskRef is the typed-command path (/task followup <id>): resolve
 // the id then take the same turn the list's Enter produces. Failures land as
 // transcript notes, not exec output — this runs on the Update goroutine.
