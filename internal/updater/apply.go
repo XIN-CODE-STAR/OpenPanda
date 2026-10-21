@@ -144,7 +144,11 @@ func ReleaseFallbackPath() string {
 // same atomic replaceBinary the update path does. The caller handles process
 // restart (applyRelease's delayedRestart/install.RestartDaemon are not
 // invoked here — a CLI rollback asks the operator or bounces the service).
-func RollbackToRelease() error {
+//
+// floor is the schema version the live data directory already carries. The
+// caller must pass it: the fallback binary is probed in isolation and cannot
+// see the data directory it would be rolled back onto.
+func RollbackToRelease(floor int) error {
 	fallback := ReleaseFallbackPath()
 	if fallback == "" {
 		return fmt.Errorf("cannot locate the running binary")
@@ -156,7 +160,7 @@ func RollbackToRelease() error {
 	if dst == "" {
 		return fmt.Errorf("cannot locate the running binary")
 	}
-	if err := checkSelfRollbackSchema(fallback); err != nil {
+	if err := checkSelfRollbackSchema(fallback, floor); err != nil {
 		return err
 	}
 	if err := replaceBinary(fallback, dst); err != nil {
@@ -168,7 +172,13 @@ func RollbackToRelease() error {
 // checkSelfRollbackSchema refuses a rollback whose fallback binary predates
 // the data directory's schema floor — rolling back to a binary that cannot
 // open the store bricks the node as surely as a bad update would.
-func checkSelfRollbackSchema(fallback string) error {
+//
+// The guard fails closed: when the data directory is at a non-zero schema and
+// the fallback cannot report its ceiling, the rollback is refused. The
+// fallback's own db_schema reading describes whatever data directory IT
+// opened (the probe runs without the caller's --config), so it is only used
+// when the caller knows no floor.
+func checkSelfRollbackSchema(fallback string, floor int) error {
 	out, err := exec.Command(fallback, "version", "--json").Output()
 	if err != nil {
 		return fmt.Errorf("probe fallback binary: %w", err)
@@ -180,8 +190,18 @@ func checkSelfRollbackSchema(fallback string) error {
 	if err := json.Unmarshal(out, &info); err != nil {
 		return fmt.Errorf("probe fallback binary: unreadable version JSON")
 	}
-	if info.Schema > 0 && info.DBSchema > info.Schema {
-		return fmt.Errorf("release fallback supports schema v%d but the data directory is at v%d — rollback refused", info.Schema, info.DBSchema)
+	if floor <= 0 {
+		// The caller knows no floor: fall back to the probe's own reading.
+		floor = info.DBSchema
+	}
+	if floor <= 0 {
+		return nil // nothing to protect — the data directory is at schema v0
+	}
+	if info.Schema <= 0 {
+		return fmt.Errorf("release fallback cannot report its schema ceiling but the data directory is at schema v%d — rollback refused", floor)
+	}
+	if info.Schema < floor {
+		return fmt.Errorf("release fallback supports schema v%d but the data directory is at v%d — rollback refused", info.Schema, floor)
 	}
 	return nil
 }

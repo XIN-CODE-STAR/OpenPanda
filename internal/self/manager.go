@@ -142,6 +142,19 @@ func (m *Manager) AcquireWorktreeLock(ctx context.Context) (func(), error) {
 func (m *Manager) queueDir() string   { return filepath.Join(m.root, "queue") }
 func (m *Manager) archiveDir() string { return filepath.Join(m.root, "archive") }
 
+// safeSetID rejects an id that is not a single safe path element. Set ids
+// arrive from the CLI and from HTTP paths; joining one into a path without
+// this check would read or write outside the queue root.
+func safeSetID(id string) error {
+	if id == "" || id == "." || id == ".." {
+		return fmt.Errorf("patch set id %q is not a valid set id", id)
+	}
+	if filepath.IsAbs(id) || strings.ContainsAny(id, "/\\") || strings.Contains(id, "..") {
+		return fmt.Errorf("patch set id %q is not a valid set id", id)
+	}
+	return nil
+}
+
 // criticalOrFailClosed recomputes the critical flag from the patches on disk.
 // A read failure must never downgrade a set to "not critical" — the flag is a
 // merge-gate input — so an error is reported as critical, with the error text
@@ -200,9 +213,12 @@ func (m *Manager) Queue() ([]Set, error) {
 	return out, nil
 }
 
+// stateMarkerFile is the one-word file a set's lifecycle verdict lives in.
+const stateMarkerFile = ".state"
+
 // markerState reads the one-word state marker an archived dir carries.
 func markerState(dir string) SetState {
-	b, err := os.ReadFile(filepath.Join(dir, ".state"))
+	b, err := os.ReadFile(filepath.Join(dir, stateMarkerFile))
 	if err != nil {
 		return ""
 	}
@@ -215,6 +231,9 @@ func markerState(dir string) SetState {
 
 // Get resolves one set by id across queue and archive.
 func (m *Manager) Get(id string) (Set, error) {
+	if err := safeSetID(id); err != nil {
+		return Set{}, err
+	}
 	for _, dir := range []string{filepath.Join(m.queueDir(), id), filepath.Join(m.archiveDir(), id)} {
 		if _, err := os.Stat(dir); err == nil {
 			mf, err := LoadManifest(dir)
@@ -336,6 +355,9 @@ func (m *Manager) mintLocked(ctx context.Context, baseRef, title, version string
 
 // Archive moves a queued set into archive/ with a terminal state marker.
 func (m *Manager) Archive(id string, state SetState) error {
+	if err := safeSetID(id); err != nil {
+		return err
+	}
 	src := filepath.Join(m.queueDir(), id)
 	dst := filepath.Join(m.archiveDir(), id)
 	if _, err := os.Stat(src); err != nil {
@@ -344,7 +366,7 @@ func (m *Manager) Archive(id string, state SetState) error {
 	if err := os.MkdirAll(m.archiveDir(), 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(src, ".state"), []byte(state), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(src, stateMarkerFile), []byte(state), 0o644); err != nil {
 		return err
 	}
 	return os.Rename(src, dst)
@@ -366,17 +388,31 @@ func (m *Manager) MarkRejected(id string) error {
 
 // MarkState writes the one-word state marker a queued set carries.
 func (m *Manager) MarkState(id string, state SetState) error {
+	if err := safeSetID(id); err != nil {
+		return err
+	}
 	dir := filepath.Join(m.queueDir(), id)
 	if _, err := os.Stat(dir); err != nil {
 		return fmt.Errorf("no queued patch set %q", id)
 	}
-	return os.WriteFile(filepath.Join(dir, ".state"), []byte(state), 0o644)
+	return os.WriteFile(filepath.Join(dir, stateMarkerFile), []byte(state), 0o644)
 }
 
 // ClearConflicted lifts the marker after a successful rebase — a set that
 // was never conflicted has nothing to lift.
+//
+// Only a CONFLICTED marker is lifted. A rejected or merged marker is the
+// human's verdict (or the merge's own record); erasing it would put a
+// terminal set back into the proposable queue.
 func (m *Manager) ClearConflicted(id string) error {
-	err := os.Remove(filepath.Join(m.queueDir(), id, ".state"))
+	if err := safeSetID(id); err != nil {
+		return err
+	}
+	dir := filepath.Join(m.queueDir(), id)
+	if markerState(dir) != StateConflicted {
+		return nil
+	}
+	err := os.Remove(filepath.Join(dir, stateMarkerFile))
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -467,6 +503,12 @@ func (m *Manager) rebaseOntoLocked(ctx context.Context, id, newBase string, pub 
 	set, err := m.Get(id)
 	if err != nil {
 		return err
+	}
+	// A terminal set stays terminal. Rebasing a rejected set would rewrite
+	// its patches and lift its marker, handing the operator's "no" back to
+	// the queue as a fresh pending set.
+	if set.State != StatePending {
+		return fmt.Errorf("patch set %s is %s — only pending sets can be rebased", id, set.State)
 	}
 	if err := m.EnsureWorktree(ctx); err != nil {
 		return err
@@ -590,7 +632,10 @@ func gitOut(ctx context.Context, dir string, args ...string) (string, error) {
 	return string(out), err
 }
 
-// copyDir duplicates a patch-set directory (manifest + patches + markers).
+// copyDir duplicates a patch-set directory (manifest + patches). The state
+// marker is deliberately NOT copied: it records the source directory's
+// lifecycle verdict, and an imported set starts its own life here — carrying
+// a "rejected" marker would make the freshly imported set terminal.
 func copyDir(src, dst string) error {
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -599,6 +644,9 @@ func copyDir(src, dst string) error {
 		rel, err := filepath.Rel(src, path)
 		if err != nil {
 			return err
+		}
+		if rel == stateMarkerFile {
+			return nil
 		}
 		to := filepath.Join(dst, rel)
 		if info.IsDir() {

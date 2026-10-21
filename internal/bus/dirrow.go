@@ -22,18 +22,72 @@ const DirRowMaxBytes = 16 * 1024
 // hashed are the bytes every receiver reproduces after a parse round-trip.
 //
 //	withSeen=true  → signature domain: everything except Sig
-//	withSeen=false → content-hash domain: also excludes SeenAt
+//	withSeen=false → content-hash domain: also excludes SeenAt and the
+//	                 measured link latencies
 func dirRowCanonical(r *DirRow, withSeen bool) []byte {
 	c := *r
 	c.Sig = ""
 	if !withSeen {
 		c.SeenAt = 0
+		c.Links = stableLinks(c.Links)
+		c.Card = stableCard(c.Card)
 	}
 	b, err := json.Marshal(&c)
 	if err != nil {
 		return nil
 	}
 	return b
+}
+
+// stableLinks drops the measured latency from a row's link metrics. The RTT
+// moves on every ping, and the content hash is what two peers compare to
+// decide whether their directories agree: hashing the latency would make
+// the hash move with it, and the two sides would never meet.
+func stableLinks(links []LinkMetric) []LinkMetric {
+	if len(links) == 0 {
+		return links
+	}
+	out := make([]LinkMetric, len(links))
+	copy(out, links)
+	for i := range out {
+		out[i].RTTms = 0
+	}
+	return out
+}
+
+// stableCard drops the measured latency from a capability card. The card
+// embeds the same link metrics (links[].rtt_ms) for consumers that read the
+// summary; the key is REMOVED rather than zeroed so a link with a sample and
+// a link without one normalize to the same bytes.
+func stableCard(card json.RawMessage) json.RawMessage {
+	if len(card) == 0 {
+		return card
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(card, &m); err != nil {
+		return card
+	}
+	raw, ok := m["links"]
+	if !ok {
+		return card
+	}
+	var links []map[string]any
+	if err := json.Unmarshal(raw, &links); err != nil {
+		return card
+	}
+	for _, l := range links {
+		delete(l, "rtt_ms")
+	}
+	norm, err := json.Marshal(links)
+	if err != nil {
+		return card
+	}
+	m["links"] = norm
+	out, err := json.Marshal(m)
+	if err != nil {
+		return card
+	}
+	return out
 }
 
 // CanonicalDirRowBytes returns the full-field serialization — the byte

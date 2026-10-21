@@ -271,6 +271,56 @@ func TestProposeSelfMergeRefusesStaleBase(t *testing.T) {
 	}
 }
 
+// TestSelfMergeRefusesChangedSet pins the review binding: the artifact on
+// disk at approve time must still be the one the reviewer saw. The
+// boot-time rebase sweep rewrites a queued set in place, so approving a
+// proposal whose set has since been rebased would merge bytes nobody looked
+// at.
+func TestSelfMergeRefusesChangedSet(t *testing.T) {
+	ctx := context.Background()
+	repo := selfTestRepo(t)
+	mgr := self.New(t.TempDir(), repo, testLogger())
+	c := newSelfTestCore(t, "digest-node", "mesh", mgr)
+	pub, priv, ok := c.nodeKeyPair()
+	if !ok {
+		t.Fatal("node key unavailable")
+	}
+	set := mintTestSet(t, mgr, pub, priv, "digest change")
+	task, err := c.ProposeSelfMerge(ctx, set.Manifest.ID)
+	if err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	// Rewrite the set in place: a rebase re-mints the manifest (new title,
+	// new patch bytes) while the set stays pending.
+	if err := mgr.RebaseOnto(ctx, set.Manifest.ID, set.Manifest.Base, pub, priv); err != nil {
+		t.Fatalf("rebase: %v", err)
+	}
+
+	oldGuard, oldGate, oldStage, oldUpd, oldRestart := selfSwapGuard, selfRunGate, selfStageTree, selfNewUpdater, selfRestart
+	t.Cleanup(func() {
+		selfSwapGuard, selfRunGate, selfStageTree, selfNewUpdater, selfRestart = oldGuard, oldGate, oldStage, oldUpd, oldRestart
+	})
+	selfSwapGuard = func() error { return nil }
+	selfRunGate = func(context.Context, string) self.GateDigest {
+		return self.GateDigest{OK: true, Legs: []self.GateLeg{{Name: "stub", OK: true}}}
+	}
+	selfStageTree = func(*self.Manager, context.Context, string, string, string) error { return nil }
+	fake := &fakeSelfUpdater{}
+	selfNewUpdater = func(updater.Options) selfUpdater { return fake }
+	selfRestart = func(*slog.Logger, bool) {}
+
+	final, res, err := c.ResumeApproved(ctx, task.TaskID)
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if res.OK || fake.applied {
+		t.Fatalf("a changed patch set must not merge: state=%s res=%+v applied=%v", final.State, res, fake.applied)
+	}
+	if !strings.Contains(res.Stderr, "changed since it was proposed") {
+		t.Fatalf("the failure must name the digest mismatch: %q", res.Stderr)
+	}
+}
+
 // TestProposeSelfMergeRefusesForeignProducer pins self_evolution.producers:
 // the default admits only this node's own key, so a set signed elsewhere must
 // never become mergeable here.

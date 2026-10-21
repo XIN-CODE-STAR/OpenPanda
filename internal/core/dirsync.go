@@ -66,6 +66,12 @@ const (
 	// dirRowsEvery. The frame budget alone still lets 8×256 ids land in one
 	// window, enough to fill the whole directory and block honest peers.
 	dirRowsNewPerWindow = 256
+	// dirRowsShareMax bounds how much of the directory ONE sender may
+	// occupy. The window budget bounds the RATE at which a member can push
+	// new ids in; this bounds the SHARE it ends up holding, so a member
+	// cannot fill the table with its own rows and lock honest peers out of
+	// it (their rows would never fit).
+	dirRowsShareMax = dirRowsMax / 4
 	// dirRowsMax caps the whole directory at the stamp table's own limit.
 	// Beyond it peers can never converge anyway (dirStampMax trims pulls),
 	// so accepting more rows only grows the DB and the heartbeat scan.
@@ -91,6 +97,9 @@ type dirState struct {
 	rowsAt    map[string][]time.Time
 	rowsNew   map[string]int
 	rowsNewAt map[string]time.Time
+	// digest/digestAt cache the folded directory digest for dirDigestTTL.
+	digest   string
+	digestAt time.Time
 	// sumAt/sum cache the static half of the self-row's capability summary:
 	// summary() probes each agent's usability, too expensive to run every
 	// heartbeat — the card changes on reload, not per beat. Live fields
@@ -362,13 +371,31 @@ func (s *dirRowSynthesis) synth() *bus.DirRow {
 	return r
 }
 
+// dirDigestTTL is how long a folded directory digest is reused. The fold
+// reads every row of the directory and hashes it, and an inbound heartbeat
+// arrives per peer per beat — an uncached fold is a CPU amplifier a single
+// member can aim at the node.
+const dirDigestTTL = 2 * time.Second
+
 // dirDigest folds the stamp table into the single heartbeat field.
 func (c *Core) dirDigest(ctx context.Context) string {
+	c.dir.mu.Lock()
+	if c.dir.digest != "" && time.Since(c.dir.digestAt) < dirDigestTTL {
+		d := c.dir.digest
+		c.dir.mu.Unlock()
+		return d
+	}
+	c.dir.mu.Unlock()
 	stamps, err := c.dirStamps(ctx)
 	if err != nil {
 		return ""
 	}
-	return bus.DirDigestFromStamps(stamps)
+	d := bus.DirDigestFromStamps(stamps)
+	c.dir.mu.Lock()
+	c.dir.digest = d
+	c.dir.digestAt = time.Now()
+	c.dir.mu.Unlock()
+	return d
 }
 
 // dirPullAllowed enforces the 30s fresh-pull rate limit and the continuation
@@ -463,8 +490,7 @@ func (c *Core) dirNewRowsRemaining(peer string) int {
 	}
 	now := time.Now()
 	if now.Sub(c.dir.rowsNewAt[peer]) >= dirRowsEvery {
-		c.dir.rowsNew[peer] = 0
-		c.dir.rowsNewAt[peer] = now
+		return dirRowsNewPerWindow
 	}
 	left := dirRowsNewPerWindow - c.dir.rowsNew[peer]
 	if left < 0 {
@@ -473,23 +499,75 @@ func (c *Core) dirNewRowsRemaining(peer string) int {
 	return left
 }
 
-// dirNewRowsAdded charges n new ids to peer's current window budget.
-func (c *Core) dirNewRowsAdded(peer string, n int) {
-	if n <= 0 {
-		return
-	}
+// dirNewRowsReserve takes up to n new-id slots out of peer's current window
+// budget and returns how many it got. The reservation happens under the lock:
+// checking the budget and charging it later would let two frames from the
+// same sender (one over a direct conn, one over a transit path) each take
+// the full budget.
+func (c *Core) dirNewRowsReserve(peer string, n int) int {
 	c.dir.mu.Lock()
+	defer c.dir.mu.Unlock()
 	if c.dir.rowsNew == nil {
 		c.dir.rowsNew = make(map[string]int)
 		c.dir.rowsNewAt = make(map[string]time.Time)
 	}
 	now := time.Now()
-	if c.dir.rowsNewAt[peer].IsZero() || now.Sub(c.dir.rowsNewAt[peer]) >= dirRowsEvery {
+	if now.Sub(c.dir.rowsNewAt[peer]) >= dirRowsEvery {
 		c.dir.rowsNew[peer] = 0
 		c.dir.rowsNewAt[peer] = now
 	}
+	left := dirRowsNewPerWindow - c.dir.rowsNew[peer]
+	if left < 0 {
+		left = 0
+	}
+	if n > left {
+		n = left
+	}
 	c.dir.rowsNew[peer] += n
-	c.dir.mu.Unlock()
+	return n
+}
+
+// dirNewRowsRefund hands reserved-but-unused slots back to the sender's
+// window budget.
+func (c *Core) dirNewRowsRefund(peer string, n int) {
+	if n <= 0 {
+		return
+	}
+	c.dir.mu.Lock()
+	defer c.dir.mu.Unlock()
+	if c.dir.rowsNew == nil {
+		return
+	}
+	c.dir.rowsNew[peer] -= n
+	if c.dir.rowsNew[peer] < 0 {
+		c.dir.rowsNew[peer] = 0
+	}
+}
+
+// dirRowShare counts the directory rows one sender is responsible for: the
+// rows it delivered to us, plus the rows its own proven key owns. Both halves
+// matter — the first catches a flood of unsigned rows, the second catches a
+// member that rotates its session ids to get a fresh share with every one.
+func (c *Core) dirRowShare(ctx context.Context, peer string) int {
+	if c.db == nil || peer == "" {
+		return 0
+	}
+	var n int
+	if err := c.db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM employee_cache WHERE learned_via = ?`, peer).Scan(&n); err != nil {
+		return 0 // an unreadable share must not close the door on honest rows
+	}
+	var pub string
+	if err := c.db.QueryRowContext(ctx,
+		`SELECT COALESCE(pub_key,'') FROM employee_cache WHERE id = ?`, peer).Scan(&pub); err != nil || pub == "" {
+		return n
+	}
+	var owned int
+	if err := c.db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM employee_cache WHERE pub_key = ?`, pub).Scan(&owned); err == nil {
+		n += owned
+	}
+	return n
 }
 
 // dirRowRoom is the number of NEW ids the directory may still accept. The
@@ -595,6 +673,11 @@ func (c *Core) handleDirPull(ctx context.Context, env bus.Envelope) {
 			want = append(want, id)
 		}
 	}
+	// Sort before the page cut: the stamp table is a map, so an unsorted
+	// want list would hand every round a DIFFERENT random subset of the
+	// missing ids — the two sides would then chase each other without ever
+	// covering the same ids.
+	sort.Strings(want)
 	rows, cursor, more := c.dirRowsFor(ctx, need, p.After)
 	if len(want) > dirRowsPerFrame {
 		want = want[:dirRowsPerFrame]
@@ -702,9 +785,20 @@ func (c *Core) handleDirRows(ctx context.Context, env bus.Envelope) {
 		return
 	}
 	applied := 0
+	// Reserve the sender's new-id budget under the lock, then hand back
+	// whatever the frame did not use.
+	reserved := c.dirNewRowsReserve(env.From, dirRowsNewPerWindow)
 	room := c.dirRowRoom(ctx)
-	if per := c.dirNewRowsRemaining(env.From); per < room {
-		room = per
+	if reserved < room {
+		room = reserved
+	}
+	// The sender's SHARE of the directory: it may not fill the table with
+	// rows no honest peer could ever add.
+	switch share := c.dirRowShare(ctx, env.From); {
+	case share >= dirRowsShareMax:
+		room = 0
+	case dirRowsShareMax-share < room:
+		room = dirRowsShareMax - share
 	}
 	startRoom := room
 	for _, raw := range p.Rows {
@@ -712,9 +806,7 @@ func (c *Core) handleDirRows(ctx context.Context, env bus.Envelope) {
 			applied++
 		}
 	}
-	if added := startRoom - room; added > 0 {
-		c.dirNewRowsAdded(env.From, added)
-	}
+	c.dirNewRowsRefund(env.From, reserved-(startRoom-room))
 	if applied > 0 {
 		c.mesh.dirRowsIn.Add(int64(applied))
 		c.logger.Debug("dir rows applied", "from", env.From, "n", applied)
@@ -787,8 +879,14 @@ func (c *Core) applyDirRowLimited(ctx context.Context, raw json.RawMessage, via 
 		return false
 	}
 	if found {
-		if incSig != "" && !signed {
-			return false // signed incumbent beats every unsigned challenger
+		if !signed {
+			// An unsigned row may CREATE a row but never displace one. The
+			// incumbent's card, addrs and relay are what the live view trusts;
+			// an unsigned challenger carries no proof of anything, and letting
+			// it win would let any member rewrite a peer's identity in the
+			// directory (and knock it out of the dial path with an empty
+			// dir_sig). A signed challenger still wins — see the rules below.
+			return false
 		}
 		if (incSig == "") == (row.Sig == "") && incSeen >= seenAt {
 			return false // same signedness, incumbent is newer or equal

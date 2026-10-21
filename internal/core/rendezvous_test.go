@@ -112,6 +112,21 @@ func TestRendezvousElect(t *testing.T) {
 		}
 	})
 
+	t.Run("one domain still reaches K", func(t *testing.T) {
+		c.rzv.mu.Lock()
+		c.rzv.peers = map[string]bool{}
+		c.rzv.mu.Unlock()
+		// Every LAN peer shares one failure domain. A hard domain filter
+		// would elect a single node and leave the mesh holding one edge
+		// where the design asks for K.
+		got := c.rendezvousElect([]rendezvousCandidate{
+			mk("a", 100, "same"), mk("b", 99, "same"), mk("c", 98, "same"),
+		}, rendezvousKDefault)
+		if len(got) != rendezvousKDefault || !got["a"] || !got["b"] {
+			t.Fatalf("elected %v, want %d members", got, rendezvousKDefault)
+		}
+	})
+
 	t.Run("hysteresis keeps incumbent", func(t *testing.T) {
 		c.rzv.mu.Lock()
 		c.rzv.peers = map[string]bool{"inc": true}

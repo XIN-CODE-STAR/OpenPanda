@@ -103,6 +103,46 @@ func TestDirDigestDeterministic(t *testing.T) {
 	}
 }
 
+func TestDirRowContentHashExcludesLatency(t *testing.T) {
+	// The measured RTT moves on every ping. If the content hash followed it,
+	// two peers holding the same directory would never agree on the digest
+	// and would re-sync forever.
+	card := json.RawMessage(`{"device":"n","links":[{"peer":"node-b","rtt_ms":12,"kind":"ws"}]}`)
+	r := &DirRow{
+		ID:    "node-a",
+		Card:  card,
+		Links: []LinkMetric{{Peer: "node-b", RTTms: 12, Kind: "ws"}},
+	}
+	h1 := DirRowContentHashHex(r)
+	r.Links[0].RTTms = 987
+	r.Card = json.RawMessage(`{"device":"n","links":[{"peer":"node-b","rtt_ms":987,"kind":"ws"}]}`)
+	if h2 := DirRowContentHashHex(r); h1 != h2 {
+		t.Fatalf("content hash moved with the latency: %s vs %s", h1, h2)
+	}
+	// A link without a sample must normalize to the same bytes as one with
+	// a measured latency.
+	r.Links[0].RTTms = 0
+	r.Card = json.RawMessage(`{"device":"n","links":[{"peer":"node-b","kind":"ws"}]}`)
+	if h3 := DirRowContentHashHex(r); h1 != h3 {
+		t.Fatalf("an unmeasured link hashes differently from a measured one: %s vs %s", h1, h3)
+	}
+	// The signature still covers the latency: the hash domain is narrower
+	// than the signature domain on purpose.
+	pub, priv, err := GenerateNodeKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &DirRow{ID: "node-a", PubKey: hex.EncodeToString(pub), Links: []LinkMetric{{Peer: "node-b", RTTms: 12}}}
+	SignDirRow(priv, s)
+	if !VerifyDirRow(s) {
+		t.Fatal("signed row failed verify")
+	}
+	s.Links[0].RTTms = 13
+	if VerifyDirRow(s) {
+		t.Fatal("a tampered latency must break the signature")
+	}
+}
+
 func TestParseDirRowBounds(t *testing.T) {
 	if _, err := ParseDirRow(nil); err == nil {
 		t.Fatal("empty row parsed")

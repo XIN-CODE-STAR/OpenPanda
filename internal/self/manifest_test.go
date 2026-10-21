@@ -45,7 +45,7 @@ func validManifest(t *testing.T) Manifest {
 	return Manifest{
 		Kind:     ManifestKind,
 		ID:       "ps-test",
-		Base:     "abc123",
+		Base:     testBaseSHA,
 		Version:  "0.0.12-preview+self.1",
 		Producer: producerID(pub),
 		Title:    "test set",
@@ -53,6 +53,10 @@ func validManifest(t *testing.T) Manifest {
 		Digests:  map[string]string{"0001-x.patch": digestOf([]byte(testPatch))},
 	}
 }
+
+// testBaseSHA is a pinned commit sha — the only base form a manifest may
+// carry, since a symbolic ref would resolve at apply time.
+const testBaseSHA = "0123456789abcdef0123456789abcdef01234567"
 
 func TestManifestValidate(t *testing.T) {
 	m := validManifest(t)
@@ -74,6 +78,11 @@ func TestManifestValidate(t *testing.T) {
 	bad.Base = ""
 	if err := bad.Validate(); err == nil {
 		t.Fatal("empty base must be rejected")
+	}
+	bad = validManifest(t)
+	bad.Base = "main"
+	if err := bad.Validate(); err == nil {
+		t.Fatal("a symbolic base must be rejected — it resolves at apply time, not at review time")
 	}
 	bad = validManifest(t)
 	bad.Files = nil

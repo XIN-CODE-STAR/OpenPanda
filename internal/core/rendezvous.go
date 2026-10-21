@@ -137,11 +137,13 @@ func (c *Core) rendezvousEval(ctx context.Context) {
 }
 
 // rendezvousCandidates scores every directory row that advertises
-// relay.rendezvous on an online, non-session, non-self row with a usable
-// trust tier. Trust is the operator's local assertion — a peer the operator
-// fenced to "open" stays a candidate for COORDINATION (rendezvous serves
-// the mesh, not task admission), but a pub-less row cannot be pinned at
-// dial time and is skipped.
+// relay.rendezvous on a non-session, non-self row with a usable trust tier.
+// Trust is the operator's local assertion — a peer the operator fenced to
+// "open" stays a candidate for COORDINATION (rendezvous serves the mesh, not
+// task admission), but a pub-less row cannot be pinned at dial time and is
+// skipped. Liveness enters through the score (a row marked offline is
+// dialed only when nothing better is on offer), not as a hard filter: the
+// status column decays on its own clock and must not empty the set.
 func (c *Core) rendezvousCandidates(ctx context.Context) []rendezvousCandidate {
 	rows, err := c.db.QueryContext(ctx, `
 		SELECT id, COALESCE(relay,''), COALESCE(status,''), COALESCE(pub_key,''),
@@ -187,6 +189,12 @@ func (c *Core) rendezvousCandidates(ctx context.Context) []rendezvousCandidate {
 		}
 		if load := c.peerEdgeLoad(id); load >= 0 {
 			score -= float64(load) * 2 // prefer less-pinned candidates
+		}
+		if status != "online" {
+			// The row's own liveness flag: a row the sweep already marked
+			// offline is still worth dialing (the score decays with age), but
+			// it loses to a live one.
+			score -= 100
 		}
 		out = append(out, rendezvousCandidate{
 			id: id, score: score,
@@ -234,7 +242,10 @@ func (c *Core) rendezvousElect(cands []rendezvousCandidate, k int) map[string]bo
 			domains[cd.domain] = true
 		}
 	}
-	// Fill: best remaining candidates, preferring fresh domains.
+	// Fill, first pass: the best candidates whose failure domain is still
+	// free. The domain is a PREFERENCE, not a filter: every LAN peer shares
+	// one domain, so a hard filter would elect a single node and leave the
+	// mesh holding one edge where the design asks for K.
 	for _, cd := range cands {
 		if len(elected) >= k {
 			break
@@ -244,6 +255,18 @@ func (c *Core) rendezvousElect(cands []rendezvousCandidate, k int) map[string]bo
 		}
 		elected[cd.id] = true
 		domains[cd.domain] = true
+	}
+	// Fill, second pass: reach K even when every remaining candidate shares
+	// a domain with an electee. A shared domain is a weaker guarantee, not a
+	// reason to run a one-edge mesh.
+	for _, cd := range cands {
+		if len(elected) >= k {
+			break
+		}
+		if elected[cd.id] {
+			continue
+		}
+		elected[cd.id] = true
 	}
 	return elected
 }

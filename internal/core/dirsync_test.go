@@ -205,11 +205,23 @@ func TestDirRowsLimits(t *testing.T) {
 		t.Fatal("existing row refresh must not consume new-id room")
 	}
 
-	// Per-sender new-id budget: exhausting it closes the window's room and
-	// only a rolled window reopens it.
-	c.dirNewRowsAdded("peer", dirRowsNewPerWindow)
+	// Per-sender new-id budget: the reservation is taken under the lock, so
+	// exhausting it closes the window's room and only a rolled window reopens
+	// it.
+	if got := c.dirNewRowsReserve("peer", dirRowsNewPerWindow); got != dirRowsNewPerWindow {
+		t.Fatalf("reserved %d slots, want %d", got, dirRowsNewPerWindow)
+	}
 	if got := c.dirNewRowsRemaining("peer"); got != 0 {
 		t.Fatalf("new-id budget after exhaustion = %d, want 0", got)
+	}
+	if got := c.dirNewRowsReserve("peer", dirRowsNewPerWindow); got != 0 {
+		t.Fatalf("reserved %d slots from an exhausted budget, want 0", got)
+	}
+	// An unused reservation is refunded, so a frame that carried no new id
+	// does not burn the sender's window.
+	c.dirNewRowsRefund("peer", dirRowsNewPerWindow)
+	if got := c.dirNewRowsRemaining("peer"); got != dirRowsNewPerWindow {
+		t.Fatalf("new-id budget after refund = %d, want %d", got, dirRowsNewPerWindow)
 	}
 	c.dir.mu.Lock()
 	c.dir.rowsNewAt["peer"] = time.Now().Add(-2 * dirRowsEvery)
@@ -312,6 +324,35 @@ func TestApplyDirRowConflicts(t *testing.T) {
 		}
 		if got := dirField(t, c, "ghost", "pub_key"); got != "" {
 			t.Fatalf("unsigned row wrote pub_key %q (claimed %q)", got, pub)
+		}
+	})
+
+	t.Run("unsigned never displaces a live row", func(t *testing.T) {
+		c := mkCore()
+		// A peer we learned from a direct hello: the live columns are ours,
+		// the gossip layer is empty (no dir_sig, no seen_at).
+		if _, err := c.db.Exec(`INSERT INTO employee_cache (id, name, addrs, status, last_seen)
+			VALUES ('victim', 'victim-node', '["10.0.0.9:7836"]', 'online', ?)`,
+			time.Now().Unix()); err != nil {
+			t.Fatal(err)
+		}
+		// An unsigned gossip row for the same id, with a fresher seen_at: it
+		// must not win, or any member could rewrite a peer's card and addrs
+		// in the directory.
+		card, _ := json.Marshal(ledger.CapabilitySummary{Device: "attacker", Addrs: []string{"10.6.6.6:7836"}})
+		raw, _ := mintDirRow(t, "victim", time.Now().Unix()+300, func(r *bus.DirRow) {
+			r.Card = card
+			r.Addrs = []string{"10.6.6.6:7836"}
+		})
+		raw = stripSig(t, raw, func(r *bus.DirRow) { r.Sig = "" })
+		if c.applyDirRow(ctx, raw, "p") {
+			t.Fatal("unsigned row displaced a live directory row")
+		}
+		if got := dirField(t, c, "victim", "name"); got != "victim-node" {
+			t.Fatalf("live row's card was rewritten: name = %q", got)
+		}
+		if got := dirField(t, c, "victim", "addrs"); got != `["10.0.0.9:7836"]` {
+			t.Fatalf("live row's addrs were rewritten: %q", got)
 		}
 	})
 

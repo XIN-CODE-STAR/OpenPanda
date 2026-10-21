@@ -4,7 +4,6 @@ package core
 
 import (
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,6 +35,11 @@ type selfMergeSpec struct {
 	Critical bool     `json:"critical"`
 	Paths    []string `json:"critical_paths,omitempty"`
 	Files    int      `json:"files"`
+	// Digest pins the manifest the reviewer saw. The boot-time rebase sweep
+	// rewrites a queued set in place, so the artifact on disk at approve
+	// time can differ from the one that was proposed — the digest is what
+	// makes that visible instead of silently merging unseen bytes.
+	Digest string `json:"digest"`
 }
 
 // SelfMergeSpec decodes a task row's merge envelope; ok=false on any row that
@@ -165,6 +169,7 @@ func (c *Core) ProposeSelfMerge(ctx context.Context, patchSetID string) (Task, e
 		Critical: set.Critical,
 		Paths:    set.CriticalPaths,
 		Files:    len(set.Manifest.Files),
+		Digest:   set.Manifest.Digest(),
 	}
 	specJSON, _ := json.Marshal(spec)
 	title := "self-merge: " + set.Manifest.Title
@@ -249,6 +254,14 @@ func (c *Core) resumeSelfMerge(ctx context.Context, cur Task) (Task, bus.TaskRes
 	if set.State != self.StatePending {
 		return fail(fmt.Errorf("patch set %s is %s", spec.PatchSet, set.State))
 	}
+	// The set on disk must still be the artifact the reviewer approved. A
+	// rebase (the boot-time sweep, or an operator) rewrites the patches and
+	// the manifest in place; approving the proposal then would merge bytes
+	// nobody looked at.
+	if spec.Digest != "" && set.Manifest.Digest() != spec.Digest {
+		return fail(fmt.Errorf("patch set %s changed since it was proposed (manifest digest %s, expected %s) — re-review it",
+			spec.PatchSet, shortSHA(set.Manifest.Digest()), shortSHA(spec.Digest)))
+	}
 	if !c.producerTrusted(set.Manifest.Producer) {
 		return fail(fmt.Errorf("patch set %s is signed by %s, which self_evolution.producers=%q does not admit",
 			spec.PatchSet, set.Manifest.Producer, c.producersMode()))
@@ -322,6 +335,9 @@ func (c *Core) resumeSelfMerge(ctx context.Context, cur Task) (Task, bus.TaskRes
 		return fail(fmt.Errorf("apply build: %w", err))
 	}
 	swapped = true
+	// The stamp this build carries is now spent: remember it so the next
+	// patch set never reuses it (a purge must not reset the counter).
+	c.selfMgr.NoteVersionUsed(targetVersion)
 	res := bus.TaskResultPayload{
 		OK: true, TaskID: cur.TaskID, State: StateDone,
 		Stdout: fmt.Sprintf("merged %s → %s; release gate green (%d legs), binary swapped",
@@ -348,24 +364,18 @@ func (c *Core) resumeSelfMerge(ctx context.Context, cur Task) (Task, bus.TaskRes
 // producersMode is the configured admission policy, with the empty value
 // meaning "self" — the config default documented in config.example.yaml.
 func (c *Core) producersMode() string {
-	if c.selfProducers == "" {
-		return "self"
-	}
-	return c.selfProducers
+	return self.ProducerMode(c.selfProducers)
 }
 
 // producerTrusted reports whether a set's signer may enter this node's merge
 // queue. The manifest signature already proved the set was signed by the key
 // it names; this decides whether that key is one this node accepts.
 func (c *Core) producerTrusted(producer string) bool {
-	if c.producersMode() == "mesh" {
-		return true
-	}
 	pub, _, ok := c.nodeKeyPair()
-	if !ok {
+	if !ok && c.producersMode() != self.ProducersMesh {
 		return false
 	}
-	return producer == "k:"+hex.EncodeToString(pub)
+	return self.ProducerAdmitted(c.producersMode(), producer, pub)
 }
 
 // idleExcept reports whether no task other than taskID is running, dispatched,

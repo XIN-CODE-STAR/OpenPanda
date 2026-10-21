@@ -402,3 +402,140 @@ func TestNextVersion(t *testing.T) {
 		t.Fatalf("merged sets must bump the counter: %q", v)
 	}
 }
+
+// TestVersionCounterSurvivesPurge pins the counter's high-water mark: a purge
+// empties the archive, and a counter derived from the archive alone would
+// restart at 1 — handing out a stamp older than the binary already installed.
+func TestVersionCounterSurvivesPurge(t *testing.T) {
+	ctx := context.Background()
+	m, repo := testManager(t)
+	set := mintChange(t, m, repo, "p.txt", "p\n", "p")
+	if err := m.Archive(set.Manifest.ID, StateMerged); err != nil {
+		t.Fatal(err)
+	}
+	m.NoteVersionUsed("0.0.12-preview+self.2")
+	if err := m.Reset(ctx, true); err != nil {
+		t.Fatalf("reset --purge: %v", err)
+	}
+	if v := m.NextVersion("0.0.12-preview"); v != "0.0.12-preview+self.3" {
+		t.Fatalf("counter regressed after a purge: %q", v)
+	}
+}
+
+// TestTerminalSetStaysTerminal pins the lifecycle rule: a rejected set is the
+// human's verdict. A rebase must not rewrite it, and lifting the conflicted
+// marker must never lift a rejected one.
+func TestTerminalSetStaysTerminal(t *testing.T) {
+	ctx := context.Background()
+	m, repo := testManager(t)
+	set := mintChange(t, m, repo, "t.txt", "t\n", "terminal")
+	if err := m.MarkRejected(set.Manifest.ID); err != nil {
+		t.Fatalf("mark rejected: %v", err)
+	}
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	head, err := GitHead(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RebaseOnto(ctx, set.Manifest.ID, head, pub, priv); err == nil {
+		t.Fatal("a rejected set must not be rebased")
+	}
+	// ClearConflicted lifts a conflicted marker — and only that one. A
+	// rejected marker is the human's verdict and must survive it.
+	if err := m.ClearConflicted(set.Manifest.ID); err != nil {
+		t.Fatalf("clear conflicted: %v", err)
+	}
+	got, err := m.Get(set.Manifest.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != StateRejected {
+		t.Fatalf("state = %v, want rejected (the rejected marker must survive)", got.State)
+	}
+	// A conflicted marker IS lifted.
+	other := mintChange(t, m, repo, "t2.txt", "t2\n", "conflicted one")
+	if err := m.MarkConflicted(other.Manifest.ID); err != nil {
+		t.Fatalf("mark conflicted: %v", err)
+	}
+	if err := m.ClearConflicted(other.Manifest.ID); err != nil {
+		t.Fatalf("clear conflicted: %v", err)
+	}
+	got, err = m.Get(other.Manifest.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != StatePending {
+		t.Fatalf("state = %v, want pending", got.State)
+	}
+}
+
+// TestImportDropsStateMarker pins that an imported set starts its own life: a
+// "rejected" marker in the source directory must not make the imported copy
+// terminal.
+func TestImportDropsStateMarker(t *testing.T) {
+	m, repo := testManager(t)
+	set := mintChange(t, m, repo, "i.txt", "i\n", "import me")
+	if err := m.MarkRejected(set.Manifest.ID); err != nil {
+		t.Fatalf("mark rejected: %v", err)
+	}
+	src := filepath.Join(m.queueDir(), set.Manifest.ID)
+	if _, err := os.Stat(filepath.Join(src, ".state")); err != nil {
+		t.Fatalf("source marker missing: %v", err)
+	}
+	// Import into a FRESH manager: the copy in the source directory still
+	// carries the marker, and the imported set must not inherit it.
+	dst := New(t.TempDir(), repo, slog.New(slog.DiscardHandler))
+	copySrc := filepath.Join(t.TempDir(), set.Manifest.ID)
+	if err := copyDir(src, copySrc); err != nil {
+		t.Fatal(err)
+	}
+	imported, err := dst.Import(copySrc)
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	got, err := dst.Get(imported.Manifest.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != StatePending {
+		t.Fatalf("imported set state = %v, want pending", got.State)
+	}
+}
+
+// TestSetIDRejectsTraversal pins that a set id is a directory name and
+// nothing else: the id arrives from the CLI and from HTTP paths.
+func TestSetIDRejectsTraversal(t *testing.T) {
+	m, _ := testManager(t)
+	for _, id := range []string{"", "..", "../escape", "a/b", `a\b`, "/abs"} {
+		if _, err := m.Get(id); err == nil {
+			t.Fatalf("Get(%q) must fail", id)
+		}
+		if err := m.MarkState(id, StateConflicted); err == nil {
+			t.Fatalf("MarkState(%q) must fail", id)
+		}
+		if err := m.Archive(id, StateMerged); err == nil {
+			t.Fatalf("Archive(%q) must fail", id)
+		}
+	}
+}
+
+// TestProducerAdmission pins the admission rule the rebase sweep, the propose
+// path and the operator's rebase all share.
+func TestProducerAdmission(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(nil)
+	other, _, _ := ed25519.GenerateKey(nil)
+	mine := ProducerID(pub)
+	theirs := ProducerID(other)
+	if !ProducerAdmitted("", mine, pub) {
+		t.Fatal("the default mode (self) must admit the node's own sets")
+	}
+	if ProducerAdmitted("", theirs, pub) {
+		t.Fatal("the default mode (self) must not admit a foreign set")
+	}
+	if !ProducerAdmitted("mesh", theirs, pub) {
+		t.Fatal("mesh mode must admit any signer")
+	}
+	if ProducerAdmitted("", mine, nil) {
+		t.Fatal("without a node key nothing is admitted under self")
+	}
+}

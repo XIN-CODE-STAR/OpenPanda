@@ -291,8 +291,17 @@ func (c *Core) handleTransit(ctx context.Context, conn *bus.Conn, env bus.Envelo
 		return
 	}
 	defer release()
-	if !c.relayLim.allow(len(p.Inner)) {
-		c.logger.Debug("transit: relay bandwidth cap reached", "from", env.From, "bytes", len(p.Inner))
+	// Charge what actually leaves this node. The sealed blob travels as
+	// base64 inside the marshalled payload, so the egress is a third larger
+	// than the blob's byte length — budgeting the blob would let a relay
+	// spend a third more bandwidth than the operator allowed.
+	p.TTL--
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return
+	}
+	if !c.relayLim.allow(len(raw)) {
+		c.logger.Debug("transit: relay bandwidth cap reached", "from", env.From, "bytes", len(raw))
 		return
 	}
 	// No-echo: never hand a frame straight back to the conn it arrived on.
@@ -305,11 +314,6 @@ func (c *Core) handleTransit(ctx context.Context, conn *bus.Conn, env bus.Envelo
 	hop := c.transitNextHop(ctx, p.Dest, exclude)
 	if hop == "" {
 		c.logger.Debug("transit: no onward hop", "from", env.From, "dest", p.Dest)
-		return
-	}
-	p.TTL--
-	raw, err := json.Marshal(p)
-	if err != nil {
 		return
 	}
 	env.Payload = raw
@@ -450,7 +454,33 @@ func (c *Core) deliverTransit(ctx context.Context, env bus.Envelope, p bus.Trans
 		c.handlePairViaTransit(ctx, innerEnv, env.From)
 		return
 	}
+	// The inner frame must be addressed to THIS node. A member can seal a
+	// frame for somebody else and route it here; executing it would apply
+	// this node's admission policy to a task meant for another node — and
+	// its result would come back here instead of there.
+	if !c.transitAddressedToUs(ctx, innerEnv.To) {
+		c.logger.Warn("transit: inner frame is not addressed to this node",
+			"to", innerEnv.To, "type", innerEnv.Type, "inner-from", innerEnv.From)
+		return
+	}
 	c.dispatch(ctx, nil, innerEnv)
+}
+
+// transitAddressedToUs reports whether an inner envelope's addressee names
+// this node. An empty addressee is a broadcast; a stable id must be this
+// node's own key; an instance id must be this node's runtime identity (a
+// restarted node's session sibling included).
+func (c *Core) transitAddressedToUs(ctx context.Context, to string) bool {
+	if to == "" {
+		return true
+	}
+	if to == c.nodeID {
+		return true
+	}
+	if strings.HasPrefix(to, stableIDPrefix) {
+		return c.isSelfStable(to)
+	}
+	return scheduler.SameRuntimeIdentity(c.instanceForStable(ctx, to), c.nodeID)
 }
 
 // transitFirstContact lists the frames an unpinned peer may still send over

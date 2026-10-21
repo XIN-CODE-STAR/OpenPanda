@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -124,6 +125,13 @@ func (m Manifest) Validate() error {
 	if m.Base == "" {
 		return fmt.Errorf("manifest base is empty")
 	}
+	// The base must be a pinned commit, never a ref. A symbolic base ("main",
+	// "HEAD") resolves at apply time, so the tree the set was reviewed
+	// against and the tree the patch lands on can differ — the merge would
+	// apply bytes nobody reviewed.
+	if !pinnedBaseRe.MatchString(m.Base) {
+		return fmt.Errorf("manifest base %q is not a pinned commit sha", m.Base)
+	}
 	if len(m.Files) == 0 {
 		return fmt.Errorf("manifest carries no patch files")
 	}
@@ -139,6 +147,19 @@ func (m Manifest) Validate() error {
 		return fmt.Errorf("manifest has %d digests for %d patch files", len(m.Digests), len(m.Files))
 	}
 	return nil
+}
+
+// pinnedBaseRe matches the only base form a patch set may carry: a full
+// commit sha.
+var pinnedBaseRe = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
+
+// Digest identifies the exact set a reviewer approved: the sha256 over the
+// canonical manifest (the signature payload). A rebase rewrites the manifest,
+// so the digest moves with it — a proposal can therefore detect that the
+// artifact on disk is no longer the one that was reviewed.
+func (m Manifest) Digest() string {
+	sum := sha256.Sum256(m.canonicalBytes())
+	return hex.EncodeToString(sum[:])
 }
 
 // patchDigests hashes every patch file in dir so the manifest can bind the

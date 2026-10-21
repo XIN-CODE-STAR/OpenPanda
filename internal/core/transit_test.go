@@ -402,6 +402,56 @@ func TestTransitInnerAttestationGate(t *testing.T) {
 	}
 }
 
+// TestTransitDropsFrameAddressedElsewhere pins the addressee check: a frame
+// that names somebody else must not be executed here. Without it a member
+// could route another node's delegate to us and have it settled under our
+// admission policy, with the result coming back to us instead.
+func TestTransitDropsFrameAddressedElsewhere(t *testing.T) {
+	ctx := context.Background()
+	b := newCoreErr(t)
+	pub, priv, err := bus.GenerateNodeKey()
+	if err != nil {
+		t.Fatalf("generate signer: %v", err)
+	}
+	env, err := bus.NewEnvelope(bus.MsgHeartbeat, "ghost", "hb-elsewhere",
+		bus.HeartbeatPayload{Status: "online", Card: json.RawMessage(`{"device":"ghost"}`)})
+	if err != nil {
+		t.Fatalf("envelope: %v", err)
+	}
+	env.To = "somebody-else"
+	raw, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal env: %v", err)
+	}
+	inner := transitInner{Env: raw, Pub: hex.EncodeToString(pub), Sig: bus.SignTransitInner(priv, raw)}
+	innerJSON, err := json.Marshal(inner)
+	if err != nil {
+		t.Fatalf("marshal inner: %v", err)
+	}
+	_, xpub, ok := b.nodeXKey()
+	if !ok {
+		t.Fatal("destination has no x key")
+	}
+	blob, err := bus.TransitSealX25519(xpub, innerJSON)
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	b.deliverTransit(ctx, bus.Envelope{
+		V: 1, Type: bus.MsgTransit, MsgID: "outer-elsewhere", From: "relay",
+	}, bus.TransitPayload{
+		Dest: b.nodeID, TTL: bus.TransitMaxTTL,
+		Seal: bus.SealX25519, Inner: blob,
+	})
+
+	var n int
+	if err := b.db.QueryRow(`SELECT COUNT(1) FROM employee_cache WHERE id='ghost'`).Scan(&n); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if n != 0 {
+		t.Fatal("a frame addressed to another node was executed here")
+	}
+}
+
 // TestTransitFromOKBindsClaimedID covers the identity binding directly:
 // stable keys must match verbatim, instance/session ids must resolve to a row
 // with the signing key, and unknown or unpinned rows fail closed.

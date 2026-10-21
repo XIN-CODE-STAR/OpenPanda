@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/Xustalis/OpenPanda/internal/updater"
@@ -34,7 +36,11 @@ func (m *Manager) StageTree(ctx context.Context, wt, dst, version string) error 
 		return err
 	}
 	out := filepath.Join(binDir, "panda")
-	if strings.HasSuffix(os.Args[0], ".exe") {
+	// The staged name must match what the updater looks for, and that is
+	// decided by the OS, not by argv[0]: a daemon started through a wrapper
+	// (or a symlink without the suffix) would otherwise stage "panda" on
+	// Windows and fail the swap with "no panda.exe binary".
+	if runtime.GOOS == "windows" {
 		out += ".exe"
 	}
 	ldflags := "-X github.com/Xustalis/OpenPanda/internal/version.Provenance=self"
@@ -69,6 +75,11 @@ func (m *Manager) StageTree(ctx context.Context, wt, dst, version string) error 
 // release version plus a +self.<n> build counter, where n counts this node's
 // already-merged sets + 1. CompareVersion ignores +meta, so the stamp sorts
 // on its base release and an official update still surfaces as available.
+//
+// The counter never moves backwards: the merged-set count alone would restart
+// at 1 after `panda self reset --purge` and hand out a stamp older than the
+// binary already installed, so the highest counter ever issued is remembered
+// on disk.
 func (m *Manager) NextVersion(base string) string {
 	n := 1
 	if sets, err := m.Queue(); err == nil {
@@ -78,13 +89,67 @@ func (m *Manager) NextVersion(base string) string {
 			}
 		}
 	}
+	if c := m.loadCounter(); c >= n {
+		n = c + 1
+	}
 	// A base that already carries +self.N keeps counting from it.
 	if i := strings.Index(base, "+self."); i >= 0 {
-		var seen int
-		if _, err := fmt.Sscanf(base[i:], "+self.%d", &seen); err == nil && seen >= n {
+		if seen := selfCounter(base[i:]); seen >= n {
 			n = seen + 1
 		}
 		base = base[:i]
 	}
 	return fmt.Sprintf("%s+self.%d", base, n)
+}
+
+// NoteVersionUsed remembers the counter a built binary was stamped with, so
+// the next stamp is strictly newer than the last one handed out.
+func (m *Manager) NoteVersionUsed(version string) {
+	n := selfCounter(version)
+	if n <= 0 {
+		return
+	}
+	if cur := m.loadCounter(); n > cur {
+		m.saveCounter(n)
+	}
+}
+
+// selfCounter reads the +self.N suffix off a version stamp.
+func selfCounter(v string) int {
+	i := strings.Index(v, "+self.")
+	if i < 0 {
+		return 0
+	}
+	var n int
+	if _, err := fmt.Sscanf(v[i:], "+self.%d", &n); err != nil {
+		return 0
+	}
+	return n
+}
+
+// counterPath is where the high-water counter lives. It sits beside the
+// queue so `panda self reset --purge` (which clears the queue and the
+// archive) keeps it — the point of the counter is to outlive exactly that.
+func (m *Manager) counterPath() string { return filepath.Join(m.root, "version-counter") }
+
+func (m *Manager) loadCounter() int {
+	b, err := os.ReadFile(m.counterPath())
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+func (m *Manager) saveCounter(n int) {
+	if n <= 0 {
+		return
+	}
+	if err := os.MkdirAll(m.root, 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(m.counterPath(), []byte(strconv.Itoa(n)), 0o644)
 }

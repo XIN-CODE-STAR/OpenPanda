@@ -278,6 +278,18 @@ func runSelfRebase(args []string) {
 	if !ok {
 		fatal("node key", fmt.Errorf("no Ed25519 identity yet — run the daemon once"))
 	}
+	// A rebase re-signs the set with THIS node's key. Under producers=self
+	// that would turn a foreign set — which propose refuses — into a locally
+	// signed, mergeable one, so the operator path carries the same admission
+	// rule as the boot-time sweep.
+	set, err := mgr.Get(rest[0])
+	if err != nil {
+		fatal("rebase", err)
+	}
+	if !self.ProducerAdmitted(cfg.SelfEvolution.Producers, set.Manifest.Producer, pub) {
+		fatal("rebase", fmt.Errorf("patch set %s is signed by %s, which self_evolution.producers=%q does not admit on this node",
+			set.Manifest.ID, set.Manifest.Producer, self.ProducerMode(cfg.SelfEvolution.Producers)))
+	}
 	if err := mgr.RebaseOnto(context.Background(), rest[0], rest[1], pub, priv); err != nil {
 		fatal("rebase", err)
 	}
@@ -302,7 +314,7 @@ func runSelfRollback(args []string) {
 		fatal("open store", err)
 	}
 	defer db.Close()
-	if err := updater.RollbackToRelease(); err != nil {
+	if err := updater.RollbackToRelease(schemaFloor(db)); err != nil {
 		fatal("rollback", err)
 	}
 	// Audit the rollback on the signed chain — reverting the running binary
@@ -332,10 +344,16 @@ func runSelfReset(args []string) {
 	// after the feature was disabled — the state may predate that.
 	mgr := selfManager(cfg, false)
 	if versionpkg.ProvenanceClass() == versionpkg.ProvenanceSelf {
-		if err := updater.RollbackToRelease(); err != nil {
+		db, _, err := panelStore(cfg)
+		if err != nil {
 			fmt.Println(pal().Warn(fmt.Sprintf(i18n.T(loc, "cli.self.reset.restoreFailed"), err)))
 		} else {
-			fmt.Println(fmt.Sprintf(i18n.T(loc, "cli.self.reset.restored"), updater.ReleaseFallbackPath()))
+			defer db.Close()
+			if err := updater.RollbackToRelease(schemaFloor(db)); err != nil {
+				fmt.Println(pal().Warn(fmt.Sprintf(i18n.T(loc, "cli.self.reset.restoreFailed"), err)))
+			} else {
+				fmt.Println(fmt.Sprintf(i18n.T(loc, "cli.self.reset.restored"), updater.ReleaseFallbackPath()))
+			}
 		}
 	}
 	if err := mgr.Reset(context.Background(), *purge); err != nil {
@@ -346,6 +364,20 @@ func runSelfReset(args []string) {
 		suffix = i18n.T(loc, "cli.self.reset.purged")
 	}
 	fmt.Println(fmt.Sprintf(i18n.T(loc, "cli.self.reset.cleared"), suffix))
+}
+
+// schemaFloor reports the live data directory's migration level. The rollback
+// guard needs it: the fallback binary is probed in isolation and cannot see
+// the store it would be rolled back onto.
+func schemaFloor(db *sql.DB) int {
+	if db == nil {
+		return 0
+	}
+	var v int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+		return 0
+	}
+	return v
 }
 
 // selfCore builds the minimal Core a CLI verb needs — propose parks a row on
