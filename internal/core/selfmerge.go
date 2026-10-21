@@ -429,6 +429,14 @@ func (c *Core) SelfRebaseSweep(ctx context.Context) {
 		if self.SameRef(ctx, repo, s.Manifest.Base, head) {
 			continue
 		}
+		// Re-signing a foreign set with this node's key would defeat the
+		// producers=self admission rule: a set that could never be proposed
+		// would become "this node's" after one boot sweep. Skip it; mesh
+		// mode admits it anyway and rebases.
+		if !c.producerTrusted(s.Manifest.Producer) {
+			c.logger.Debug("self: rebase sweep skips an unadmitted producer", "set", s.Manifest.ID)
+			continue
+		}
 		pub, priv, ok := c.nodeKeyPair()
 		if !ok {
 			c.logger.Warn("self: rebase sweep needs the node key", "set", s.Manifest.ID)
