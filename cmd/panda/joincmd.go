@@ -120,10 +120,17 @@ func joinWithSpec(w io.Writer, configPath string, spec *core.JoinSpec, trustLeve
 // is reported and skipped — the list exists precisely so one dead address is
 // not the end of the join.
 func dialJoinBootstraps(w io.Writer, loc i18n.Locale, spec *core.JoinSpec, selfID string, cfg *config.Config, pub []byte) (*core.PairClient, string) {
+	target := ""
+	if spec.Introducer != "" {
+		// With k= the contact point is asked to RELAY the handshake to the
+		// introducer instead of answering it — the cross-NAT path (P4b). A
+		// directly reachable node answers either way.
+		target = "k:" + spec.Introducer
+	}
 	for _, b := range spec.Bootstraps {
 		addr := normalizeDialable(b)
 		fmt.Fprintln(w, i18n.Tf(loc, "cli.pair.start", "name", b, "addr", addr))
-		pc, err := core.DialPair(context.Background(), addr, selfID, cfg.Node.Name, cfg.Network.ListenAddr, pub)
+		pc, err := core.DialPairTo(context.Background(), addr, target, selfID, cfg.Node.Name, cfg.Network.ListenAddr, pub)
 		if err != nil {
 			var rj *core.PairRejected
 			if errors.As(err, &rj) {

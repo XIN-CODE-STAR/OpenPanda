@@ -254,7 +254,6 @@ func TestTransitTTLExhaustion(t *testing.T) {
 func TestTransitEligibility(t *testing.T) {
 	for _, typ := range []string{
 		bus.MsgHello, bus.MsgHelloReject,
-		bus.MsgPairHello, bus.MsgPairReady, bus.MsgPairSecret, bus.MsgPairReject,
 		bus.MsgArtifactFetch, bus.MsgArtifactChunk,
 		bus.MsgArtifactPush, bus.MsgArtifactPushStatus, bus.MsgArtifactPushDone,
 	} {
@@ -264,6 +263,21 @@ func TestTransitEligibility(t *testing.T) {
 		if err := newCoreErr(t).sendViaTransit(context.Background(), "peer-x",
 			bus.Envelope{V: 2, Type: typ, MsgID: "m", From: "n"}); err == nil {
 			t.Fatalf("sendViaTransit accepted ineligible type %q", typ)
+		}
+	}
+	// Pair frames are the one type that is DELIVERABLE over transit (P4b:
+	// the contact-point proxy seals them as the pairing exemption) but not
+	// SENDABLE through the generic fallback, which has no return binding for
+	// a joiner and cannot seal to an identity it has never met.
+	for _, typ := range []string{
+		bus.MsgPairHello, bus.MsgPairReady, bus.MsgPairSecret, bus.MsgPairReject,
+	} {
+		if !transitEligible(typ) {
+			t.Fatalf("pair frame %q must be deliverable over transit", typ)
+		}
+		if err := newCoreErr(t).sendViaTransit(context.Background(), "peer-x",
+			bus.Envelope{V: 2, Type: typ, MsgID: "m", From: "n"}); err == nil {
+			t.Fatalf("sendViaTransit must refuse pair frame %q", typ)
 		}
 	}
 }

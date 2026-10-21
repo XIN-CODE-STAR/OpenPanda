@@ -55,6 +55,13 @@ const (
 const (
 	SealX25519 = "x25519"
 	SealMesh   = "mesh"
+	// SealNone is the pairing exemption (cross-network mesh P4b): a joiner
+	// holds no shared secret yet and does not know the introducer's X25519
+	// key, so a transit-wrapped pair_hello cannot be sealed to anything. It
+	// carries no secret — the DH box and the SAS do the protecting — and
+	// every receiver accepts it ONLY for pair_* inner types. Anything else
+	// sealed "none" is refused.
+	SealNone = "none"
 )
 
 // transitNonceLen is the AES-GCM standard nonce size, same as sessenc.

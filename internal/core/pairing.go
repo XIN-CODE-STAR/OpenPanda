@@ -88,7 +88,21 @@ type pairSession struct {
 	initAddr  string
 	initName  string
 	conn      *bus.Conn
+	// replyHop/replyDest route the answers for a session created from a
+	// transit-delivered pair_hello (P4b): the joiner is not in the directory,
+	// so the only way back is the hop the question came from. Both empty on
+	// the direct path, where conn carries the replies.
+	replyHop  *bus.Conn
+	replyDest string
 	expires   time.Time
+}
+
+// closeConn drops the session's direct conn, if it has one. A transit session
+// owns no conn — the contact point does — so there is nothing to close.
+func (s *pairSession) closeConn() {
+	if s.conn != nil {
+		_ = s.conn.Close()
+	}
 }
 
 // PairJoinHook is called by the responder when a pairing completes: it is
@@ -130,12 +144,37 @@ func isPairMessage(typ string) bool {
 // unauthenticated and stays so — pairing never binds a PeerID; the sealed
 // secret is the only thing it is allowed to carry away.
 func (c *Core) handlePairHello(ctx context.Context, conn *bus.Conn, env bus.Envelope) {
+	c.pairHello(ctx, conn, nil, env)
+}
+
+// pairHelloVia is the transit-delivered entry point (P4b): the frame arrived
+// inside a transit envelope relayed by hop, so the answers go back through
+// that hop instead of a conn.
+func (c *Core) pairHelloVia(ctx context.Context, hop *bus.Conn, env bus.Envelope) {
+	c.pairHello(ctx, nil, hop, env)
+}
+
+// pairHello is the shared body: conn is the direct unauthenticated conn (LAN
+// ceremony) and hop the relayed route (cross-NAT), exactly one of which is
+// set.
+func (c *Core) pairHello(ctx context.Context, conn *bus.Conn, hop *bus.Conn, env bus.Envelope) {
 	var p bus.PairHelloPayload
 	if err := env.PayloadInto(&p); err != nil || p.Session == "" {
 		c.logger.Warn("pair_hello: malformed", "err", err)
 		return
 	}
-	if conn.PeerID() != "" {
+	// A Target asks this node to act as a contact point rather than as the
+	// responder — the joiner behind NAT naming the introducer it cannot dial.
+	// Only a DIRECT conn can be asking: a transit-delivered hello has already
+	// been through a proxy, and honoring its Target would loop it onward.
+	if p.Target != "" && conn != nil {
+		c.proxyPairHello(ctx, conn, env, p)
+		return
+	}
+	if conn == nil && hop == nil {
+		return
+	}
+	if conn != nil && conn.PeerID() != "" {
 		// A peer that already hellos is already inside — pairing would only
 		// re-send the secret it demonstrably holds.
 		c.sendPairReject(conn, p.Session, "already_joined")
@@ -144,7 +183,10 @@ func (c *Core) handlePairHello(ctx context.Context, conn *bus.Conn, env bus.Enve
 	// Initiator's view of its own listen address; when it advertises a
 	// wildcard/loopback host the responder substitutes the source IP of
 	// this conn — the same "dial me where you saw me" rule beacons use.
-	srcIP, _, _ := strings.Cut(conn.RemoteAddr(), ":")
+	srcIP := ""
+	if conn != nil {
+		srcIP, _, _ = strings.Cut(conn.RemoteAddr(), ":")
+	}
 
 	c.pairing.mu.Lock()
 	if c.pairing.sessions == nil {
@@ -168,7 +210,7 @@ func (c *Core) handlePairHello(ctx context.Context, conn *bus.Conn, env bus.Enve
 		// pair_ready from the existing one and let it continue.
 		sess := c.pairing.sessions[p.Session]
 		c.pairing.mu.Unlock()
-		c.sendPairReady(conn, sess)
+		c.sendPairReady(ctx, sess)
 		return
 	}
 
@@ -218,7 +260,13 @@ func (c *Core) handlePairHello(ctx context.Context, conn *bus.Conn, env bus.Enve
 		initAddr:  resolvePairAddr(p.Addr, srcIP),
 		initName:  p.Name,
 		conn:      conn,
+		replyHop:  hop,
 		expires:   time.Now().Add(pairSessionTTL),
+	}
+	if hop != nil && p.Pub != "" {
+		// The joiner's own identity is the return address the contact point
+		// bound its conn to; it is a destination, never a trust claim.
+		sess.replyDest = stableIDPrefix + strings.ToLower(p.Pub)
 	}
 	sas := pairSAS(initX, respX, initPub, respPub(c), initNonce, respNonce, dh)
 	sess.initAddr = normalizeDialableAddr(sess.initAddr)
@@ -232,8 +280,10 @@ func (c *Core) handlePairHello(ctx context.Context, conn *bus.Conn, env bus.Enve
 	// The conn arrived under the short unauthenticated-hello deadline; the
 	// confirm window is minutes, so hand it the keepalive deadline — the
 	// ping/pong machinery refreshes it from here on.
-	_ = conn.ResetReadDeadline()
-	c.sendPairReady(conn, sess)
+	if conn != nil {
+		_ = conn.ResetReadDeadline()
+	}
+	c.sendPairReady(ctx, sess)
 	c.goGuarded("pair confirm "+sess.id, func() { c.waitPairConfirm(ctx, sess, dh) })
 }
 
@@ -249,7 +299,7 @@ func (c *Core) handlePairCancel(ctx context.Context, conn *bus.Conn, env bus.Env
 	sess := c.pairing.sessions[p.Session]
 	delete(c.pairing.sessions, p.Session)
 	c.pairing.mu.Unlock()
-	if sess != nil && sess.conn == conn {
+	if sess != nil && (sess.conn == conn || (sess.conn == nil && conn == nil)) {
 		_ = c.pairSessionSetState(ctx, sess.id, PairStateExpired)
 	}
 }
@@ -271,8 +321,8 @@ func (c *Core) waitPairConfirm(ctx context.Context, sess *pairSession, dh []byte
 	for {
 		if time.Now().After(sess.expires) {
 			_ = c.pairSessionSetState(ctx, sess.id, PairStateExpired)
-			c.sendPairReject(sess.conn, sess.id, "expired")
-			_ = sess.conn.Close()
+			c.sendPairRejectSess(ctx, sess, "expired")
+			sess.closeConn()
 			return
 		}
 		state, err := c.pairSessionState(ctx, sess.id)
@@ -281,23 +331,23 @@ func (c *Core) waitPairConfirm(ctx context.Context, sess *pairSession, dh []byte
 			c.pairing.mu.Lock()
 			delete(c.pairing.sessions, sess.id)
 			c.pairing.mu.Unlock()
-			_ = sess.conn.Close()
+			sess.closeConn()
 			return
 		}
 		switch state {
 		case PairStateConfirmed:
 			if err := c.pairAccept(ctx, sess, dh); err != nil {
 				c.logger.Warn("pair: accept failed", "session", sess.id, "err", err)
-				c.sendPairReject(sess.conn, sess.id, "accept_failed")
+				c.sendPairRejectSess(ctx, sess, "accept_failed")
 			} else {
 				_ = c.pairSessionSetState(ctx, sess.id, PairStateDone)
 				c.logger.Info("pair: joined", "peer", sess.initName, "addr", sess.initAddr)
 			}
-			_ = sess.conn.Close()
+			sess.closeConn()
 			return
 		case PairStateRejected:
-			c.sendPairReject(sess.conn, sess.id, "rejected")
-			_ = sess.conn.Close()
+			c.sendPairRejectSess(ctx, sess, "rejected")
+			sess.closeConn()
 			return
 		}
 		select {
@@ -335,7 +385,7 @@ func (c *Core) pairAccept(ctx context.Context, sess *pairSession, dh []byte) err
 	if err != nil {
 		return err
 	}
-	if err := sess.conn.Send(env); err != nil {
+	if err := c.pairSend(ctx, sess, env); err != nil {
 		return fmt.Errorf("send pair_secret: %w", err)
 	}
 	c.pairing.mu.Lock()
@@ -351,7 +401,7 @@ func (c *Core) pairAccept(ctx context.Context, sess *pairSession, dh []byte) err
 
 // sendPairReady emits pair_ready for an existing session (initial answer
 // or idempotent replay on a duplicate pair_hello).
-func (c *Core) sendPairReady(conn *bus.Conn, sess *pairSession) {
+func (c *Core) sendPairReady(ctx context.Context, sess *pairSession) {
 	msgID, err := newUUID()
 	if err != nil {
 		return
@@ -363,7 +413,9 @@ func (c *Core) sendPairReady(conn *bus.Conn, sess *pairSession) {
 		Nonce:   hex.EncodeToString(sess.respNonce),
 	})
 	if err == nil {
-		_ = conn.Send(env)
+		if err := c.pairSend(ctx, sess, env); err != nil {
+			c.logger.Debug("pair: send ready", "session", sess.id, "err", err)
+		}
 	}
 }
 
@@ -376,8 +428,26 @@ func (c *Core) sendPairReject(conn *bus.Conn, session, reason string) {
 	env, err := bus.NewEnvelope(bus.MsgPairReject, c.nodeID, msgID, bus.PairRejectPayload{
 		Session: session, Reason: reason,
 	})
-	if err == nil {
+	if err != nil {
+		return
+	}
+	if conn != nil {
 		_ = conn.Send(env)
+	}
+}
+
+// sendPairRejectSess ends a session on whichever channel it was created on —
+// the direct conn or the transit route back through the contact point.
+func (c *Core) sendPairRejectSess(ctx context.Context, sess *pairSession, reason string) {
+	msgID, err := newUUID()
+	if err != nil {
+		return
+	}
+	env, err := bus.NewEnvelope(bus.MsgPairReject, c.nodeID, msgID, bus.PairRejectPayload{
+		Session: sess.id, Reason: reason,
+	})
+	if err == nil {
+		_ = c.pairSend(ctx, sess, env)
 	}
 }
 
@@ -567,6 +637,15 @@ type PairClient struct {
 // selfID/name/listenAddr are the display fields the responder's operator
 // sees next to the confirm prompt.
 func DialPair(ctx context.Context, dialAddr, selfID, name, listenAddr string, pub ed25519.PublicKey) (*PairClient, error) {
+	return DialPairTo(ctx, dialAddr, "", selfID, name, listenAddr, pub)
+}
+
+// DialPairTo is DialPair with a forwarding target (P4b): when target is
+// non-empty the contact point is asked to relay the handshake to that stable
+// identity instead of answering it, and the answers come back the same way.
+// The contact point never sees a secret — pair_secret is already boxed to the
+// DH the two pairing ends derived.
+func DialPairTo(ctx context.Context, dialAddr, target, selfID, name, listenAddr string, pub ed25519.PublicKey) (*PairClient, error) {
 	dialAddr = normalizeDialableAddr(dialAddr)
 	initKey, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
@@ -595,6 +674,7 @@ func DialPair(ctx context.Context, dialAddr, selfID, name, listenAddr string, pu
 		Addr:    listenAddr,
 		Name:    name,
 		NodeID:  selfID,
+		Target:  target,
 	})
 	if err != nil {
 		conn.Close()

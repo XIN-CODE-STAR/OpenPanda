@@ -492,8 +492,37 @@ SAS → 引入者人工确认 → `pair_secret` 带密封密钥回程 → 落地
 （`k`/`c`），不改配对协议本身。`panda nodes invite --uri` 打印的本机 URI
 就是 `panda join` 解析的那一行（往返有单测）。
 
-跨 NAT 的接触点（`b` 与 joiner 双向不可达）需要 pair 帧走 transit 中继，
-属 P4b；在它落地前，`b` 必须是 joiner 能直拨的地址。
+### pair 帧经 transit：接触点代理（P4b）
+
+joiner 与引入者双向不可达时，`b` 里的任意在线成员充当**接触点**转发配对
+握手。两端仍然只说原来的配对协议——没有新方言，也没有改变客户端：
+
+```
+joiner ──明文 pair_hello{target=k:<I>}──▶ 接触点 C
+C ──transit{seal:"none", dest=k:<I>, inner=pair_hello}──▶ 引入者 I
+I ──transit{seal:"none", dest=k:<J>}──▶ C
+C ──明文 pair_ready / pair_secret──▶ joiner
+```
+
+- **接触点回程绑定（att_clients）**：C 收到带 `target` 的 `pair_hello` 时，
+  按其中的 `pub` 记 `k:<joiner-pub> → 该未认证 conn`，TTL = 配对窗口
+  4 分钟、上限 16 条、conn 死亡即清。transit 的 `dest` 解析顺序变为
+  `instanceForStable → att_clients → 丢/回执`。绑定只存本地、不 gossip、
+  不授予任何成员权利；冒名者顶多让两端 SAS 不一致——那是配对本来就要
+  检测的东西。
+- **`target` 只被消费一次**：C 转发前必须清空它，否则引入者会把自己当成
+  第二个接触点继续转。
+- **`seal:"none"` 是唯一的未密封豁免**，且**只对 pair_\* 内层生效**：
+  joiner 此刻既无 shared_secret（mesh 密封不成立）、也不知引入者的
+  X25519 钥（x25519 密封不成立）。pair 帧从设计第一天起就按"敌对信道"
+  处理——机密性靠 DH 盒，认证靠 SAS；中继能读、能改、能丢，任何一种
+  都会表现为两个人屏幕上的码不一致或盒子打不开。任何非 pair 内层若以
+  `seal:"none"` 到达，接收端直接丢弃并告警。
+- 引入者的会话不再绑定 conn：`pairSession` 记录 `replyHop`（来路中继）
+  与 `replyDest`（joiner 的稳定身份），`pair_ready`/`pair_secret`/
+  `pair_reject` 全部沿同一条回路发出，并以 `transit_degraded` 记账。
+- x25519 升级（joiner 在 `pair_hello` 里带 `x_pub`，引入者直接密封回程）
+  留给后续阶段：它需要客户端能解 transit 外壳，本阶段刻意不引入。
 
 ## LAN 发现 beacon 与配对
 

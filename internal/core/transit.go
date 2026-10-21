@@ -73,9 +73,15 @@ var errTransitDisabled = errors.New("transit: disabled by network.transit")
 // allowed: TTL bounds each layer independently.
 func transitEligible(typ string) bool {
 	switch typ {
-	case bus.MsgHello, bus.MsgHelloReject,
-		bus.MsgPairHello, bus.MsgPairReady, bus.MsgPairSecret, bus.MsgPairReject:
+	case bus.MsgHello, bus.MsgHelloReject:
 		return false
+	// Pair frames DO ride transit (P4b): a joiner behind a symmetric NAT can
+	// only reach the introducer through a contact point, and the pairing
+	// ceremony was designed for a hostile channel from the start — the SAS
+	// is the authentication, the DH box carries the secret. They are sealed
+	// "none" (a joiner holds no shared secret and does not know the
+	// introducer's X25519 key) and that exemption is enforced type-by-type
+	// in deliverTransit and deliverToAttached.
 	// The artifact plane is a request/response pull whose replies are bulk
 	// chunks. A transit frame is capped at transitMaxInner, so a 1 MiB chunk
 	// can never ride back; letting the small fetch request through would
@@ -99,6 +105,13 @@ func (c *Core) sendViaTransit(ctx context.Context, id string, env bus.Envelope) 
 	}
 	if !c.netPolicy().transit {
 		return errTransitDisabled
+	}
+	if isPairMessage(env.Type) {
+		// Pair frames reach transit only through the contact-point proxy
+		// (pairtransit.go), which owns the return binding. The generic
+		// fallback would seal them to an identity the joiner does not hold
+		// and has no way to route the answer back.
+		return errTransitUnsupported
 	}
 	target := env.To
 	if target == "" {
@@ -221,7 +234,7 @@ func (c *Core) handleTransit(ctx context.Context, conn *bus.Conn, env bus.Envelo
 		c.logger.Debug("transit: bad shell", "from", env.From, "dest", p.Dest, "inner", len(p.Inner))
 		return
 	}
-	if p.Seal != bus.SealX25519 && p.Seal != bus.SealMesh {
+	if p.Seal != bus.SealX25519 && p.Seal != bus.SealMesh && p.Seal != bus.SealNone {
 		c.logger.Debug("transit: unknown seal level", "from", env.From, "seal", p.Seal)
 		return
 	}
@@ -233,9 +246,25 @@ func (c *Core) handleTransit(ctx context.Context, conn *bus.Conn, env bus.Envelo
 		c.logger.Debug("transit: ttl clamped", "from", env.From, "ttl", p.TTL)
 		p.TTL = clamped
 	}
+	// Ours by identity first: a stable key naming this node is decidable
+	// without the directory, and the directory may not know our own key yet
+	// (the self row carries one only once the key has been stamped).
+	if c.isSelfStable(p.Dest) {
+		c.deliverTransit(ctx, env, p)
+		return
+	}
 	destInst := c.instanceForStable(ctx, p.Dest)
 	if destInst != "" && scheduler.SameRuntimeIdentity(destInst, c.nodeID) {
 		c.deliverTransit(ctx, env, p)
+		return
+	}
+	// Return path for pair-over-transit (P4b): the destination is a joiner
+	// bound to this contact point on an unauthenticated conn. The frame is
+	// handed over still sealed — or, for the pairing exemption, unsealed and
+	// re-emitted as a plain pair frame, since the joiner speaks the ordinary
+	// ceremony on its own conn.
+	if ac := c.attClientFor(p.Dest); ac != nil {
+		c.deliverToAttached(ctx, env, p, ac)
 		return
 	}
 	// Not ours: relay. TTL is the loop bound under msg-id dedup — a frame
@@ -355,6 +384,12 @@ func (c *Core) deliverTransit(ctx context.Context, env bus.Envelope, p bus.Trans
 		plain, err = bus.TransitOpenX25519(priv, p.Inner)
 	case bus.SealMesh:
 		plain, err = bus.TransitOpenMesh(c.sharedSecretValue(), p.Dest, p.Inner)
+	case bus.SealNone:
+		// The pairing exemption. Only the type check below makes this safe:
+		// an unsealed frame is accepted solely when its inner is a pair
+		// handshake, which carries no secret and is authenticated by the
+		// SAS rather than by the transport.
+		plain = p.Inner
 	}
 	if err != nil {
 		c.logger.Debug("transit: open failed (tamper or wrong dest)", "from", env.From, "err", err)
@@ -372,6 +407,13 @@ func (c *Core) deliverTransit(ctx context.Context, env bus.Envelope, p bus.Trans
 	}
 	if !transitEligible(innerEnv.Type) {
 		c.logger.Debug("transit: ineligible inner type", "type", innerEnv.Type, "from", env.From)
+		return
+	}
+	if p.Seal == bus.SealNone && !isPairMessage(innerEnv.Type) {
+		// SealNone is the pair handshake's exemption and nothing else's. A
+		// delegate or result riding unsealed would make every relay a
+		// legitimate reader, which the whole transit design forbids.
+		c.logger.Warn("transit: unsealed non-pair frame rejected", "type", innerEnv.Type, "from", env.From)
 		return
 	}
 	// Attestation gate: transit has no conn-bound From, so the signature is
@@ -396,6 +438,12 @@ func (c *Core) deliverTransit(ctx context.Context, env bus.Envelope, p bus.Trans
 			"inner-from", innerEnv.From, "signer", inner.Pub, "type", innerEnv.Type)
 		return
 	}
+	if isPairMessage(innerEnv.Type) {
+		// Pair frames keep the relay hop: the joiner is not in the directory,
+		// so the answer has to go back the way the question came.
+		c.handlePairViaTransit(ctx, innerEnv, env.From)
+		return
+	}
 	c.dispatch(ctx, nil, innerEnv)
 }
 
@@ -408,6 +456,11 @@ func (c *Core) deliverTransit(ctx context.Context, env bus.Envelope, p bus.Trans
 func transitFirstContact(typ string) bool {
 	switch typ {
 	case bus.MsgHeartbeat, bus.MsgPunchOffer, bus.MsgPunchReady:
+		return true
+	// A joiner is by definition unpinned: the whole point of the ceremony is
+	// that the two sides have never met. Pair frames therefore pass the
+	// first-contact gate and rely on the SAS for authentication.
+	case bus.MsgPairHello, bus.MsgPairReady, bus.MsgPairSecret, bus.MsgPairReject:
 		return true
 	}
 	return false
@@ -445,4 +498,18 @@ func (c *Core) transitFromOK(ctx context.Context, from, pubHex string) (bound, u
 		return false, true // no row: eligible only for first-contact frame types
 	}
 	return pinned != "" && pinned == pubHex, false
+}
+
+// isSelfStable reports whether key is this node's own stable identity. It is
+// the transit equivalent of scheduler.SameRuntimeIdentity for a key that has
+// never been through the directory.
+func (c *Core) isSelfStable(key string) bool {
+	if !strings.HasPrefix(key, stableIDPrefix) {
+		return false
+	}
+	pub, _, ok := c.nodeKeyPair()
+	if !ok {
+		return false
+	}
+	return strings.EqualFold(key[len(stableIDPrefix):], hex.EncodeToString(pub))
 }

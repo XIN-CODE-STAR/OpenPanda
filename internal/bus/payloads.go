@@ -1066,6 +1066,11 @@ type PairHelloPayload struct {
 	Addr    string `json:"addr"`    // initiator's advertised listen addr (host may be 0.0.0.0)
 	Name    string `json:"name"`    // configured node.name, display only
 	NodeID  string `json:"node_id"` // runtime node id, display only
+	// Target (P4b) asks the receiver to FORWARD this pair_hello to the named
+	// stable identity instead of answering it: the receiver is being used as
+	// a contact point by a joiner that cannot reach the introducer directly.
+	// Absent on every pre-feature frame and on the direct (LAN) path.
+	Target string `json:"target,omitempty"`
 }
 
 // PairReadyPayload answers pair_hello with the responder's ephemeral half.

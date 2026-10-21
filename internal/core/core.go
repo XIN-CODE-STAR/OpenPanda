@@ -236,6 +236,10 @@ type Core struct {
 	peerTrustHints map[string]string
 	reputationOn   atomic.Bool
 
+	// att holds the contact-point bindings for pair-over-transit (P4b):
+	// stable identity → unauthenticated joiner conn, in attclients.go.
+	att attState
+
 	// Cross-network policy (network.*): the rendezvous target K, the ladder
 	// and relay switches, and this node's own rendezvous role. Swapped whole
 	// under polMu so ApplyNetworkConfig is one assignment; the zero value
@@ -2051,7 +2055,10 @@ func (c *Core) handleInbound(ctx context.Context, conn *bus.Conn) {
 			// sealed DH exchange so the unauthenticated channel it rides
 			// cannot leak the secret, and hello_reject carries only a fixed
 			// reason code that is worth more to the rejected peer than the
-			// nothing it reveals to anyone else.
+			// nothing it reveals to anyone else. MsgTransit is rejected here
+			// too: pair-over-transit (P4b) forwards pair frames from an
+			// ALREADY-authenticated contact point, so a transit envelope on
+			// an unauthenticated conn has no legitimate sender.
 			c.logger.Warn("message before hello", "type", env.Type, "from", env.From)
 			return
 		}
