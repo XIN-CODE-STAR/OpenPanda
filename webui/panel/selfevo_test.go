@@ -19,12 +19,9 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/self"
 )
 
-// selfMergeTask makes a real self-merge review row: a throwaway git repo, a
-// signed patch set, and a Core wired to it. producers=mesh admits the test
-// key without needing the node's persisted identity.
-func selfMergeTask(t *testing.T) (*core.Core, *self.Manager, core.Task) {
+// testGitRepo makes a throwaway checkout with one commit.
+func testGitRepo(t *testing.T) string {
 	t.Helper()
-	ctx := context.Background()
 	repo := t.TempDir()
 	run := func(args ...string) {
 		t.Helper()
@@ -42,9 +39,13 @@ func selfMergeTask(t *testing.T) (*core.Core, *self.Manager, core.Task) {
 	}
 	run("add", "-A")
 	run("commit", "-qm", "base")
+	return repo
+}
 
-	logger := slog.New(slog.DiscardHandler)
-	mgr := self.New(t.TempDir(), repo, logger)
+// mintSelfSet mints a signed patch set into mgr's queue.
+func mintSelfSet(t *testing.T, mgr *self.Manager) self.Set {
+	t.Helper()
+	ctx := context.Background()
 	if err := mgr.EnsureWorktree(ctx); err != nil {
 		t.Fatalf("ensure worktree: %v", err)
 	}
@@ -63,6 +64,19 @@ func selfMergeTask(t *testing.T) (*core.Core, *self.Manager, core.Task) {
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
+	return set
+}
+
+// selfMergeTask makes a real self-merge review row: a throwaway git repo, a
+// signed patch set, and a Core wired to it. producers=mesh admits the test
+// key without needing the node's persisted identity.
+func selfMergeTask(t *testing.T) (*core.Core, *self.Manager, core.Task) {
+	t.Helper()
+	ctx := context.Background()
+	repo := testGitRepo(t)
+	logger := slog.New(slog.DiscardHandler)
+	mgr := self.New(t.TempDir(), repo, logger)
+	set := mintSelfSet(t, mgr)
 
 	db := newTestDB(t)
 	c := core.NewCore(db, "panel-node", ledger.Card{Device: "panel-node"}, 5, logger, config.ModelConfig{})
@@ -104,6 +118,55 @@ func TestSidecarRefusesSelfMergeApproval(t *testing.T) {
 	set, err := mgr.Get(patchSetID(t, task))
 	if err != nil || set.State != self.StatePending {
 		t.Fatalf("patch set state = %v err=%v, want pending", set.State, err)
+	}
+}
+
+// TestSelfEvoEndpoints pins the read-only review surface: the queue lists a
+// set, the detail names it, and the file endpoint serves only files the
+// signed manifest lists.
+func TestSelfEvoEndpoints(t *testing.T) {
+	repo := testGitRepo(t)
+	cfg := &config.Config{}
+	cfg.Storage.DBPath = filepath.Join(t.TempDir(), "panda.db")
+	cfg.SelfEvolution.Enabled = true
+	cfg.SelfEvolution.Repo = repo
+	logger := slog.New(slog.DiscardHandler)
+	mgr := self.New(cfg.SelfEvolutionDir(), repo, logger)
+	set := mintSelfSet(t, mgr)
+
+	h := New(Deps{
+		Store:     newTestStore(t),
+		Cfg:       cfg,
+		StaticDir: t.TempDir(),
+		Token:     testToken,
+	})
+
+	code, out := doJSON(t, h, authedReq(http.MethodGet, "/api/selfevo", nil))
+	if code != http.StatusOK || out["enabled"] != true {
+		t.Fatalf("queue = %d %v", code, out)
+	}
+	sets, _ := out["sets"].([]any)
+	if len(sets) != 1 {
+		t.Fatalf("sets = %v, want one", out["sets"])
+	}
+
+	code, one := doJSON(t, h, authedReq(http.MethodGet, "/api/selfevo/"+set.Manifest.ID, nil))
+	if code != http.StatusOK || one["title"] != "panel test" {
+		t.Fatalf("detail = %d %v", code, one)
+	}
+
+	rr := authedReqWriter(t, h, authedReq(http.MethodGet,
+		"/api/selfevo/"+set.Manifest.ID+"/file?n="+set.Manifest.Files[0], nil))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "change.txt") {
+		t.Fatalf("patch file = %d %s", rr.Code, rr.Body.String())
+	}
+	rr = authedReqWriter(t, h, authedReq(http.MethodGet,
+		"/api/selfevo/"+set.Manifest.ID+"/file?n=manifest.json", nil))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("unlisted file = %d, want 400", rr.Code)
+	}
+	if code, _ := doJSON(t, h, authedReq(http.MethodGet, "/api/selfevo/nope", nil)); code != http.StatusNotFound {
+		t.Fatalf("unknown set = %d, want 404", code)
 	}
 }
 

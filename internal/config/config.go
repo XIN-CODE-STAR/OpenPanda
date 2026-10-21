@@ -51,7 +51,7 @@ type Config struct {
 	Skills     SkillsConfig     `yaml:"skills"`
 	Sandbox    SandboxConfig    `yaml:"sandbox"`
 	// SelfEvolution is the opt-in self-modification pipeline (design doc
-	// docs/author/2026-10-21). Entirely inert while enabled=false: no
+	// docs/plans/design-self-evolution.md). Entirely inert while enabled=false: no
 	// worktree, no queue, no merge proposals.
 	SelfEvolution SelfEvolutionConfig `yaml:"self_evolution"`
 }

@@ -261,6 +261,15 @@ func (c *Core) resumeSelfMerge(ctx context.Context, cur Task) (Task, bus.TaskRes
 	if set.Critical && !spec.Critical {
 		return fail(fmt.Errorf("patch set now touches critical paths (%s) — re-mint and re-review it", strings.Join(set.CriticalPaths, ", ")))
 	}
+	// The restart defer is registered BEFORE the lock defer so LIFO releases
+	// the worktree lock first: RestartAfterSwap may kill this process, and a
+	// lock left behind would block merges until its heartbeat goes stale.
+	swapped := false
+	defer func() {
+		if swapped {
+			selfRestart(c.logger, c.selfOneShot)
+		}
+	}()
 	// One merge at a time, across processes: two approved sets share the
 	// same worktree, and applying/gating one under the other resets files
 	// mid-build. The lock is held through swap; a crashed holder is cleared
@@ -309,12 +318,6 @@ func (c *Core) resumeSelfMerge(ctx context.Context, cur Task) (Task, bus.TaskRes
 	if err := upd.StageLocal(stage, targetVersion); err != nil {
 		return fail(fmt.Errorf("stage build: %w", err))
 	}
-	swapped := false
-	defer func() {
-		if swapped {
-			selfRestart(c.logger, c.selfOneShot)
-		}
-	}()
 	if err := upd.Apply(ctx); err != nil {
 		return fail(fmt.Errorf("apply build: %w", err))
 	}

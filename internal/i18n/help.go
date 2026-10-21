@@ -87,6 +87,7 @@ var helpEN = map[string]string{
 	"cli.help.d.card_struct":      "structured card edits (comments kept,\nvalidated, hot-reloaded into the daemon)",
 	"cli.help.d.version":          "version / this help",
 	"cli.help.d.completion":       "shell completion script (source it)",
+	"cli.help.d.self":             "source-level self-evolution: signed patch sets,\ngated merge review, release-safe rollback (opt-in)",
 
 	"cli.help.globalflags":  "global flags: --config <path>, --card <path>, --mcp <cmd>, --json",
 	"cli.help.globalflags2": "(before or after the subcommand; --json = JSON output)",
@@ -157,6 +158,7 @@ var helpZH = map[string]string{
 	"cli.help.d.card_struct":      "结构化卡片修改（保留注释、\n经校验、热加载进 daemon）",
 	"cli.help.d.version":          "版本 / 本帮助",
 	"cli.help.d.completion":       "shell 补全脚本（source 加载）",
+	"cli.help.d.self":             "源码级自进化：签名补丁集、\n审批门合并、可回滚到签名 release（默认关闭）",
 
 	"cli.help.globalflags":  "全局 flags：--config <路径>、--card <路径>、--mcp <命令>、--json",
 	"cli.help.globalflags2": "（可放在子命令之前或之后；--json = JSON 输出）",
@@ -227,6 +229,7 @@ var helpJA = map[string]string{
 	"cli.help.d.card_struct":      "構造化カード編集（コメント保持、\n検証済み、daemon にホットリロード）",
 	"cli.help.d.version":          "バージョン / このヘルプ",
 	"cli.help.d.completion":       "シェル補完スクリプト（source して使用）",
+	"cli.help.d.self":             "ソースレベルの自己進化：署名済みパッチセット、\n承認ゲート付きマージ、署名 release へのロールバック（オプトイン）",
 
 	"cli.help.globalflags":  "グローバルフラグ：--config <パス>、--card <パス>、--mcp <コマンド>、--json",
 	"cli.help.globalflags2": "（サブコマンドの前後どちらでも可；--json = JSON 出力）",
@@ -297,6 +300,7 @@ var helpES = map[string]string{
 	"cli.help.d.card_struct":      "ediciones estructuradas de la tarjeta (conserva comentarios,\nvalidadas, recargadas en caliente en el daemon)",
 	"cli.help.d.version":          "versión / esta ayuda",
 	"cli.help.d.completion":       "script de autocompletado de shell (cárgalo con source)",
+	"cli.help.d.self":             "auto-evolución a nivel de código: conjuntos de parches firmados,\nrevisión de fusión con puerta y rollback al release firmado (opt-in)",
 
 	"cli.help.globalflags":  "flags globales: --config <ruta>, --card <ruta>, --mcp <cmd>, --json",
 	"cli.help.globalflags2": "(antes o después del subcomando; --json = salida JSON)",
@@ -367,6 +371,7 @@ var helpDE = map[string]string{
 	"cli.help.d.card_struct":      "strukturierte Karten-Edits (Kommentare bleiben,\nvalidiert, in den Daemon heiß nachgeladen)",
 	"cli.help.d.version":          "Version / diese Hilfe",
 	"cli.help.d.completion":       "Shell-Vervollständigungsskript (per source laden)",
+	"cli.help.d.self":             "Selbstentwicklung auf Quellcodeebene: signierte Patch-Sets,\nMerge-Review mit Freigabe, Rollback auf das signierte Release (opt-in)",
 
 	"cli.help.globalflags":  "globale Flags: --config <Pfad>, --card <Pfad>, --mcp <Befehl>, --json",
 	"cli.help.globalflags2": "(vor oder nach dem Subkommando; --json = JSON-Ausgabe)",

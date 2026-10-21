@@ -152,6 +152,21 @@ English translation of [status.md](status.md)（中文版为准）· English
 > panda-screen missing-value guards, shell completions for `task
 > board`/`task artifact`; version turned `0.0.11`, `make gate` green).
 
+> 2026-10-21 (cross-network mesh P1–P5: dual-key identity and reachability cards,
+> transitive blind relay, epidemic directory sync, K=2 rendezvous edges and the
+> reachability ladder, policy surface and relay budgets, `panda://join`, pair over
+> transit, `dial_check`, and §8 counters. Remaining: UPnP/NAT-PMP, punch/dir
+> source-signature convergence, and a daemon→panel IPC path for mesh metrics).
+>
+> 2026-10-21 (self-evolution phases 1–4 main body, opt-in and off by default:
+> signed patch-set manifests with per-patch sha256, `<data>/self` queue + merge
+> worktree, a merge proposal as a review task, approve → apply → `make gate` →
+> build → `StageLocal` → swap, `panda.release` rollback, cross-process worktree
+> lock, base-freshness check, `+self.N` allocation at merge, and a service restart
+> deferred until the review row settles; web patch-set/diff review card and
+> read-only `/api/selfevo`. Remaining: mesh transport, auto mode, producer-side
+> gate digest, `panda update --no-rebase`, macOS stable signing).
+>
 > This document answers one question: **where the project stands now —
 > what works and what does not.**
 

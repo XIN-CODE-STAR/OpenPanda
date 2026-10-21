@@ -921,6 +921,8 @@ func printUsage(w *os.File) {
 	h("  mcp", "cli.help.d.mcp", wide)
 	h("  rpc", "cli.help.d.rpc", wide)
 	h("  auth login|status|logout <provider>", "cli.help.d.auth", wide)
+	line("  self status|queue|doctor|mint|propose|rebase|rollback|reset")
+	h("", "cli.help.d.self", wide)
 	line("")
 	line(t("cli.help.g.observability"))
 	h("  status", "cli.help.d.status", wide)

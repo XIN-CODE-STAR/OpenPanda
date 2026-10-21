@@ -86,11 +86,14 @@ prebuilt copy; only a placeholder `dist/index.html` is committed.
   (`verify`/`entries`), `session`/`sessions` (`list`/`show`/`rm` plus
   `fork`/`tree` for thread branching), `memory`, `model`/`models`
   (multi-model registry + active-model switcher), `config` (sections
-  `model`/`mcp`/`limits`/`routing`/`injection`/`approval`/`delegation`,
-  comments preserved), `agents`, `project`, `mcp` (exposes the node's self-tools
-  as an MCP stdio server), `rpc` (NDJSON-over-stdio embedding surface,
-  experimental), `auth` (subscription OAuth, experimental), `read`
-  (markdown viewer; aliases `view`/`cat`/`md`/`markdown`), `version`,
+  `model`/`mcp`/`limits`/`routing`/`injection`/`approval`/`delegation`/
+  `self_evolution`, comments preserved), `agents`, `project`, `mcp` (exposes
+  the node's self-tools as an MCP stdio server), `rpc` (NDJSON-over-stdio
+  embedding surface, experimental), `auth` (subscription OAuth,
+  experimental), `self` (`status`/`queue`/`doctor`/`mint`/`propose`/
+  `rebase`/`rollback`/`reset` — the opt-in self-evolution patch-set
+  pipeline), `read` (markdown viewer; aliases
+  `view`/`cat`/`md`/`markdown`), `version`,
   `completion` (bash/zsh/fish script generation). Global flags:
   `--config`, `--card`, `--mcp`, `--json`.
 - `internal/` — all runtime code (see below).
@@ -157,7 +160,9 @@ prebuilt copy; only a placeholder `dist/index.html` is committed.
   `version`, `hwinfo`, `install`, `i18n` (EN/ZH/JA/ES/DE), `reminders`,
   `updater`, `doctor`, `cliui`, `providers`, `pyexec`, `askengine`,
   `artifact`, `mdtext`, `mcp`/`mcpserve`, `agents`, `plan`, `auth`
-  (subscription-OAuth token store + PKCE flows).
+  (subscription-OAuth token store + PKCE flows), `self` (self-evolution:
+  signed patch-set manifests/queue/worktree/archive, release-gate runner,
+  staged swap + `panda.release` rollback target).
 
 ## Conventions
 
