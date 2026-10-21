@@ -235,3 +235,141 @@ func TestPostUserMessageOwnerGuard(t *testing.T) {
 		t.Fatalf("empty local id skips the guard: %v", err)
 	}
 }
+
+// TestUserNoteLifecycle pins the store-side lifecycle the console's pending
+// strip drives: list → edit → drop, all on the same slot, none of it posting a
+// second row.
+func TestUserNoteLifecycle(t *testing.T) {
+	c := queueTestCore(t)
+	ctx := context.Background()
+	tk := steerTestTask(t, c)
+
+	msg, err := c.QueueUserNote(ctx, tk.TaskID, "check the tests", []string{"uploads/shot.png"})
+	if err != nil {
+		t.Fatalf("queue note: %v", err)
+	}
+	if !strings.HasPrefix(msg.Sender, userSenderPrefix) {
+		t.Fatalf("note sender = %q, want a user:<seq> slot", msg.Sender)
+	}
+	// The agent reads the body; the console reads the prose. Both must be
+	// right from one row: a chip list alone would leave the prompt without the
+	// path, and the raw body alone would show the attachment header as prose.
+	if !strings.Contains(msg.Body, "- @uploads/shot.png") {
+		t.Fatalf("body should carry the attachment ref: %q", msg.Body)
+	}
+	if got := NoteProse(msg.Body); got != "check the tests" {
+		t.Fatalf("NoteProse = %q", got)
+	}
+
+	notes, err := c.store.UserNotes(ctx, tk.TaskID)
+	if err != nil || len(notes) != 1 {
+		t.Fatalf("UserNotes = %v err=%v, want 1", notes, err)
+	}
+	if notes[0].Attachments == nil || notes[0].Attachments[0] != "uploads/shot.png" {
+		t.Fatalf("attachments did not round-trip: %+v", notes[0].Attachments)
+	}
+
+	// Edit keeps the slot and the grade, bumps the seq (the store's stale-write
+	// guard needs it) and drops the attachment the user removed.
+	edited, err := c.store.EditUserNote(ctx, tk.TaskID, msg.Sender, "check the tests twice", nil, c.nodeID)
+	if err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	if edited.Sender != msg.Sender || edited.Grade != MsgGradeStatus {
+		t.Fatalf("edit changed identity: %+v", edited)
+	}
+	if edited.SenderSeq <= msg.SenderSeq {
+		t.Fatalf("edit kept seq %d (was %d) — the store would drop it as stale", edited.SenderSeq, msg.SenderSeq)
+	}
+	if got := NoteProse(edited.Body); got != "check the tests twice" {
+		t.Fatalf("edited prose = %q", got)
+	}
+
+	if err := c.store.DeleteUserNote(ctx, tk.TaskID, msg.Sender); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if notes, _ := c.store.UserNotes(ctx, tk.TaskID); len(notes) != 0 {
+		t.Fatalf("note survived the drop: %+v", notes)
+	}
+}
+
+// TestPromoteKeepsOneRow is the second-Enter contract: escalation rewrites the
+// queued slot as a steer instead of posting a duplicate, so the round reads the
+// user's words exactly once.
+func TestPromoteKeepsOneRow(t *testing.T) {
+	c := queueTestCore(t)
+	ctx := context.Background()
+	tk := steerTestTask(t, c)
+
+	msg, err := c.QueueUserNote(ctx, tk.TaskID, "use tabs", nil)
+	if err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	status, err := c.PromoteUserNote(ctx, tk.TaskID, msg.Sender)
+	if err != nil || status != "queued" {
+		t.Fatalf("promote = %q err=%v, want queued (no running round here)", status, err)
+	}
+	msgs, err := c.store.TaskMessages(ctx, "task:"+tk.TaskID)
+	if err != nil {
+		t.Fatalf("board: %v", err)
+	}
+	var user []TaskMessage
+	for _, m := range msgs {
+		if isUserSender(m.Sender) {
+			user = append(user, m)
+		}
+	}
+	if len(user) != 1 {
+		t.Fatalf("promote posted a second row: %+v", user)
+	}
+	if user[0].Grade != MsgGradeSteer {
+		t.Fatalf("promoted grade = %q, want steer", user[0].Grade)
+	}
+	if user[0].SenderSeq <= msg.SenderSeq {
+		t.Fatalf("promoted seq %d did not advance past %d", user[0].SenderSeq, msg.SenderSeq)
+	}
+
+	// A live round's cancel is what turns the same call into "interrupted".
+	cctx, cancel := context.WithCancel(context.Background())
+	c.registerInterrupt(tk.TaskID, cancel)
+	msg2, err := c.QueueUserNote(ctx, tk.TaskID, "and run gofmt", nil)
+	if err != nil {
+		t.Fatalf("queue 2: %v", err)
+	}
+	status, err = c.PromoteUserNote(ctx, tk.TaskID, msg2.Sender)
+	if err != nil || status != "interrupted" {
+		t.Fatalf("promote with a live round = %q err=%v, want interrupted", status, err)
+	}
+	if cctx.Err() == nil {
+		t.Fatal("promote did not abort the live round")
+	}
+	c.clearInterrupt(tk.TaskID)
+}
+
+// TestConsumedNoteRefusesEdits keeps the board honest: once a round folded a
+// note into its prompt, rewriting or deleting the row would leave the board
+// disagreeing with what the model was actually told.
+func TestConsumedNoteRefusesEdits(t *testing.T) {
+	c := queueTestCore(t)
+	ctx := context.Background()
+	tk := steerTestTask(t, c)
+	msg, err := c.QueueUserNote(ctx, tk.TaskID, "already read", nil)
+	if err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	if err := c.store.MarkTaskMessageConsumed(ctx, msg.Scope, msg.Sender, msg.SenderSeq); err != nil {
+		t.Fatalf("mark consumed: %v", err)
+	}
+	if _, err := c.store.EditUserNote(ctx, tk.TaskID, msg.Sender, "rewritten", nil, c.nodeID); err == nil ||
+		!strings.Contains(err.Error(), "already read") {
+		t.Fatalf("edit of a consumed note = %v, want an already-read refusal", err)
+	}
+	if err := c.store.DeleteUserNote(ctx, tk.TaskID, msg.Sender); err == nil ||
+		!strings.Contains(err.Error(), "already read") {
+		t.Fatalf("drop of a consumed note = %v, want an already-read refusal", err)
+	}
+	if _, err := c.store.EditUserNote(ctx, tk.TaskID, "user:999", "ghost", nil, c.nodeID); err == nil ||
+		!strings.Contains(err.Error(), "no such note") {
+		t.Fatalf("edit of an unknown key = %v, want no-such-note", err)
+	}
+}

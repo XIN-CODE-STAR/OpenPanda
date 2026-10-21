@@ -259,8 +259,14 @@ func New(d Deps) http.Handler {
 		mux.HandleFunc("POST /api/sessions/{id}/fork", h.forkSession)
 		mux.HandleFunc("POST /api/sessions/{id}/ask", h.sessionAsk)
 		// Type into the thread while the agent works — the queue/inject pair
-		// the composer promises (see session_msg.go).
+		// the composer promises (see session_msg.go). The notes routes are the
+		// same contract's read/edit/drop/promote half: a queued note the user
+		// can no longer see is a note they cannot correct.
 		mux.HandleFunc("POST /api/sessions/{id}/messages", h.sendSessionMessage)
+		mux.HandleFunc("GET /api/sessions/{id}/notes", h.listSessionNotes)
+		mux.HandleFunc("PATCH /api/sessions/{id}/notes/{key}", h.editSessionNote)
+		mux.HandleFunc("DELETE /api/sessions/{id}/notes/{key}", h.deleteSessionNote)
+		mux.HandleFunc("POST /api/sessions/{id}/notes/{key}/promote", h.promoteSessionNote)
 		mux.HandleFunc("GET /api/sessions/{id}/approval", h.getSessionApproval)
 		mux.HandleFunc("DELETE /api/sessions/{id}/approval", h.clearSessionApproval)
 		mux.HandleFunc("POST /api/sessions/{id}/cancel", h.sessionCancel)
@@ -517,7 +523,10 @@ type handler struct {
 	// the TUI's askStream.steer channel — the only delivery path for a plain
 	// answer turn, which has no task row to land a durable note on.
 	steerMu sync.Mutex
-	steers  map[string]chan string
+	steers  map[string][]pendingNote
+	// memSeq stamps the in-memory notes' keys. Guarded by steerMu; monotonic
+	// per process so a key handed to the browser never names a later note.
+	memSeq int
 
 	approvalMu         sync.Mutex
 	approvalOperations map[string]approvalOperation

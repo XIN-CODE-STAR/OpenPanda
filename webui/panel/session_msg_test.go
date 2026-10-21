@@ -5,6 +5,7 @@ package panel
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -33,7 +34,46 @@ func newSessionMsgHandler(store *core.TaskStore, eng *askengine.Engine, sess *se
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/sessions/{id}/messages", h.sendSessionMessage)
+	mux.HandleFunc("GET /api/sessions/{id}/notes", h.listSessionNotes)
+	mux.HandleFunc("PATCH /api/sessions/{id}/notes/{key}", h.editSessionNote)
+	mux.HandleFunc("DELETE /api/sessions/{id}/notes/{key}", h.deleteSessionNote)
+	mux.HandleFunc("POST /api/sessions/{id}/notes/{key}/promote", h.promoteSessionNote)
 	return h, mux
+}
+
+// decodeNotes reads the pending-strip payload.
+func decodeNotes(t *testing.T, rr *httptest.ResponseRecorder) []sessionNote {
+	t.Helper()
+	var res struct {
+		Notes []sessionNote `json:"notes"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode notes %q: %v", rr.Body.String(), err)
+	}
+	return res.Notes
+}
+
+// getNotes lists a session's pending notes.
+func getNotes(t *testing.T, h http.Handler, sessionID string) []sessionNote {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/sessions/"+sessionID+"/notes", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list notes: %d %s", rr.Code, rr.Body.String())
+	}
+	return decodeNotes(t, rr)
+}
+
+// noteReq drives one of the three per-note routes.
+func noteReq(t *testing.T, h http.Handler, method, sessionID, key, suffix, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	var rdr io.Reader
+	if body != "" {
+		rdr = strings.NewReader(body)
+	}
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(method, "/api/sessions/"+sessionID+"/notes/"+key+suffix, rdr))
+	return rr
 }
 
 // decodeSessionMessage reads the endpoint's three-field response.
@@ -83,10 +123,10 @@ func TestSessionMessageSteersLiveTurn(t *testing.T) {
 	}
 	// The round loop's GetSteer poll is what drains it — assert the text landed
 	// where that poll reads, trimmed.
-	if got := h.drainSteer(sess.ID); got != "also check the tests" {
-		t.Fatalf("steer queue delivered %q", got)
+	if got, key := h.drainSteer(sess.ID); got != "also check the tests" || key == "" {
+		t.Fatalf("steer queue delivered %q (key %q)", got, key)
 	}
-	if got := h.drainSteer(sess.ID); got != "" {
+	if got, _ := h.drainSteer(sess.ID); got != "" {
 		t.Fatalf("steer queue replayed %q", got)
 	}
 
@@ -191,5 +231,197 @@ func TestSessionMessageTargetsLiveTask(t *testing.T) {
 	}
 	if !got {
 		t.Fatalf("board has no user note: %+v", msgs)
+	}
+}
+
+// parkedTaskThread builds the shape the pending strip actually reads: a live
+// (parked) task linked to a session, plus the one-route mux. Parked rather than
+// running so it cannot settle mid-test.
+func parkedTaskThread(t *testing.T) (*core.TaskStore, http.Handler, string, string) {
+	t.Helper()
+	engine, _ := newApprovalQueueEngine(t)
+	store := engine.TaskStore()
+	sessStore := sessions.NewStore(t.TempDir())
+	full := New(Deps{
+		Store: store, Engine: engine, Sessions: sessStore,
+		StaticDir: t.TempDir(), Token: testToken,
+	})
+	_, mux := newSessionMsgHandler(store, engine, sessStore)
+
+	rr := httptest.NewRecorder()
+	full.ServeHTTP(rr, authedReq(http.MethodPost, "/api/tasks", strings.NewReader(
+		`{"title":"parked task","prompt":"do it","requires":["test:once"],"authorize":false}`)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("create task: %d %s", rr.Code, rr.Body.String())
+	}
+	var created struct {
+		TaskID    string `json:"task_id"`
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		task, err := store.Get(context.Background(), created.TaskID)
+		if err == nil && task.State == core.StateReview {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("task did not reach review: %+v, %v", task, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return store, mux, created.TaskID, created.SessionID
+}
+
+// TestSessionNotesEditAndDrop walks the pending strip's two maintenance verbs on
+// the durable path: the note is listed with its prose (not the attachment
+// header the agent reads), an edit rewrites that same row, and a drop removes it.
+func TestSessionNotesEditAndDrop(t *testing.T) {
+	store, mux, taskID, sessID := parkedTaskThread(t)
+
+	rr := postSessionMessage(t, mux, sessID,
+		`{"text":"look at the shot","attachments":["uploads/shot.png"]}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("send: %d %s", rr.Code, rr.Body.String())
+	}
+	_, status, _ := decodeSessionMessage(t, rr)
+	if status != "queued" {
+		t.Fatalf("status = %q", status)
+	}
+
+	notes := getNotes(t, mux, sessID)
+	if len(notes) != 1 {
+		t.Fatalf("notes = %+v, want 1", notes)
+	}
+	n := notes[0]
+	if n.Text != "look at the shot" {
+		t.Fatalf("note text = %q — the attachment block leaked into the prose", n.Text)
+	}
+	if !n.Durable || n.Mode != "queue" || n.TaskID != taskID {
+		t.Fatalf("note = %+v", n)
+	}
+	if len(n.Attachments) != 1 || n.Attachments[0] != "uploads/shot.png" {
+		t.Fatalf("attachments = %+v", n.Attachments)
+	}
+
+	rr = noteReq(t, mux, http.MethodPatch, sessID, n.Key, "", `{"text":"look at both shots"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("edit: %d %s", rr.Code, rr.Body.String())
+	}
+	notes = getNotes(t, mux, sessID)
+	if len(notes) != 1 || notes[0].Text != "look at both shots" {
+		t.Fatalf("after edit: %+v", notes)
+	}
+	if len(notes[0].Attachments) != 0 {
+		t.Fatalf("edit should replace the attachment list, got %+v", notes[0].Attachments)
+	}
+
+	rr = noteReq(t, mux, http.MethodDelete, sessID, n.Key, "", "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("drop: %d %s", rr.Code, rr.Body.String())
+	}
+	if notes := getNotes(t, mux, sessID); len(notes) != 0 {
+		t.Fatalf("note survived the drop: %+v", notes)
+	}
+	msgs, _ := store.TaskMessages(context.Background(), "task:"+taskID)
+	if len(msgs) != 0 {
+		t.Fatalf("board still holds rows: %+v", msgs)
+	}
+}
+
+// TestSessionNotesPromoteInPlace is the strip's ▲: one row before and after, so
+// the round cannot read the same words twice. No live round runs here, so the
+// honest answer is "queued", not "interrupted".
+func TestSessionNotesPromoteInPlace(t *testing.T) {
+	store, mux, taskID, sessID := parkedTaskThread(t)
+	if rr := postSessionMessage(t, mux, sessID, `{"text":"use tabs"}`); rr.Code != http.StatusOK {
+		t.Fatalf("send: %d %s", rr.Code, rr.Body.String())
+	}
+	notes := getNotes(t, mux, sessID)
+	if len(notes) != 1 {
+		t.Fatalf("notes = %+v", notes)
+	}
+
+	rr := noteReq(t, mux, http.MethodPost, sessID, notes[0].Key, "/promote", "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("promote: %d %s", rr.Code, rr.Body.String())
+	}
+	var res map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode promote: %v", err)
+	}
+	if res["status"] != "queued" {
+		t.Fatalf("promote status = %q, want queued (nothing was running)", res["status"])
+	}
+	msgs, _ := store.TaskMessages(context.Background(), "task:"+taskID)
+	if len(msgs) != 1 {
+		t.Fatalf("promote posted a second row: %+v", msgs)
+	}
+	if msgs[0].Grade != core.MsgGradeSteer {
+		t.Fatalf("grade = %q, want steer", msgs[0].Grade)
+	}
+	notes = getNotes(t, mux, sessID)
+	if len(notes) != 1 || notes[0].Mode != "inject" {
+		t.Fatalf("strip after promote = %+v", notes)
+	}
+}
+
+// TestSessionNotesSteerQueueCRUD covers the process-local queue a task-less
+// answer turn uses: the same strip, the same three verbs, no board row behind
+// it. Promote cannot abort anything here, and says so.
+func TestSessionNotesSteerQueueCRUD(t *testing.T) {
+	sessStore := sessions.NewStore(t.TempDir())
+	sess, err := sessStore.Create("answer turn")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	h, mux := newSessionMsgHandler(newTestStore(t), nil, sessStore)
+	h.askMu.Lock()
+	h.activeAsks[sess.ID] = sessionOperation{operationID: "op-1", generation: 1}
+	h.askMu.Unlock()
+
+	if rr := postSessionMessage(t, mux, sess.ID, `{"text":"faster please"}`); rr.Code != http.StatusOK {
+		t.Fatalf("send: %d %s", rr.Code, rr.Body.String())
+	}
+	notes := getNotes(t, mux, sess.ID)
+	if len(notes) != 1 || notes[0].Durable || notes[0].Mode != "queue" {
+		t.Fatalf("notes = %+v", notes)
+	}
+	if !strings.HasPrefix(notes[0].Key, memNotePrefix) {
+		t.Fatalf("key = %q, want a mem: key", notes[0].Key)
+	}
+
+	if rr := noteReq(t, mux, http.MethodPatch, sess.ID, notes[0].Key, "", `{"text":"slower please"}`); rr.Code != http.StatusOK {
+		t.Fatalf("edit: %d %s", rr.Code, rr.Body.String())
+	}
+	if got := getNotes(t, mux, sess.ID); len(got) != 1 || got[0].Text != "slower please" {
+		t.Fatalf("after edit: %+v", got)
+	}
+
+	rr := noteReq(t, mux, http.MethodPost, sess.ID, notes[0].Key, "/promote", "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("promote: %d %s", rr.Code, rr.Body.String())
+	}
+	var res map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode promote: %v", err)
+	}
+	if res["status"] != "queued" || res["warning"] == "" {
+		t.Fatalf("promote on a queued-only channel = %+v, want queued + caveat", res)
+	}
+	if got := getNotes(t, mux, sess.ID); len(got) != 1 || got[0].Mode != "inject" {
+		t.Fatalf("after promote: %+v", got)
+	}
+
+	if rr := noteReq(t, mux, http.MethodDelete, sess.ID, notes[0].Key, "", ""); rr.Code != http.StatusOK {
+		t.Fatalf("drop: %d %s", rr.Code, rr.Body.String())
+	}
+	if got := getNotes(t, mux, sess.ID); len(got) != 0 {
+		t.Fatalf("note survived the drop: %+v", got)
+	}
+	if got, _ := h.drainSteer(sess.ID); got != "" {
+		t.Fatalf("dropped note still reaches the round: %q", got)
 	}
 }

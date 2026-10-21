@@ -4,6 +4,7 @@ package core
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -88,6 +89,25 @@ func clipRunes(s string, n int) string {
 	return s
 }
 
+// noteAttachHeader opens the block noteBody appends. Kept as one constant so
+// the writer and NoteProse cannot drift: a console that failed to strip it
+// would show the agent's instruction text as if the user had typed it.
+const noteAttachHeader = "Attached files (read them from the workspace):"
+
+// NoteProse returns the user's own words from a note body — everything before
+// the attachment block. The block itself stays in the stored body because the
+// agent reads bodies, never chip lists; surfaces that show the note to its
+// author want the prose back.
+func NoteProse(body string) string {
+	if i := strings.Index(body, "\n\n"+noteAttachHeader); i >= 0 {
+		return strings.TrimRight(body[:i], "\n")
+	}
+	if strings.HasPrefix(body, noteAttachHeader) {
+		return ""
+	}
+	return body
+}
+
 // TaskMessage is one board slot: a sender's latest note toward one recipient
 // (Rcpt=="" = broadcast to the scope) within a scope.
 type TaskMessage struct {
@@ -105,7 +125,12 @@ type TaskMessage struct {
 	// arrival, so a just-posted note already reads "received". Surfaces use
 	// this one to draw "waiting for the next round" apart from "already read".
 	ConsumedAt int64 `json:"consumed_at"`
-	ExpiresAt  int64 `json:"expires_at"`
+	// Attachments are the files a user note rode along with, as
+	// workspace-relative paths. The body already names them (`@path`); this
+	// keeps the prose separable so a console can show chips and edit the text
+	// without touching the attachment block. Empty on agent-authored slots.
+	Attachments []string `json:"attachments,omitempty"`
+	ExpiresAt   int64    `json:"expires_at"`
 }
 
 // msgLabel is the human-readable name a board line shows for a sender: its
@@ -170,16 +195,26 @@ func (s *TaskStore) PutTaskMessage(ctx context.Context, m TaskMessage) error {
 	if expires == 0 {
 		expires = now + int64(msgBoardTTL/time.Second)
 	}
+	// Stored as a JSON array, '' for none. A malformed list can only come from
+	// a hand-edited row; persist '' rather than refusing the message — the
+	// body still names the files, so the agent loses nothing.
+	attach := ""
+	if len(m.Attachments) > 0 {
+		if raw, err := json.Marshal(m.Attachments); err == nil {
+			attach = string(raw)
+		}
+	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO task_messages
-		(scope, sender, rcpt, sender_seq, sender_label, grade, body, sent_at, recv_at, consumed_at, expires_at)
-		VALUES (?,?,?,?,?,?,?,?,?,0,?)
+		(scope, sender, rcpt, sender_seq, sender_label, grade, body, attachments, sent_at, recv_at, consumed_at, expires_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,0,?)
 		ON CONFLICT(scope, sender, rcpt) DO UPDATE SET
 			sender_seq=excluded.sender_seq, sender_label=excluded.sender_label,
-			grade=excluded.grade, body=excluded.body, sent_at=excluded.sent_at,
+			grade=excluded.grade, body=excluded.body, attachments=excluded.attachments,
+			sent_at=excluded.sent_at,
 			recv_at=excluded.recv_at, consumed_at=0, expires_at=excluded.expires_at
 		WHERE excluded.sender_seq > task_messages.sender_seq`,
 		m.Scope, m.Sender, m.Rcpt, m.SenderSeq, m.SenderLabel, m.Grade, m.Body,
-		m.SentAt, recv, expires)
+		attach, m.SentAt, recv, expires)
 	return err
 }
 
@@ -248,7 +283,7 @@ func (s *TaskStore) NextMsgSeq(ctx context.Context, scope, sender string) int64 
 // a rendered board reads chronologically.
 func (s *TaskStore) TaskMessages(ctx context.Context, scope string) ([]TaskMessage, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT scope, sender, rcpt, sender_seq,
-		sender_label, grade, body, sent_at, recv_at, consumed_at FROM task_messages
+		sender_label, grade, body, attachments, sent_at, recv_at, consumed_at FROM task_messages
 		WHERE scope=? AND expires_at > ? ORDER BY sent_at ASC, sender ASC`,
 		scope, time.Now().Unix())
 	if err != nil {
@@ -258,13 +293,30 @@ func (s *TaskStore) TaskMessages(ctx context.Context, scope string) ([]TaskMessa
 	var out []TaskMessage
 	for rows.Next() {
 		var m TaskMessage
+		var attach sql.NullString
 		if err := rows.Scan(&m.Scope, &m.Sender, &m.Rcpt, &m.SenderSeq,
-			&m.SenderLabel, &m.Grade, &m.Body, &m.SentAt, &m.RecvAt, &m.ConsumedAt); err != nil {
+			&m.SenderLabel, &m.Grade, &m.Body, &attach, &m.SentAt, &m.RecvAt, &m.ConsumedAt); err != nil {
 			return out, err
 		}
+		m.Attachments = decodeAttachments(attach.String)
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+// decodeAttachments reads the JSON array PutTaskMessage wrote. A row from a
+// pre-v60 build, or one whose bytes were touched outside the store, yields
+// nil rather than an error: the note itself is still readable, and refusing
+// the whole board for a malformed chip list would hide the message too.
+func decodeAttachments(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	return out
 }
 
 // msgSeen tracks, per board slot, the sender_seq a run episode already folded

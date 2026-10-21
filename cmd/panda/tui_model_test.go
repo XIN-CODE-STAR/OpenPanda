@@ -579,8 +579,14 @@ func TestTUIRuntimeSteeringInputAndStop(t *testing.T) {
 	if m.mode != modeAsking {
 		t.Fatalf("steering with enter should stay in modeAsking: got %v", m.mode)
 	}
-	if m.ta.Value() != "" {
-		t.Fatalf("textarea should reset after steering: %q", m.ta.Value())
+	// The draft stays in the box on purpose: pressing Enter on it once more is
+	// the escalate gesture (stageNote / promoteStaged), so the note is editable
+	// and promotable until the user is done with it.
+	if m.ta.Value() != "also add benchmarks" {
+		t.Fatalf("the draft should stay for the second Enter: %q", m.ta.Value())
+	}
+	if m.staged == nil {
+		t.Fatal("a queued note should stay staged so the next Enter can inject it")
 	}
 	if !strings.Contains(m.pendingPrompt, "also add benchmarks") {
 		t.Fatalf("pendingPrompt should contain steering idea: %q", m.pendingPrompt)
@@ -589,7 +595,19 @@ func TestTUIRuntimeSteeringInputAndStop(t *testing.T) {
 		t.Fatal("steering should emit printBlock cmd")
 	}
 
-	// 4. Press Esc to stop in-flight task
+	// 4. Esc clears that draft first — the two-step Esc every chat mode uses —
+	// and only the second Esc stops the round.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(tuiModel)
+	if cancelled {
+		t.Fatal("the first Esc should clear the pending draft, not stop the round")
+	}
+	if m.ta.Value() != "" {
+		t.Fatalf("Esc should clear the draft: %q", m.ta.Value())
+	}
+	if m.staged != nil {
+		t.Fatalf("a cleared draft should stop being editable: %+v", m.staged)
+	}
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m = next.(tuiModel)
 	if !cancelled {
@@ -658,8 +676,13 @@ func TestTUIMouseClickActions(t *testing.T) {
 		if !strings.Contains(got.pendingPrompt, "refactor cleanly") {
 			t.Fatalf("pendingPrompt should contain injected steer: %q", got.pendingPrompt)
 		}
-		if got.ta.Value() != "" {
-			t.Fatalf("textarea should clear after steer click: %q", got.ta.Value())
+		// Same contract as the Enter path: the draft survives so the button and
+		// the key describe one gesture — press again to inject.
+		if got.ta.Value() != "refactor cleanly" {
+			t.Fatalf("the draft should stay for the second press: %q", got.ta.Value())
+		}
+		if got.staged == nil {
+			t.Fatal("a queued note should stay staged so a second press can inject it")
 		}
 		if cmd == nil {
 			t.Fatal("clicking inject should emit printBlock cmd")

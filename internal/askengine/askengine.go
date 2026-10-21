@@ -504,6 +504,25 @@ func (e *Engine) stableNodeID() string {
 // this store never reaches a round, so a note delivered to it is durable but
 // unread — say so instead of reporting a silent success.
 func (e *Engine) SendTaskMessage(ctx context.Context, taskID, text string, inject bool) (status, warning string, err error) {
+	res, err := e.SendTaskNote(ctx, taskID, text, nil, inject)
+	return res.Status, res.Warning, err
+}
+
+// TaskNoteResult is the outcome of one note into a task: the board slot it
+// occupies (so the caller can edit, drop or promote that exact row), how it
+// landed, and the advisory the surface should show beside the outcome.
+type TaskNoteResult struct {
+	Sender  string `json:"sender"`
+	Seq     int64  `json:"seq"`
+	Status  string `json:"status"`
+	Warning string `json:"warning,omitempty"`
+}
+
+// SendTaskNote is SendTaskMessage with attachments and the landed slot. The
+// text and the files travel together: the store appends one `@path` line per
+// attachment to the body, so the agent reads a self-contained note.
+func (e *Engine) SendTaskNote(ctx context.Context, taskID, text string, attachments []string, inject bool) (TaskNoteResult, error) {
+	res := TaskNoteResult{}
 	sched := e.sched.Load()
 	switch {
 	case sched == nil:
@@ -511,36 +530,80 @@ func (e *Engine) SendTaskMessage(ctx context.Context, taskID, text string, injec
 		// still delivers it to the row — with the same owner guard, so a
 		// remote-executor task refuses instead of silently swallowing the note.
 		if inject {
-			return "", "", fmt.Errorf("inject requires the scheduler (capability card initialization failed)")
+			return res, fmt.Errorf("inject requires the scheduler (capability card initialization failed)")
 		}
-		if err = core.NewSigningTaskStore(e.db, e.logger).PostUserMessage(ctx, taskID, text, core.MsgGradeStatus, e.stableNodeID()); err != nil {
-			return "", "", err
+		msg, err := core.NewSigningTaskStore(e.db, e.logger).
+			PostUserNote(ctx, taskID, text, attachments, core.MsgGradeStatus, e.stableNodeID())
+		if err != nil {
+			return res, err
 		}
-		status = "queued"
+		res.Sender, res.Seq, res.Status = msg.Sender, msg.SenderSeq, "queued"
 	case inject:
-		if status, err = sched.InjectUserMessage(ctx, taskID, text); err != nil {
-			return "", "", err
+		msg, status, err := sched.InjectUserNote(ctx, taskID, text, attachments)
+		if err != nil {
+			return res, err
 		}
+		res.Sender, res.Seq, res.Status = msg.Sender, msg.SenderSeq, status
 	default:
-		if err = sched.QueueUserMessage(ctx, taskID, text); err != nil {
-			return "", "", err
+		msg, err := sched.QueueUserNote(ctx, taskID, text, attachments)
+		if err != nil {
+			return res, err
 		}
-		status = "queued"
+		res.Sender, res.Seq, res.Status = msg.Sender, msg.SenderSeq, "queued"
 	}
-	if t, terr := core.NewSigningTaskStore(e.db, e.logger).Get(ctx, taskID); terr == nil {
-		if t.State == core.StateQueued && !e.queueConsumerAlive(ctx) {
-			return status, i18n.T(e.Locale(), "cli.queue.noConsumer"), nil
-		}
-		// An inject only aborts a round this process is running — the cancel
-		// handle lives in memory (steer.go). When the row is running somewhere
-		// else the note still queued for the next round, which is fine, but
-		// silently reporting the same "queued" a same-process inject reports
-		// would tell the user they cut the round short when nothing was cut.
-		if inject && status == "queued" && t.State == core.StateRunning {
-			return status, i18n.T(e.Locale(), "cli.task.send.injectNoInterrupt"), nil
-		}
+	res.Warning = e.noteWarning(ctx, taskID, inject, res.Status)
+	return res, nil
+}
+
+// PromoteTaskNote escalates a queued note to an inject without posting a
+// second row — the second-Enter path. The returned status is the same
+// "interrupted"/"queued" pair SendTaskNote reports.
+func (e *Engine) PromoteTaskNote(ctx context.Context, taskID, sender string) (status, warning string, err error) {
+	sched := e.sched.Load()
+	if sched == nil {
+		return "", "", fmt.Errorf("inject requires the scheduler (capability card initialization failed)")
 	}
-	return status, "", nil
+	status, err = sched.PromoteUserNote(ctx, taskID, sender)
+	if err != nil {
+		return "", "", err
+	}
+	return status, e.noteWarning(ctx, taskID, true, status), nil
+}
+
+// EditTaskNote rewrites a pending note. Errors carry the reason the store
+// refused (unknown row, already read, terminal task, remote executor) so the
+// surface can map them onto an HTTP status without guessing.
+func (e *Engine) EditTaskNote(ctx context.Context, taskID, sender, text string, attachments []string) error {
+	_, err := core.NewSigningTaskStore(e.db, e.logger).
+		EditUserNote(ctx, taskID, sender, text, attachments, e.stableNodeID())
+	return err
+}
+
+// DeleteTaskNote drops a pending note from the board.
+func (e *Engine) DeleteTaskNote(ctx context.Context, taskID, sender string) error {
+	return core.NewSigningTaskStore(e.db, e.logger).DeleteUserNote(ctx, taskID, sender)
+}
+
+// noteWarning phrases the two ways a delivered note still fails to reach a
+// round: a queued task with no consumer, and an inject that could not abort
+// because the running round lives in another process.
+func (e *Engine) noteWarning(ctx context.Context, taskID string, inject bool, status string) string {
+	t, terr := core.NewSigningTaskStore(e.db, e.logger).Get(ctx, taskID)
+	if terr != nil {
+		return ""
+	}
+	if t.State == core.StateQueued && !e.queueConsumerAlive(ctx) {
+		return i18n.T(e.Locale(), "cli.queue.noConsumer")
+	}
+	// An inject only aborts a round this process is running — the cancel
+	// handle lives in memory (steer.go). When the row is running somewhere
+	// else the note still queued for the next round, which is fine, but
+	// silently reporting the same "queued" a same-process inject reports
+	// would tell the user they cut the round short when nothing was cut.
+	if inject && status == "queued" && t.State == core.StateRunning {
+		return i18n.T(e.Locale(), "cli.task.send.injectNoInterrupt")
+	}
+	return ""
 }
 
 // SetOnReview installs the callback fired when a task enters review — i.e. when
@@ -1281,6 +1344,12 @@ type StreamCallbacks struct {
 	// it "已注入" is a claim the caller cannot back up — the last round of a
 	// turn can start and finish before anything polls the channel again.
 	OnSteerConsumed func(text string, round int)
+	// OnTaskRow fires once, with the id of the task row this turn created,
+	// before that task executes. The Result carries the same id, but it
+	// arrives after the work is over — far too late for a surface that wants
+	// to type into the running task (queue on the first Enter, inject on the
+	// second). Nil for callers that only read the outcome.
+	OnTaskRow func(taskID string)
 }
 
 // ProgressKind names what the engine is about to do.
@@ -2457,6 +2526,9 @@ func (e *Engine) submitTask(ctx context.Context, spec *entry.TaskSpec, prompt st
 		if err != nil {
 			return &Result{Kind: "task", TaskState: "failed", Stderr: err.Error(), ExitCode: 1}
 		}
+		if cb.OnTaskRow != nil {
+			cb.OnTaskRow(task.TaskID)
+		}
 		if !awaitQueued {
 			// Receipt mode (the panel's board): the queued pointer IS the
 			// result — the session streams the row's progress and the
@@ -2501,7 +2573,17 @@ func (e *Engine) submitTask(ctx context.Context, spec *entry.TaskSpec, prompt st
 			defer unsub()
 		}
 		var err error
-		task, result, err = sched.Submit(ctx, in)
+		// Submit is synchronous, so the row id is otherwise unknowable until
+		// it returns. The observer fires inside createTask — the one moment
+		// the id exists while the work has not started yet.
+		submitCtx := ctx
+		if cb.OnTaskRow != nil {
+			var once sync.Once
+			submitCtx = core.WithTaskObserver(ctx, func(t core.Task) {
+				once.Do(func() { cb.OnTaskRow(t.TaskID) })
+			})
+		}
+		task, result, err = sched.Submit(submitCtx, in)
 		if err != nil {
 			return &Result{Kind: "task", TaskState: "failed", Stderr: err.Error(), ExitCode: 1}
 		}

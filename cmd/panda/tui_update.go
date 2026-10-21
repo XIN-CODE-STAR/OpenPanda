@@ -265,6 +265,15 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.onProgress(msg)
+	case taskRowMsg:
+		if msg.stream == nil || msg.stream != m.stream || msg.stream.detached {
+			return m, nil
+		}
+		// Remember which row this turn is running: a mid-turn Enter queues
+		// into it, and the second Enter promotes that note. Silence here would
+		// leave the note targeting whatever the picker last opened.
+		m.streamTask = msg.taskID
+		return m, waitForActivity(msg.stream)
 	case steerAckMsg:
 		if msg.stream == nil || msg.stream != m.stream || msg.stream.detached {
 			return m, nil
@@ -629,6 +638,7 @@ func (m tuiModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if strings.TrimSpace(m.ta.Value()) != "" {
 				m.ta.Reset()
 				m.ta.SetHeight(1)
+				m.disarmStaged()
 				return m, nil
 			}
 			return m.interrupt()
@@ -639,8 +649,20 @@ func (m tuiModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		// ctrl+d retracts the note the last Enter queued. It is unbound in
+		// asking mode (the textarea does not use it), and it is the honest
+		// counterpart of the second Enter: that one escalates the note, this
+		// one takes it back before the round reads it. The idle binding —
+		// quit on an empty box — would be a trap mid-turn, where a stray
+		// ctrl+d would kill a running task instead of undoing a keystroke.
+		if msg.Type == tea.KeyCtrlD {
+			return m.dropStaged()
+		}
 		var cmd tea.Cmd
 		m.ta, cmd = m.ta.Update(msg)
+		if strings.TrimSpace(m.ta.Value()) == "" {
+			m.disarmStaged()
+		}
 		m.ta.SetHeight(min(8, max(1, m.ta.LineCount())))
 		return m, cmd
 	case modeApproving:
@@ -1105,34 +1127,26 @@ func (m tuiModel) withPending(cmds ...tea.Cmd) (tea.Model, tea.Cmd) {
 }
 
 // sendTurnInput is the single routing point for text submitted while a turn
-// runs — Enter and the [⏎ 注入] footer button land here identically. The
-// split mirrors the task board's queue-and-inject contract:
+// runs — Enter and the footer button land here identically. The split mirrors
+// the task board's queue-and-inject contract:
 //
 //	/cmd, !cmd  — commands never become steering text: they either run now as
 //	              a background exec or queue when they need the foreground.
-//	plain text  — a steer queued for the next supervision round.
+//	plain text  — first Enter queues the note, a second Enter on the same text
+//	              promotes it to an inject (see stageNote / promoteStaged).
 func (m tuiModel) sendTurnInput(text string) (tea.Model, tea.Cmd) {
 	if strings.HasPrefix(text, "/") || strings.HasPrefix(text, "!") {
 		m.ta.Reset()
 		m.ta.SetHeight(1)
 		return m.submitDuringTurn(text)
 	}
-	if m.stream == nil || !m.stream.injectSteer(text) {
-		note := block{kind: blockError, body: i18n.T(m.loc, "tui.steer.full")}
-		return m, m.printBlock(note)
+	// The draft that was just queued is still in the box on purpose: pressing
+	// Enter again on it is the escalate gesture, not a second message. Posting
+	// another note would make the round read the same words twice.
+	if s := m.staged; s != nil && strings.TrimSpace(s.text) == strings.TrimSpace(text) {
+		return m.promoteStaged()
 	}
-	m.ta.Reset()
-	m.ta.SetHeight(1)
-	steerPrefix := i18n.T(m.loc, "tui.turn.steerPrefix")
-	// The steer rides inside pendingPrompt and is persisted as part of this
-	// turn's user side by recordOutcome — appending it to convo here would
-	// leave an unpaired user turn in the replayed history.
-	m.pendingPrompt += "\n" + steerPrefix + text
-	blk := block{
-		kind: blockNote,
-		body: m.th.accent.Render("💡 ") + i18n.Tf(m.loc, "tui.turn.steered", "idea", text),
-	}
-	return m, m.printBlock(blk)
+	return m.stageNote(text)
 }
 
 // submitDuringTurn routes a /cmd or !cmd typed while a turn is live. The

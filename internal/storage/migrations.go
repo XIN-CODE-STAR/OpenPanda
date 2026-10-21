@@ -90,6 +90,7 @@ var migrations = []Migration{
 	{Version: 57, Name: "add_employee_prov", Apply: migrateV57},
 	{Version: 58, Name: "add_task_messages_consumed_at", Apply: migrateV58},
 	{Version: 59, Name: "add_employee_dir_row", Apply: migrateV59},
+	{Version: 60, Name: "add_task_messages_attachments", Apply: migrateV60},
 }
 
 // migrateV58 adds task_messages.consumed_at: the moment the recipient's round
@@ -1429,4 +1430,16 @@ func migrateV57(tx MigrationExec) error {
 		return err
 	}
 	return addColumnIfMissingTx(tx, "employee_cache", "prov", "TEXT NOT NULL DEFAULT ''")
+}
+
+// migrateV60 adds task_messages.attachments: the files a user rode along with
+// a queue/inject note, as a JSON array of workspace-relative paths. The body
+// already carries them as `@path` refs for the agent (see PostUserNote); this
+// column is what lets a console draw the note's chips and let the user edit
+// the prose without re-typing the attachment block. Empty = no attachments,
+// which is every row written before this migration.
+func migrateV60(tx MigrationExec) error {
+	_, err := tx.Exec(`ALTER TABLE task_messages
+		ADD COLUMN attachments TEXT NOT NULL DEFAULT ''`)
+	return err
 }

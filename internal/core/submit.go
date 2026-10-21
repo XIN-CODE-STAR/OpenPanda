@@ -595,7 +595,38 @@ func (c *Core) createTask(ctx context.Context, in TaskInput) (Task, string, stri
 			"stages_count": 1,
 		})
 	}
+	notifyTaskCreated(ctx, t)
 	return t, hash, level, nil
+}
+
+// taskObserverKey carries a task-creation observer through a request context.
+// A context value rather than a Core field: the observer belongs to one ask's
+// goroutine, and two concurrent asks (a board submission plus a foreground
+// turn) must not see each other's rows.
+type taskObserverKey struct{}
+
+// WithTaskObserver installs fn to be called once for every task row created
+// under ctx — the only point at which a caller learns the id of a task that is
+// about to run synchronously. A surface needs it before execution starts: by
+// the time Submit returns, the work is over and there is nothing left to
+// steer.
+func WithTaskObserver(ctx context.Context, fn func(Task)) context.Context {
+	if fn == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, taskObserverKey{}, fn)
+}
+
+// notifyTaskCreated fires the context's observer, if any. Best-effort by
+// construction: the callback is a notifier, never a decision, so a panic in it
+// must not abort the task the user asked for.
+func notifyTaskCreated(ctx context.Context, t Task) {
+	fn, _ := ctx.Value(taskObserverKey{}).(func(Task))
+	if fn == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	fn(t)
 }
 
 // runLocal executes a task on this node and returns the final row + result.
@@ -793,7 +824,7 @@ func (c *Core) ContinueReviewed(ctx context.Context, taskID, note string) (Task,
 	if steer == "" {
 		steer = "the operator asked to continue — pick up where the previous round stopped and finish the remaining work"
 	}
-	if err := c.userMessage(ctx, taskID, steer, MsgGradeSteer, "continue"); err != nil {
+	if _, err := c.userMessage(ctx, taskID, steer, nil, MsgGradeSteer, "continue"); err != nil {
 		return cur, err
 	}
 	if err := c.store.RequeueForContinue(ctx, taskID, cur.OwnerNode); err != nil {

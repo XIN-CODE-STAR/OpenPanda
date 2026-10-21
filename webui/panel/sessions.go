@@ -629,7 +629,10 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 		// every round boundary, so the note lands in the round after the one
 		// that was running when it was typed — the same contract the TUI's
 		// steer channel gives, and the only channel a task-less turn has.
-		GetSteer: func() string { return h.drainSteer(sess.ID) },
+		GetSteer: func() string {
+			text, _ := h.drainSteer(sess.ID)
+			return text
+		},
 		// The proof the note actually reached the model: a queued channel write
 		// alone cannot distinguish "delivered next round" from "the turn ended
 		// first". The console upgrades its "queued" note on this event.
