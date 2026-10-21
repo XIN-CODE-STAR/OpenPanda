@@ -245,8 +245,14 @@ func TestFsImageTempRootWidensReadOnlyForImages(t *testing.T) {
 	}
 
 	// Outside both the roots and the temp tree: refused.
-	// filepath.Dir(os.TempDir()) is the temp tree's parent on every platform.
-	outside := filepath.Join(filepath.Dir(os.TempDir()), "panda-image-outside.png")
+	//
+	// The temp tree's parent, not filepath.Dir(os.TempDir()): os.TempDir
+	// returns $TMPDIR verbatim, and macOS sets that with a trailing slash
+	// ("/var/folders/…/T/"), so Dir() lands back on the temp tree itself and
+	// the "outside" path would sit inside the root the endpoint allows.
+	// Clean() first, then one Dir() up, gives a path above the tree on
+	// every platform.
+	outside := filepath.Join(filepath.Dir(filepath.Clean(os.TempDir())), "panda-image-outside.png")
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, authedReq(http.MethodGet, "/api/fs/image?path="+url.QueryEscape(outside), nil))
 	if rr.Code != http.StatusForbidden {
