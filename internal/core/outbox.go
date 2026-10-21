@@ -694,6 +694,18 @@ func (c *Core) resumeOutboxDropKey(ctx context.Context, key, taskID string) {
 	}
 }
 
+// resumeOutboxDropTask removes every parked approval for a task, regardless
+// of the destination key it was parked under. Used once the executor's result
+// proves the approval landed: the task id is unique, so any copy is done.
+func (c *Core) resumeOutboxDropTask(ctx context.Context, taskID string) {
+	if c.db == nil || taskID == "" {
+		return
+	}
+	if _, err := c.db.ExecContext(ctx, `DELETE FROM resume_outbox WHERE task_id = ?`, taskID); err != nil {
+		c.logger.Debug("outbox: drop delivered resume", "task", taskID, "err", err)
+	}
+}
+
 // resumeOutboxDrop removes a delivered approval keyed by either form.
 func (c *Core) resumeOutboxDrop(ctx context.Context, peer, taskID string) {
 	if c.db == nil || peer == "" || taskID == "" {
@@ -817,9 +829,11 @@ func (c *Core) supersedeTarget(ctx context.Context, taskID, newTarget string) {
 		"prev", prev, "new", newTarget)
 }
 
-// deliverCancel places a task_cancel envelope on the wire to peer, returning
-// whether it was accepted by the connection. Shared by the initial send path
-// (forwardCancelDownstream) and the flush path.
+// deliverCancel places a task_cancel envelope on the wire to peer. accepted
+// is true when a direct/UDP send or a transit handoff took the frame; relayed
+// says the latter, so the initial-cancel path can keep a custody copy while
+// the flush path treats the handoff as its final attempt. Shared by the
+// initial send path (forwardCancelDownstream) and the flush path.
 func (c *Core) deliverCancel(ctx context.Context, peer, taskID, attemptID, reason string) (accepted, relayed bool) {
 	msgID, err := newUUID()
 	if err != nil {

@@ -449,7 +449,7 @@ func (c *Core) waitRemoteResult(ctx context.Context, cur Task, ch <-chan bus.Tas
 		case res := <-ch:
 			// The approval reached the executor and the result is here; a
 			// backup resume parked for a relay handoff has done its job.
-			c.resumeOutboxDrop(ctx, cur.OwnerNode, taskID)
+			c.resumeOutboxDropTask(ctx, taskID)
 			final, err := c.store.Get(ctx, taskID)
 			if err != nil {
 				return cur, res, err
@@ -475,7 +475,7 @@ func (c *Core) waitRemoteResult(ctx context.Context, cur Task, ch <-chan bus.Tas
 			if Terminal(t.State) {
 				// A monitor, cancel or concurrent runner already closed the
 				// row: report the real terminal state, not a timeout verdict.
-				c.resumeOutboxDrop(ctx, cur.OwnerNode, taskID)
+				c.resumeOutboxDropTask(ctx, taskID)
 				return t, bus.TaskResultPayload{
 					TaskID: t.TaskID, AttemptID: t.AttemptID, State: t.State,
 				}, nil
