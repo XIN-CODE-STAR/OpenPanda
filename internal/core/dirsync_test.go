@@ -304,7 +304,10 @@ func TestApplyDirRowConflicts(t *testing.T) {
 
 	t.Run("future seen_at clamps", func(t *testing.T) {
 		c := mkCore()
-		raw, _ := mintDirRow(t, "ghost", now+3600, nil)
+		// Use a fresh clock: the outer `now` predates the earlier subtests,
+		// and under -race the gap can exceed the two-second slack.
+		base := time.Now().Unix()
+		raw, _ := mintDirRow(t, "ghost", base+3600, nil)
 		if !c.applyDirRow(ctx, raw, "p") {
 			t.Fatal("future row rejected instead of clamped")
 		}
@@ -312,7 +315,7 @@ func TestApplyDirRowConflicts(t *testing.T) {
 		if err := c.db.QueryRow(`SELECT seen_at FROM employee_cache WHERE id='ghost'`).Scan(&seen); err != nil {
 			t.Fatal(err)
 		}
-		if seen > now+int64(dirFutureSkew.Seconds())+2 {
+		if seen > base+int64(dirFutureSkew.Seconds())+2 {
 			t.Fatalf("seen_at %d exceeded the clamp", seen)
 		}
 	})
