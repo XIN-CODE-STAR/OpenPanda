@@ -29,6 +29,11 @@ func initRepo(t *testing.T) string {
 	run("init", "-q", "-b", "main")
 	run("config", "user.email", "test@panda")
 	run("config", "user.name", "test")
+	// Keep the bytes as written. The Windows runner's default autocrlf would
+	// rewrite the worktree file to CRLF, so the diff (and the patch applied
+	// from it) would carry CRLF where the fixture wrote LF — the test then
+	// fails on the bytes, not on the behaviour it means to check.
+	run("config", "core.autocrlf", "false")
 	if err := os.WriteFile(filepath.Join(repo, "foo.txt"), []byte("v0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -212,6 +217,16 @@ func TestMintRefusesUntracked(t *testing.T) {
 	}
 }
 
+// normalizeEOL folds CRLF to LF so a fixture's line endings do not decide
+// whether the test passes: the behaviour under test is the patch, not the
+// platform's newline convention.
+func normalizeEOL(s string) string {
+	return strings.ReplaceAll(s, "\r\n", "\n")
+}
+
+// TestApplyConflictedGateAndArchive pins the apply path around the conflict
+// marker: a conflicted set never applies, lifting the marker makes it apply,
+// and the applied patch re-materialises the change.
 func TestApplyConflictedGateAndArchive(t *testing.T) {
 	m, repo := testManager(t)
 	ctx := context.Background()
@@ -240,7 +255,7 @@ func TestApplyConflictedGateAndArchive(t *testing.T) {
 		t.Fatalf("apply: %v", err)
 	}
 	body, err := os.ReadFile(filepath.Join(m.WorktreePath(), "delta.txt"))
-	if err != nil || string(body) != "delta\n" {
+	if err != nil || normalizeEOL(string(body)) != "delta\n" {
 		t.Fatalf("patch did not materialise: %q %v", body, err)
 	}
 
