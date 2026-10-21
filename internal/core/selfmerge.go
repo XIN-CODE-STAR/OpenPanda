@@ -126,17 +126,22 @@ func (c *Core) ProposeSelfMerge(ctx context.Context, patchSetID string) (Task, e
 	return c.store.Get(ctx, t.TaskID)
 }
 
-// selfSwapGuard refuses a merge in a process whose own binary is not a panda
-// install target: the updater's swap replaces os.Executable(), and writing a
-// panda build over the panel sidecar would destroy the console binary. It is a
-// variable so tests can exercise the pipeline from a test binary.
-var selfSwapGuard = func() error {
-	exe := filepath.Base(os.Args[0])
-	if strings.HasPrefix(exe, "panda") {
+// selfSwapGuard refuses a merge in a process whose own binary is not the
+// panda install target: the updater's swap replaces os.Executable(), and
+// writing a panda build over the panel sidecar (`panda-webui`) would destroy
+// the console binary. The match is exact — a prefix test let `panda-webui`
+// through, which is precisely the binary this guard exists to protect.
+func selfSwapGuardFor(exe string) error {
+	switch strings.ToLower(filepath.Base(exe)) {
+	case "panda", "panda.exe":
 		return nil
 	}
-	return fmt.Errorf("self-merge approvals run from the panda daemon or `panda approve` — this process (%s) would overwrite its own binary", exe)
+	return fmt.Errorf("self-merge approvals run from the panda daemon or `panda approve` — this process (%s) would overwrite its own binary", filepath.Base(exe))
 }
+
+// selfSwapGuard is a variable so tests can exercise the pipeline from a test
+// binary; production calls resolve os.Args[0] through selfSwapGuardFor.
+var selfSwapGuard = func() error { return selfSwapGuardFor(os.Args[0]) }
 
 // resumeSelfMerge is the ApprovalSelfMerge half of resumeApproved: the human
 // said yes, so apply the set to the worktree, re-run the release gate, build,

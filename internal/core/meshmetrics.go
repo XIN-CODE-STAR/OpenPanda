@@ -10,17 +10,17 @@ import "sync/atomic"
 // without a store write on the hot path. Every field is a monotonic total
 // since process start; rates are the caller's subtraction.
 type meshCounters struct {
-	transitTxBytes  atomic.Int64
-	transitRxBytes  atomic.Int64
-	transitRelayed  atomic.Int64
-	transitRefused  atomic.Int64
-	dirRowsIn       atomic.Int64
-	dirRowsOut      atomic.Int64
-	dirPulls        atomic.Int64
-	punchAttempts   atomic.Int64
-	punchSucceeded  atomic.Int64
-	dialCheckOK     atomic.Int64
-	dialCheckFail   atomic.Int64
+	transitTxBytes atomic.Int64
+	transitRxBytes atomic.Int64
+	transitRelayed atomic.Int64
+	transitRefused atomic.Int64
+	dirRowsIn      atomic.Int64
+	dirRowsOut     atomic.Int64
+	dirPulls       atomic.Int64
+	punchAttempts  atomic.Int64
+	punchSucceeded atomic.Int64
+	dialCheckOK    atomic.Int64
+	dialCheckFail  atomic.Int64
 }
 
 // MeshMetrics is the exported snapshot (`panda metrics`, the console's mesh

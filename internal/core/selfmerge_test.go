@@ -77,6 +77,22 @@ func newSelfTestCore(t *testing.T, id, producers string, mgr *self.Manager) *Cor
 	return c
 }
 
+// TestSelfSwapGuardBinaryName pins the exact-name rule: the sidecar binary
+// starts with "panda" too, and a prefix match let it through even though a
+// swap there overwrites panda-webui instead of the install target.
+func TestSelfSwapGuardBinaryName(t *testing.T) {
+	for _, exe := range []string{"panda", "panda.exe", "PANDA.EXE", "/usr/local/bin/panda"} {
+		if err := selfSwapGuardFor(exe); err != nil {
+			t.Errorf("selfSwapGuardFor(%q) = %v, want nil", exe, err)
+		}
+	}
+	for _, exe := range []string{"panda-webui", "panda-webui.exe", "core.test", "panel", ""} {
+		if err := selfSwapGuardFor(exe); err == nil {
+			t.Errorf("selfSwapGuardFor(%q) = nil, want refusal", exe)
+		}
+	}
+}
+
 // TestIdleExceptIgnoresOwnMergeTask pins the deadlock fix: a self-merge task
 // is RUNNING while it swaps the binary, and the updater's idle gate must not
 // count it as busy work.

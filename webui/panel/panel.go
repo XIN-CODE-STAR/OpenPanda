@@ -76,6 +76,11 @@ type Deps struct {
 	StaticDir  string
 	Token      string
 	Updater    *updater.Manager // nil disables the self-update endpoints
+	// Sidecar marks the standalone panda-webui process. A self-merge
+	// approval swaps os.Executable(), and the sidecar's executable is the
+	// console binary — not the panda install target. The daemon and
+	// `panda web` (both running the panda binary) leave this false.
+	Sidecar bool
 }
 
 // New builds the panel HTTP handler: the static web app under StaticDir plus
@@ -112,6 +117,7 @@ func New(d Deps) http.Handler {
 		configPath:         d.ConfigPath,
 		cardFilePath:       d.CardPath,
 		updater:            d.Updater,
+		sidecar:            d.Sidecar,
 		activeAsks:         make(map[string]sessionOperation),
 		approvalOperations: make(map[string]approvalOperation),
 		serviceCtx:         context.Background(),
@@ -514,6 +520,9 @@ type handler struct {
 	// means "ask the live engine which card it was built from".
 	cardFilePath string
 	updater      *updater.Manager
+	// sidecar is true in the standalone panda-webui process; a self-merge
+	// approval there would overwrite the console binary.
+	sidecar bool
 
 	// cfgMu guards h.cfg only when no engine exists to borrow a lock from —
 	// degraded static mode still serves concurrent HTTP handlers. When the
@@ -1135,6 +1144,14 @@ func (h *handler) approveTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if disposition == core.ApprovalNeedsChangedInput {
 		writeErr(w, http.StatusConflict, core.ErrApprovalNeedsChangedInput)
+		return
+	}
+	// A self-merge approval runs the merge pipeline, whose final step swaps
+	// os.Executable(). In the sidecar that file is panda-webui, not the panda
+	// install target — refuse before remembering the approval so the operator
+	// can settle the review from the daemon (`panda approve`).
+	if disposition == core.ApprovalSelfMerge && h.sidecar {
+		writeErr(w, http.StatusConflict, errors.New("self-merge proposals must be approved with `panda approve` — the web sidecar cannot swap its own binary"))
 		return
 	}
 	if !h.rememberTaskApproval(w, r, id, body.Scope, projectstore.DecisionApprove) {
