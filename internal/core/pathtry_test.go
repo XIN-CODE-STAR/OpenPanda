@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/Xustalis/OpenPanda/internal/bus"
+	"github.com/Xustalis/OpenPanda/internal/config"
+	"github.com/Xustalis/OpenPanda/internal/ledger"
 )
 
 func TestAddrRankAndPublic(t *testing.T) {
@@ -400,5 +402,118 @@ func TestRelayedPunchWantKeepsItsRequester(t *testing.T) {
 	}
 	if markedRelay {
 		t.Fatal("the offerer punched the relay instead of the requester")
+	}
+}
+
+// TestRelayedPunchWantReachesTheRequester pins the PRODUCER half of the
+// punch_want contract end to end: a want that crosses a relay must make the
+// elected offerer punch the REQUESTER, not the relay.
+//
+// The consumer half was already pinned by
+// TestRelayedPunchWantKeepsItsRequester, but a producer that omitted Src
+// passed every test: the relayed want then carried an empty Src, the relay
+// re-minted env.From as itself, and the offerer punched the RELAY — the one
+// node already reachable — instead of the node that asked.
+//
+// The sender's transit plane is off here on purpose: the sealed transit path
+// keeps the original From inside the inner envelope, so the plain-WS relay —
+// where the envelope is re-minted as the forwarder — is the path that loses
+// the requester, and it is the one this test drives.
+func TestRelayedPunchWantReachesTheRequester(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	requester := newCoreWithNative(t, "zz-want-req", "127.0.0.1:0",
+		ledger.NativeAbility{ID: "x", Command: "true"})
+	relay := newCoreWithNative(t, "mm-want-relay", "127.0.0.1:0",
+		ledger.NativeAbility{ID: "x", Command: "true"})
+	offerer := newCoreWithNative(t, "aa-want-off", "127.0.0.1:0",
+		ledger.NativeAbility{ID: "x", Command: "true"})
+	defer requester.Shutdown(ctx)
+	defer relay.Shutdown(ctx)
+	defer offerer.Shutdown(ctx)
+
+	// The sender's transit plane is off: the plain-WS relay is the path that
+	// re-mints the envelope and loses the requester.
+	requester.SetNetworkPolicy(config.NetworkConfig{Transit: false})
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayAddr := l.Addr().String()
+	_ = l.Close()
+	for _, c := range []*Core{requester, relay, offerer} {
+		if err := c.Register(ctx); err != nil {
+			t.Fatalf("register: %v", err)
+		}
+	}
+	go func() { _ = relay.Listen(ctx, relayAddr) }()
+	time.Sleep(300 * time.Millisecond)
+	dial := func(c *Core) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			if err := c.DialPeer(ctx, relayAddr); err == nil {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("dial relay: %v", err)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	dial(requester)
+	dial(offerer)
+	waitPeer(t, requester, relay.nodeID)
+	waitPeer(t, offerer, relay.nodeID)
+	waitPeer(t, relay, requester.nodeID)
+	waitPeer(t, relay, offerer.nodeID)
+
+	// The link state the routing consults: the requester reaches the offerer
+	// through the relay, and the relay reaches the offerer directly.
+	if _, err := requester.db.Exec(
+		`UPDATE employee_cache SET neighbors_json=? WHERE id=?`,
+		`["`+relay.nodeID+`"]`, requester.nodeID); err != nil {
+		t.Fatalf("seed requester neighbors: %v", err)
+	}
+	if _, err := relay.db.Exec(
+		`UPDATE employee_cache SET neighbors_json=? WHERE id=?`,
+		`["`+offerer.nodeID+`"]`, relay.nodeID); err != nil {
+		t.Fatalf("seed relay neighbors: %v", err)
+	}
+	if err := ledger.UpsertRemote(requester.db, relay.nodeID, ledger.CapabilitySummary{
+		Device:    relay.nodeID,
+		Neighbors: []string{requester.nodeID, offerer.nodeID},
+	}); err != nil {
+		t.Fatalf("upsert remote: %v", err)
+	}
+	if err := ledger.UpsertRemote(relay.db, offerer.nodeID, ledger.CapabilitySummary{
+		Device:    offerer.nodeID,
+		Neighbors: []string{relay.nodeID},
+	}); err != nil {
+		t.Fatalf("upsert remote: %v", err)
+	}
+
+	// The requester asks the elected offerer to punch it. "zz" > "aa", so the
+	// offerer is the elected side and the requester sends the want.
+	requester.sendPunchWant(ctx, offerer.nodeID)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		offerer.path.mu.Lock()
+		_, markedRequester := offerer.path.punchAt[requester.nodeID]
+		_, markedRelay := offerer.path.punchAt[relay.nodeID]
+		offerer.path.mu.Unlock()
+		if markedRequester {
+			if markedRelay {
+				t.Fatal("the offerer punched the relay as well as the requester")
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the offerer never marked the requester (relay marked=%v)", markedRelay)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

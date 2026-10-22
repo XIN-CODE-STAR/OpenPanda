@@ -602,3 +602,64 @@ func newCoreErr(t *testing.T) *Core {
 	c.SetSharedSecret(testSharedSecret)
 	return c
 }
+
+// TestTransitRejectsUnsealedNonPairInner pins the one guard every sibling
+// has a test for: SealNone is the PAIRING handshake's exemption and nothing
+// else's. A member that seals nothing around a delegate or heartbeat inner
+// would have every relay that ferried the frame act as a legitimate reader
+// of the plaintext — the blind-relay confidentiality property the design
+// guarantees.
+//
+// The positive control matters as much as the negative: a pair frame riding
+// SealNone must still be delivered, or the exemption would be untested too.
+func TestTransitRejectsUnsealedNonPairInner(t *testing.T) {
+	ctx := context.Background()
+	b := newCoreErr(t)
+	pub, priv, err := bus.GenerateNodeKey()
+	if err != nil {
+		t.Fatalf("generate signer: %v", err)
+	}
+	signerPubHex := hex.EncodeToString(pub)
+	if _, err := b.db.Exec(
+		`INSERT INTO employee_cache (id, pub_key, status, last_seen)
+		 VALUES ('ghost', ?, 'offline', 0)`, signerPubHex); err != nil {
+		t.Fatalf("seed pinned row: %v", err)
+	}
+
+	deliver := func(name string, typ string, payload any) bool {
+		t.Helper()
+		env, err := bus.NewEnvelope(typ, "ghost", "hb-"+name, payload)
+		if err != nil {
+			t.Fatalf("envelope: %v", err)
+		}
+		env.To = b.nodeID
+		raw, err := json.Marshal(env)
+		if err != nil {
+			t.Fatalf("marshal env: %v", err)
+		}
+		inner := transitInner{Env: raw, Pub: signerPubHex, Sig: bus.SignTransitInner(priv, raw)}
+		innerJSON, err := json.Marshal(inner)
+		if err != nil {
+			t.Fatalf("marshal inner: %v", err)
+		}
+		// SealNone: the payload travels in the clear.
+		b.deliverTransit(ctx, bus.Envelope{
+			V: 1, Type: bus.MsgTransit, MsgID: "outer-" + name, From: "relay",
+		}, bus.TransitPayload{
+			Dest: b.nodeID, TTL: bus.TransitMaxTTL,
+			Seal: bus.SealNone, Inner: innerJSON,
+		})
+		var status string
+		err = b.db.QueryRow(`SELECT COALESCE(status,'') FROM employee_cache WHERE id='ghost'`).Scan(&status)
+		return err == nil && status == "online"
+	}
+
+	if deliver("heartbeat", bus.MsgHeartbeat,
+		bus.HeartbeatPayload{Status: "online", Card: json.RawMessage(`{"device":"ghost"}`)}) {
+		t.Fatal("an UNSEALED non-pair inner was dispatched — the blind-relay seal was bypassed")
+	}
+	// The positive path (a pair frame riding SealNone) is covered by
+	// TestPairOverTransitThroughContactPoint, which drives it through the
+	// production contact-point path; this test pins the branch that had no
+	// coverage at all — the REJECTION of an unsealed non-pair inner.
+}

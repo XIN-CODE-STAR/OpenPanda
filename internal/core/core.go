@@ -2142,12 +2142,25 @@ func (c *Core) removePeerForConn(conn *bus.Conn) {
 // read loop keeps the connection alive. Short-lived schedulers (the ask CLI)
 // use this so they can dial every peer and then proceed to routing. A daemon
 // that must hold the connection and reconnect on drop should use MaintainPeer.
+//
+// The ctx bounds the DIAL, not the connection. A caller that wants a short
+// dial budget (the reachability ladder) must not hand that budget to the
+// read loop: cancelling it the moment the dial returns would close the
+// connection before the peer's hello reply was ever read, and the edge
+// would die on arrival. See dialPeerWithLife.
 func (c *Core) DialPeer(ctx context.Context, addr string) error {
-	conn, err := c.dial(ctx, addr)
+	return c.dialPeerWithLife(ctx, context.WithoutCancel(ctx), addr)
+}
+
+// dialPeerWithLife connects with a dial budget (ctx) and serves the
+// resulting connection under a separate lifetime (life). The two are different
+// clocks: the budget bounds the attempt, the lifetime bounds the edge.
+func (c *Core) dialPeerWithLife(dialCtx, life context.Context, addr string) error {
+	conn, err := c.dial(dialCtx, addr)
 	if err != nil {
 		return err
 	}
-	c.goGuarded("inbound read "+conn.PeerID(), func() { c.handleInbound(ctx, conn) })
+	c.goGuarded("inbound read "+conn.PeerID(), func() { c.handleInbound(life, conn) })
 	return nil
 }
 
