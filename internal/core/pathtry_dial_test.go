@@ -44,6 +44,22 @@ func TestLadderDialKeepsItsConnectionAlive(t *testing.T) {
 	dialer := newCoreWithNative(t, "ladder-dialer", "127.0.0.1:0",
 		ledger.NativeAbility{ID: "sys:info", Command: "uname"})
 	registerAndListen(t, ctx, server, serverAddr)
+	// registerAndListen starts Listen in a goroutine; wait until it actually
+	// accepts before dialing. On a slow Windows runner the first dial could
+	// land before the listener was up, get refused, and the ladder (which
+	// dials each candidate once per pass) would report no route.
+	readyBy := time.Now().Add(5 * time.Second)
+	for {
+		conn, derr := net.DialTimeout("tcp", serverAddr, 200*time.Millisecond)
+		if derr == nil {
+			_ = conn.Close()
+			break
+		}
+		if time.Now().After(readyBy) {
+			t.Fatalf("listener never became reachable at %s: %v", serverAddr, derr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 
 	// The ladder rung dials the peer's ADVERTISED address, so the directory
 	// row has to carry it. A directly-learned row (learned_via empty) is

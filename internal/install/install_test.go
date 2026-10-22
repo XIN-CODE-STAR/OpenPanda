@@ -636,8 +636,13 @@ func TestBackupZipPrivateAndAbortsOnHole(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat backup: %v", err)
 	}
-	if got := st.Mode().Perm(); got != 0o600 {
-		t.Fatalf("backup mode = %o, want 600", got)
+	// Windows has no Unix permission bits: os.OpenFile's 0600 is a no-op and
+	// Stat reports 0666 for every ordinary file. The privacy guarantee there
+	// is the ACL inherited from the (owner-only) home directory, not a mode.
+	if runtime.GOOS != "windows" {
+		if got := st.Mode().Perm(); got != 0o600 {
+			t.Fatalf("backup mode = %o, want 600", got)
+		}
 	}
 
 	out := ExecuteUninstall(targets, UninstallOptions{BackupPath: zipPath})
