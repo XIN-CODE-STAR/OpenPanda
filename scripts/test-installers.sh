@@ -44,8 +44,10 @@ trap 'rm -rf "$WORK"' EXIT
 
 pass=0
 fail=0
+skip=0
 ok()   { pass=$((pass + 1)); printf '  ok    %s\n' "$1"; }
 bad()  { fail=$((fail + 1)); printf '  FAIL  %s\n' "$1" >&2; }
+skipped() { skip=$((skip + 1)); printf '  skip  %s\n' "$1"; }
 
 # ── Stage a release tree ────────────────────────────────────────────────────
 echo "→ packaging $TARGET as v$VERSION"
@@ -244,10 +246,121 @@ else
     bad "service definition does not reference $want"
 fi
 
+# ── 7. A release older than the data directory must be refused ──────────────
+# The guard exists because installing a binary whose migration ceiling is below
+# the database's user_version strands the data directory: the next launch dies
+# with "schema version newer than this binary". It has to fire *before* the
+# prefix is touched, and --force has to override it for a deliberate downgrade.
+echo "→ install (schema downgrade, must refuse)"
+if command -v sqlite3 >/dev/null 2>&1; then
+    mkdir -p "$WORK/data" "$WORK/cfg"
+    sqlite3 "$WORK/data/openpanda.db" "PRAGMA user_version=999;"
+    printf 'storage:\n  db_path: "%s"\n' "$WORK/data/openpanda.db" > "$WORK/cfg/config.yaml"
+
+    downgrade_install() { # <prefix> [extra args...]
+        pfx="$1"; shift
+        env -i PATH="${PATH:-/usr/bin:/bin}" HOME="$HOME_DIR" \
+            OPENPANDA_CONFIG_PATH="$WORK/cfg/config.yaml" \
+            OPENPANDA_RELEASE_BASE="file://$WORK/dist" \
+            OPENPANDA_RELEASE_API="file://$WORK/dist/latest.json" \
+            sh scripts/install.sh --no-service --prefix "$pfx" --version "$VERSION" "$@"
+    }
+
+    if downgrade_install "$WORK/prefix-downgrade" > "$WORK/run7.log" 2>&1; then
+        bad "installer accepted a downgrade over a newer data directory"
+    elif grep -qE 'refusing to install|拒绝安装' "$WORK/run7.log"; then
+        ok "installer refused the downgrade"
+    else
+        bad "installer refused, but not for the schema (see below)"
+        tail -10 "$WORK/run7.log" >&2
+    fi
+    if [ ! -e "$WORK/prefix-downgrade/bin/panda" ]; then
+        ok "refused downgrade left no binary behind"
+    else
+        bad "a refused downgrade still wrote $WORK/prefix-downgrade/bin/panda"
+    fi
+    if downgrade_install "$WORK/prefix-downgrade" --force > "$WORK/run7b.log" 2>&1; then
+        ok "--force overrode the schema guard"
+    else
+        bad "--force did not override the schema guard"
+        tail -10 "$WORK/run7b.log" >&2
+    fi
+else
+    skipped "schema guard (sqlite3 not available to stage a newer database)"
+fi
+
+# ── 8. A release signed by a foreign key must be refused ────────────────────
+# SHA-256 alone cannot catch a substituted checksums.txt (it travels with the
+# archive); the Ed25519 signature is what the self-updater trusts. The installer
+# verifies it wherever the local OpenSSL can (pkeyutl -rawin). Stock macOS
+# LibreSSL cannot, and degrades to a warning by design — that is a skip, not a
+# pass, so a host that silently stopped verifying cannot look green here.
+echo "→ install (foreign signature, must refuse)"
+mkdir -p "$WORK/badsig"
+cp "$WORK/dist/$ARCHIVE" "$WORK/badsig/$ARCHIVE"
+cp "$WORK/dist/checksums.txt" "$WORK/badsig/checksums.txt"
+head -c 64 /dev/zero | openssl base64 -A > "$WORK/badsig/checksums.txt.sig"
+if env -i PATH="${PATH:-/usr/bin:/bin}" HOME="$HOME_DIR" \
+        OPENPANDA_RELEASE_BASE="file://$WORK/badsig" \
+        sh scripts/install.sh --no-service --prefix "$WORK/prefix-badsig" --version "$VERSION" \
+        > "$WORK/run8.log" 2>&1; then
+    if grep -q 'cannot verify Ed25519' "$WORK/run8.log"; then
+        skipped "release signature (this host's openssl has no Ed25519)"
+    else
+        bad "installer accepted a checksums.txt signed by another key"
+    fi
+elif grep -q 'does not verify' "$WORK/run8.log"; then
+    ok "installer refused the foreign signature"
+else
+    bad "installer failed, but not on the signature (see below)"
+    tail -10 "$WORK/run8.log" >&2
+fi
+
+# ── 9. --lite target selection ──────────────────────────────────────────────
+# Lite ships Linux targets only; the flag has to be refused on any other host
+# instead of resolving an archive that does not exist. On a Linux host the real
+# lite install runs end to end, since that is the only place the binary is
+# executable.
+echo "→ install (--lite)"
+if [ "$HOST_OS" = linux ]; then
+    lite_target="lite-linux-$HOST_ARCH"
+    if OPENPANDA_DIST_DIR="$WORK/dist" OPENPANDA_PACKAGE_TARGETS="$lite_target" \
+            sh scripts/package.sh "$VERSION" > "$WORK/package-lite.log" 2>&1; then
+        if env -i PATH="${PATH:-/usr/bin:/bin}" HOME="$HOME_DIR" \
+                OPENPANDA_RELEASE_BASE="file://$WORK/dist" \
+                sh scripts/install.sh --no-service --lite --prefix "$WORK/prefix-lite" --version "$VERSION" \
+                > "$WORK/run9.log" 2>&1; then
+            if "$WORK/prefix-lite/bin/panda" version 2>/dev/null | grep -q "$VERSION"; then
+                ok "--lite installed a working binary"
+            else
+                bad "--lite installed a binary that does not run"
+            fi
+        else
+            bad "--lite install failed"
+            tail -10 "$WORK/run9.log" >&2
+        fi
+    else
+        bad "packaging $lite_target failed"
+        tail -10 "$WORK/package-lite.log" >&2
+    fi
+else
+    if env -i PATH="${PATH:-/usr/bin:/bin}" HOME="$HOME_DIR" \
+            OPENPANDA_RELEASE_BASE="file://$WORK/dist" \
+            sh scripts/install.sh --no-service --lite --prefix "$WORK/prefix-lite" --version "$VERSION" \
+            > "$WORK/run9.log" 2>&1; then
+        bad "--lite was accepted on $HOST_OS, which ships no lite target"
+    elif grep -qE 'lite build currently ships Linux targets only|lite 构建目前只发布 Linux 目标' "$WORK/run9.log"; then
+        ok "--lite refused on $HOST_OS"
+    else
+        bad "--lite failed, but not for the platform reason (see below)"
+        tail -10 "$WORK/run9.log" >&2
+    fi
+fi
+
 # ── Summary ─────────────────────────────────────────────────────────────────
 echo
 if [ "$fail" -ne 0 ]; then
-    echo "test-installers: FAILED ($fail failed, $pass passed)"
+    echo "test-installers: FAILED ($fail failed, $pass passed, $skip skipped)"
     exit 1
 fi
-echo "test-installers: OK ($pass checks passed on $TARGET)"
+echo "test-installers: OK ($pass checks passed on $TARGET, $skip skipped)"
