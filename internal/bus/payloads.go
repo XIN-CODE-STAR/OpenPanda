@@ -229,8 +229,16 @@ type DialCheckAckPayload struct {
 // PunchWantPayload is the auto-punch request (M3): the sender asks the
 // receiver — the lexicographically-smaller, offerer-elected side — to send
 // it a punch_offer. TTL bounds relay hops the same way punch_offer's does.
+//
+// Src names the REQUESTER and must survive the relay. A relayed envelope is
+// re-minted as the forwarder's (env.From = this node) because the receiving
+// conn authenticates envelopes by their bound peer id — so the requester
+// would otherwise be lost, and the elected offerer would punch the RELAY
+// instead of the node that asked. It rides the payload for the same reason
+// PunchOfferPayload.Src does.
 type PunchWantPayload struct {
-	TTL int `json:"ttl"`
+	Src string `json:"src,omitempty"`
+	TTL int    `json:"ttl"`
 }
 
 // DirPullPayload is the differential-sync request (M1): the requester's own

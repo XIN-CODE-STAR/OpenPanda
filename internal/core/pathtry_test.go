@@ -190,8 +190,12 @@ func TestNatSuspectWindow(t *testing.T) {
 	c.learnPeerUDP("zz", 7836, nil, "")
 	c.path.init()
 
-	// First failed window: offer goes out, no route — one strike.
+	// First failed window: the offer goes out, the spray runs, no route lands —
+	// one strike. The verdict is applied when the window closes, not at offer
+	// time: a pinhole confirmed inside the window is a success, and counting
+	// before the spray had a chance marked every punch as a failure.
 	c.autoPunch(ctx, "zz")
+	c.notePunchAttempt("zz")
 	c.path.mu.Lock()
 	tries := c.path.punchTries["zz"]
 	c.path.mu.Unlock()
@@ -203,6 +207,7 @@ func TestNatSuspectWindow(t *testing.T) {
 	c.path.punchAt["zz"] = time.Now().Add(-2 * autoPunchEvery)
 	c.path.mu.Unlock()
 	c.autoPunch(ctx, "zz")
+	c.notePunchAttempt("zz")
 	c.path.mu.Lock()
 	suspect, marked := c.path.natSuspect["zz"]
 	c.path.mu.Unlock()
@@ -354,5 +359,46 @@ func TestNatStateClearsOnRoute(t *testing.T) {
 	}
 	if n != 0 {
 		t.Fatal("empty snapshot should delete the persisted key")
+	}
+}
+
+// TestRelayedPunchWantKeepsItsRequester pins the origin across a relay hop.
+//
+// A punch_want travels the mesh to the elected offerer, and a relayed
+// envelope is re-minted as the FORWARDER's (env.From = this node) because
+// the receiving conn authenticates envelopes by their bound peer id. The
+// requester therefore survives only in the payload — and it used to survive
+// nowhere, so after a relay hop the offerer punched the RELAY (the one node
+// already reachable) instead of the node that asked.
+func TestRelayedPunchWantKeepsItsRequester(t *testing.T) {
+	ctx := context.Background()
+
+	// "aa" is the elected offerer for the pair (aa, zz).
+	a := newCoreOnDB(t, openTestDB(t), "aa")
+	if err := a.ListenUDP(ctx, "127.0.0.1:0", nil); err != nil {
+		t.Fatalf("udp: %v", err)
+	}
+	a.learnPeerUDP("zz", 7836, nil, "")
+
+	// A want that crossed a relay: the envelope's From is the RELAY (the
+	// conn it arrived on), and the payload carries the real requester.
+	env, err := bus.NewEnvelope(bus.MsgPunchWant, "middle", "m-relay", bus.PunchWantPayload{
+		Src: "zz",
+		TTL: bus.PunchMaxTTL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.handlePunchWant(ctx, env)
+
+	a.path.mu.Lock()
+	_, markedRequester := a.path.punchAt["zz"]
+	_, markedRelay := a.path.punchAt["middle"]
+	a.path.mu.Unlock()
+	if !markedRequester {
+		t.Fatal("the offerer did not honor the want's real requester")
+	}
+	if markedRelay {
+		t.Fatal("the offerer punched the relay instead of the requester")
 	}
 }
