@@ -10,6 +10,7 @@ OpenPanda project docs that are intentionally part of the public source tree.
 - [`protocol.md`](protocol.md) — P2P bus protocol distilled from `internal/bus`: WS + sealed-UDP transports, negotiated per-session AEAD and binary data frames, message envelope, hello/heartbeat/delegation/result/artifact/DTN/punch/pair frames, frame caps, the HMAC-membership + Ed25519-identity hello auth, LAN discovery beacons, trust-zone clamping, and the mesh-only rule for screen-capture tasks and their output. (中文 · [English](protocol.en.md))
 - [`../SECURITY.md`](../SECURITY.md) — trust model (single shared secret, negotiated session AEAD + gated plaintext fallback, encrypted UDP/DTN planes, mesh-exclusive display content), deployment red lines, and the vulnerability reporting channel. (中文 · [English](../SECURITY.en.md) · [日本語](../SECURITY.ja.md) · [Español](../SECURITY.es.md) · [Deutsch](../SECURITY.de.md))
 - [`testing/distributed-lab-plan.md`](testing/distributed-lab-plan.md) — the three-node interop scenarios gating each release.
+- [`testing/three-node-runbook.md`](testing/three-node-runbook.md) — the runbook for the three-real-device cross-network test (Mac / public cloud / Windows): the per-node configs, the firewall rules, the Clash bypass the hole punch needs, and how to tell a direct pinhole from a relayed hop. (中文)
 
 ## Internal documents
 
