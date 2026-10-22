@@ -2433,33 +2433,6 @@ func (e *Engine) startClassifiedPlan(ctx context.Context, spec *entry.PlanSpec, 
 	return res, nil
 }
 
-// gateAuthorized resolves the effective tier-2 consent for a task from the
-// configured approval mode and any standing session authorization. It is the
-// single decision point for the three modes so the semantics stay auditable
-// (and unit-testable) in one place:
-//
-//   - never       — tier-2 runs as classified; consent is implied.
-//   - on-request  — the default; consent is withheld until the user approves
-//     at the inline gate (a tier-2 task parks in review otherwise), unless an
-//     explicit session grant (--authorize / /authorize on) already consented.
-//   - always      — consent is always withheld at submission: every tier-2
-//     task parks in review and is decided per-task in the foreground. A
-//     standing session grant must not silently satisfy the gate — "每次都需
-//     审批" means the approval happens after the task exists and says what it
-//     will do, not as a flag covering whatever the session produces. The
-//     approval itself (ResumeApproved) carries its own consent and does not
-//     pass through this function.
-func gateAuthorized(mode string, sessionAuthorized bool) bool {
-	switch mode {
-	case config.ApprovalModeNever:
-		return true
-	case config.ApprovalModeAlways:
-		return false
-	default:
-		return sessionAuthorized
-	}
-}
-
 // submitTask executes a classified task spec through the scheduler core and
 // maps the outcome to a Result. In queue mode the task is Enqueued and the
 // call returns immediately (TaskState "queued"); the queue scheduler starts

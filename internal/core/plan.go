@@ -983,32 +983,44 @@ func (c *Core) SpawnChildTask(ctx context.Context, parentID string, in TaskInput
 	if err != nil {
 		return Task{}, fmt.Errorf("create child task: %w", err)
 	}
+	// A failed persistence of a BOUND is not a warning: the row is what every
+	// later hop and restart reads, so a lost depth/cap/scope/isolate means the
+	// child runs with a weaker policy than the one it was minted under. The
+	// child is cancelled before the error returns, or it would sit in
+	// submitted and be requeued by recovery.
+	fail := func(stage string, err error) (Task, error) {
+		_ = c.store.Cancel(ctx, t.TaskID)
+		return Task{}, fmt.Errorf("persist child %s: %w", stage, err)
+	}
 	if err := c.store.SetSpawnDepth(ctx, t.TaskID, childDepth); err != nil {
-		c.logger.Warn("persist child spawn depth", "task", t.TaskID, "err", err)
+		return fail("spawn depth", err)
 	}
 	t.SpawnDepth = childDepth
 	// The child inherits the effective cap its spawn was judged against —
 	// stamping it here (not at dispatch) keeps the bound honest across
 	// restarts and onward forwards, where only the row survives.
 	if err := c.store.SetSpawnCap(ctx, t.TaskID, cap); err != nil {
-		c.logger.Warn("persist child spawn cap", "task", t.TaskID, "err", err)
+		return fail("spawn cap", err)
 	}
 	t.SpawnCap = cap
 	if paths := normalizeScopePaths(in.Paths); len(paths) > 0 {
 		if err := c.store.SetScopePaths(ctx, t.TaskID, paths); err != nil {
-			c.logger.Warn("persist child scope paths", "task", t.TaskID, "err", err)
+			return fail("scope paths", err)
 		}
 		t.ScopePaths = paths
 	}
 	if in.Isolate {
+		// Without this the child runs against the SHARED tree while its
+		// siblings were promised private copies — two tasks writing one
+		// checkout, which is the collision isolation exists to stop.
 		if err := c.store.SetIsolate(ctx, t.TaskID, true); err != nil {
-			c.logger.Warn("persist child isolate", "task", t.TaskID, "err", err)
+			return fail("isolate", err)
 		}
 		t.Isolate = true
 	}
 	if in.WorkDir != "" {
 		if err := c.store.SetWorkDir(ctx, t.TaskID, in.WorkDir); err != nil {
-			c.logger.Warn("persist child work dir", "task", t.TaskID, "err", err)
+			return fail("work dir", err)
 		}
 	}
 	if err := c.store.SetAuthorized(ctx, t.TaskID, in.Authorized); err != nil {
@@ -1020,7 +1032,7 @@ func (c *Core) SpawnChildTask(ctx context.Context, parentID string, in TaskInput
 		// The detail IS the child's intent and requires: without it the row
 		// would run with an empty intent — a silent wrong-run. Fail the
 		// spawn; the parent folds "delegation failed: ..." and can retry.
-		return Task{}, fmt.Errorf("persist child detail: %w", err)
+		return fail("detail", err)
 	}
 	// A pre-budget parent (delegation_budget=0, e.g. a row minted before v19)
 	// carries the default; its child's dispatch still decrements normally.
@@ -1029,14 +1041,16 @@ func (c *Core) SpawnChildTask(ctx context.Context, parentID string, in TaskInput
 		budget = scheduler.MaxDelegationBudget
 	}
 	if err := c.store.SetDelegationBudget(ctx, t.TaskID, budget); err != nil {
-		c.logger.Warn("persist child delegation budget", "task", t.TaskID, "err", err)
+		// A lost budget reads as 0 = unbounded on the next hop.
+		return fail("delegation budget", err)
 	}
 	// The token quota is mesh-wide too (§6.1): the child draws from the same
 	// remainder the parent carries — zero stays unbounded, an exhausted
 	// parent spawns an already-exhausted child that declines on dispatch.
 	if parent.TokenBudget != 0 {
 		if err := c.store.SetTokenBudget(ctx, t.TaskID, parent.TokenBudget); err != nil {
-			c.logger.Warn("persist child token budget", "task", t.TaskID, "err", err)
+			// A lost quota reads as 0 = unbounded mesh-wide.
+			return fail("token budget", err)
 		}
 	}
 	c.EvTrace(ctx, t.TaskID, "spawn_child_task", map[string]any{
