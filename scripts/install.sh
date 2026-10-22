@@ -281,7 +281,10 @@ verify_release_sig() { # <sums> <sig> → 0 verified, 1 bad signature, 2 no veri
 
 if [ -n "${OPENPANDA_SKIP_SIG:-}" ]; then
     warn "$(T "已按 OPENPANDA_SKIP_SIG 跳过发布签名校验" "release signature check skipped (OPENPANDA_SKIP_SIG)")"
-elif [ ! -f "$WORK/checksums.txt.sig" ]; then
+elif [ ! -s "$WORK/checksums.txt.sig" ]; then
+    # -s, not -f: a failed wget leaves a zero-byte file behind, and treating
+    # that as "a signature that does not verify" would abort an install that
+    # merely lacks the signature.
     if [ -n "${OPENPANDA_REQUIRE_SIG:-}" ]; then
         die "$(T "该发布没有 checksums.txt.sig，且已要求强制验签" "the release ships no checksums.txt.sig and OPENPANDA_REQUIRE_SIG is set")"
     fi

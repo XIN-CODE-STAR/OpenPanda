@@ -316,6 +316,36 @@ else
     tail -10 "$WORK/run8.log" >&2
 fi
 
+# ── 8b. A release with no signature installs, but says so ───────────────────
+# Forks and mirrors stage releases without a signing key. That has to stay
+# installable — SHA-256 still passed — but it must not be silent, and
+# OPENPANDA_REQUIRE_SIG=1 must turn it into a refusal.
+echo "→ install (no checksums.txt.sig)"
+mkdir -p "$WORK/nosig"
+cp "$WORK/dist/$ARCHIVE" "$WORK/nosig/$ARCHIVE"
+cp "$WORK/dist/checksums.txt" "$WORK/nosig/checksums.txt"
+if env -i PATH="${PATH:-/usr/bin:/bin}" HOME="$HOME_DIR" \
+        OPENPANDA_RELEASE_BASE="file://$WORK/nosig" \
+        sh scripts/install.sh --no-service --prefix "$WORK/prefix-nosig" --version "$VERSION" \
+        > "$WORK/run8b.log" 2>&1; then
+    if grep -q 'ships no checksums.txt.sig' "$WORK/run8b.log"; then
+        ok "unsigned release installed with a warning"
+    else
+        bad "unsigned release installed without saying the signature was missing"
+    fi
+else
+    bad "installer refused a release that merely lacks a signature"
+    tail -10 "$WORK/run8b.log" >&2
+fi
+if env -i PATH="${PATH:-/usr/bin:/bin}" HOME="$HOME_DIR" \
+        OPENPANDA_RELEASE_BASE="file://$WORK/nosig" OPENPANDA_REQUIRE_SIG=1 \
+        sh scripts/install.sh --no-service --prefix "$WORK/prefix-nosig2" --version "$VERSION" \
+        > "$WORK/run8c.log" 2>&1; then
+    bad "OPENPANDA_REQUIRE_SIG accepted an unsigned release"
+else
+    ok "OPENPANDA_REQUIRE_SIG refused the unsigned release"
+fi
+
 # ── 9. --lite target selection ──────────────────────────────────────────────
 # Lite ships Linux targets only; the flag has to be refused on any other host
 # instead of resolving an archive that does not exist. On a Linux host the real
