@@ -42,11 +42,11 @@ OpenPanda（**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **
 
 暂无未发布内容。
 
-## [0.1.0] - 2026-10-22
+## [0.1.0-preview] - 2026-10-22
 
-**第一个发布级版本**——代号 **Constellation**：v0.0.12 预览画出的那支舰队，原样保留，只是它身后多了发布审计的全部正确性与安全性收口。
+**发布级版本线的第一个切点**——代号 **Constellation**：v0.0.12 预览画出的那支舰队，原样保留，只是它身后多了发布审计的全部正确性与安全性收口。
 
-在此之前都是预览线，每一次发布也都直说自己是预览：wire 会变，存储会迁移，安装脚本的职责是给你最新的东西，而不是给你已经定下来的东西。`0.1.0` 是第一个我们愿意为它背书的版本——`install.sh` 递给陌生人的是它，更新器允许把运行中的节点搬上去的是它，审计在真实的 Mac → 中继 → 云链路跑完之后签字的也是它。功能集是 Constellation 的；变的是它身后站着什么。
+在此之前都是预览线，每一次发布也都直说自己是预览：wire 会变，存储会迁移，安装脚本的职责是给你最新的东西，而不是给你已经定下来的东西。`0.1.0-preview` 是第一个我们愿意为它背书的版本——`install.sh` 递给陌生人的是它，更新器允许把运行中的节点搬上去的是它，审计在真实的 Mac → 中继 → 云链路跑完之后签字的也是它。功能集是 Constellation 的；变的是它身后站着什么。
 
 这个说法立在三件事上：
 
@@ -151,6 +151,12 @@ OpenPanda（**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **
 - **存储转发托管在链路闪断间按正确顺序投递** —— 停泊的 cancel 先于停泊的 delegate flush（停机令永远赶在它所针对的重投递之前送达），人工树级取消绝不因新投递泊车而被清掉，task_outbox 行不再复活终态/失败的任务，重启的 daemon 按稳定身份而非崩溃前的实例号收回自己的停泊托管。
 - **委派 run 走统一的 settle 路径，回传包大幅瘦身** —— 执行侧三条执行路径的结果现在统一汇入 `settleDelegated`，checkpoint 续跑、预算内重试、向上游 decline 对委派任务与本地任务行为一致；context 续跑与工件续跑的 decline 盖泊车时的 attempt 而非行当前的；输出包跳过可再生目录（实测 389 MB 结果包缩到 84.6 MB）（f53ddcf）。
 - **重启恢复续跑幸存任务并指名阻塞者** —— 被打断的 run 续跑而非从零重启，agent 切换进度提前可见，项目键匹配折叠大小写，重启恢复不再回收 peer 执行的行，外节点 pin 的队列任务被正确解除，exec-lock 等待报告是谁占着车道，adapter 的畸形 JSON 加了守卫（e0c7bec、5044f4a）。
+
+- **Windows 安装器也拒绝降级了** —— `install.sh`、`panda install`、`panda update apply` 都会拒绝迁移上限低于数据目录 `user_version` 的二进制，只有 `install.ps1` 会把包无条件覆盖到前缀目录：旧版可以装到新库上，留下一个启动即死、数据被搁在身后的 daemon。现在会在动前缀之前先用 `panda version --json` 探测解包出来的包，`-Force` / `OPENPANDA_FORCE=1` 留给有意的降级。
+
+- **shell 安装器校验发布签名，而不只是校验和** —— `checksums.txt` 与安装包同源下载，SHA-256 抓不住两者一起被换掉。`install.sh` 现在按自更新器强制执行的同一把 Ed25519 公钥校验 `checksums.txt.sig`：不符即中止，只有本机 openssl 做不了 Ed25519（macOS 自带 LibreSSL）时才降级为一条明确警告。`OPENPANDA_REQUIRE_SIG=1` 让「无法验签」也成为失败。
+
+- **`install.ps1` 从它真正下载的仓库解析版本** —— API 端点原本写死上游仓库，而 `OPENPANDA_REPO_URL` 只改下载基址，于是 fork 或镜像会解析到它并不提供的 tag。
 
 ## [0.0.12-preview] - 2026-10-19
 

@@ -48,11 +48,11 @@ OpenPanda (**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **A
 
 _No unreleased changes yet._
 
-## [0.1.0] - 2026-10-22
+## [0.1.0-preview] - 2026-10-22
 
-**The first release-grade version** — codename **Constellation**: the same fleet the v0.0.12 preview drew, with the release audit's correctness and security work closed behind it.
+**The first cut of the release-grade line** — codename **Constellation**: the same fleet the v0.0.12 preview drew, with the release audit's correctness and security work closed behind it.
 
-Everything before this was a preview line, and every cut said so: the wire could move, the store could migrate under you, and the installer's job was to hand you the newest thing rather than the settled one. `0.1.0` is the first version we are willing to stand behind — the one `install.sh` hands a stranger, the one the updater may move a running node onto, and the one the audit signs off on after a live Mac → relay → cloud run. The feature set is Constellation's. What changed is what stands behind it.
+Everything before this was a preview line, and every cut said so: the wire could move, the store could migrate under you, and the installer's job was to hand you the newest thing rather than the settled one. `0.1.0-preview` is the first version we are willing to stand behind — the one `install.sh` hands a stranger, the one the updater may move a running node onto, and the one the audit signs off on after a live Mac → relay → cloud run. The feature set is Constellation's. What changed is what stands behind it.
 
 What that claim rests on:
 
@@ -157,6 +157,12 @@ What that claim rests on:
 - **Store-and-forward custody orders correctly across a link flap** — parked cancels flush before parked delegates (the stand-down always beats the re-delivery it was meant to precede), a parked human cancel is never cleared by a newer delivery parking, task-outbox rows no longer resurrect terminal/failed work, and a restarted daemon reclaims its parked custody under its stable identity rather than the bounced instance id.
 - **Delegated runs settle through the shared retry loop and ship slimmer output** — the three executor-side execution paths now funnel their outcome through `settleDelegated`, so checkpoint resume, budgeted retries and upstream decline behave identically for delegated and local work; context-resumed and artifact-resumed runs decline under the parked attempt rather than whatever the row happens to hold later; and output packs skip regenerable directories (a measured 389 MB result pack shrank to 84.6 MB) (f53ddcf).
 - **Restart recovery resumes what survived and names what blocks** — interrupted runs are resumed instead of restarted from scratch, agent-switch progress surfaces early, project-key matching folds case, restart recovery no longer reclaims peer-executed rows, foreign-pinned queue tasks are unpinned correctly, exec-lock waits report who holds the lane, and malformed adapter JSON is guarded (e0c7bec, 5044f4a).
+
+- **The Windows installer refuses a downgrade the way every other path already did** — `install.sh`, `panda install` and `panda update apply` all refuse a binary whose migration ceiling sits below the data directory's `user_version`; `install.ps1` copied the archive over the prefix unconditionally, so an older release could be installed over a newer database and leave a daemon that dies at startup with the data stranded behind it. The staged archive is probed with `panda version --json` before the prefix is touched, and `-Force` / `OPENPANDA_FORCE=1` covers a deliberate downgrade.
+
+- **The shell installer verifies the release signature, not just the checksum** — `checksums.txt` arrives from the same origin as the archive, so SHA-256 could not catch both being substituted together. `install.sh` now verifies `checksums.txt.sig` under the same pinned Ed25519 key the self-updater enforces: a mismatch aborts the install, and only a host whose openssl cannot do Ed25519 (stock macOS LibreSSL) degrades to an explicit warning. `OPENPANDA_REQUIRE_SIG=1` makes an unverifiable release fatal.
+
+- **`install.ps1` resolves versions from the repository it downloads from** — the API endpoint was pinned to the upstream repo while `OPENPANDA_REPO_URL` moved the download base, so a fork or mirror resolved a tag it does not serve.
 
 ## [0.0.12-preview] - 2026-10-19
 

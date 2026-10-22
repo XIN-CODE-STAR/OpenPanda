@@ -42,11 +42,11 @@ OpenPanda (**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **A
 
 Aún no hay cambios sin publicar.
 
-## [0.1.0] - 2026-10-22
+## [0.1.0-preview] - 2026-10-22
 
-**La primera versión de calidad de release** — nombre en clave **Constellation**: la misma flota que dibujó la vista previa v0.0.12, ahora con todo el trabajo de corrección y seguridad de la auditoría cerrado detrás.
+**El primer corte de la línea de calidad de release** — nombre en clave **Constellation**: la misma flota que dibujó la vista previa v0.0.12, ahora con todo el trabajo de corrección y seguridad de la auditoría cerrado detrás.
 
-Todo lo anterior fue una línea de vista previa, y cada entrega lo decía: el protocolo podía moverse, el almacén podía migrar bajo tus pies y el instalador servía para darte lo más nuevo, no lo asentado. `0.1.0` es la primera versión que estamos dispuestos a respaldar: la que `install.sh` entrega a un desconocido, la que el actualizador puede aplicar sobre un nodo en marcha y la que la auditoría firma tras una ejecución real Mac → relay → nube. El conjunto de funciones es el de Constellation. Lo que cambió es lo que hay detrás.
+Todo lo anterior fue una línea de vista previa, y cada entrega lo decía: el protocolo podía moverse, el almacén podía migrar bajo tus pies y el instalador servía para darte lo más nuevo, no lo asentado. `0.1.0-preview` es la primera versión que estamos dispuestos a respaldar: la que `install.sh` entrega a un desconocido, la que el actualizador puede aplicar sobre un nodo en marcha y la que la auditoría firma tras una ejecución real Mac → relay → nube. El conjunto de funciones es el de Constellation. Lo que cambió es lo que hay detrás.
 
 En qué se apoya esa afirmación:
 
@@ -144,6 +144,12 @@ En qué se apoya esa afirmación:
 - **La custodia store-and-forward se entrega en el orden correcto tras un corte de enlace** — los cancels aparcados se vacían antes que los delegates aparcados (la orden de retirada siempre llega antes que la reentrega a la que iba dirigida), un cancel humano aparcado nunca se borra porque aparque una entrega nueva, las filas de `task_outbox` ya no resucitan trabajo terminal/fallido, y un daemon reiniciado recupera su custodia aparcada bajo su identidad estable y no bajo el id de instancia fallecido.
 - **Las ejecuciones delegadas se liquidan por el bucle de reintentos compartido y el paquete de salida adelgaza** — las tres rutas de ejecución del lado ejecutor ahora canalizan su resultado por `settleDelegated`, de modo que la reanudación por checkpoint, los reintentos presupuestados y el decline aguas arriba se comportan igual para trabajo delegado y local; las ejecuciones reanudadas por contexto o por artefactos declinan con el intento aparcado y no con el que la fila tenga después; y los paquetes de salida omiten directorios regenerables (un paquete medido de 389 MB se redujo a 84,6 MB) (f53ddcf).
 - **La recuperación tras reinicio reanuda lo que sobrevivió y nombra lo que bloquea** — las ejecuciones interrumpidas se reanudan en vez de reiniciarse de cero, el progreso del cambio de agente se muestra pronto, la coincidencia de claves de proyecto ignora mayúsculas, la recuperación tras reinicio ya no reclama filas ejecutadas por pares, las tareas en cola fijadas por otro nodo se liberan correctamente, las esperas de exec-lock informan de quién ocupa el carril y el JSON malformado de los adapters queda blindado (e0c7bec, 5044f4a).
+
+- **El instalador de Windows también rechaza una degradación** — `install.sh`, `panda install` y `panda update apply` rechazan un binario cuyo techo de migración queda por debajo del `user_version` del directorio de datos; `install.ps1` copiaba el archivo sobre el prefijo sin condiciones, así que un release antiguo podía instalarse sobre una base de datos nueva y dejar un daemon que muere al arrancar con los datos atrás. Ahora sondea el archivo desempaquetado con `panda version --json` antes de tocar el prefijo, y `-Force` / `OPENPANDA_FORCE=1` cubre una degradación deliberada.
+
+- **El instalador de shell verifica la firma del release, no solo el checksum** — `checksums.txt` llega desde el mismo origen que el archivo, así que SHA-256 no podía detectar la sustitución de ambos a la vez. `install.sh` ahora verifica `checksums.txt.sig` con la misma clave Ed25519 fijada que exige el autoactualizador: si no coincide, aborta; y solo donde openssl no puede con Ed25519 (LibreSSL de macOS de serie) degrada a un aviso explícito. `OPENPANDA_REQUIRE_SIG=1` convierte «no se puede verificar» en un fallo.
+
+- **`install.ps1` resuelve la versión desde el repositorio del que descarga** — el endpoint de la API estaba fijado al repositorio upstream mientras `OPENPANDA_REPO_URL` movía la base de descarga, de modo que un fork o un espejo resolvía una etiqueta que no sirve.
 
 ## [0.0.12-preview] - 2026-10-19
 

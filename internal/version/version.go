@@ -10,18 +10,18 @@ package version
 // Version is the semantic version of this build, and the default for a build
 // that does not go through release packaging.
 //
-// It tracks the newest tag on main — currently v0.1.0, the first release-grade
-// version — so ad-hoc builds identify themselves with the branch's latest
-// published lineage.
-var Version = "0.1.0"
+// It tracks the newest tag on main — currently v0.1.0-preview, the first cut
+// of the release-grade line — so ad-hoc builds identify themselves with the
+// branch's latest published lineage.
+var Version = "0.1.0-preview"
 
 // Codename is the release line's thematic name — "Constellation": the fleet
 // drawn as one sky. The workspace page renders every device as a plate on a
 // live topology map keyed by hop count, same-project tasks fly in parallel
 // through path-scoped lanes and isolated worktrees, and the console
 // consolidates into the single place that constellation is commanded from.
-// v0.1.0 is the first release-grade version on that line: the same shape, with
-// the audit's correctness and security fixes closed. Surfaced by `panda
+// v0.1.0-preview is the first cut of the release-grade line: the same shape,
+// with the audit's correctness and security fixes closed. Surfaced by `panda
 // version` and /api/version; not part of the semver itself.
 var Codename = "Constellation"
 
