@@ -27,7 +27,7 @@ curl -fsSL https://raw.githubusercontent.com/Xustalis/OpenPanda/main/scripts/ins
 Equivalent explicit invocations:
 
 ```bash
-sh scripts/install.sh --version 0.0.11   # install a specific version (e.g. stable 0.0.11, the older pre-release 0.0.11-preview; default `latest` = newest stable)
+sh scripts/install.sh --version 0.1.0   # install a specific version (e.g. stable 0.1.0, the older pre-release 0.0.12-preview; default `latest` = newest stable)
 sh scripts/install.sh --prefix /opt/openpanda  # custom install directory
 sh scripts/install.sh --lite                   # lite build: no embedded Web console/TUI (Linux only)
 sh scripts/install.sh --yes                    # also register auto-start (no prompt)
@@ -90,7 +90,7 @@ irm https://raw.githubusercontent.com/Xustalis/OpenPanda/main/scripts/install.ps
 Or download first and run:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.0.11 -Yes
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.1.0 -Yes
 ```
 
 Installs to `%LOCALAPPDATA%\OpenPanda\` and adds `bin` to the **user
@@ -210,7 +210,7 @@ from "manual control" once more.
 ## Publishing a new release
 
 1. Merge the change into `main`, confirm that commit's **Gate is green**,
-   then tag: `git tag v0.0.11 && git push origin v0.0.11` (two caveats:
+   then tag: `git tag v0.1.0 && git push origin v0.1.0` (two caveats:
    the CHANGELOG must already contain a section for that version or the
    release pipeline refuses to publish; the release pipeline checks the
    Gate conclusion for **the same commit** — if there is no push-triggered
