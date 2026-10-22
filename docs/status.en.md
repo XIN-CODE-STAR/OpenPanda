@@ -158,8 +158,10 @@ English translation of [status.md](status.md)（中文版为准）· English
 > `-Force`), `install.sh` verifies the release signature where the local
 > openssl supports Ed25519 and aborts on a mismatch, and `install.ps1`
 > resolves versions from the repository it actually downloads from.
-> Installer coverage grew to 21 checks in `scripts/test-installers.sh`,
-> adding downgrade refusal, a foreign signature and `--lite`. The
+> Installer coverage grew to 23 checks in `scripts/test-installers.sh`,
+> adding downgrade refusal and the `--force` override, a foreign signature, an
+> unsigned release that must warn (and must be refused under
+> `OPENPANDA_REQUIRE_SIG`), and `--lite`. The
 > cross-network mesh P1–P5 landed whole (dual-key identity and reachability
 > cards, transitive blind relay, epidemic directory sync, K=2 rendezvous edges
 > and the reachability ladder, the policy surface and relay budgets,

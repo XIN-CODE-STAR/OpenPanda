@@ -182,6 +182,34 @@ jobs:
           After installing, run `panda init` to set the node up, or just type `panda` to drop into the REPL. An older install upgrades in place with the same command — user data is preserved.
           INSTALL
 
+          # A pre-release is deliberately not what /releases/latest resolves to,
+          # so every one-liner above installs the last stable release — not the
+          # page the reader is on. The install block is generic, so say it here
+          # and hand over the version-pinned form instead of letting a visitor
+          # copy a command that quietly gives them something else.
+          case "$GITHUB_REF_NAME" in
+            *-*)
+          cat >> "$notes" <<'PRERELEASE'
+
+          > **This is a pre-release.** `/releases/latest`, the one-liners above and the
+          > Homebrew tap keep serving the last stable release — none of them resolve to
+          > this cut. To install it, name the version:
+
+          ```sh
+          curl -fsSL https://raw.githubusercontent.com/Xustalis/OpenPanda/main/scripts/install.sh | sh -s -- --version __VERSION__
+          ```
+
+          **Windows (PowerShell)**
+
+          ```powershell
+          irm https://raw.githubusercontent.com/Xustalis/OpenPanda/main/scripts/install.ps1 -OutFile install.ps1
+          powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version __VERSION__
+          ```
+          PRERELEASE
+              sed -i "s/__VERSION__/$ver/g" "$notes"
+              ;;
+          esac
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3
         with:
