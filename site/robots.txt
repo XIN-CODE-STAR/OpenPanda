@@ -1,0 +1,7 @@
+# robots.txt — OpenPanda
+# The site is a single page plus a 404; nothing here needs crawling limits.
+
+User-agent: *
+Allow: /
+
+Sitemap: https://xustalis.github.io/OpenPanda/sitemap.xml

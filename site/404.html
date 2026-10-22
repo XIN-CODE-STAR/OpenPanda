@@ -1,0 +1,126 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>404 — 这条航线没有节点 · OpenPanda</title>
+<style>
+  /* Self-contained on purpose: GitHub Pages serves this file for any missing
+     path, so relative asset URLs would resolve against that path and 404 too.
+     The two background URLs cover root-relative hosting and local preview. */
+  :root {
+    --paper: #faf9f5;
+    --jade: #6fc7a1;
+    --night: #05060a;
+    --mono: 'IBM Plex Mono', 'SF Mono', Menlo, Consolas, monospace;
+    --sans: 'Inter', 'SF Pro Display', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+    --serif: 'Newsreader', 'Songti SC', 'STSong', Georgia, serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    display: grid;
+    place-items: center;
+    padding: 32px;
+    background: var(--night);
+    color: var(--paper);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+  .sky {
+    position: fixed;
+    inset: 0;
+    background:
+      linear-gradient(180deg, rgba(5,6,10,.72) 0%, rgba(5,6,10,.88) 60%, #05060a 100%),
+      url('/OpenPanda/textures/hero-still.jpg') center / cover no-repeat,
+      url('textures/hero-still.jpg') center / cover no-repeat,
+      radial-gradient(120% 80% at 70% 10%, rgba(111,199,161,.12), transparent 60%),
+      #05060a;
+    filter: saturate(.9);
+  }
+  .sky::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(60% 50% at 50% 50%, transparent, rgba(5,6,10,.55) 70%);
+  }
+  main { position: relative; max-width: 640px; text-align: center; }
+  .mark { width: 52px; height: 52px; margin: 0 auto 28px; border-radius: 15px; background: #0c7a55; display: grid; place-items: center; box-shadow: 0 14px 40px -16px rgba(12, 122, 85, .8); }
+  .code {
+    margin: 0;
+    font-family: var(--serif);
+    font-size: clamp(84px, 18vw, 148px);
+    font-weight: 300;
+    line-height: .9;
+    letter-spacing: -.05em;
+    color: rgba(250,249,245,.92);
+  }
+  .kicker {
+    margin: 18px 0 0;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: .24em;
+    text-transform: uppercase;
+    color: var(--jade);
+  }
+  h1 { margin: 26px 0 14px; font-size: clamp(20px, 3.2vw, 26px); font-weight: 600; letter-spacing: -.02em; }
+  p.lede {
+    margin: 0 auto;
+    max-width: 460px;
+    font-family: var(--serif);
+    font-size: 16px;
+    line-height: 1.75;
+    color: rgba(250,249,245,.56);
+  }
+  .links { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; margin-top: 36px; }
+  .links a {
+    padding: 11px 20px;
+    border: 1px solid rgba(250,249,245,.22);
+    border-radius: 999px;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: rgba(250,249,245,.8);
+    text-decoration: none;
+    transition: border-color .2s, color .2s, background .2s;
+  }
+  .links a:hover { border-color: var(--jade); color: #fff; background: rgba(12,122,85,.24); }
+  .links a.primary { border-color: rgba(111,199,161,.6); color: var(--jade); }
+  footer {
+    position: relative;
+    margin-top: 56px;
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: rgba(250,249,245,.28);
+  }
+</style>
+</head>
+<body>
+  <div class="sky" aria-hidden="true"></div>
+  <main>
+    <div class="mark" aria-hidden="true">
+      <svg width="32" height="32" viewBox="0 0 40 40" aria-hidden="true"><defs><mask id="pm404"><rect width="40" height="40" fill="#000"/><circle cx="20" cy="21.9" r="11.6" fill="#fff"/><circle cx="12.1" cy="10.7" r="4.7" fill="#fff"/><circle cx="27.9" cy="10.7" r="4.7" fill="#fff"/><ellipse cx="15.2" cy="20.1" rx="2.45" ry="3.05" transform="rotate(-16 15.2 20.1)" fill="#000"/><ellipse cx="24.8" cy="20.1" rx="2.45" ry="3.05" transform="rotate(16 24.8 20.1)" fill="#000"/><ellipse cx="20" cy="26.4" rx="1.55" ry="1.15" fill="#000"/></mask></defs><rect width="40" height="40" fill="#eafff6" mask="url(#pm404)"/></svg>
+    </div>
+
+    <p class="code">404</p>
+    <p class="kicker">No node at this coordinate</p>
+    <h1>这条航线没有节点。</h1>
+    <p class="lede">页面可能已经改名、被合并进别的章节，或者这一步本来就在你的计划之外。回到主场，或者去仓库里找找。</p>
+
+    <div class="links">
+      <a class="primary" href="/OpenPanda/">返回首页</a>
+      <a href="https://github.com/Xustalis/OpenPanda">GitHub</a>
+      <a href="https://github.com/Xustalis/OpenPanda/blob/main/docs/status.md">项目现状</a>
+    </div>
+
+    <footer>OpenPanda · Local-first orchestration kernel</footer>
+  </main>
+</body>
+</html>
