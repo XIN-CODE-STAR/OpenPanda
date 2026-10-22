@@ -48,51 +48,95 @@ func notifyDaemonReload(configPath string) {
 	notifyDaemonReloadTo(os.Stdout, configPath)
 }
 
+// reloadOutcome is why a SIGHUP did or did not happen. It exists because
+// "not signaled" is not one condition: a daemon that is genuinely gone, a pid
+// whose owner could not be verified, and a signal that failed all leave the
+// user with a different thing to do, and collapsing them into one bool made
+// the caller print "daemon not running" when the daemon was running fine.
+type reloadOutcome int
+
+const (
+	reloadSignaled     reloadOutcome = iota // SIGHUP delivered
+	reloadNotRunning                        // no pidfile, unreadable, or the pid is gone
+	reloadStranger                          // the pid belongs to another program
+	reloadUnverified                        // ps could not be consulted
+	reloadSignalFailed                      // the pid was ours but the signal failed
+)
+
 // sighupDaemon delivers SIGHUP to the daemon PID recorded next to the
 // database configPath's config points at. Signal 0 probes liveness first: a
 // stale PID file from a crashed daemon must not turn into a signal to an
 // unrelated process that happened to reuse the number.
-func sighupDaemon(configPath string) (int, bool) {
+func sighupDaemon(configPath string) (int, reloadOutcome) {
 	pidFile := daemonPIDFile(configPath)
 	if pidFile == "" {
-		return 0, false
+		return 0, reloadNotRunning
 	}
 	data, err := os.ReadFile(pidFile)
 	if err != nil {
-		return 0, false
+		return 0, reloadNotRunning
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil || pid <= 0 {
-		return 0, false
+		return 0, reloadNotRunning
 	}
 	if err := syscall.Kill(pid, 0); err != nil {
-		return 0, false
+		return 0, reloadNotRunning
 	}
-	if !looksLikePandaProcess(pid) {
-		return 0, false
+	switch verdict := looksLikePandaProcess(pid); verdict {
+	case procStranger:
+		return 0, reloadStranger
+	case procUnverified:
+		// Fail closed — SIGHUP's default action terminates whatever it lands
+		// on — but say so honestly instead of claiming the daemon is gone.
+		return pid, reloadUnverified
 	}
 	if err := syscall.Kill(pid, syscall.SIGHUP); err != nil {
 		fmt.Fprintf(os.Stderr, "could not signal daemon (pid %d): %v\n", pid, err)
-		return 0, false
+		return pid, reloadSignalFailed
 	}
-	return pid, true
+	return pid, reloadSignaled
 }
+
+// procVerdict is what the pidfile identity probe could establish. The third
+// state is the point: ps is a child process, and a sandbox, a stripped
+// container, or a PATH without ps all make it fail for reasons that have
+// nothing to do with whether the daemon is running.
+type procVerdict int
+
+const (
+	procMatches    procVerdict = iota // comm names this binary
+	procStranger                      // comm names some other program
+	procUnverified                    // ps could not answer
+)
 
 // looksLikePandaProcess keeps a stale pidfile from becoming a footgun: a
 // crashed daemon leaves the file, the number gets reused by an unrelated
 // same-user process, and signal 0 alone cannot tell them apart — SIGHUP's
 // default action terminates whatever it lands on. Comm names the program;
 // anything that does not look like this binary degrades to the restart hint
-// instead of signaling a stranger. ps exists on every unix the daemon runs
-// on, and a miss is fail-closed (no signal, hint printed), never a wrong kill.
-func looksLikePandaProcess(pid int) bool {
+// instead of signaling a stranger.
+//
+// When ps itself is unavailable this returns procUnverified rather than
+// procStranger: the caller still refuses to signal (fail closed), but it must
+// not tell the user the daemon is down when the truth is that we could not
+// check.
+func looksLikePandaProcess(pid int) procVerdict {
 	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
 	if err != nil {
-		return false
+		return procUnverified
 	}
 	comm := strings.ToLower(filepath.Base(strings.TrimSpace(string(out))))
+	if comm == "" || comm == "." {
+		// ps succeeded but printed nothing: the pid vanished between the
+		// liveness probe and this call.
+		return procStranger
+	}
 	self := strings.ToLower(filepath.Base(os.Args[0]))
-	return comm == self || strings.Contains(comm, "panda")
+	if comm == self || strings.Contains(comm, "panda") {
+		return procMatches
+	}
+	return procStranger
 }
 
 // notifyDaemonReloadTo SIGHUPs a running daemon so it hot-reloads the card,
@@ -101,12 +145,19 @@ func looksLikePandaProcess(pid int) bool {
 // resolved all degrade to the restart hint — the card on disk is already the
 // new one either way.
 func notifyDaemonReloadTo(out io.Writer, configPath string) {
-	pid, ok := sighupDaemon(configPath)
-	if !ok {
+	pid, outcome := sighupDaemon(configPath)
+	switch outcome {
+	case reloadSignaled:
+		fmt.Fprintf(out, "daemon (pid %d) told to reload the card — changes are live\n", pid)
+	case reloadUnverified:
+		fmt.Fprintf(out, "daemon (pid %d) could not be verified (ps unavailable), so it was not signaled — the new card is picked up when it restarts\n", pid)
+	case reloadStranger:
+		fmt.Fprintln(out, "the recorded pid belongs to another program — the new card is picked up at the daemon's next start")
+	case reloadSignalFailed:
+		fmt.Fprintln(out, "the daemon could not be signaled — the new card is picked up when it restarts")
+	default:
 		fmt.Fprintln(out, "daemon not running — the new card is picked up at its next start")
-		return
 	}
-	fmt.Fprintf(out, "daemon (pid %d) told to reload the card — changes are live\n", pid)
 }
 
 // notifyDaemonMeshTo is the peer-list counterpart of notifyDaemonReloadTo:
@@ -115,10 +166,17 @@ func notifyDaemonReloadTo(out io.Writer, configPath string) {
 // through Core.ApplyNetworkConfig — the link forms (or drops) without a
 // restart.
 func notifyDaemonMeshTo(out io.Writer, configPath string) {
-	pid, ok := sighupDaemon(configPath)
-	if !ok {
+	pid, outcome := sighupDaemon(configPath)
+	switch outcome {
+	case reloadSignaled:
+		fmt.Fprintf(out, "daemon (pid %d) applied the new peer list — live now\n", pid)
+	case reloadUnverified:
+		fmt.Fprintf(out, "daemon (pid %d) could not be verified (ps unavailable), so it was not signaled — the new peer list takes effect when it restarts\n", pid)
+	case reloadStranger:
+		fmt.Fprintln(out, "the recorded pid belongs to another program — the new peer list takes effect at the daemon's next start")
+	case reloadSignalFailed:
+		fmt.Fprintln(out, "the daemon could not be signaled — the new peer list takes effect when it restarts")
+	default:
 		fmt.Fprintln(out, "daemon not running — the new peer list takes effect at its next start")
-		return
 	}
-	fmt.Fprintf(out, "daemon (pid %d) applied the new peer list — live now\n", pid)
 }

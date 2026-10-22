@@ -63,9 +63,7 @@ func runConfig(args []string) {
 			configUsage()
 			return
 		default:
-			fmt.Fprintln(os.Stderr, "panda: "+i18n.Tf(i18n.Detect(), "cli.unknownNamed", "kind", "config section", "name", section))
-			configUsage()
-			os.Exit(2)
+			failUsage(2, "panda: "+i18n.Tf(i18n.Detect(), "cli.unknownNamed", "kind", "config section", "name", section), configUsage)
 		}
 	}
 	if len(rest) == 0 {
@@ -82,9 +80,7 @@ func runConfig(args []string) {
 	case "help", "-h", "--help":
 		configUsage()
 	default:
-		fmt.Fprintln(os.Stderr, "panda: "+i18n.Tf(i18n.Detect(), "cli.unknownNamedOpts", "kind", "config action", "name", action, "opts", "get|set|test"))
-		configUsage()
-		os.Exit(2)
+		failUsage(2, "panda: "+i18n.Tf(i18n.Detect(), "cli.unknownNamedOpts", "kind", "config action", "name", action, "opts", "get|set|test"), configUsage)
 	}
 }
 
@@ -271,20 +267,17 @@ func runConfigSet(section string, args []string) {
 		configPath := fs.String("config", cliConfigPath, "path to config.yaml")
 		fs.Parse(reorderFlags(fs, args))
 		if fs.NArg() != 2 {
-			fmt.Fprintln(os.Stderr, "usage: panda config limits set <user|memory|project> <int>")
-			os.Exit(2)
+			fail(2, "usage: panda config limits set <user|memory|project> <int>")
 		}
 		key, raw := fs.Arg(0), fs.Arg(1)
 		switch key {
 		case "user", "memory", "project":
 		default:
-			fmt.Fprintln(os.Stderr, "panda: "+i18n.Tf(i18n.Detect(), "cli.unknownNamedOpts", "kind", "limits key", "name", key, "opts", "user|memory|project"))
-			os.Exit(2)
+			fail(2, "panda: "+i18n.Tf(i18n.Detect(), "cli.unknownNamedOpts", "kind", "limits key", "name", key, "opts", "user|memory|project"))
 		}
 		value, err := strconv.Atoi(raw)
 		if err != nil || value <= 0 {
-			fmt.Fprintf(os.Stderr, "panda: limits value must be a positive integer, got %q\n", raw)
-			os.Exit(2)
+			failf(2, "panda: limits value must be a positive integer, got %q\n", raw)
 		}
 		if err := config.UpdateSectionFieldInt(configWritePath(*configPath), []string{"memory", "limits"}, key, value); err != nil {
 			fatal("config limits set", err)
@@ -295,15 +288,13 @@ func runConfigSet(section string, args []string) {
 		configPath := fs.String("config", cliConfigPath, "path to config.yaml")
 		fs.Parse(reorderFlags(fs, args))
 		if fs.NArg() != 2 {
-			fmt.Fprintln(os.Stderr, "usage: panda config delegation set <max_children|fanout|max_depth> <int> | enabled <true|false>")
-			os.Exit(2)
+			fail(2, "usage: panda config delegation set <max_children|fanout|max_depth> <int> | enabled <true|false>")
 		}
 		key, raw := fs.Arg(0), fs.Arg(1)
 		if key == "enabled" {
 			value, err := strconv.ParseBool(raw)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "panda: delegation enabled must be true or false, got %q\n", raw)
-				os.Exit(2)
+				failf(2, "panda: delegation enabled must be true or false, got %q\n", raw)
 			}
 			if err := config.UpdateSectionFieldBool(configWritePath(*configPath), []string{"delegation"}, key, value); err != nil {
 				fatal("config delegation set", err)
@@ -314,13 +305,11 @@ func runConfigSet(section string, args []string) {
 		switch key {
 		case "max_children", "fanout", "max_depth":
 		default:
-			fmt.Fprintln(os.Stderr, "panda: "+i18n.Tf(i18n.Detect(), "cli.unknownNamedOpts", "kind", "delegation key", "name", key, "opts", "max_children|fanout|max_depth|enabled"))
-			os.Exit(2)
+			fail(2, "panda: "+i18n.Tf(i18n.Detect(), "cli.unknownNamedOpts", "kind", "delegation key", "name", key, "opts", "max_children|fanout|max_depth|enabled"))
 		}
 		value, err := strconv.Atoi(raw)
 		if err != nil || value <= 0 {
-			fmt.Fprintf(os.Stderr, "panda: delegation value must be a positive integer, got %q\n", raw)
-			os.Exit(2)
+			failf(2, "panda: delegation value must be a positive integer, got %q\n", raw)
 		}
 		if err := config.UpdateSectionFieldInt(configWritePath(*configPath), []string{"delegation"}, key, value); err != nil {
 			fatal("config delegation set", err)
@@ -331,8 +320,7 @@ func runConfigSet(section string, args []string) {
 		configPath := fs.String("config", cliConfigPath, "path to config.yaml")
 		fs.Parse(reorderFlags(fs, args))
 		if fs.NArg() < 1 || fs.Arg(0) != "preferred_agents" {
-			fmt.Fprintln(os.Stderr, "usage: panda config routing set preferred_agents <a,b,c>")
-			os.Exit(2)
+			fail(2, "usage: panda config routing set preferred_agents <a,b,c>")
 		}
 		var agents []string
 		if fs.NArg() == 2 {
@@ -354,8 +342,7 @@ func runConfigSet(section string, args []string) {
 		switch value {
 		case config.InjectionModelAuto, config.InjectionModelAlways, config.InjectionModelNever:
 		default:
-			fmt.Fprintln(os.Stderr, "panda: injection model must be auto, always, or never")
-			os.Exit(2)
+			fail(2, "panda: injection model must be auto, always, or never")
 		}
 		if err := config.UpdateSectionField(configWritePath(*configPath), []string{"injection"}, "model", value); err != nil {
 			fatal("config injection set", err)
@@ -369,8 +356,7 @@ func runConfigSet(section string, args []string) {
 		switch value {
 		case config.ApprovalModeAlways, config.ApprovalModeOnRequest, config.ApprovalModeNever:
 		default:
-			fmt.Fprintln(os.Stderr, "panda: approval mode must be always, on-request, or never")
-			os.Exit(2)
+			fail(2, "panda: approval mode must be always, on-request, or never")
 		}
 		if err := config.UpdateSectionField(configWritePath(*configPath), []string{"approval"}, "mode", value); err != nil {
 			fatal("config approval set", err)
@@ -381,8 +367,7 @@ func runConfigSet(section string, args []string) {
 		configPath := fs.String("config", cliConfigPath, "path to config.yaml")
 		fs.Parse(reorderFlags(fs, args))
 		if fs.NArg() != 2 {
-			fmt.Fprintln(os.Stderr, "usage: panda config self_evolution set <enabled|rebase_on_update> <true|false> | <repo> <path> | <producers> <self|mesh>")
-			os.Exit(2)
+			fail(2, "usage: panda config self_evolution set <enabled|rebase_on_update> <true|false> | <repo> <path> | <producers> <self|mesh>")
 		}
 		key, raw := fs.Arg(0), fs.Arg(1)
 		path := configWritePath(*configPath)
@@ -390,27 +375,23 @@ func runConfigSet(section string, args []string) {
 		case "enabled", "rebase_on_update":
 			value, err := strconv.ParseBool(raw)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "panda: self_evolution %s must be true or false, got %q\n", key, raw)
-				os.Exit(2)
+				failf(2, "panda: self_evolution %s must be true or false, got %q\n", key, raw)
 			}
 			if err := config.UpdateSectionFieldBool(path, []string{"self_evolution"}, key, value); err != nil {
 				fatal("config self_evolution set", err)
 			}
 		case "repo", "producers":
 			if key == "producers" && raw != "self" && raw != "mesh" {
-				fmt.Fprintf(os.Stderr, "panda: producers must be self or mesh, got %q\n", raw)
-				os.Exit(2)
+				failf(2, "panda: producers must be self or mesh, got %q\n", raw)
 			}
 			if key == "repo" && strings.TrimSpace(raw) == "" {
-				fmt.Fprintln(os.Stderr, "panda: repo must name this node's OpenPanda checkout")
-				os.Exit(2)
+				fail(2, "panda: repo must name this node's OpenPanda checkout")
 			}
 			if err := config.UpdateSectionField(path, []string{"self_evolution"}, key, raw); err != nil {
 				fatal("config self_evolution set", err)
 			}
 		default:
-			fmt.Fprintf(os.Stderr, "panda: unknown self_evolution key %q (want enabled|repo|producers|rebase_on_update)\n", key)
-			os.Exit(2)
+			failf(2, "panda: unknown self_evolution key %q (want enabled|repo|producers|rebase_on_update)\n", key)
 		}
 		// Reload+validate the result: enabling without repo, or a bad enum,
 		// must fail here rather than at the next daemon start.
@@ -472,8 +453,7 @@ func runConfigTest(section string, args []string) {
 		}
 		reportTest(loc, "mcp", true, i18n.T(loc, "cli.config.mcp.ok"))
 	default:
-		fmt.Fprintf(os.Stderr, "panda: config test supports model|mcp, not %q\n", section)
-		os.Exit(2)
+		failf(2, "panda: config test supports model|mcp, not %q\n", section)
 	}
 }
 
@@ -531,6 +511,9 @@ func splitMCPCommand(command string) ([]string, error) {
 func reportTest(loc i18n.Locale, section string, ok bool, detail string) {
 	if jsonOutput {
 		emitJSON(map[string]any{"section": section, "ok": ok, "detail": detail})
+		if !ok {
+			os.Exit(1)
+		}
 		return
 	}
 	if ok {

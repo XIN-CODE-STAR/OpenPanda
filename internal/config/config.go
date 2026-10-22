@@ -2300,6 +2300,16 @@ func UpdateNetworkSection(path string, nc NetworkConfig) error {
 		if err != nil {
 			return err
 		}
+		// The config directory may not exist yet: on a machine that never ran
+		// `panda init`, the join path (`panda pair --secret … --peer …`,
+		// `panda nodes add …`) writes the network section into a config that
+		// does not exist — and its parent with it. Every sibling writer
+		// (UpdateModelSection, UpdateModelsSection, UpdateSectionField*)
+		// creates the directory first; this one did not, so the write died
+		// with a raw "create temp file: … no such file or directory".
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return err
+		}
 		return util.WriteFileAtomic(path, out, 0o600)
 	default:
 		return fmt.Errorf("read config %s: %w", path, err)

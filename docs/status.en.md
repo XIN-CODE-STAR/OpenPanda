@@ -152,6 +152,28 @@ English translation of [status.md](status.md)（中文版为准）· English
 > panda-screen missing-value guards, shell completions for `task
 > board`/`task artifact`; version turned `0.0.11`, `make gate` green).
 
+> 2026-10-22 (`v0.1.0` "Constellation", the first release-grade version. The
+> cross-network mesh P1–P5 landed whole (dual-key identity and reachability
+> cards, transitive blind relay, epidemic directory sync, K=2 rendezvous edges
+> and the reachability ladder, the policy surface and relay budgets,
+> `panda://join`, pair over transit, `dial_check`), and the release audit plus a
+> second hardening pass closed the rest: multi-hop artifact pulls through
+> relays, a model-reported failure no longer settling as done, a declined task
+> falling back to a capable origin, hello identity pinning, a bounded
+> project-pack admission, the UDP-plane crash, strict-mode secret read denial,
+> the standalone console's thread and skills APIs; then the directory share cap
+> bound to the row's signer (phantom rows could fill the directory and starve
+> honest peers), the dial budget no longer owning the connection, trust
+> assertions failing closed, the pairing sweep's nil dereference (it could stop
+> the whole daemon), the transit SealNone guard's regression test, and the
+> relayed punch request keeping its origin. The live cross-network multi-hop
+> was verified (Mac → relay → cloud, a 3 MiB project tree hashing the same).
+> See `docs/reports/release-audit-2026-10-22.md` and
+> `docs/plans/design-cross-network-three-node.md`; not done: UPnP/NAT-PMP,
+> punch/dir source-signature convergence, a daemon→panel mesh-metrics IPC path,
+> and hello replay across peers (a protocol-level challenge-response, for
+> v0.1.1).
+>
 > 2026-10-21 (cross-network mesh P1–P5: dual-key identity and reachability cards,
 > transitive blind relay, epidemic directory sync, K=2 rendezvous edges and the
 > reachability ladder, policy surface and relay budgets, `panda://join`, pair over

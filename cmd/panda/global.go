@@ -287,6 +287,103 @@ func emitJSON(v any) {
 	fmt.Println(string(out))
 }
 
+// cliErrorEnvelope is the failure shape a `--json` consumer parses:
+//
+//	{"error": {"code": 2, "message": "task add requires --title"}}
+//
+// It goes to stderr, not stdout, so a successful payload stream is never
+// polluted by a failure object: `panda queue --json | jq` keeps its meaning
+// and a script branches on the exit code plus this line. `step` names the
+// operation that failed ("open store", "load config") when there is one —
+// `fatal` supplies it; a rejected argument has no step, only a sentence.
+type cliErrorEnvelope struct {
+	Error struct {
+		Code    int    `json:"code"`
+		Step    string `json:"step,omitempty"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// fail is the CLI's single failure exit. Every non-zero exit routes through
+// here (or its siblings below) so the --json promise — "the error path is
+// JSON too" — holds for all ~150 call sites without each one re-deciding.
+// In text mode it reproduces exactly what the call sites wrote before.
+func fail(code int, msg string) {
+	if jsonOutput {
+		failJSON(code, "", msg)
+	}
+	fmt.Fprintln(os.Stderr, msg)
+	os.Exit(code)
+}
+
+// failf is fail for a printf-style message. The format is handed to Fprintf
+// verbatim in text mode (several formats already end in "\n"), and rendered
+// with Sprintf for the JSON envelope, where the trailing newline is noise.
+func failf(code int, format string, a ...any) {
+	if jsonOutput {
+		failJSON(code, "", strings.TrimRight(fmt.Sprintf(format, a...), "\n"))
+	}
+	fmt.Fprintf(os.Stderr, format, a...)
+	os.Exit(code)
+}
+
+// failUsage is fail for the "unknown verb" dispatchers, where the message is
+// the error and the usage block is the coaching that follows it. The usage
+// block is text-mode only: a --json consumer asked for a machine answer.
+func failUsage(code int, msg string, usage func()) {
+	if jsonOutput {
+		failJSON(code, "", msg)
+	}
+	fmt.Fprintln(os.Stderr, msg)
+	usage()
+	os.Exit(code)
+}
+
+// failUsagef is failUsage with a printf-style message (the project dispatcher
+// keeps its palette-styled command name in the sentence).
+func failUsagef(code int, usage func(), format string, a ...any) {
+	if jsonOutput {
+		failJSON(code, "", strings.TrimRight(fmt.Sprintf(format, a...), "\n"))
+	}
+	fmt.Fprintf(os.Stderr, format, a...)
+	usage()
+	os.Exit(code)
+}
+
+// cliErrorLine renders the failure envelope as the single JSON line stderr
+// gets. Kept separate from failJSON so the shape is testable without exiting
+// the test process.
+func cliErrorLine(code int, step, msg string) (string, error) {
+	// Strip the decorations the text paths put in front of a sentence —
+	// "panda: " (the program prefix) and "error: " (what several i18n
+	// sentences open with) — because the envelope already says both: it comes
+	// from panda, and it is an error.
+	msg = strings.TrimPrefix(msg, "panda: ")
+	msg = strings.TrimPrefix(msg, "error: ")
+	var env cliErrorEnvelope
+	env.Error.Code = code
+	env.Error.Step = step
+	env.Error.Message = msg
+	out, err := json.Marshal(env)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+// failJSON writes the envelope and exits.
+func failJSON(code int, step, msg string) {
+	line, err := cliErrorLine(code, step, msg)
+	if err != nil {
+		// Unreachable: the envelope is three scalars. If it ever happens, a
+		// text line beats exiting with nothing said.
+		fmt.Fprintf(os.Stderr, "panda: %s\n", strings.TrimPrefix(msg, "panda: "))
+		os.Exit(code)
+	}
+	fmt.Fprintln(os.Stderr, line)
+	os.Exit(code)
+}
+
 // parseCLIPriority maps the CLI's priority vocabulary onto the core's three
 // tiers (core only knows high/normal/low). medium lands on normal and
 // critical on high so codex-style inputs work unchanged.
@@ -383,7 +480,13 @@ func rejectExtraArgs(fs *flag.FlagSet, usage string) {
 		return
 	}
 	loc := i18n.Detect()
-	fmt.Fprintln(os.Stderr, "panda: "+i18n.Tf(loc, "cli.unexpectedArgs", "args", strings.Join(fs.Args(), " ")))
+	msg := i18n.Tf(loc, "cli.unexpectedArgs", "args", strings.Join(fs.Args(), " "))
+	// The usage block is text-mode coaching. A --json consumer asked for a
+	// machine answer, so it gets the envelope and nothing else.
+	if jsonOutput {
+		failJSON(2, "", msg)
+	}
+	fmt.Fprintln(os.Stderr, "panda: "+msg)
 	fmt.Fprintln(os.Stderr, usage)
 	os.Exit(2)
 }

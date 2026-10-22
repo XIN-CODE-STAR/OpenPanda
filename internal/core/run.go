@@ -445,6 +445,23 @@ func (c *Core) claimForRun(ctx context.Context, taskID, intent string, plan *com
 		unlock()
 		return Task{}, nil, fmt.Errorf("load task: %w", err)
 	}
+	// A row that is queued but owned by this node is a claim whose runner is
+	// still alive: task recovery's dispatched → queued branch moved it back
+	// underneath us (Recover runs at startup, and the scheduler's first pass
+	// can claim a row before recovery has finished). The claim is still ours
+	// — the scheduler's resource-key registry holds the task's keys for the
+	// run's duration, so no other runner can take it — so restore the state
+	// the run expects rather than refusing the row ("cannot run task in state
+	// queued") and losing the task.
+	if task.State == StateQueued {
+		if rerr := c.store.ReclaimClaimed(ctx, taskID, c.nodeID); rerr == nil {
+			if fresh, gerr := c.store.Get(ctx, taskID); gerr == nil {
+				task = fresh
+			}
+		} else {
+			c.logger.Warn("queue: reclaim claimed task", "task", taskID, "err", rerr)
+		}
+	}
 	// §7.2: an actuator plan's argv is a template — fill {intent}/{action}/
 	// {param:<name>} from the task's action_spec before anything runs. A
 	// substitution failure means the spec and the card disagree, which no
@@ -1465,13 +1482,17 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 		}
 		structured := parseStructuredResult(res.Structured)
 		// The schema's status field is the model's self-report. question and
-		// delegate are consumed below; "failed" is traced as evidence for the
-		// judge rather than flipping res.OK — a task kill here would bypass
-		// the supervision round that could issue a corrective continuation.
+		// delegate are consumed below; "failed" is honored as a failure rather
+		// than traced and forgotten — an adapter can exit 0 with a clean
+		// envelope while the model itself says it could not do the work (a
+		// CLI-authenticated agent whose turn failed is the common case), and
+		// settling that as done tells the user and the delegator a lie. The
+		// retry/judge path above this loop is the corrective continuation.
 		if structured != nil && structured.Status != "" && structured.Status != "done" {
 			c.EvTrace(execCtx, taskID, "structured_status", map[string]any{
 				"round": round + 1, "agent": res.Agent, "status": structured.Status,
 			})
+			applyStructuredFailure(&res, structured)
 		}
 		if res.SessionID != "" && res.SessionID != sessionID {
 			sessionID = res.SessionID
@@ -2317,3 +2338,25 @@ func (c *Core) finalizeRun(ctx context.Context, taskID string, task Task, plan c
 // footprint's job is showing what the task touched, and the first few hundred
 // paths show that fine — a node_modules-scale rewrite would only drown it.
 const maxFilesChangedReport = 200
+
+// applyStructuredFailure turns a model's self-reported failed status into a
+// failed result. The adapter envelope's ok field only reports whether the CLI
+// turn itself completed; it cannot know that the model answered "I could not
+// reach the device". Without this, that run settles as done and the user and
+// every upstream delegator are told work succeeded when it did not. The
+// model's own answer becomes the failure reason when the adapter left stderr
+// empty, so the retry loop and the task timeline carry something actionable.
+func applyStructuredFailure(res *commander.Result, sr *structuredAgentResult) {
+	if res == nil || sr == nil || sr.Status != "failed" {
+		return
+	}
+	res.OK = false
+	if strings.TrimSpace(res.Stderr) != "" {
+		return
+	}
+	reason := strings.TrimSpace(sr.Answer)
+	if reason == "" {
+		reason = "agent reported status: failed"
+	}
+	res.Stderr = reason
+}

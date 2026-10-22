@@ -337,6 +337,7 @@ const zhCN: Messages = {
   'sessions.taskCreated': '任务已创建',
   'sessions.msgSend': '发消息到任务',
   'sessions.viewTask': '查看任务',
+  'sessions.castPlan': '查看计划',
   'sessions.chainShow': '思维链',
   'sessions.chainHide': '收起',
   'sessions.chainEmpty': '暂无任务事件。',

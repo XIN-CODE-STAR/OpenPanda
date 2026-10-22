@@ -949,13 +949,36 @@ func SetPeerTrustByKey(db *sql.DB, pubKeyHex, level string) (int64, error) {
 // plus the key the row attests, so a caller can also check whether sibling
 // rows of the same identity carry a tier — trust is asserted on one row but
 // should follow the Ed25519 identity a restarted node keeps.
+// PeerTrust returns the tier and key asserted on a node's directory row.
+//
+// The error is returned rather than swallowed: a caller that cannot read the
+// assertion must not treat the peer as unasserted (which reads as the
+// most-trusting tier). "No row" is the only case that legitimately means
+// "no assertion".
 func PeerTrust(db *sql.DB, nodeID string) (level, pubKey string) {
-	if db == nil || nodeID == "" {
+	level, pubKey, err := PeerTrustErr(db, nodeID)
+	if err != nil {
 		return "", ""
 	}
-	_ = db.QueryRow(`SELECT COALESCE(trust,''), COALESCE(pub_key,'') FROM employee_cache WHERE id=?`,
-		nodeID).Scan(&level, &pubKey)
 	return level, pubKey
+}
+
+// PeerTrustErr is PeerTrust with the read error surfaced. sql.ErrNoRows
+// means the node is simply not in the directory — no assertion, not a
+// failure.
+func PeerTrustErr(db *sql.DB, nodeID string) (level, pubKey string, err error) {
+	if db == nil || nodeID == "" {
+		return "", "", nil
+	}
+	err = db.QueryRow(`SELECT COALESCE(trust,''), COALESCE(pub_key,'') FROM employee_cache WHERE id=?`,
+		nodeID).Scan(&level, &pubKey)
+	if err == sql.ErrNoRows {
+		return "", "", nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	return level, pubKey, nil
 }
 
 // PeerTrustByKey returns the strongest tier assertion made on ANY row holding
@@ -963,13 +986,25 @@ func PeerTrust(db *sql.DB, nodeID string) (level, pubKey string) {
 // restarts because the tier is read through the proven key, not the row id.
 // "Strongest" means the least-trusting non-empty value: an operator who ever
 // downgraded this identity sees the downgrade until they explicitly lift it.
+//
+// The error is returned for the same reason PeerTrustErr surfaces it: a
+// failed read must not read as "no assertion".
 func PeerTrustByKey(db *sql.DB, pubKeyHex string) string {
-	if db == nil || pubKeyHex == "" {
+	level, err := PeerTrustByKeyErr(db, pubKeyHex)
+	if err != nil {
 		return ""
+	}
+	return level
+}
+
+// PeerTrustByKeyErr is PeerTrustByKey with the read error surfaced.
+func PeerTrustByKeyErr(db *sql.DB, pubKeyHex string) (string, error) {
+	if db == nil || pubKeyHex == "" {
+		return "", nil
 	}
 	rows, err := db.Query(`SELECT trust FROM employee_cache WHERE pub_key=? AND trust != ''`, pubKeyHex)
 	if err != nil {
-		return ""
+		return "", err
 	}
 	defer rows.Close()
 	best := ""
@@ -982,7 +1017,7 @@ func PeerTrustByKey(db *sql.DB, pubKeyHex string) string {
 			best = l
 		}
 	}
-	return best
+	return best, rows.Err()
 }
 
 // RecordPeerAddr persists the binding from a configured dial address to the

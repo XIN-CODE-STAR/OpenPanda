@@ -200,6 +200,25 @@ vet:
 staticcheck:
 	$(GO) run honnef.co/go/tools/cmd/staticcheck@2026.2.2 ./...
 
+# vuln answers the question staticcheck cannot: is anything this tree reaches
+# already known-bad? It scans the import graph against the Go vulnerability
+# database and reports only vulnerabilities with a reachable call path, so a
+# module that is merely present in go.sum does not fail the gate.
+#
+# This leg exists because the audit found GO-2026-6809 (crypto/x509 intermediate
+# certificate handling) reachable through bus.Client.Dial on the pinned Go
+# 1.26.9 toolchain — a stdlib CVE that no amount of vetting our own code would
+# have surfaced, and that nothing in the gate was looking for. The `go` directive
+# in go.mod is now 1.26.10, which is the fixed release; this target is what keeps
+# the next one from shipping silently.
+#
+# Like staticcheck it resolves through the module cache (`go run …@latest`), so
+# it needs the network once and works offline afterwards. It exits non-zero on a
+# finding, which is the point: a reachable CVE is a gate failure, not a warning.
+VULNCHECK ?= golang.org/x/vuln/cmd/govulncheck@latest
+vuln:
+	$(GO) run $(VULNCHECK) ./...
+
 # Formatting is part of the gate, not a reviewer's job: gofmt disagreements are
 # the one class of diff noise that is entirely mechanical to prevent.
 fmt:
@@ -261,7 +280,7 @@ race-focused:
 #   - 版本号从 internal/version/version.go 提取，禁止在 Makefile 中
 #     写死 VERSION 默认值，避免版本漂移。
 # ============================================================================
-gate: fmt-check vet staticcheck build adapter-test test race-focused
+gate: fmt-check vet staticcheck vuln build adapter-test test race-focused
 
 # gate-all is gate + the web pipeline (one install, then typecheck + ui build +
 # web tests) + the TUI pty check. CI runs these as separate jobs (see

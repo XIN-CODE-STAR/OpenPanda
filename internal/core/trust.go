@@ -103,7 +103,18 @@ func (c *Core) peerTrustOf(ctx context.Context, peerID string) trust.Level {
 	if strings.HasPrefix(peerID, stableIDPrefix) {
 		pub = peerID[len(stableIDPrefix):]
 	} else {
-		lvl, pk := ledger.PeerTrust(c.db, peerID)
+		lvl, pk, err := ledger.PeerTrustErr(c.db, peerID)
+		if err != nil {
+			// Fail CLOSED. The tier lookup could not be read, so the
+			// operator's assertion on this peer is unknown — and "unknown"
+			// must not mean "mesh", the most trusting tier. A transient
+			// SQLITE_BUSY would otherwise hand a guarded (or open) peer the
+			// full send ceiling, the artifact-input clamps, relay admission
+			// and the screen-output exemption.
+			c.logger.Warn("peer trust lookup failed — treating the peer as open",
+				"peer", peerID, "err", err)
+			return trust.Open
+		}
 		merge(lvl)
 		pub = pk
 		if pub == "" {
@@ -112,12 +123,23 @@ func (c *Core) peerTrustOf(ctx context.Context, peerID string) trust.Level {
 			// a guarded peer would read as an unpinned stranger while the
 			// node that spawned it carries the assertion.
 			if base, ok := scheduler.EphemeralBase(peerID); ok {
-				_, pub = ledger.PeerTrust(c.db, base)
+				_, pub, err = ledger.PeerTrustErr(c.db, base)
+				if err != nil {
+					c.logger.Warn("peer trust lookup failed — treating the peer as open",
+						"peer", peerID, "err", err)
+					return trust.Open
+				}
 			}
 		}
 	}
 	if pub != "" {
-		merge(ledger.PeerTrustByKey(c.db, pub))
+		lvl, err := ledger.PeerTrustByKeyErr(c.db, pub)
+		if err != nil {
+			c.logger.Warn("peer trust-by-key lookup failed — treating the peer as open",
+				"peer", peerID, "err", err)
+			return trust.Open
+		}
+		merge(lvl)
 	}
 	// Configured addr hints only bind once the peer_addrs table has mapped
 	// the dial address to this identity — recorded at hello, so a hint never

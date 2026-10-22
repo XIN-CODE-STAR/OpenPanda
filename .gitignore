@@ -198,3 +198,8 @@ fetch_emails.py
 
 # Editor/codemod leftovers that shadow a real source file.
 *.bak
+
+# Throwaway probe tests written while investigating a finding (zz_*_test.go).
+# They are scratch, not fixtures: a real regression test gets a descriptive
+# name and is committed deliberately.
+zz_*_test.go

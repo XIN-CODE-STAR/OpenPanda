@@ -2186,6 +2186,39 @@ func (s *TaskStore) ClaimLocal(ctx context.Context, taskID, node string) error {
 	})
 }
 
+// ReclaimClaimed moves a queued row this node owns back to dispatched.
+//
+// The queue scheduler's claim→run window is one goroutine (ClaimLocal →
+// runScheduled → Accept). Task recovery can land inside that window: its
+// dispatched → queued branch moves the row back under the runner, and the
+// runner's run() refuses a row that is not in a runnable state ("cannot run
+// task in state queued") — the task is then lost, which is exactly what
+// recovery was supposed to prevent.
+//
+// The claim is still ours — the scheduler's resource-key registry holds the
+// task's keys for the run's duration, so no other runner can take it — so
+// the row is restored to the state the run expects instead of being dropped.
+//
+// The guard is the same shape ClaimLocal uses, plus the owner: state=queued
+// AND owner=this node. A row owned by someone else is never touched, and a
+// row this node does not own cannot be stolen by the reclaim.
+func (s *TaskStore) ReclaimClaimed(ctx context.Context, taskID, node string) error {
+	now := s.now()
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `
+			UPDATE tasks SET state=?, state_version=state_version+1, updated_at=?
+			WHERE task_id=? AND state=? AND owner_node=?`,
+			StateDispatched, now, taskID, StateQueued, node)
+		if err != nil {
+			return fmt.Errorf("reclaim task: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return fmt.Errorf("%w: task %s not queued for %s", ErrConflict, taskID, node)
+		}
+		return s.recordEventTx(ctx, tx, taskID, EvDelegate, map[string]any{"target": node, "by": "queue-reclaim"})
+	})
+}
+
 // leaseExpiredReason composes the failure reason for a lease that ran out.
 //
 // A bare "lease expired" hides the one fact worth having afterwards: what the
@@ -2673,8 +2706,13 @@ func (s *TaskStore) Recover(ctx context.Context, selfNode string) (int, error) {
 		// and the sweep releases it — or fails it — exactly as if the restart
 		// never happened. Non-plan submitted rows are unscheduled asks awaiting
 		// a first dispatch, so they requeue safely.
+		// remote = 0 is the trust-admission boundary: an inbound delegate
+		// that died between CreateWithID(remote=true) and admitDelegate was
+		// never admitted, and requeueing it here would run/forward it with
+		// the accept policy bypassed. The mid-life sweep
+		// (CancelStaleRemoteSubmits) terminalizes those instead.
 		n, err = s.recoverBatchTx(ctx, tx, []string{StateSubmitted}, StateQueued, "requeued",
-			`AND (plan_id IS NULL OR plan_id = '')`)
+			`AND (plan_id IS NULL OR plan_id = '') AND remote = 0`)
 		if err != nil {
 			return fmt.Errorf("recover submitted tasks: %w", err)
 		}

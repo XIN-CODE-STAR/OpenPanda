@@ -385,3 +385,108 @@ func TestTierFromCommandSubVerbsAndPowerGating(t *testing.T) {
 		}
 	}
 }
+
+// TestTierFromCommandSystemPathForms pins the P1-1 group: cp/mv/install/ln/tee/
+// chmod/chown/kill are recoverable verbs, and the policy comment says so — but
+// each has a form that leaves a machine no later command can repair. The table
+// has one row per form that used to grade Tier 1 (auto-approved) and one row
+// per neighbouring benign form that must keep grading Tier 1, because a
+// classifier that prompts on `cp a b` is as broken as one that never prompts.
+func TestTierFromCommandSystemPathForms(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+		args    []string
+		want    int
+	}{
+		// install: a setuid binary is a local root however it is spelled.
+		{"install setuid octal", "install", []string{"-m", "4755", "pwn", "/usr/local/bin/pwn"}, TierIrreversible},
+		{"install setgid octal", "install", []string{"-m", "2755", "pwn", "/usr/local/bin/pwn"}, TierIrreversible},
+		{"install setuid attached", "install", []string{"-m4755", "pwn", "/usr/local/bin/pwn"}, TierIrreversible},
+		{"install setuid long", "install", []string{"--mode=4755", "pwn", "/usr/local/bin/pwn"}, TierIrreversible},
+		{"install symbolic setuid", "install", []string{"-m", "u+s", "pwn", "/usr/local/bin/pwn"}, TierIrreversible},
+		{"install onto system path", "install", []string{"-m", "644", "x", "/etc/passwd"}, TierIrreversible},
+		{"install ordinary deploy", "install", []string{"-m", "755", "tool", "/usr/local/bin/tool"}, TierReversible},
+
+		// chmod: privilege bits, or -R against the system.
+		{"chmod recursive root", "chmod", []string{"-R", "000", "/"}, TierIrreversible},
+		{"chmod recursive etc", "chmod", []string{"-R", "777", "/etc"}, TierIrreversible},
+		{"chmod setuid on a binary", "chmod", []string{"u+s", "/usr/bin/sh"}, TierIrreversible},
+		{"chmod setuid octal", "chmod", []string{"4755", "/usr/bin/sh"}, TierIrreversible},
+		{"chmod recursive workdir", "chmod", []string{"-R", "777", "."}, TierReversible},
+		{"chmod single file", "chmod", []string{"644", "notes.txt"}, TierReversible},
+
+		// chown/chgrp: only the recursive form aimed at the system.
+		{"chown recursive root", "chown", []string{"-R", "nobody", "/"}, TierIrreversible},
+		{"chown recursive usr", "chown", []string{"-R", "nobody", "/usr/bin"}, TierIrreversible},
+		{"chown recursive long flag", "chown", []string{"--recursive", "nobody", "/etc"}, TierIrreversible},
+		{"chown single file", "chown", []string{"nobody", "notes.txt"}, TierReversible},
+		{"chgrp recursive root", "chgrp", []string{"-R", "wheel", "/"}, TierIrreversible},
+
+		// ln -sf onto a system path replaces the target with a pointer.
+		{"ln force onto passwd", "ln", []string{"-sf", "/dev/null", "/etc/passwd"}, TierIrreversible},
+		{"ln force cluster", "ln", []string{"-sfn", "/dev/null", "/etc/shadow"}, TierIrreversible},
+		{"ln force long flag", "ln", []string{"--force", "/dev/null", "/etc/hosts"}, TierIrreversible},
+		{"ln plain symlink", "ln", []string{"-s", "/tmp/a", "/tmp/b"}, TierReversible},
+		{"ln force in workdir", "ln", []string{"-sf", "a", "b"}, TierReversible},
+
+		// cp/tee: only the destination matters — reading /etc is not a risk.
+		{"cp onto passwd", "cp", []string{"x", "/etc/passwd"}, TierIrreversible},
+		{"cp onto bin", "cp", []string{"x", "/usr/bin/ls"}, TierIrreversible},
+		{"cp out of etc", "cp", []string{"/etc/hosts", "backup.txt"}, TierReversible},
+		{"cp plain", "cp", []string{"a", "b"}, TierReversible},
+		{"tee onto passwd", "tee", []string{"/etc/passwd"}, TierIrreversible},
+		{"tee plain", "tee", []string{"out.log"}, TierReversible},
+
+		// mv removes the source, so both ends matter.
+		{"mv onto passwd", "mv", []string{"x", "/etc/passwd"}, TierIrreversible},
+		{"mv away from etc", "mv", []string{"/etc/passwd", "/tmp/p"}, TierIrreversible},
+		{"mv plain", "mv", []string{"a", "b"}, TierReversible},
+
+		// kill family: init and the all-processes spellings only.
+		{"kill init", "kill", []string{"-9", "1"}, TierIrreversible},
+		{"kill init by name", "kill", []string{"systemd"}, TierIrreversible},
+		{"kill everything", "kill", []string{"-9", "-1"}, TierIrreversible},
+		{"killall5", "killall5", nil, TierIrreversible},
+		{"pkill match all", "pkill", []string{"-9", "-f", "."}, TierIrreversible},
+		{"pkill by name", "pkill", []string{"node"}, TierReversible},
+		{"kill by pid", "kill", []string{"1234"}, TierReversible},
+		{"killall by name", "killall", []string{"node"}, TierReversible},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := TierFromCommand(tc.command, tc.args...); got != tc.want {
+				t.Fatalf("TierFromCommand(%q, %v) = %d, want %d", tc.command, tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTierFromCommandLanguageDeletion pins the interpreter half of P1-1: a
+// language runtime's own deletion primitive destroys data exactly like `rm`,
+// but it is not a command name, so the verb table never matched it. `perl -e
+// 'unlink "/etc/passwd"'` used to grade Tier 1 end to end.
+func TestTierFromCommandLanguageDeletion(t *testing.T) {
+	cases := []struct {
+		command string
+		args    []string
+		want    int
+	}{
+		{"perl", []string{"-e", `unlink "/etc/passwd"`}, TierIrreversible},
+		{"perl", []string{"-e", `unlink $f`}, TierIrreversible},
+		{"ruby", []string{"-e", `File.unlink("/etc/passwd")`}, TierIrreversible},
+		{"ruby", []string{"-e", `FileUtils.rm_rf("/")`}, TierIrreversible},
+		{"python3", []string{"-c", `import shutil; shutil.rmtree("/tmp/x")`}, TierIrreversible},
+		{"node", []string{"-e", `require("fs").rmSync("/tmp/x",{recursive:true})`}, TierIrreversible},
+		// Ordinary interpreter work stays Tier 1: running code is not the test,
+		// irreversibility is.
+		{"perl", []string{"-e", `print "unlinked the build cache\n"`}, TierReversible},
+		{"python3", []string{"-c", `print(1+1)`}, TierReversible},
+		{"node", []string{"-e", `console.log("hi")`}, TierReversible},
+	}
+	for _, tc := range cases {
+		if got := TierFromCommand(tc.command, tc.args...); got != tc.want {
+			t.Fatalf("TierFromCommand(%q, %v) = %d, want %d", tc.command, tc.args, got, tc.want)
+		}
+	}
+}

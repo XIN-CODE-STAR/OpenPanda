@@ -31,8 +31,7 @@ func runTaskArtifact(args []string) {
 	fs.Parse(reorderFlags(fs, args))
 	id := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	if id == "" {
-		fmt.Fprintln(os.Stderr, "usage: panda task artifact <task-id> [--out DIR | --list | --file PATH]")
-		os.Exit(2)
+		fail(2, "usage: panda task artifact <task-id> [--out DIR | --list | --file PATH]")
 	}
 	loc := i18n.Detect()
 
@@ -53,8 +52,7 @@ func runTaskArtifact(args []string) {
 	}
 	hash := t.OutputArtifact
 	if hash == "" {
-		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.task.artifact.none"))
-		os.Exit(1)
+		fail(1, i18n.T(loc, "cli.task.artifact.none"))
 	}
 
 	pool := artifact.NewStore(cfg.Storage.ArtifactPath, cfg.Storage.ArtifactExtraPaths...)
@@ -63,9 +61,8 @@ func runTaskArtifact(args []string) {
 		// The row names content this node never received — the bytes stay on
 		// the executor until a transfer moves them. Say where instead of a
 		// bare "not found" that reads as data loss.
-		fmt.Fprintln(os.Stderr, i18n.Tf(loc, "cli.task.artifact.not_held",
+		fail(1, i18n.Tf(loc, "cli.task.artifact.not_held",
 			"hash", hash, "executor", orDash(taskExecutor(store, t))))
-		os.Exit(1)
 	}
 
 	switch {

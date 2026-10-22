@@ -246,15 +246,13 @@ func TestTransitTTLExhaustion(t *testing.T) {
 }
 
 // TestTransitEligibility covers the denylist: frames whose handler binds the
-// sender to a conn, and the artifact plane's request/response pulls, must
-// never be sealed into a transit inner. The artifact fetch is small enough to
-// seal but its reply is a bulk chunk — letting the request through would skip
-// the caller's relay fallback and wait out a transfer budget for bytes that
-// cannot ride back.
+// sender to a conn, and the unsolicited push side of the artifact plane, must
+// never be sealed into a transit inner. Fetch/chunk DO ride transit: both keep
+// their own From/To inside the sealed envelope, so the reply reaches the
+// requester through the relay, and transitMaxInner is sized for one chunk.
 func TestTransitEligibility(t *testing.T) {
 	for _, typ := range []string{
 		bus.MsgHello, bus.MsgHelloReject,
-		bus.MsgArtifactFetch, bus.MsgArtifactChunk,
 		bus.MsgArtifactPush, bus.MsgArtifactPushStatus, bus.MsgArtifactPushDone,
 	} {
 		if transitEligible(typ) {
@@ -263,6 +261,11 @@ func TestTransitEligibility(t *testing.T) {
 		if err := newCoreErr(t).sendViaTransit(context.Background(), "peer-x",
 			bus.Envelope{V: 2, Type: typ, MsgID: "m", From: "n"}); err == nil {
 			t.Fatalf("sendViaTransit accepted ineligible type %q", typ)
+		}
+	}
+	for _, typ := range []string{bus.MsgArtifactFetch, bus.MsgArtifactChunk} {
+		if !transitEligible(typ) {
+			t.Fatalf("frame type %q must be transit-eligible for multi-hop input pulls", typ)
 		}
 	}
 	// Pair frames are the one type that is DELIVERABLE over transit (P4b:
@@ -598,4 +601,65 @@ func newCoreErr(t *testing.T) *Core {
 	c.SetWorkDir(t.TempDir())
 	c.SetSharedSecret(testSharedSecret)
 	return c
+}
+
+// TestTransitRejectsUnsealedNonPairInner pins the one guard every sibling
+// has a test for: SealNone is the PAIRING handshake's exemption and nothing
+// else's. A member that seals nothing around a delegate or heartbeat inner
+// would have every relay that ferried the frame act as a legitimate reader
+// of the plaintext — the blind-relay confidentiality property the design
+// guarantees.
+//
+// The positive control matters as much as the negative: a pair frame riding
+// SealNone must still be delivered, or the exemption would be untested too.
+func TestTransitRejectsUnsealedNonPairInner(t *testing.T) {
+	ctx := context.Background()
+	b := newCoreErr(t)
+	pub, priv, err := bus.GenerateNodeKey()
+	if err != nil {
+		t.Fatalf("generate signer: %v", err)
+	}
+	signerPubHex := hex.EncodeToString(pub)
+	if _, err := b.db.Exec(
+		`INSERT INTO employee_cache (id, pub_key, status, last_seen)
+		 VALUES ('ghost', ?, 'offline', 0)`, signerPubHex); err != nil {
+		t.Fatalf("seed pinned row: %v", err)
+	}
+
+	deliver := func(name string, typ string, payload any) bool {
+		t.Helper()
+		env, err := bus.NewEnvelope(typ, "ghost", "hb-"+name, payload)
+		if err != nil {
+			t.Fatalf("envelope: %v", err)
+		}
+		env.To = b.nodeID
+		raw, err := json.Marshal(env)
+		if err != nil {
+			t.Fatalf("marshal env: %v", err)
+		}
+		inner := transitInner{Env: raw, Pub: signerPubHex, Sig: bus.SignTransitInner(priv, raw)}
+		innerJSON, err := json.Marshal(inner)
+		if err != nil {
+			t.Fatalf("marshal inner: %v", err)
+		}
+		// SealNone: the payload travels in the clear.
+		b.deliverTransit(ctx, bus.Envelope{
+			V: 1, Type: bus.MsgTransit, MsgID: "outer-" + name, From: "relay",
+		}, bus.TransitPayload{
+			Dest: b.nodeID, TTL: bus.TransitMaxTTL,
+			Seal: bus.SealNone, Inner: innerJSON,
+		})
+		var status string
+		err = b.db.QueryRow(`SELECT COALESCE(status,'') FROM employee_cache WHERE id='ghost'`).Scan(&status)
+		return err == nil && status == "online"
+	}
+
+	if deliver("heartbeat", bus.MsgHeartbeat,
+		bus.HeartbeatPayload{Status: "online", Card: json.RawMessage(`{"device":"ghost"}`)}) {
+		t.Fatal("an UNSEALED non-pair inner was dispatched — the blind-relay seal was bypassed")
+	}
+	// The positive path (a pair frame riding SealNone) is covered by
+	// TestPairOverTransitThroughContactPoint, which drives it through the
+	// production contact-point path; this test pins the branch that had no
+	// coverage at all — the REJECTION of an unsealed non-pair inner.
 }

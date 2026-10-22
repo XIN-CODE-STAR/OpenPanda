@@ -861,16 +861,31 @@ export function SessionsView({
     inflightSid.current = null
     inflightOperation.current = null
     setLoading(true)
+    // A stale transcript and a sticky error belong to the thread we are
+    // leaving, not the one being opened. Without these resets a failed load
+    // (deleted thread, restarted panel) rendered the previous conversation
+    // under the new header, and every later successful open kept the old red
+    // line because nothing ever cleared it.
+    setLoadError('')
+    setSession(null)
+    setMsgs([])
+    setTurnMs({})
+    setLiveFrom(0)
     api
       .session(activeId)
       .then((s) => {
         setSession(s)
+        setLoadError('')
         setTeam(s.team ?? [])
         setTurnMs({})
         setLiveFrom(0)
         setMsgs((s.turns ?? []).map((turn, i) => ({ ...turn, k: `srv-${i}` })))
       })
-      .catch((e: unknown) => setLoadError(e instanceof Error ? e.message : String(e)))
+      .catch((e: unknown) => {
+        setSession(null)
+        setMsgs([])
+        setLoadError(e instanceof Error ? e.message : String(e))
+      })
       .finally(() => setLoading(false))
   }, [activeId])
 
@@ -1489,7 +1504,14 @@ export function SessionsView({
               r.kind === 'task' && r.task_id
                 ? ({ kind: 'task', ref: r.task_id } as const)
                 : {}
-            return { ...m, ...task, result: r, status: undefined, text }
+            // A plan turn carries no prose either: its id is what the plan
+            // card and the cast link key off. Adopting it here keeps the
+            // bubble from staying blank until a reload replaces the turn.
+            const plan =
+              r.kind === 'plan' && r.plan_id
+                ? ({ kind: 'plan', ref: r.plan_id } as const)
+                : {}
+            return { ...m, ...task, ...plan, result: r, status: undefined, text }
           }),
           onError: (message, code, info) =>
             patch((m) => ({

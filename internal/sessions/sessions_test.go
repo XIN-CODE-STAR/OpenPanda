@@ -5,10 +5,12 @@ package sessions
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -597,5 +599,48 @@ func TestReplayBudget(t *testing.T) {
 		if got := ReplayBudget(tc.window); got != tc.want {
 			t.Errorf("ReplayBudget(%d) = %d, want %d", tc.window, got, tc.want)
 		}
+	}
+}
+
+// TestAppendTurnSerializesAcrossStores pins the cross-process guarantee: the
+// CLI, the web panel and the standalone sidecar all open the same sessions
+// directory, so two INDEPENDENT Store instances (the in-process mutex does
+// not span them) must not lose each other's turns to a read-modify-write
+// race. Each store appends concurrently; every turn must survive.
+func TestAppendTurnSerializesAcrossStores(t *testing.T) {
+	dir := t.TempDir()
+	a := NewStore(dir)
+	sess, err := a.Create("shared thread")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	const perStore = 25
+	var wg sync.WaitGroup
+	stores := []*Store{NewStore(dir), NewStore(dir)}
+	for w, st := range stores {
+		wg.Add(1)
+		go func(w int, st *Store) {
+			defer wg.Done()
+			for i := 0; i < perStore; i++ {
+				if _, err := st.AppendTurn(sess.ID, Turn{
+					Role: "user",
+					Text: fmt.Sprintf("writer %d turn %d", w, i),
+				}); err != nil {
+					t.Errorf("append: %v", err)
+					return
+				}
+			}
+		}(w, st)
+	}
+	wg.Wait()
+
+	got, err := NewStore(dir).Get(sess.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if len(got.Turns) != perStore*len(stores) {
+		t.Fatalf("turns = %d, want %d — a concurrent writer's turn was lost",
+			len(got.Turns), perStore*len(stores))
 	}
 }

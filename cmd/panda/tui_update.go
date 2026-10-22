@@ -269,18 +269,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.stream == nil || msg.stream != m.stream || msg.stream.detached {
 			return m, nil
 		}
-		// Remember which row this turn is running: a mid-turn Enter queues
-		// into it, and the second Enter promotes that note. Silence here would
-		// leave the note targeting whatever the picker last opened.
+		// Remember which row this turn is running: it stays the default target
+		// for an explicit /queue or /inject that names no id. Silence here
+		// would leave those commands targeting whatever the picker last opened.
 		m.streamTask = msg.taskID
 		return m, waitForActivity(msg.stream)
-	case steerAckMsg:
-		if msg.stream == nil || msg.stream != m.stream || msg.stream.detached {
-			return m, nil
-		}
-		note := block{kind: blockNote, body: m.th.accent.Render("💡 ") +
-			i18n.Tf(m.loc, "tui.steer.delivered", "n", strconv.Itoa(msg.round), "text", msg.text)}
-		return m, tea.Batch(m.printBlock(note), waitForActivity(msg.stream))
 	case doneMsg:
 		return m.onDone(msg)
 	case resumedMsg:
@@ -638,9 +631,10 @@ func (m tuiModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if strings.TrimSpace(m.ta.Value()) != "" {
 				m.ta.Reset()
 				m.ta.SetHeight(1)
-				m.disarmStaged()
 				return m, nil
 			}
+			// interrupt() drains the pending queue, so Esc on an empty box is
+			// the harness-standard "stop, and run what I already queued".
 			return m.interrupt()
 		}
 		if msg.Type == tea.KeyEnter {
@@ -649,20 +643,28 @@ func (m tuiModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		// ctrl+d retracts the note the last Enter queued. It is unbound in
+		// ctrl+x leads with the draft: interrupt the running turn and run this
+		// line ahead of anything already queued. It is the explicit "send now"
+		// harnesses offer, and it is deliberately NOT alt+enter — that chord is
+		// the universal newline (isModifiedEnter) and stealing it would break
+		// multi-line prompts to gain nothing.
+		if msg.Type == tea.KeyCtrlX {
+			if text := strings.TrimSpace(m.ta.Value()); text != "" {
+				return m.injectQueued(text)
+			}
+			return m, nil
+		}
+		// ctrl+d retracts the line the last Enter queued. It is unbound in
 		// asking mode (the textarea does not use it), and it is the honest
-		// counterpart of the second Enter: that one escalates the note, this
-		// one takes it back before the round reads it. The idle binding —
-		// quit on an empty box — would be a trap mid-turn, where a stray
-		// ctrl+d would kill a running task instead of undoing a keystroke.
+		// counterpart of Enter: that one parks the line, this one takes it
+		// back before it becomes a turn. The idle binding — quit on an empty
+		// box — would be a trap mid-turn, where a stray ctrl+d would kill a
+		// running task instead of undoing a keystroke.
 		if msg.Type == tea.KeyCtrlD {
-			return m.dropStaged()
+			return m.dropLastQueued()
 		}
 		var cmd tea.Cmd
 		m.ta, cmd = m.ta.Update(msg)
-		if strings.TrimSpace(m.ta.Value()) == "" {
-			m.disarmStaged()
-		}
 		m.ta.SetHeight(min(8, max(1, m.ta.LineCount())))
 		return m, cmd
 	case modeApproving:
@@ -1127,26 +1129,69 @@ func (m tuiModel) withPending(cmds ...tea.Cmd) (tea.Model, tea.Cmd) {
 }
 
 // sendTurnInput is the single routing point for text submitted while a turn
-// runs — Enter and the footer button land here identically. The split mirrors
-// the task board's queue-and-inject contract:
+// runs — Enter and the footer button land here identically.
 //
-//	/cmd, !cmd  — commands never become steering text: they either run now as
+//	/cmd, !cmd  — commands never become queued prompts: they either run now as
 //	              a background exec or queue when they need the foreground.
-//	plain text  — first Enter queues the note, a second Enter on the same text
-//	              promotes it to an inject (see stageNote / promoteStaged).
+//	plain text  — becomes the NEXT turn, parked in the pending queue. Ctrl+X
+//	              instead interrupts the running turn and leads with the line.
+//
+// The line never joins the prompt that is already streaming. That is the rule
+// this function exists to hold, and it is what Claude Code, Codex and Devin
+// all do: a message sent mid-run is your next message, not an amendment to the
+// last one. The old code folded it into the in-flight prompt, which made one
+// sentence reach the model twice (inline in the user turn, then again as a
+// board line) and rewrote the persisted transcript to say the user had typed
+// something they had not.
 func (m tuiModel) sendTurnInput(text string) (tea.Model, tea.Cmd) {
+	m.ta.Reset()
+	m.ta.SetHeight(1)
 	if strings.HasPrefix(text, "/") || strings.HasPrefix(text, "!") {
-		m.ta.Reset()
-		m.ta.SetHeight(1)
 		return m.submitDuringTurn(text)
 	}
-	// The draft that was just queued is still in the box on purpose: pressing
-	// Enter again on it is the escalate gesture, not a second message. Posting
-	// another note would make the round read the same words twice.
-	if s := m.staged; s != nil && strings.TrimSpace(s.text) == strings.TrimSpace(text) {
-		return m.promoteStaged()
+	return m.enqueuePending(text)
+}
+
+// injectQueued is the Ctrl+X gesture: lead with this line. It splices to the
+// head of the same queue rather than opening a side channel, so anything typed
+// after it keeps its place behind it, and then interrupts — interrupt() drains
+// the queue, so the line just spliced becomes the very next turn.
+//
+// With no turn in flight there is nothing to preempt: the line is simply
+// submitted, which is what the user meant.
+func (m tuiModel) injectQueued(text string) (tea.Model, tea.Cmd) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return m, nil
 	}
-	return m.stageNote(text)
+	m.ta.Reset()
+	m.ta.SetHeight(1)
+	if m.stream == nil {
+		return m.submit(text)
+	}
+	m.pendingInputs = append([]string{text}, m.pendingInputs...)
+	blk := block{
+		kind: blockNote,
+		body: m.th.accent.Render("⚡ ") + i18n.Tf(m.loc, "tui.queue.injecting", "text", text),
+	}
+	nm, interruptCmd := m.interrupt()
+	return nm, tea.Batch(interruptCmd, m.printBlock(blk))
+}
+
+// dropLastQueued retracts the most recently queued line — Ctrl+D's job while a
+// turn streams, where the idle binding (quit) would be a trap. Only the tail is
+// retractable: the head is already being dispatched the moment the foreground
+// frees, so pulling it would race the dispatcher.
+func (m tuiModel) dropLastQueued() (tea.Model, tea.Cmd) {
+	if len(m.pendingInputs) == 0 {
+		return m, m.printBlock(block{kind: blockNote, body: i18n.T(m.loc, "tui.queue.nothing")})
+	}
+	last := m.pendingInputs[len(m.pendingInputs)-1]
+	m.pendingInputs = m.pendingInputs[:len(m.pendingInputs)-1]
+	return m, m.printBlock(block{
+		kind: blockNote,
+		body: i18n.Tf(m.loc, "tui.queue.dropped", "text", last),
+	})
 }
 
 // submitDuringTurn routes a /cmd or !cmd typed while a turn is live. The

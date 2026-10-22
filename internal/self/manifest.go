@@ -150,8 +150,11 @@ func (m Manifest) Validate() error {
 }
 
 // pinnedBaseRe matches the only base form a patch set may carry: a full
-// commit sha.
-var pinnedBaseRe = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
+// commit sha. Both object formats are accepted — SHA-1 (40 hex) and SHA-256
+// (64 hex) — so a set minted in a `git init --object-format=sha256` repo can
+// still be read back instead of failing validation after its manifest was
+// rewritten.
+var pinnedBaseRe = regexp.MustCompile(`^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$`)
 
 // Digest identifies the exact set a reviewer approved: the sha256 over the
 // canonical manifest (the signature payload). A rebase rewrites the manifest,

@@ -137,8 +137,13 @@ func (c *Core) handleUDPEnvelope(ctx context.Context, env bus.Envelope, src *net
 	if env.From == "" || env.From == c.nodeID {
 		return
 	}
-	if env.Type == bus.MsgHello {
-		c.logger.Warn("udp: hello over datagram dropped", "from", env.From)
+	// Both hello types are connection-bound: a hello opens a WS handshake,
+	// and hello_reject answers one on the conn it arrived on. The datagram
+	// plane has no conn, so dispatch would hand a nil *bus.Conn to a handler
+	// that dereferences it — a member could kill the single UDP read loop
+	// (and with it every punch and sealed datagram) with one frame.
+	if env.Type == bus.MsgHello || env.Type == bus.MsgHelloReject {
+		c.logger.Warn("udp: hello frame over datagram dropped", "type", env.Type, "from", env.From)
 		return
 	}
 	if !c.udpPeerTrusted(env.From, src) {
@@ -338,10 +343,22 @@ func (c *Core) stunDiscover(ctx context.Context, servers []string) {
 }
 
 // udpCandidates lists the host:port strings a punch offer should advertise:
-// every non-loopback interface address, the reflexive IP a peer's hello
-// observed for us, and any STUN-discovered mapping — all at the UDP listen
-// port, because a punch sprayed from the shared socket opens a mapping for
-// exactly that port.
+// the STUN-discovered reflexive endpoint, every non-loopback interface
+// address, and the reflexive IP a peer's hello observed for us.
+//
+// The reflexive endpoint is advertised VERBATIM, port included. A NAT rewrites
+// the external port of the UDP mapping (measured on a real home uplink: local
+// 17837 surfaced as public 8690), so the reachable endpoint is
+// public-host:public-PORT — and the port is half the address. Pairing the
+// public host with the LOCAL listen port names a port the mapping does not
+// live on, so the peer sprays a socket that does not exist and the hole
+// never opens. The reflexive answer already carries the right port, and it
+// is the one endpoint that survives a NAT.
+//
+// The interface addresses and the peer-observed host are added at the local
+// listen port: those are the cases where the peer is on a reachable segment
+// (a LAN address, or a directly-routable host whose UDP port really is the
+// local one).
 func (c *Core) udpCandidates() []string {
 	c.udpMu.Lock()
 	port := c.udpPort
@@ -352,34 +369,43 @@ func (c *Core) udpCandidates() []string {
 	}
 	seen := map[string]bool{}
 	var out []string
-	add := func(host string) {
-		if host == "" {
+	add := func(ep string) {
+		if ep == "" {
 			return
 		}
-		ep := net.JoinHostPort(host, itoa(port))
 		if !seen[ep] {
 			seen[ep] = true
 			out = append(out, ep)
 		}
 	}
+	addHostAtPort := func(host string) {
+		if host == "" {
+			return
+		}
+		add(net.JoinHostPort(host, itoa(port)))
+	}
+	// The reflexive endpoint first: it is the only one that is certainly
+	// reachable for a NAT-bound node, and it carries its own port.
 	if reflexive != "" {
-		if h, _, err := net.SplitHostPort(reflexive); err == nil {
-			add(h)
-		} else {
+		if _, _, err := net.SplitHostPort(reflexive); err == nil {
 			add(reflexive)
+		} else {
+			// A bare host (no port) — fall back to pairing it with the
+			// local port rather than dropping it.
+			addHostAtPort(reflexive)
 		}
 	}
 	c.udpMu.Lock()
 	you := c.observedIP
 	c.udpMu.Unlock()
-	add(you)
+	addHostAtPort(you)
 	if addrs, err := net.InterfaceAddrs(); err == nil {
 		for _, a := range addrs {
 			ipn, ok := a.(*net.IPNet)
 			if !ok || ipn.IP.IsLoopback() || !ipn.IP.IsGlobalUnicast() || ipn.IP.IsLinkLocalUnicast() {
 				continue
 			}
-			add(ipn.IP.String())
+			addHostAtPort(ipn.IP.String())
 		}
 	}
 	return out

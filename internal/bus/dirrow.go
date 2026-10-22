@@ -23,13 +23,14 @@ const DirRowMaxBytes = 16 * 1024
 //
 //	withSeen=true  → signature domain: everything except Sig
 //	withSeen=false → content-hash domain: also excludes SeenAt and the
-//	                 measured link latencies
+//	                 measured link latencies, and normalizes array order
 func dirRowCanonical(r *DirRow, withSeen bool) []byte {
 	c := *r
 	c.Sig = ""
 	if !withSeen {
 		c.SeenAt = 0
 		c.Links = stableLinks(c.Links)
+		c.Neighbors = stableStrings(c.Neighbors)
 		c.Card = stableCard(c.Card)
 	}
 	b, err := json.Marshal(&c)
@@ -39,10 +40,12 @@ func dirRowCanonical(r *DirRow, withSeen bool) []byte {
 	return b
 }
 
-// stableLinks drops the measured latency from a row's link metrics. The RTT
-// moves on every ping, and the content hash is what two peers compare to
-// decide whether their directories agree: hashing the latency would make
-// the hash move with it, and the two sides would never meet.
+// stableLinks drops the measured latency from a row's link metrics and sorts
+// the result. The RTT moves on every ping, and the content hash is what two
+// peers compare to decide whether their directories agree: hashing the latency
+// would make the hash move with it, and the two sides would never meet.
+// Order matters too — the live adjacency is built by ranging over a map, so
+// two mints of the same content would otherwise hash differently.
 func stableLinks(links []LinkMetric) []LinkMetric {
 	if len(links) == 0 {
 		return links
@@ -52,13 +55,31 @@ func stableLinks(links []LinkMetric) []LinkMetric {
 	for i := range out {
 		out[i].RTTms = 0
 	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Peer != out[j].Peer {
+			return out[i].Peer < out[j].Peer
+		}
+		return out[i].Kind < out[j].Kind
+	})
 	return out
 }
 
-// stableCard drops the measured latency from a capability card. The card
-// embeds the same link metrics (links[].rtt_ms) for consumers that read the
-// summary; the key is REMOVED rather than zeroed so a link with a sample and
-// a link without one normalize to the same bytes.
+// stableStrings returns a sorted copy of a set-like string slice. Nothing in
+// the content-hash domain may depend on map iteration order.
+func stableStrings(in []string) []string {
+	if len(in) < 2 {
+		return in
+	}
+	out := make([]string, len(in))
+	copy(out, in)
+	sort.Strings(out)
+	return out
+}
+
+// stableCard normalizes the two map-order-derived arrays a capability card
+// embeds: links (drop rtt_ms and sort) and neighbors (sort). The key is
+// REMOVED rather than zeroed so a link with a sample and a link without one
+// normalize to the same bytes.
 func stableCard(card json.RawMessage) json.RawMessage {
 	if len(card) == 0 {
 		return card
@@ -67,27 +88,51 @@ func stableCard(card json.RawMessage) json.RawMessage {
 	if err := json.Unmarshal(card, &m); err != nil {
 		return card
 	}
-	raw, ok := m["links"]
-	if !ok {
+	changed := false
+	if raw, ok := m["links"]; ok {
+		var links []map[string]any
+		if err := json.Unmarshal(raw, &links); err == nil {
+			for _, l := range links {
+				delete(l, "rtt_ms")
+			}
+			sort.SliceStable(links, func(i, j int) bool { return linkLess(links[i], links[j]) })
+			if norm, err := json.Marshal(links); err == nil {
+				m["links"] = norm
+				changed = true
+			}
+		}
+	}
+	if raw, ok := m["neighbors"]; ok {
+		var neighbors []string
+		if err := json.Unmarshal(raw, &neighbors); err == nil {
+			sort.Strings(neighbors)
+			if norm, err := json.Marshal(neighbors); err == nil {
+				m["neighbors"] = norm
+				changed = true
+			}
+		}
+	}
+	if !changed {
 		return card
 	}
-	var links []map[string]any
-	if err := json.Unmarshal(raw, &links); err != nil {
-		return card
-	}
-	for _, l := range links {
-		delete(l, "rtt_ms")
-	}
-	norm, err := json.Marshal(links)
-	if err != nil {
-		return card
-	}
-	m["links"] = norm
 	out, err := json.Marshal(m)
 	if err != nil {
 		return card
 	}
 	return out
+}
+
+// linkLess orders decoded card links by the same (peer, kind) key stableLinks
+// uses on the wire form, so both levels of the row hash identically.
+func linkLess(a, b map[string]any) bool {
+	ap, _ := a["peer"].(string)
+	bp, _ := b["peer"].(string)
+	if ap != bp {
+		return ap < bp
+	}
+	ak, _ := a["kind"].(string)
+	bk, _ := b["kind"].(string)
+	return ak < bk
 }
 
 // CanonicalDirRowBytes returns the full-field serialization — the byte

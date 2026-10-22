@@ -318,3 +318,39 @@ func TestArtifactGrantDirectHandoff(t *testing.T) {
 		t.Fatal("a forged grant was served the artifact")
 	}
 }
+
+// TestConsentDigestBindsScopeAndIsolation pins the two scope-bearing fields
+// that were added after ConsentDigest's whitelist was written and silently
+// went unbound: an authenticated relay could rewrite the task's write lanes
+// (which decide sibling lock granularity) or flip worktree isolation, and the
+// origin's Ed25519 grant still verified. Chain and budgets stay unbound —
+// legitimate relay edits must not break consent.
+func TestConsentDigestBindsScopeAndIsolation(t *testing.T) {
+	p := bus.TaskDelegatePayload{
+		TaskID: "scope-task", Intent: "edit the tree",
+		Paths: []string{"internal/core"}, Isolate: true,
+	}
+	base := p.ConsentDigest()
+	if base == "" {
+		t.Fatal("empty digest")
+	}
+
+	scoped := p
+	scoped.Paths = []string{"internal/commander"}
+	if scoped.ConsentDigest() == base {
+		t.Fatal("a relay rewrite of the declared write lanes did not change the digest")
+	}
+	shared := p
+	shared.Isolate = false
+	if shared.ConsentDigest() == base {
+		t.Fatal("a relay flip of worktree isolation did not change the digest")
+	}
+
+	// The legitimate relay edits stay out of the digest.
+	moved := p
+	moved.Chain = []string{"origin", "relay"}
+	moved.TimeoutMS = 1
+	if moved.ConsentDigest() != base {
+		t.Fatal("chain/timeout are relay-rewritten and must not move the digest")
+	}
+}

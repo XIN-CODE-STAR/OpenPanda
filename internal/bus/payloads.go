@@ -229,8 +229,16 @@ type DialCheckAckPayload struct {
 // PunchWantPayload is the auto-punch request (M3): the sender asks the
 // receiver — the lexicographically-smaller, offerer-elected side — to send
 // it a punch_offer. TTL bounds relay hops the same way punch_offer's does.
+//
+// Src names the REQUESTER and must survive the relay. A relayed envelope is
+// re-minted as the forwarder's (env.From = this node) because the receiving
+// conn authenticates envelopes by their bound peer id — so the requester
+// would otherwise be lost, and the elected offerer would punch the RELAY
+// instead of the node that asked. It rides the payload for the same reason
+// PunchOfferPayload.Src does.
 type PunchWantPayload struct {
-	TTL int `json:"ttl"`
+	Src string `json:"src,omitempty"`
+	TTL int    `json:"ttl"`
 }
 
 // DirPullPayload is the differential-sync request (M1): the requester's own
@@ -458,17 +466,25 @@ func (p TaskDelegatePayload) ConsentDigest() string {
 		p.ProjectPack = nil
 	}
 	type consentBound struct {
-		TaskID          string        `json:"task_id"`
-		ParentID        string        `json:"parent_id,omitempty"`
-		Project         string        `json:"project,omitempty"`
-		Title           string        `json:"title,omitempty"`
-		ContextType     string        `json:"context_type,omitempty"`
-		ContextHash     string        `json:"context_hash,omitempty"`
-		ContextLevel    string        `json:"context_level,omitempty"`
-		ContextData     []byte        `json:"context_data,omitempty"`
-		Intent          string        `json:"intent"`
-		SpecJSON        string        `json:"spec_json,omitempty"`
-		Requires        []string      `json:"requires,omitempty"`
+		TaskID       string   `json:"task_id"`
+		ParentID     string   `json:"parent_id,omitempty"`
+		Project      string   `json:"project,omitempty"`
+		Title        string   `json:"title,omitempty"`
+		ContextType  string   `json:"context_type,omitempty"`
+		ContextHash  string   `json:"context_hash,omitempty"`
+		ContextLevel string   `json:"context_level,omitempty"`
+		ContextData  []byte   `json:"context_data,omitempty"`
+		Intent       string   `json:"intent"`
+		SpecJSON     string   `json:"spec_json,omitempty"`
+		Requires     []string `json:"requires,omitempty"`
+		// Paths and Isolate decide the task's write lanes and whether it runs
+		// against a private copy of the project. They were added after the
+		// whitelist was written and silently went unbound: an authenticated
+		// relay could rewrite the scope or flip isolation and the origin's
+		// Ed25519 grant still verified (P1). Older peers send both zero, so
+		// binding them does not move the digest for a mixed-version mesh.
+		Paths           []string      `json:"paths,omitempty"`
+		Isolate         bool          `json:"isolate,omitempty"`
 		PreferredNode   string        `json:"preferred_node,omitempty"`
 		TargetNode      string        `json:"target_node,omitempty"`
 		MaxRetries      int           `json:"max_retries,omitempty"`
@@ -498,6 +514,8 @@ func (p TaskDelegatePayload) ConsentDigest() string {
 		Intent:          p.Intent,
 		SpecJSON:        p.SpecJSON,
 		Requires:        p.Requires,
+		Paths:           p.Paths,
+		Isolate:         p.Isolate,
 		PreferredNode:   p.PreferredNode,
 		TargetNode:      p.TargetNode,
 		MaxRetries:      p.MaxRetries,

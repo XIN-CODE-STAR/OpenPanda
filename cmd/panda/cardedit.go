@@ -93,12 +93,10 @@ func runCardNative(args []string) {
 	switch verb {
 	case "add":
 		if len(positional) != 1 || *command == "" {
-			fmt.Fprintln(os.Stderr, "usage: panda card native add <id> --command <cmd> [--args a,b] [--tier 1|2] [--description …]")
-			os.Exit(2)
+			fail(2, "usage: panda card native add <id> --command <cmd> [--args a,b] [--tier 1|2] [--description …]")
 		}
 		if *tier != 1 && *tier != 2 {
-			fmt.Fprintf(os.Stderr, "panda: --tier must be 1 or 2, got %d\n", *tier)
-			os.Exit(2)
+			failf(2, "panda: --tier must be 1 or 2, got %d\n", *tier)
 		}
 		ab := ledger.NativeAbility{
 			ID:          positional[0],
@@ -113,16 +111,14 @@ func runCardNative(args []string) {
 		cardEditDone(path, "native", ab.ID, "added")
 	case "remove", "rm":
 		if len(positional) != 1 {
-			fmt.Fprintln(os.Stderr, "usage: panda card native remove <id>")
-			os.Exit(2)
+			fail(2, "usage: panda card native remove <id>")
 		}
 		if err := cardmut.NativeRemove(path, positional[0]); err != nil {
 			fatal("remove native ability", err)
 		}
 		cardEditDone(path, "native", positional[0], "removed")
 	default:
-		fmt.Fprintln(os.Stderr, "usage: panda card native add|remove …")
-		os.Exit(2)
+		fail(2, "usage: panda card native add|remove …")
 	}
 }
 
@@ -152,12 +148,10 @@ func runCardAgent(args []string) {
 	case "add":
 		if len(positional) != 1 || *adapter == "" {
 			fmt.Fprintln(os.Stderr, "usage: panda card agent add <name> --adapter <script> [--install-check …] [--capabilities a,b]")
-			fmt.Fprintln(os.Stderr, "                                [--command '… {prompt}'] [--best-at a,b] [--not-for a,b] [--cost-tier …] [--tier 1|2]")
-			os.Exit(2)
+			fail(2, "                                [--command '… {prompt}'] [--best-at a,b] [--not-for a,b] [--cost-tier …] [--tier 1|2]")
 		}
 		if *tier != 1 && *tier != 2 {
-			fmt.Fprintf(os.Stderr, "panda: --tier must be 1 or 2, got %d\n", *tier)
-			os.Exit(2)
+			failf(2, "panda: --tier must be 1 or 2, got %d\n", *tier)
 		}
 		ag := ledger.Agent{
 			Adapter:      *adapter,
@@ -175,8 +169,7 @@ func runCardAgent(args []string) {
 		cardEditDone(path, "agent", positional[0], "added")
 	case "remove", "rm":
 		if len(positional) != 1 {
-			fmt.Fprintln(os.Stderr, "usage: panda card agent remove <name>")
-			os.Exit(2)
+			fail(2, "usage: panda card agent remove <name>")
 		}
 		if err := cardmut.AgentRemove(path, positional[0]); err != nil {
 			fatal("remove agent", err)
@@ -185,8 +178,7 @@ func runCardAgent(args []string) {
 	case "set":
 		if len(positional) < 2 {
 			fmt.Fprintln(os.Stderr, "usage: panda card agent set <name> <field>=<value> …")
-			fmt.Fprintln(os.Stderr, "fields: adapter, install_check, command, capabilities, best_at, not_for, cost_tier, tier")
-			os.Exit(2)
+			fail(2, "fields: adapter, install_check, command, capabilities, best_at, not_for, cost_tier, tier")
 		}
 		name := positional[0]
 		upd, err := parseAgentUpdate(positional[1:])
@@ -198,8 +190,7 @@ func runCardAgent(args []string) {
 		}
 		cardEditDone(path, "agent", name, "updated")
 	default:
-		fmt.Fprintln(os.Stderr, "usage: panda card agent add|remove|set …")
-		os.Exit(2)
+		fail(2, "usage: panda card agent add|remove|set …")
 	}
 }
 
@@ -217,8 +208,7 @@ func runCardManual(args []string) {
 	switch verb {
 	case "add":
 		if len(positional) != 1 || *notify == "" {
-			fmt.Fprintln(os.Stderr, "usage: panda card manual add <id> --notify <contact>")
-			os.Exit(2)
+			fail(2, "usage: panda card manual add <id> --notify <contact>")
 		}
 		ab := ledger.ManualAbility{ID: positional[0], Notify: *notify}
 		if err := cardmut.ManualAdd(path, ab); err != nil {
@@ -227,16 +217,14 @@ func runCardManual(args []string) {
 		cardEditDone(path, "manual", ab.ID, "added")
 	case "remove", "rm":
 		if len(positional) != 1 {
-			fmt.Fprintln(os.Stderr, "usage: panda card manual remove <id>")
-			os.Exit(2)
+			fail(2, "usage: panda card manual remove <id>")
 		}
 		if err := cardmut.ManualRemove(path, positional[0]); err != nil {
 			fatal("remove manual ability", err)
 		}
 		cardEditDone(path, "manual", positional[0], "removed")
 	default:
-		fmt.Fprintln(os.Stderr, "usage: panda card manual add|remove …")
-		os.Exit(2)
+		fail(2, "usage: panda card manual add|remove …")
 	}
 }
 

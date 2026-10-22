@@ -2142,12 +2142,25 @@ func (c *Core) removePeerForConn(conn *bus.Conn) {
 // read loop keeps the connection alive. Short-lived schedulers (the ask CLI)
 // use this so they can dial every peer and then proceed to routing. A daemon
 // that must hold the connection and reconnect on drop should use MaintainPeer.
+//
+// The ctx bounds the DIAL, not the connection. A caller that wants a short
+// dial budget (the reachability ladder) must not hand that budget to the
+// read loop: cancelling it the moment the dial returns would close the
+// connection before the peer's hello reply was ever read, and the edge
+// would die on arrival. See dialPeerWithLife.
 func (c *Core) DialPeer(ctx context.Context, addr string) error {
-	conn, err := c.dial(ctx, addr)
+	return c.dialPeerWithLife(ctx, context.WithoutCancel(ctx), addr)
+}
+
+// dialPeerWithLife connects with a dial budget (ctx) and serves the
+// resulting connection under a separate lifetime (life). The two are different
+// clocks: the budget bounds the attempt, the lifetime bounds the edge.
+func (c *Core) dialPeerWithLife(dialCtx, life context.Context, addr string) error {
+	conn, err := c.dial(dialCtx, addr)
 	if err != nil {
 		return err
 	}
-	c.goGuarded("inbound read "+conn.PeerID(), func() { c.handleInbound(ctx, conn) })
+	c.goGuarded("inbound read "+conn.PeerID(), func() { c.handleInbound(life, conn) })
 	return nil
 }
 
@@ -2675,10 +2688,18 @@ func (c *Core) handleHelloReject(ctx context.Context, conn *bus.Conn, env bus.En
 	if reason == "" {
 		reason = "unknown"
 	}
-	conn.SetRejectReason(reason)
+	// The marker and the log are conn-independent; only the per-conn verdict
+	// needs a conn. A nil conn should be unreachable (the UDP plane drops
+	// hello frames before dispatch), but a handler that panics on transport
+	// shape is a remote kill switch, so fail soft.
+	if conn != nil {
+		conn.SetRejectReason(reason)
+	}
 	c.lastHelloReject.Store(reason)
 	c.logger.Warn("peer rejected our hello", "peer", env.From, "reason", reason)
-	conn.Close()
+	if conn != nil {
+		conn.Close()
+	}
 }
 
 func (c *Core) handleHello(ctx context.Context, conn *bus.Conn, env bus.Envelope) {
@@ -2722,23 +2743,23 @@ func (c *Core) handleHello(ctx context.Context, conn *bus.Conn, env bus.Envelope
 		c.rejectHello(conn, "identity")
 		return
 	}
-	// Identity pin on keys a human verified: once a node id's recorded key is
-	// key_verified, a hello re-keying it is rejected outright — from here a
-	// reinstall and a node-id hijack are indistinguishable, and neither may
-	// silently inherit the human's check. The operator clears the old row
-	// (nodes remove / re-pair) to admit the new key. Unverified rows keep the
-	// TOFU path in recordPeerPubKey (the change still clears key_verified and
-	// logs loudly).
-	if p.PubKey != "" && p.EdSig != "" {
-		if stored, ok := c.peerPubKey(p.NodeID); ok && hex.EncodeToString(stored) != p.PubKey {
-			var verified int
-			_ = c.db.QueryRowContext(ctx,
-				`SELECT COALESCE(key_verified,0) FROM employee_cache WHERE id=?`, p.NodeID).Scan(&verified)
-			if verified != 0 {
-				c.logger.Warn("rejected hello: key re-bind on verified identity", "peer", p.NodeID)
-				c.rejectHello(conn, "identity")
-				return
-			}
+	// Identity pinning. Once a node id has a key on record, a hello must prove
+	// that key: presenting a different one, or omitting the Ed25519 block
+	// entirely, is rejected. The omission half is load-bearing — VerifyHelloP
+	// still accepts an identity-less hello as a legacy peer for a first
+	// contact, but every peer holds the mesh secret that signs the HMAC, so a
+	// member could otherwise claim a known node id with no key at all, inherit
+	// that node's trust zone and pinned-key decisions, and mint work as it.
+	// A genuine re-key (reinstall) is an operator action: clear the old row
+	// with `nodes remove` / re-pair, which is also what a human-verified key
+	// already required.
+	if stored, ok := c.peerPubKey(p.NodeID); ok && len(stored) > 0 {
+		want := hex.EncodeToString(stored)
+		if p.PubKey != want {
+			c.logger.Warn("rejected hello: identity key absent or changed for known node",
+				"peer", p.NodeID, "presented", p.PubKey != "")
+			c.rejectHello(conn, "identity")
+			return
 		}
 	}
 	// Replay check (M24): within MaxHelloAge a captured hello still verifies,

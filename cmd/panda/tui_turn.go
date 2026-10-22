@@ -105,7 +105,6 @@ func (m tuiModel) onDone(msg doneMsg) (tea.Model, tea.Cmd) {
 	// the next mid-turn Enter must start a fresh queue rather than escalating
 	// stale text. The board row itself stays — it is durable and may still be
 	// read by the task's next round.
-	m.staged = nil
 	m.streamTask = ""
 
 	if msg.err != nil {

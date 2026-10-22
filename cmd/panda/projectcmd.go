@@ -56,9 +56,7 @@ func runProject(args []string) {
 		projectUsage(os.Stdout)
 	default:
 		p := palFor(os.Stderr)
-		fmt.Fprintf(os.Stderr, "panda: %s %s\n", i18n.T(i18n.Detect(), "cli.unknownSub"), p.Command("project "+verb))
-		projectUsage(os.Stderr)
-		os.Exit(2)
+		failUsagef(2, func() { projectUsage(os.Stderr) }, "panda: %s %s\n", i18n.T(i18n.Detect(), "cli.unknownSub"), p.Command("project "+verb))
 	}
 }
 
@@ -192,8 +190,7 @@ func runProjectNew(args []string) {
 	fs.Parse(reorderFlags(fs, args))
 	name := strings.TrimSpace(fs.Arg(0))
 	if name == "" {
-		fmt.Fprintln(os.Stderr, "usage: panda project new <name> [--dir PATH] [--desc S] [--enter=false]")
-		os.Exit(2)
+		fail(2, "usage: panda project new <name> [--dir PATH] [--desc S] [--enter=false]")
 	}
 	if err := projects.ValidateName(name); err != nil {
 		fatalMsg(err.Error())
@@ -347,8 +344,7 @@ func runProjectApproval(args []string) {
 	rest := fs.Args()
 	loc := i18n.Detect()
 	usage := func() {
-		fmt.Fprintln(os.Stderr, "usage: panda project approval <name> [mode inherit|never|on-request|always | scope once|session|project | clear]")
-		os.Exit(2)
+		fail(2, "usage: panda project approval <name> [mode inherit|never|on-request|always | scope once|session|project | clear]")
 	}
 	if len(rest) == 0 {
 		usage()
@@ -409,8 +405,7 @@ func runProjectEnter(args []string) {
 	fs.Parse(reorderFlags(fs, args))
 	name := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	if name == "" {
-		fmt.Fprintln(os.Stderr, "usage: panda project enter <name>")
-		os.Exit(2)
+		fail(2, "usage: panda project enter <name>")
 	}
 	store, mem, _, closeDB := projectStores(*configPath)
 	defer closeDB()
@@ -473,8 +468,7 @@ func runProjectRename(args []string) {
 	configPath := fs.String("config", cliConfigPath, "path to config.yaml")
 	fs.Parse(reorderFlags(fs, args))
 	if fs.NArg() != 2 {
-		fmt.Fprintln(os.Stderr, "usage: panda project rename <old> <new>")
-		os.Exit(2)
+		fail(2, "usage: panda project rename <old> <new>")
 	}
 	oldName, newName := fs.Arg(0), fs.Arg(1)
 	if err := projects.ValidateName(newName); err != nil {
@@ -530,8 +524,7 @@ func runProjectRemove(args []string) {
 	fs.Parse(reorderFlags(fs, args))
 	name := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	if name == "" {
-		fmt.Fprintln(os.Stderr, "usage: panda project rm <name> [--keep-memory] [--delete-sessions]")
-		os.Exit(2)
+		fail(2, "usage: panda project rm <name> [--keep-memory] [--delete-sessions]")
 	}
 	store, mem, _, closeDB := projectStores(*configPath)
 	defer closeDB()

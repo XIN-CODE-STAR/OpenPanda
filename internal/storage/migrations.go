@@ -94,6 +94,33 @@ var migrations = []Migration{
 	// The to-do board landed while upstream claimed 56-60 for the cross-network
 	// mesh columns, so it moves behind them (the same collision v50 had).
 	{Version: 61, Name: "add_todos", Apply: migrateV61},
+	{Version: 62, Name: "add_employee_dir_signer", Apply: migrateV62},
+}
+
+// migrateV62 adds employee_cache.dir_signer: the Ed25519 key that SIGNED a
+// gossiped row, as distinct from pub_key (the key the row's id is pinned to).
+//
+// The share accounting needs it. dirRowBudget counts how much of the directory
+// one sender occupies, and it looked at pub_key — but pub_key is only written
+// for a self-certifying stable id or an already-pinned row, so a member that
+// signed rows for arbitrary fresh ids contributed nothing to its own share.
+// The cap then never bit, and one member could fill the whole table with
+// phantom rows until an HONEST new peer had no room left to publish its own
+// row at all.
+//
+// dir_signer is the row's own signed claim: the signature covers it, so it is
+// proof of who signed the row, not a self-asserted identity.
+func migrateV62(tx MigrationExec) error {
+	exists, err := tableExistsTx(tx, "employee_cache")
+	if err != nil || !exists {
+		return err
+	}
+	if err := addColumnIfMissingTx(tx, "employee_cache",
+		"dir_signer", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	_, err = tx.Exec(`CREATE INDEX IF NOT EXISTS idx_employee_dir_signer ON employee_cache(dir_signer)`)
+	return err
 }
 
 // migrateV58 adds task_messages.consumed_at: the moment the recipient's round

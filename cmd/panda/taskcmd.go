@@ -708,8 +708,7 @@ func resolveTaskRef(store *core.TaskStore, ref string) string {
 	}
 	var amb *core.AmbiguousTaskIDError
 	if errors.As(err, &amb) {
-		fmt.Fprintln(os.Stderr, "panda: "+ambiguousTaskMsg(i18n.Detect(), amb))
-		os.Exit(2)
+		fail(2, "panda: "+ambiguousTaskMsg(i18n.Detect(), amb))
 	}
 	taskStoreFatal(err, ref)
 	return ""
@@ -729,8 +728,7 @@ func ambiguousTaskMsg(loc i18n.Locale, amb *core.AmbiguousTaskIDError) string {
 
 func taskStoreFatal(err error, id string) {
 	if errors.Is(err, sql.ErrNoRows) {
-		fmt.Fprintln(os.Stderr, "panda: "+i18n.Tf(i18n.Detect(), "cli.noSuch.task", "id", id))
-		os.Exit(1)
+		fail(1, "panda: "+i18n.Tf(i18n.Detect(), "cli.noSuch.task", "id", id))
 	}
 	fatal("get task", err)
 }
@@ -784,8 +782,7 @@ func runTaskAdd(args []string) {
 		*title = joined
 	}
 	if *title == "" {
-		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.task.add.noTitle"))
-		os.Exit(2)
+		fail(2, i18n.T(loc, "cli.task.add.noTitle"))
 	}
 	*prompt = strings.TrimSpace(*prompt)
 	if *prompt == "" {
@@ -793,8 +790,7 @@ func runTaskAdd(args []string) {
 	}
 	prio, ok := parseCLIPriority(*priority)
 	if !ok {
-		fmt.Fprintln(os.Stderr, i18n.Tf(loc, "cli.task.add.badPriority", "level", *priority, "list", cliPriorities))
-		os.Exit(2)
+		fail(2, i18n.Tf(loc, "cli.task.add.badPriority", "level", *priority, "list", cliPriorities))
 	}
 
 	pID := strings.TrimSpace(*parentID)
@@ -811,6 +807,11 @@ func runTaskAdd(args []string) {
 		CardPath:   *cardPath,
 		MCPCommand: *mcpCmd,
 		ConfigPath: *configPath,
+		// A write-and-exit command: enqueue the row and go. Opening the LAN
+		// discovery socket for the milliseconds in between only contends for
+		// the port with a daemon (or with the other seven parallel `task add`s
+		// a script just launched) and buys a pairing window nobody can use.
+		LocalOnly: true,
 	})
 	if err != nil {
 		fatal("ask engine", err)
@@ -841,22 +842,19 @@ func runTaskAdd(args []string) {
 	// --wait watches one row; the fan-out paths create several, so a single
 	// exit code could never describe the batch.
 	if *wait && (len(agentList) > 1 || strings.TrimSpace(*nodes) != "") {
-		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.task.wait.multi"))
-		os.Exit(2)
+		fail(2, i18n.T(loc, "cli.task.wait.multi"))
 	}
 	if len(agentList) > 1 {
 		// A multi-harness plan and an actuator dispatch are different task
 		// shapes; accepting both would silently drop the action_spec.
 		if strings.TrimSpace(*actionSpec) != "" {
-			fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.task.add.actionSpecAgents"))
-			os.Exit(2)
+			fail(2, i18n.T(loc, "cli.task.add.actionSpecAgents"))
 		}
 		// Plan stages get their own per-stage keys and private dirs — a
 		// scope claim or isolation request on the parent would be silently
 		// dropped, which is worse than saying so.
 		if strings.TrimSpace(*scopePaths) != "" || *isolate {
-			fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.task.add.scopePlanConflict"))
-			os.Exit(2)
+			fail(2, i18n.T(loc, "cli.task.add.scopePlanConflict"))
 		}
 		runTaskAddAgents(loc, engine, cfg, agentList, *mode, *title, *prompt, requiresList, requiresExplicit, prio, jsonOutput)
 		return
@@ -875,12 +873,10 @@ func runTaskAdd(args []string) {
 	if raw := strings.TrimSpace(*actionSpec); raw != "" {
 		var as ledger.ActionSpec
 		if err := json.Unmarshal([]byte(raw), &as); err != nil {
-			fmt.Fprintln(os.Stderr, i18n.Tf(loc, "cli.task.add.badActionSpec", "err", err.Error()))
-			os.Exit(2)
+			fail(2, i18n.Tf(loc, "cli.task.add.badActionSpec", "err", err.Error()))
 		}
 		if as.TargetActuator == "" || as.Action == "" {
-			fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.task.add.actionSpecMissing"))
-			os.Exit(2)
+			fail(2, i18n.T(loc, "cli.task.add.actionSpecMissing"))
 		}
 		detail := struct {
 			ActionSpec ledger.ActionSpec `json:"action_spec"`
@@ -913,16 +909,13 @@ func runTaskAdd(args []string) {
 	// An explicit --paths that parses to nothing ("", ",,") must not fall
 	// through as a silent whole-project claim — the user asked for lanes.
 	if strings.TrimSpace(*scopePaths) != "" && len(pathList) == 0 {
-		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.task.add.pathsEmpty"))
-		os.Exit(2)
+		fail(2, i18n.T(loc, "cli.task.add.pathsEmpty"))
 	}
 	if (len(pathList) > 0 || *isolate) && projName == "" {
-		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.task.add.scopeNoProject"))
-		os.Exit(2)
+		fail(2, i18n.T(loc, "cli.task.add.scopeNoProject"))
 	}
 	if len(pathList) > 0 && *isolate {
-		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.task.add.scopeIsolateConflict"))
-		os.Exit(2)
+		fail(2, i18n.T(loc, "cli.task.add.scopeIsolateConflict"))
 	}
 	in := core.TaskInput{
 		Title:       *title,
@@ -950,8 +943,7 @@ func runTaskAdd(args []string) {
 		// --nodes IS the routing preference: combining it with --preferred or
 		// a multi-harness plan would produce ambiguous ownership per stage.
 		if pref != "" || len(agentList) > 1 {
-			fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.task.add.nodesConflict"))
-			os.Exit(2)
+			fail(2, i18n.T(loc, "cli.task.add.nodesConflict"))
 		}
 		runTaskAddNodes(loc, engine, cfg, nodeList, in, q, priorityName(prio))
 		return
@@ -1153,14 +1145,12 @@ func runTaskPriority(args []string) {
 	fs.Parse(reorderFlags(fs, args))
 	loc := i18n.Detect()
 	if fs.NArg() != 2 {
-		fmt.Fprintln(os.Stderr, "usage: panda task priority <task-id> <"+cliPriorities+">")
-		os.Exit(2)
+		fail(2, "usage: panda task priority <task-id> <"+cliPriorities+">")
 	}
 	id, level := fs.Arg(0), fs.Arg(1)
 	prio, ok := parseCLIPriority(level)
 	if !ok {
-		fmt.Fprintln(os.Stderr, i18n.Tf(loc, "cli.task.add.badPriority", "level", level, "list", cliPriorities))
-		os.Exit(2)
+		fail(2, i18n.Tf(loc, "cli.task.add.badPriority", "level", level, "list", cliPriorities))
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -1189,14 +1179,12 @@ func runTaskMove(args []string) {
 	configPath := fs.String("config", cliConfigPath, "path to config.yaml")
 	fs.Parse(reorderFlags(fs, args))
 	if fs.NArg() != 2 {
-		fmt.Fprintln(os.Stderr, "usage: panda task move <task-id> <seq>")
-		os.Exit(2)
+		fail(2, "usage: panda task move <task-id> <seq>")
 	}
 	id := fs.Arg(0)
 	seq, err := strconv.ParseInt(fs.Arg(1), 10, 64)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "panda: seq must be an integer, got %q\n", fs.Arg(1))
-		os.Exit(2)
+		failf(2, "panda: seq must be an integer, got %q\n", fs.Arg(1))
 	}
 	cfg, cerr := config.Load(*configPath)
 	if cerr != nil {
@@ -1229,8 +1217,7 @@ func runTaskDelete(args []string) {
 	id := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	loc := i18n.Detect()
 	if id == "" {
-		fmt.Fprintln(os.Stderr, "usage: panda task delete [--config PATH] <task-id>")
-		os.Exit(2)
+		fail(2, "usage: panda task delete [--config PATH] <task-id>")
 	}
 
 	cfg, err := config.Load(*configPath)
@@ -1255,9 +1242,8 @@ func runTaskDelete(args []string) {
 			if gerr == nil {
 				state = t.State
 			}
-			fmt.Fprintln(os.Stderr, i18n.Tf(loc, "cli.task.delete.active",
+			fail(1, i18n.Tf(loc, "cli.task.delete.active",
 				"id", id, "state", state))
-			os.Exit(1)
 		}
 		taskStoreFatal(err, id)
 	}
@@ -1303,8 +1289,7 @@ func runTaskRevert(args []string) {
 	id := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	loc := i18n.Detect()
 	if id == "" {
-		fmt.Fprintln(os.Stderr, "usage: panda task revert <task-id>")
-		os.Exit(2)
+		fail(2, "usage: panda task revert <task-id>")
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -1336,8 +1321,7 @@ func runTaskRevert(args []string) {
 		break
 	}
 	if !reverted {
-		fmt.Fprintln(os.Stderr, "panda: "+i18n.Tf(loc, "cli.task.revert.none", "id", id))
-		os.Exit(1)
+		fail(1, "panda: "+i18n.Tf(loc, "cli.task.revert.none", "id", id))
 	}
 	if jsonOutput {
 		emitJSON(map[string]any{"id": id, "reverted": true, "restored": restored, "removed": removed})
@@ -1358,8 +1342,7 @@ func runTaskFollowup(args []string) {
 	ref := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	loc := i18n.Detect()
 	if ref == "" {
-		fmt.Fprintln(os.Stderr, "usage: panda task followup <task-id>")
-		os.Exit(2)
+		fail(2, "usage: panda task followup <task-id>")
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -1387,8 +1370,7 @@ func runTaskBoard(args []string) {
 	fs.Parse(reorderFlags(fs, args))
 	ref := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	if ref == "" {
-		fmt.Fprintln(os.Stderr, "usage: panda task board <task-id>")
-		os.Exit(2)
+		fail(2, "usage: panda task board <task-id>")
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -1450,14 +1432,12 @@ func runTaskSend(args []string) {
 	rest := fs.Args()
 	loc := i18n.Detect()
 	if len(rest) < 2 {
-		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.task.send.usage"))
-		os.Exit(2)
+		fail(2, i18n.T(loc, "cli.task.send.usage"))
 	}
 	ref := strings.TrimSpace(rest[0])
 	text := strings.TrimSpace(strings.Join(rest[1:], " "))
 	if text == "" {
-		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.task.send.usage"))
-		os.Exit(2)
+		fail(2, i18n.T(loc, "cli.task.send.usage"))
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -1466,6 +1446,7 @@ func runTaskSend(args []string) {
 	engine, err := askengine.New(context.Background(), cfg, askengine.Options{
 		CardPath:   *cardPath,
 		ConfigPath: *configPath,
+		LocalOnly:  true, // store write and exit — see runTaskAdd
 	})
 	if err != nil {
 		fatal("ask engine", err)
@@ -1504,8 +1485,7 @@ func runTaskContinue(args []string) {
 	loc := i18n.Detect()
 	id := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	if id == "" {
-		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.task.continue.usage"))
-		os.Exit(2)
+		fail(2, i18n.T(loc, "cli.task.continue.usage"))
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -1514,6 +1494,7 @@ func runTaskContinue(args []string) {
 	engine, err := askengine.New(context.Background(), cfg, askengine.Options{
 		CardPath:   *cardPath,
 		ConfigPath: *configPath,
+		LocalOnly:  true, // store write and exit — see runTaskAdd
 	})
 	if err != nil {
 		fatal("ask engine", err)
@@ -1617,8 +1598,7 @@ func runTaskAddAgents(loc i18n.Locale, engine *askengine.Engine, cfg *config.Con
 	p, err := buildMultiAgentPlan(agents, mode, title, prompt, requires, requiresExplicit)
 	if err != nil {
 		if errors.Is(err, errBadAgentMode) {
-			fmt.Fprintln(os.Stderr, i18n.Tf(loc, "cli.task.add.badMode", "mode", mode))
-			os.Exit(2)
+			fail(2, i18n.Tf(loc, "cli.task.add.badMode", "mode", mode))
 		}
 		fatal("build plan", err)
 	}

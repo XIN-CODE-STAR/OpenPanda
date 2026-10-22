@@ -1180,20 +1180,26 @@ func hintTexts(hints []hint) []string {
 // entries first under the same budget (see hintLine).
 func (m tuiModel) hintKeys() []hint {
 	if m.mode == modeAsking {
-		// One slot describes the third key the user has right now. Normally
-		// that is the thought toggle; while a note is staged it is ctrl+d,
-		// because "how do I take it back" is the question the escalatable
-		// draft raises, and a key nobody is told about is the same as no key
-		// at all. Swapping in place — rather than appending a fourth entry —
-		// keeps the legend at the width the status row already budgets for:
-		// this list is joined without shedding (see hintLine).
-		third := m.th.thoughtButton().Render("⌃O " + i18n.T(m.loc, "tui.hint.thought"))
-		if m.staged != nil {
+		// One slot describes the third key the user has right now. It is the
+		// thought toggle normally; while lines are parked it is ctrl+d, because
+		// "how do I take it back" is the question a visible queue raises, and a
+		// key nobody is told about is the same as no key at all. Swapping in
+		// place — rather than appending a fourth entry — keeps the legend at
+		// the width the status row already budgets for: this list is joined
+		// without shedding (see hintLine).
+		//
+		// ctrl+x (inject) takes that slot only when the queue is empty, because
+		// drop would be a no-op message there; with lines parked, drop is the
+		// actionable one. Enter always queues mid-turn, so its label is fixed.
+		var third string
+		if len(m.pendingInputs) > 0 {
 			third = m.th.thoughtButton().Render("⌃D " + i18n.T(m.loc, "tui.hint.drop"))
+		} else {
+			third = m.th.steerButton().Render("⌃X " + i18n.T(m.loc, "tui.hint.inject"))
 		}
 		return []hint{
 			{text: m.th.stopButton().Render(m.th.glyph("⏹", "[x]") + " Esc " + i18n.T(m.loc, "tui.hint.stop"))},
-			{text: m.th.steerButton().Render(m.th.glyph("⏎", "[>]") + " Enter " + i18n.T(m.loc, m.enterHintKey()))},
+			{text: m.th.steerButton().Render(m.th.glyph("⏎", "[>]") + " Enter " + i18n.T(m.loc, "tui.hint.queue"))},
 			{text: third},
 		}
 	}
@@ -1212,16 +1218,6 @@ func (m tuiModel) hintKeys() []hint {
 		{text: m.mouseHint(), shed: 1},
 		{text: i18n.T(m.loc, "tui.hint.quit")},
 	}
-}
-
-// enterHintKey names what Enter will do right now. While a note is staged the
-// same key escalates it, so the legend has to say "inject" — a footer that
-// still said "queue" would describe a key that no longer queues anything.
-func (m tuiModel) enterHintKey() string {
-	if m.staged != nil {
-		return "tui.hint.steer"
-	}
-	return "tui.hint.queue"
 }
 
 // mouseHint is the legend entry for ctrl+t. It names what the key does *from

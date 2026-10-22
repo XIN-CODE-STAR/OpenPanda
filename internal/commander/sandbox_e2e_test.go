@@ -22,13 +22,23 @@ func TestNativeExecutorSandboxE2E(t *testing.T) {
 	backend := SetSandboxConfig(config.SandboxConfig{
 		Mode:           "strict",
 		DenyWritePaths: []string{protected},
-	}, nil)
+	}, nil, nil)
 	t.Cleanup(func() { security.SetBasePolicy(security.Policy{Mode: security.ModeOff, AllowNetwork: true}) })
 	if backend == "" {
 		t.Skip("no sandbox backend on this platform")
 	}
 
 	e := NewExecutor().WithDir(work)
+	// A backend can be present and still be unusable: a process that is
+	// already inside a seatbelt cannot nest a stricter one, so sandbox-exec
+	// refuses to apply the profile and every run below fails with
+	// "sandbox_apply: Operation not permitted". That is the harness answering,
+	// not a confinement regression — probe once and skip rather than report
+	// three escapes that never happened.
+	if probe := e.Run(context.Background(), "/bin/sh", "-c", "true"); strings.Contains(probe.Stderr, "sandbox_apply") {
+		t.Skipf("sandbox backend %q cannot apply a profile here: %s", backend, strings.TrimSpace(probe.Stderr))
+	}
+
 	home, _ := os.UserHomeDir()
 
 	r := e.Run(context.Background(), "/bin/sh", "-c", "echo ok > \"$PWD/f.txt\" && echo wrote")
@@ -76,7 +86,7 @@ func TestNativeExecutorSandboxE2E(t *testing.T) {
 // adapterSandboxPolicy shape: the selected agent's credential dirs become
 // writable, foreign agents' become read-denied under strict.
 func TestAdapterSandboxPolicy(t *testing.T) {
-	SetSandboxConfig(config.SandboxConfig{Mode: "strict"}, nil)
+	SetSandboxConfig(config.SandboxConfig{Mode: "strict"}, nil, nil)
 	t.Cleanup(func() { security.SetBasePolicy(security.Policy{Mode: security.ModeOff, AllowNetwork: true}) })
 
 	p := adapterSandboxPolicy("codex", "codex.py", "/tmp/work")
@@ -106,7 +116,7 @@ func TestAdapterSandboxPolicy(t *testing.T) {
 	}
 
 	// Standard mode: nothing read-denied beyond the base policy.
-	SetSandboxConfig(config.SandboxConfig{Mode: "standard"}, nil)
+	SetSandboxConfig(config.SandboxConfig{Mode: "standard"}, nil, nil)
 	p = adapterSandboxPolicy("codex", "codex.py", "/tmp/work")
 	if len(p.DenyReadPaths) != 0 {
 		t.Fatalf("standard mode must not deny reads: %v", p.DenyReadPaths)

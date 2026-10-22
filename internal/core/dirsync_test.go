@@ -211,22 +211,21 @@ func TestDirRowsLimits(t *testing.T) {
 	if got := c.dirNewRowsReserve("peer", dirRowsNewPerWindow); got != dirRowsNewPerWindow {
 		t.Fatalf("reserved %d slots, want %d", got, dirRowsNewPerWindow)
 	}
-	if got := c.dirNewRowsRemaining("peer"); got != 0 {
-		t.Fatalf("new-id budget after exhaustion = %d, want 0", got)
-	}
 	if got := c.dirNewRowsReserve("peer", dirRowsNewPerWindow); got != 0 {
 		t.Fatalf("reserved %d slots from an exhausted budget, want 0", got)
 	}
 	// An unused reservation is refunded, so a frame that carried no new id
 	// does not burn the sender's window.
 	c.dirNewRowsRefund("peer", dirRowsNewPerWindow)
-	if got := c.dirNewRowsRemaining("peer"); got != dirRowsNewPerWindow {
+	if got := c.dirNewRowsReserve("peer", dirRowsNewPerWindow); got != dirRowsNewPerWindow {
 		t.Fatalf("new-id budget after refund = %d, want %d", got, dirRowsNewPerWindow)
 	}
+	// Roll the window: the next reservation starts a fresh one.
+	c.dirNewRowsRefund("peer", dirRowsNewPerWindow)
 	c.dir.mu.Lock()
 	c.dir.rowsNewAt["peer"] = time.Now().Add(-2 * dirRowsEvery)
 	c.dir.mu.Unlock()
-	if got := c.dirNewRowsRemaining("peer"); got != dirRowsNewPerWindow {
+	if got := c.dirNewRowsReserve("peer", dirRowsNewPerWindow); got != dirRowsNewPerWindow {
 		t.Fatalf("new-id budget after window roll = %d, want %d", got, dirRowsNewPerWindow)
 	}
 }
@@ -514,5 +513,88 @@ func TestDirSyncEndToEnd(t *testing.T) {
 	_ = a.db.QueryRow(`SELECT COUNT(1) FROM employee_cache WHERE id='db' AND dir_sig != ''`).Scan(&n)
 	if n != 1 {
 		t.Fatal("A never received B's signed row via want")
+	}
+}
+
+// TestDirRowShareAttributesByAuthor pins the share accounting: signed rows
+// belong to the key that signed them (not the relay that delivered them), and
+// unsigned rows belong to the sender's stable identity, so a reconnection
+// under a fresh session id does not mint a fresh allowance.
+func TestDirRowShareAttributesByAuthor(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().Unix()
+	c := newCoreOnDB(t, openTestDB(t), "node-a")
+
+	relayPub, _, err := bus.GenerateNodeKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayPubHex := hex.EncodeToString(relayPub)
+	seedPeerPubKey(t, c, "relay", relayPubHex)
+
+	// A row authored by someone else, delivered by the relay.
+	raw, authorPub := mintDirRow(t, "author", now, nil)
+	if !c.applyDirRow(ctx, raw, "relay") {
+		t.Fatal("signed row rejected")
+	}
+	seedPeerPubKey(t, c, "author", authorPub)
+
+	if _, share := c.dirRowBudget(ctx, "relay"); share != 0 {
+		t.Fatalf("relay charged %d for a row it only delivered", share)
+	}
+	if _, share := c.dirRowBudget(ctx, "author"); share != 1 {
+		t.Fatalf("author share = %d, want 1", share)
+	}
+
+	// Unsigned rows have no author: they are charged to the sender.
+	unsigned, _ := mintDirRow(t, "ghost", now, nil)
+	unsigned = stripSig(t, unsigned, func(r *bus.DirRow) { r.Sig = "" })
+	if !c.applyDirRow(ctx, unsigned, "relay") {
+		t.Fatal("unsigned row rejected")
+	}
+	if _, share := c.dirRowBudget(ctx, "relay"); share != 1 {
+		t.Fatalf("relay share after its unsigned row = %d, want 1", share)
+	}
+
+	// The same identity reconnecting under a new session id keeps accruing to
+	// the stable key rather than starting over.
+	seedPeerPubKey(t, c, "relay-1234abcd", relayPubHex)
+	rotated, _ := mintDirRow(t, "ghost2", now, nil)
+	rotated = stripSig(t, rotated, func(r *bus.DirRow) { r.Sig = "" })
+	if !c.applyDirRow(ctx, rotated, "relay-1234abcd") {
+		t.Fatal("unsigned row via rotated session rejected")
+	}
+	if _, share := c.dirRowBudget(ctx, "relay"); share != 2 {
+		t.Fatalf("relay share after a session rotation = %d, want 2", share)
+	}
+}
+
+// TestDirStampsMemoInvalidatesOnRowChange pins the memo's invalidation key:
+// a refresh rewrites the stored bytes, and the next fold must hash the new
+// content instead of serving the memoized value.
+func TestDirStampsMemoInvalidatesOnRowChange(t *testing.T) {
+	c := newCoreOnDB(t, openTestDB(t), "node-a")
+	ctx := context.Background()
+	now := time.Now().Unix()
+	raw, _ := mintDirRow(t, "peer", now, nil)
+	if !c.applyDirRow(ctx, raw, "p") {
+		t.Fatal("seed row rejected")
+	}
+	first, err := c.dirStamps(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, _ := mintDirRow(t, "peer", now+1, func(r *bus.DirRow) {
+		r.Card = json.RawMessage(`{"device":"changed"}`)
+	})
+	if !c.applyDirRow(ctx, changed, "p") {
+		t.Fatal("refresh rejected")
+	}
+	second, err := c.dirStamps(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first["peer"] == second["peer"] {
+		t.Fatal("memoized hash survived a content change")
 	}
 }

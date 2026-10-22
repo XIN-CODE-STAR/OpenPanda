@@ -11,6 +11,7 @@ import (
 
 	"github.com/Xustalis/OpenPanda/internal/artifact"
 	"github.com/Xustalis/OpenPanda/internal/bus"
+	"github.com/Xustalis/OpenPanda/internal/ledger"
 	"github.com/Xustalis/OpenPanda/internal/projects"
 	"github.com/Xustalis/OpenPanda/internal/storage"
 )
@@ -266,23 +267,30 @@ func TestAttachProjectRecordsContextDegraded(t *testing.T) {
 	}
 }
 
-// TestLandProjectPackRecordsContextDegraded verifies that when a delegated project pack
-// cannot be extracted (corrupted pack payload), handleDelegate records an EvContextDegraded
-// event with stage "land_memory".
-func TestLandProjectPackRecordsContextDegraded(t *testing.T) {
+// TestDeclinedDelegateDoesNotLandProjectPack pins the ordering that matters
+// for a remote sender: the pack is unpacked only after trust admission, so a
+// node that declines the work must not write the peer's archive anywhere —
+// not even enough to record a degraded-context event about it.
+func TestDeclinedDelegateDoesNotLandProjectPack(t *testing.T) {
 	c, _, _ := projectCore(t)
 	ctx := context.Background()
+	// A sub-mesh origin: mesh is auto-admitted and may land its pack before
+	// routing, but a guarded/open origin must not write anything until the
+	// trust gate has admitted the work.
+	if err := ledger.Register(c.db, ledger.Card{Device: "source-node"}, "source-node", 1); err != nil {
+		t.Fatalf("register origin: %v", err)
+	}
+	if err := ledger.SetPeerTrust(c.db, "source-node", "guarded"); err != nil {
+		t.Fatalf("set peer trust: %v", err)
+	}
 
-	taskID := "task-land-degraded"
+	taskID := "task-land-declined"
 	payload := bus.TaskDelegatePayload{
 		TaskID:      taskID,
 		Project:     "demo",
 		Title:       "test task",
 		ProjectPack: []byte("invalid non-tar corrupted data"),
-		// An unsatisfiable requirement keeps the router on the decline path:
-		// an empty requirement would be taken ActionLocal on this fixture and
-		// spawn the real exec goroutine, whose work-dir writes then race the
-		// test's TempDir removal.
+		// An unsatisfiable requirement keeps the router on the decline path.
 		Requires: []string{"ability:nowhere"},
 	}
 
@@ -297,17 +305,25 @@ func TestLandProjectPackRecordsContextDegraded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("events: %v", err)
 	}
-	found := false
 	for _, ev := range events {
 		if ev.Type == EvContextDegraded {
-			found = true
-			if !strings.Contains(ev.DataJSON, "land_memory") {
-				t.Fatalf("event data = %s, want land_memory stage", ev.DataJSON)
-			}
-			break
+			t.Fatalf("declined delegate landed/unpacked the pack: %s", ev.DataJSON)
 		}
 	}
-	if !found {
-		t.Fatalf("no %s event recorded after corrupted landProjectPack; events: %+v", EvContextDegraded, events)
+	if dir, err := c.projectMemoryDir(c.projectsRoot, "demo"); err == nil {
+		if _, statErr := os.Stat(dir); statErr == nil {
+			t.Fatalf("declined delegate created project dir %s", dir)
+		}
+	}
+}
+
+// TestLandProjectPackRejectsOversize verifies the receiver's own bound: the
+// sender's MaxProjectPackBytes claim is not trusted, and an oversized pack is
+// refused before any unpack work starts.
+func TestLandProjectPackRejectsOversize(t *testing.T) {
+	c, _, _ := projectCore(t)
+	pack := make([]byte, bus.MaxProjectPackBytes+1)
+	if err := c.landProjectPack("demo", pack); err == nil {
+		t.Fatal("oversized project pack was accepted")
 	}
 }

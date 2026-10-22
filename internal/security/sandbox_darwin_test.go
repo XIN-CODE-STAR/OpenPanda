@@ -16,11 +16,32 @@ import (
 // skipped when the binary is absent, so the suite stays green on a stripped
 // or future macOS where Apple finally removes it.
 
+// seatbeltProbeProfile is the smallest profile that restricts anything: allow
+// everything, deny writes under /etc. It exists to answer one question — can
+// this host apply a *restrictive* seatbelt at all? — because "allow default"
+// can be applied where a denying one cannot.
+const seatbeltProbeProfile = `(version 1)
+(allow default)
+(deny file-write* (subpath "/etc"))
+`
+
 func seatbeltOrSkip(t *testing.T) string {
 	t.Helper()
 	sb, err := exec.LookPath("sandbox-exec")
 	if err != nil {
 		t.Skip("sandbox-exec not installed")
+	}
+	// A process that is already inside a seatbelt cannot nest a stricter one:
+	// the kernel refuses the apply and every profile below comes back as
+	// "sandbox_apply: Operation not permitted". That is the harness, not the
+	// policy renderer — without this probe six failures here read as six
+	// independent confinement regressions. (Same shape as the `ps`-denied
+	// probe in cmd/panda: an environment that cannot answer gets skipped, not
+	// a fabricated verdict.)
+	probe := exec.Command(sb, "-p", seatbeltProbeProfile, "/usr/bin/true")
+	if out, err := probe.CombinedOutput(); err != nil {
+		t.Skipf("sandbox-exec cannot apply a restrictive profile here (%v): %s",
+			err, strings.TrimSpace(string(out)))
 	}
 	return sb
 }

@@ -183,3 +183,75 @@ func TestDeclineRerouteExhaustedPropagates(t *testing.T) {
 		t.Fatalf("stderr = %q, want decline reason", result.Stderr)
 	}
 }
+
+// TestDeclineReroutesToLocalNode: when the preferred peer declines and this
+// node can run the task itself, the local copy must execute. The old path
+// only accepted ActionForward, so a capable origin reported failure (and a
+// synchronous Submit waited on a row nothing would ever run).
+func TestDeclineReroutesToLocalNode(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	mk := func(id, addr string, maxConcurrent int) *Core {
+		db := openTestDB(t)
+		card := ledger.Card{
+			Device:        id,
+			ResourceClass: "Standard",
+			Native: []ledger.NativeAbility{
+				{ID: "gpio:read", Command: "echo", Args: []string{"gpio-local"}},
+			},
+			Capacity: ledger.Capacity{CPUCores: 2, RAMGB: 4, MaxConcurrent: maxConcurrent},
+		}
+		c := NewCore(db, id, card, 5, testLogger(), config.ModelConfig{})
+		c.SetWorkDir(t.TempDir())
+		c.SetSharedSecret(testSharedSecret)
+		return c
+	}
+	root := mk("root-local", "127.0.0.1:17951", 2)
+	leaf := mk("leaf-busy", "127.0.0.1:17952", 1)
+
+	// Saturate the leaf so it declines on capacity.
+	busy, err := leaf.store.Create(ctx, "", "", "busy", "leaf-busy", []string{"leaf-busy"})
+	if err != nil {
+		t.Fatalf("create busy: %v", err)
+	}
+	for _, step := range []func() error{
+		func() error { return leaf.store.Queue(ctx, busy.TaskID, "leaf-busy") },
+		func() error { return leaf.store.Dispatch(ctx, busy.TaskID, "leaf-busy", "leaf-busy") },
+		func() error { return leaf.store.Accept(ctx, busy.TaskID, "leaf-busy") },
+	} {
+		if err := step(); err != nil {
+			t.Fatalf("saturate leaf: %v", err)
+		}
+	}
+
+	for _, c := range []*Core{root, leaf} {
+		if err := c.Register(ctx); err != nil {
+			t.Fatalf("register %s: %v", c.nodeID, err)
+		}
+	}
+	go func() { _ = root.Listen(ctx, "127.0.0.1:17951") }()
+	go func() { _ = leaf.Listen(ctx, "127.0.0.1:17952") }()
+	time.Sleep(200 * time.Millisecond)
+	if err := root.DialPeer(ctx, "127.0.0.1:17952"); err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	task, result, err := root.Submit(ctx, TaskInput{
+		Title: "read gpio locally", Intent: "read gpio",
+		Requires: []string{"gpio:read"}, PreferredNode: "leaf-busy",
+	})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if !result.OK {
+		t.Fatalf("result not ok after decline: %+v", result)
+	}
+	if task.State != StateDone {
+		t.Fatalf("task state = %s, want done (ran locally after decline)", task.State)
+	}
+	if !strings.Contains(result.Stdout, "gpio-local") {
+		t.Fatalf("stdout = %q, want the local executor's output", result.Stdout)
+	}
+}

@@ -67,7 +67,7 @@ type Todo struct {
 }
 
 // Store is the SQLite persistence for todos. The table is created by
-// storage.Migrate (v56).
+// storage.Migrate (v61).
 type Store struct {
 	db *sql.DB
 }

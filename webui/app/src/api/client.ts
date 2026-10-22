@@ -490,9 +490,14 @@ export type ApprovalResult =
   | ApprovalOperation
 
 export interface AskResult {
-  kind: 'answer' | 'task'
+  kind: 'answer' | 'task' | 'plan'
   answer?: string
   task_id?: string
+  /** A plan classification: the plan row the turn started, its goal and the
+   *  stages it released. The transcript renders the plan card from the ref. */
+  plan_id?: string
+  plan_goal?: string
+  plan_stages?: string[]
   task_state?: string
   ok?: boolean
   stdout?: string

@@ -70,8 +70,7 @@ func runCard(args []string) {
 		runCardPath(rest)
 	default:
 		fmt.Fprintln(os.Stderr, "panda: "+i18n.Tf(i18n.Detect(), "cli.unknownNamed", "kind", "card subcommand", "name", sub))
-		fmt.Fprintln(os.Stderr, "usage: panda card [show|rescan|edit|set|native|agent|manual|invoke|path]")
-		os.Exit(2)
+		fail(2, "usage: panda card [show|rescan|edit|set|native|agent|manual|invoke|path]")
 	}
 }
 
@@ -151,8 +150,7 @@ func runCardShow(args []string) {
 			os.Exit(1)
 		}
 		fmt.Fprintf(os.Stderr, "panda: %v\n", err)
-		fmt.Fprintln(os.Stderr, "hint: run `panda card rescan --write` to create one from this machine's hardware")
-		os.Exit(1)
+		fail(1, "hint: run `panda card rescan --write` to create one from this machine's hardware")
 	}
 	// The daemon prunes native abilities whose command is missing here, so show
 	// them too — otherwise the card a user reads and the card peers are offered
@@ -212,8 +210,7 @@ func runCardRescan(args []string) {
 			// A card that exists but does not parse must not be silently
 			// replaced by a scan — that is the one case where "fix it for you"
 			// would destroy hand-written content.
-			fmt.Fprintf(os.Stderr, "panda: %v\n", err)
-			os.Exit(1)
+			failf(1, "panda: %v\n", err)
 		}
 		created = true
 	}
@@ -321,8 +318,7 @@ func runCardEdit(args []string) {
 	// Validate through the same loader the daemon uses, so an invalid card can
 	// never reach disk and take the node down at its next start.
 	if _, err := ledger.LoadCard(tmpPath); err != nil {
-		fmt.Fprintf(os.Stderr, "panda: edited card is invalid, nothing was written: %v\n", err)
-		os.Exit(1)
+		failf(1, "panda: edited card is invalid, nothing was written: %v\n", err)
 	}
 	if err := backupCard(path); err != nil {
 		fatal("back up card", err)
@@ -365,24 +361,20 @@ func runCardSet(args []string) {
 		fmt.Fprintln(os.Stderr, "fields: device, resource_class, chip, capacity.cpu_cores, capacity.ram_gb,")
 		fmt.Fprintln(os.Stderr, "        capacity.max_concurrent_tasks, resource_profile.cpu,")
 		fmt.Fprintln(os.Stderr, "        resource_profile.ram_gb, resource_profile.gpu_vram_gb,")
-		fmt.Fprintln(os.Stderr, "        resource_profile.duration_hint")
-		os.Exit(2)
+		fail(2, "        resource_profile.duration_hint")
 	}
 	path := cardTargetPath(*cardFlag)
 	card, err := ledger.LoadCard(path)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "panda: %v\n", err)
-		os.Exit(1)
+		failf(1, "panda: %v\n", err)
 	}
 	for _, a := range assignments {
 		field, value, ok := strings.Cut(a, "=")
 		if !ok {
-			fmt.Fprintf(os.Stderr, "panda: %q is not <field>=<value>\n", a)
-			os.Exit(2)
+			failf(2, "panda: %q is not <field>=<value>\n", a)
 		}
 		if err := setCardField(&card, strings.TrimSpace(field), strings.TrimSpace(value)); err != nil {
-			fmt.Fprintf(os.Stderr, "panda: %v\n", err)
-			os.Exit(2)
+			failf(2, "panda: %v\n", err)
 		}
 	}
 	if err := writeCard(path, card, true); err != nil {
@@ -591,14 +583,12 @@ func runCardInvoke(args []string) {
 	fs.Parse(reorderFlags(fs, args))
 	pos := fs.Args()
 	if len(pos) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: panda card invoke <actuator-id> [action] [name=value ...] [--intent text] [--authorize] [--dry-run]")
-		os.Exit(2)
+		fail(2, "usage: panda card invoke <actuator-id> [action] [name=value ...] [--intent text] [--authorize] [--dry-run]")
 	}
 	path := cardTargetPath(*cardFlag)
 	card, err := ledger.LoadCard(path)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "panda: %v\n", err)
-		os.Exit(1)
+		failf(1, "panda: %v\n", err)
 	}
 	var act *ledger.ActuatorProfile
 	for i := range card.Actuators {
@@ -612,12 +602,10 @@ func runCardInvoke(args []string) {
 		for _, a := range card.Actuators {
 			ids = append(ids, a.ID)
 		}
-		fmt.Fprintf(os.Stderr, "panda: no actuator %q on card (have: %s)\n", pos[0], orDash(strings.Join(ids, ", ")))
-		os.Exit(1)
+		failf(1, "panda: no actuator %q on card (have: %s)\n", pos[0], orDash(strings.Join(ids, ", ")))
 	}
 	if act.Command == "" {
-		fmt.Fprintf(os.Stderr, "panda: actuator %q declares no command — it is a routing advertisement only\n", act.ID)
-		os.Exit(1)
+		failf(1, "panda: actuator %q declares no command — it is a routing advertisement only\n", act.ID)
 	}
 	action := ""
 	if len(pos) > 1 {
@@ -627,8 +615,7 @@ func runCardInvoke(args []string) {
 	for _, kv := range pos[2:] {
 		k, v, ok := strings.Cut(kv, "=")
 		if !ok || k == "" {
-			fmt.Fprintf(os.Stderr, "panda: bad parameter %q (want name=value)\n", kv)
-			os.Exit(2)
+			failf(2, "panda: bad parameter %q (want name=value)\n", kv)
 		}
 		params[k] = parseInvokeScalar(v)
 	}
@@ -640,16 +627,14 @@ func runCardInvoke(args []string) {
 	plan := commander.Plan{Kind: "native", Ability: act.ID, Command: act.Command,
 		Args: act.Args, Tier: tier, ActuatorID: act.ID}
 	if err := commander.SubstituteActionSpec(&plan, spec, *intentFlag); err != nil {
-		fmt.Fprintf(os.Stderr, "panda: %v\n", err)
-		os.Exit(1)
+		failf(1, "panda: %v\n", err)
 	}
 	if *dryFlag {
 		fmt.Printf("%s %s\n", plan.Command, strings.Join(plan.Args, " "))
 		return
 	}
 	if err := defense.Authorize(plan.Tier, *authFlag); err != nil {
-		fmt.Fprintf(os.Stderr, "panda: %v (re-run with --authorize to consent)\n", err)
-		os.Exit(1)
+		failf(1, "panda: %v (re-run with --authorize to consent)\n", err)
 	}
 	res := commander.NewExecutor().Run(context.Background(), plan.Command, plan.Args...)
 	if res.Stdout != "" {

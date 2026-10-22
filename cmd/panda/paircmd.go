@@ -426,8 +426,7 @@ func runPair(args []string) {
 		return
 	}
 	if *secret != "" || *peer != "" || *listen != "" {
-		fmt.Fprintln(os.Stderr, i18n.T(i18n.Detect(), "cli.pair.usage"))
-		os.Exit(2)
+		fail(2, i18n.T(i18n.Detect(), "cli.pair.usage"))
 	}
 
 	if len(rest) == 0 {

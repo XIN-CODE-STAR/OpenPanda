@@ -13,6 +13,7 @@ import (
 
 	"github.com/Xustalis/OpenPanda/internal/artifact"
 	"github.com/Xustalis/OpenPanda/internal/bus"
+	"github.com/Xustalis/OpenPanda/internal/config"
 	"github.com/Xustalis/OpenPanda/internal/ledger"
 )
 
@@ -423,7 +424,10 @@ func TestArtifactFetchRelaysAcrossHops(t *testing.T) {
 		t.Fatalf("set relay inputs: %v", err)
 	}
 
-	// The direct pull is impossible on this topology — that is the premise.
+	// The direct pull is impossible on this topology. Transit is switched off
+	// for dest so the test keeps exercising the CHAIN relay (per-hop task rows
+	// and forwarded chunks) rather than the end-to-end transit fallback.
+	dest.SetNetworkPolicy(config.NetworkConfig{Transit: false})
 	if _, err := dest.FetchArtifact(ctx, "pin-root", taskID, m.Hash); err == nil {
 		t.Fatal("dest pulled from a node it has no link to")
 	}

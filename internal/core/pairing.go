@@ -505,7 +505,17 @@ func (c *Core) sweepPairSessions(ctx context.Context) {
 	c.pairing.mu.Unlock()
 	for _, s := range dead {
 		_ = c.pairSessionSetState(ctx, s.id, PairStateExpired)
-		s.conn.Close()
+		// closeConn, not s.conn.Close(): a pairing that arrived over TRANSIT
+		// has no conn — the reply rides the contact point's replyHop — and
+		// the unconditional Close dereferenced nil. The panic was recovered
+		// by the monitor's guard, whose cancel() took the WHOLE daemon down,
+		// so any cross-NAT pairing could randomly kill the node.
+		s.closeConn()
+		// Drop the expired session so the sweep does not reprocess it (and
+		// so its id cannot be reused while a reply is still in flight).
+		c.pairing.mu.Lock()
+		delete(c.pairing.sessions, s.id)
+		c.pairing.mu.Unlock()
 	}
 	// And rows left 'ready' past expiry — e.g. written before a crash —
 	// would otherwise list forever.

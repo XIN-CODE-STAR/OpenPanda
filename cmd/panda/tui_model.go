@@ -115,6 +115,13 @@ type tuiModel struct {
 	// the foreground frees — a queued prompt becomes the next turn, a queued
 	// command runs as the next exec. Nothing is ever reordered or dropped
 	// silently; each enqueue is echoed into the transcript.
+	//
+	// A queued line is a WHOLE INPUT, not a fragment of the turn already
+	// streaming. That is the contract the other harnesses keep (Claude Code,
+	// Codex, Devin): typing while the agent works parks your next message, it
+	// does not amend the one in flight. Folding it in made the model read the
+	// same sentence twice and rewrote the persisted transcript to include
+	// words the user had typed after sending.
 	pendingInputs []string
 
 	// scrollOffset is how many lines the transcript is scrolled back from the
@@ -170,10 +177,6 @@ type tuiModel struct {
 	// a mid-turn Enter types into, and it outranks focusTask because it names
 	// the work actually on screen. Cleared when the turn ends.
 	streamTask string
-	// staged is the note the last Enter queued mid-turn. A second Enter with
-	// the same text promotes it to an inject instead of posting a duplicate —
-	// that two-step gesture is the whole queue-vs-inject contract in the TUI.
-	staged *stagedNote
 
 	// Onboarding state
 	onboardingStep onboardingStep

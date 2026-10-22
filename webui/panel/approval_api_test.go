@@ -23,7 +23,11 @@ import (
 // async by design, so a test that slept a fixed time would flake.
 func waitTaskState(t *testing.T, store *core.TaskStore, id, want string) core.Task {
 	t.Helper()
-	deadline := time.Now().Add(8 * time.Second)
+	// The Windows runner executes this package beside 2,900 other tests; an
+	// approval that waits on an exec lock behind a finishing runner can take
+	// far longer than the old 8s without anything being wrong. The deadline
+	// guards a hang, not speed.
+	deadline := time.Now().Add(30 * time.Second)
 	for {
 		task, err := store.Get(context.Background(), id)
 		if err == nil && task.State == want {
@@ -31,7 +35,12 @@ func waitTaskState(t *testing.T, store *core.TaskStore, id, want string) core.Ta
 		}
 		if time.Now().After(deadline) {
 			last, _ := store.Get(context.Background(), id)
-			t.Fatalf("task %s never reached %s (last %+v, err %v)", id, want, last, err)
+			events, _ := store.Events(context.Background(), id)
+			if len(events) > 8 {
+				events = events[len(events)-8:]
+			}
+			t.Fatalf("task %s never reached %s (last %+v, err %v; events %+v)",
+				id, want, last, err, events)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

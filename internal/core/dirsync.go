@@ -4,6 +4,7 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -82,6 +83,13 @@ const (
 	dirRowTTL = 30 * 24 * time.Hour
 )
 
+// dirHashEntry is a memoized content hash: raw fingerprints the exact stored
+// bytes, so any rewrite (a re-mint, a newer signature) invalidates the entry.
+type dirHashEntry struct {
+	raw  [sha256.Size]byte
+	hash string
+}
+
 // dirState holds the sync bookkeeping: pullAt/pages bound the pulls WE send;
 // recvAt/recvPages bound the pulls we ANSWER — a compliant peer self-limits
 // but a hostile one costs us a full-table diff plus a page of rows per
@@ -100,6 +108,12 @@ type dirState struct {
 	// digest/digestAt cache the folded directory digest for dirDigestTTL.
 	digest   string
 	digestAt time.Time
+	// hashes memoizes a stored row's content hash keyed by its exact bytes.
+	// The fold runs on every dir_digest (cached 2s) and every pull; without
+	// this, each pass re-parses the card and re-hashes every link array.
+	// Guarded by hashMu so the fold never serializes on dir.mu during SQL.
+	hashMu sync.Mutex
+	hashes map[string]dirHashEntry
 	// sumAt/sum cache the static half of the self-row's capability summary:
 	// summary() probes each agent's usability, too expensive to run every
 	// heartbeat — the card changes on reload, not per beat. Live fields
@@ -231,10 +245,19 @@ func (c *Core) dirStamps(ctx context.Context) (map[string]string, error) {
 		if s.RowJSON != "" {
 			// Verbatim gossip row: hash the canonical form of the stored
 			// bytes. content_hash is a cache only — recompute so a stale or
-			// empty column cannot skew the digest.
+			// empty column cannot skew the digest. The in-memory memo is
+			// keyed by the exact bytes, so a refresh invalidates itself and
+			// the fold skips re-parsing an unchanged card.
+			sum, h, ok := c.lookupRowHash(s.ID, s.RowJSON)
+			if ok {
+				stamps[s.ID] = h
+				continue
+			}
 			var r bus.DirRow
 			if err := json.Unmarshal([]byte(s.RowJSON), &r); err == nil {
-				stamps[s.ID] = bus.DirRowContentHashHex(&r)
+				h := bus.DirRowContentHashHex(&r)
+				c.rememberRowHash(s.ID, sum, h)
+				stamps[s.ID] = h
 				continue
 			}
 		}
@@ -254,6 +277,32 @@ func (c *Core) dirStamps(ctx context.Context) (map[string]string, error) {
 		stamps[c.nodeID] = bus.DirRowContentHashHex(row)
 	}
 	return stamps, nil
+}
+
+// lookupRowHash returns the memoized content hash for id when the stored
+// bytes are unchanged, along with the fingerprint the caller passes back to
+// rememberRowHash on a miss.
+func (c *Core) lookupRowHash(id, raw string) (sum [sha256.Size]byte, hash string, ok bool) {
+	sum = sha256.Sum256([]byte(raw))
+	c.dir.hashMu.Lock()
+	e, hit := c.dir.hashes[id]
+	c.dir.hashMu.Unlock()
+	if hit && e.raw == sum {
+		return sum, e.hash, true
+	}
+	return sum, "", false
+}
+
+// rememberRowHash stores one memoized content hash. The map is bounded by the
+// stamp table's own ceiling; exceeding it just starts a fresh generation
+// (entries are a cache, never a source of truth).
+func (c *Core) rememberRowHash(id string, sum [sha256.Size]byte, hash string) {
+	c.dir.hashMu.Lock()
+	defer c.dir.hashMu.Unlock()
+	if c.dir.hashes == nil || len(c.dir.hashes) >= 2*dirStampMax {
+		c.dir.hashes = make(map[string]dirHashEntry, dirStampMax)
+	}
+	c.dir.hashes[id] = dirHashEntry{raw: sum, hash: hash}
 }
 
 // dirRowCols is the column set a served row needs: the gossip layer
@@ -478,27 +527,6 @@ func (c *Core) dirRowsAllowed(peer string) bool {
 	return true
 }
 
-// dirNewRowsRemaining is the NEW-id budget left for peer in the current
-// window. The counter resets when the window rolls, independent of whether
-// the peer is still sending.
-func (c *Core) dirNewRowsRemaining(peer string) int {
-	c.dir.mu.Lock()
-	defer c.dir.mu.Unlock()
-	if c.dir.rowsNew == nil {
-		c.dir.rowsNew = make(map[string]int)
-		c.dir.rowsNewAt = make(map[string]time.Time)
-	}
-	now := time.Now()
-	if now.Sub(c.dir.rowsNewAt[peer]) >= dirRowsEvery {
-		return dirRowsNewPerWindow
-	}
-	left := dirRowsNewPerWindow - c.dir.rowsNew[peer]
-	if left < 0 {
-		return 0
-	}
-	return left
-}
-
 // dirNewRowsReserve takes up to n new-id slots out of peer's current window
 // budget and returns how many it got. The reservation happens under the lock:
 // checking the budget and charging it later would let two frames from the
@@ -544,43 +572,59 @@ func (c *Core) dirNewRowsRefund(peer string, n int) {
 	}
 }
 
-// dirRowShare counts the directory rows one sender is responsible for: the
-// rows it delivered to us, plus the rows its own proven key owns. Both halves
-// matter — the first catches a flood of unsigned rows, the second catches a
-// member that rotates its session ids to get a fresh share with every one.
-func (c *Core) dirRowShare(ctx context.Context, peer string) int {
+// dirRowBudget returns the directory's remaining room for NEW ids and the
+// sender's current share from one aggregate scan.
+//
+// Share attribution is by AUTHOR, not by delivery hop: learned_via names the
+// peer that handed us a row, so charging every relayed row to the relay would
+// let a star topology pin its only relay at the share cap, and a member that
+// reconnects under a fresh session id would get a fresh allowance. Signed
+// rows therefore count against the key that signed them. Unsigned rows have
+// no author, so they count against every instance of the sender's proven key
+// (learned_via resolved through pub_key), which is what makes a session-id
+// rotation not reset the count. A sender with no pinned key falls back to its
+// literal id.
+func (c *Core) dirRowBudget(ctx context.Context, peer string) (room, share int) {
 	if c.db == nil || peer == "" {
-		return 0
-	}
-	var n int
-	if err := c.db.QueryRowContext(ctx,
-		`SELECT COUNT(1) FROM employee_cache WHERE learned_via = ?`, peer).Scan(&n); err != nil {
-		return 0 // an unreadable share must not close the door on honest rows
+		return 0, 0
 	}
 	var pub string
 	if err := c.db.QueryRowContext(ctx,
-		`SELECT COALESCE(pub_key,'') FROM employee_cache WHERE id = ?`, peer).Scan(&pub); err != nil || pub == "" {
-		return n
+		`SELECT COALESCE(pub_key,'') FROM employee_cache WHERE id = ?`, peer).Scan(&pub); err != nil {
+		pub = ""
 	}
-	var owned int
-	if err := c.db.QueryRowContext(ctx,
-		`SELECT COUNT(1) FROM employee_cache WHERE pub_key = ?`, pub).Scan(&owned); err == nil {
-		n += owned
+	var total, mine int
+	var err error
+	if pub != "" {
+		// A row counts against the sender that SIGNED it (dir_signer) and
+		// against the sender it was learned from (learned_via). dir_signer is
+		// what makes the share cap bite: without it a member that signed rows
+		// for fresh ids contributed nothing to its own share and could fill
+		// the table until no honest peer had room to publish.
+		err = c.db.QueryRowContext(ctx, `
+			SELECT COUNT(1),
+			       COALESCE(SUM(CASE
+			         WHEN dir_signer = ? THEN 1
+			         WHEN dir_signer = '' AND dir_sig = '' AND learned_via IN
+			              (SELECT id FROM employee_cache WHERE pub_key = ?) THEN 1
+			         ELSE 0 END), 0)
+			FROM employee_cache`, pub, pub).Scan(&total, &mine)
+	} else {
+		err = c.db.QueryRowContext(ctx, `
+			SELECT COUNT(1),
+			       COALESCE(SUM(CASE WHEN dir_sig = '' AND learned_via = ? THEN 1 ELSE 0 END), 0)
+			FROM employee_cache`, peer).Scan(&total, &mine)
 	}
-	return n
-}
-
-// dirRowRoom is the number of NEW ids the directory may still accept. The
-// count is read once per inbound frame, then decremented as new rows land.
-func (c *Core) dirRowRoom(ctx context.Context) int {
-	var n int
-	if err := c.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM employee_cache`).Scan(&n); err != nil {
-		return 0 // fail closed: an unreadable directory is not room to grow
+	if err != nil {
+		// Fail closed: an unreadable directory is not room to grow. The share
+		// alone would only close the door on honest rows, but the same scan
+		// carries both numbers, so room=0 is the safe answer.
+		return 0, 0
 	}
-	if n >= dirRowsMax {
-		return 0
+	if total >= dirRowsMax {
+		return 0, mine
 	}
-	return dirRowsMax - n
+	return dirRowsMax - total, mine
 }
 
 // sendDirPull emits a differential-sync request toward peer. Stamps are the
@@ -788,13 +832,13 @@ func (c *Core) handleDirRows(ctx context.Context, env bus.Envelope) {
 	// Reserve the sender's new-id budget under the lock, then hand back
 	// whatever the frame did not use.
 	reserved := c.dirNewRowsReserve(env.From, dirRowsNewPerWindow)
-	room := c.dirRowRoom(ctx)
+	room, share := c.dirRowBudget(ctx, env.From)
 	if reserved < room {
 		room = reserved
 	}
 	// The sender's SHARE of the directory: it may not fill the table with
 	// rows no honest peer could ever add.
-	switch share := c.dirRowShare(ctx, env.From); {
+	switch {
 	case share >= dirRowsShareMax:
 		room = 0
 	case dirRowsShareMax-share < room:
@@ -929,17 +973,36 @@ func (c *Core) applyDirRowLimited(ctx context.Context, raw json.RawMessage, via 
 		return false
 	}
 	hash := bus.DirRowContentHash(row)
+	// dir_signer records who SIGNED the row. The signature covers it, so it
+	// is proof rather than a claim — and it is what the share accounting
+	// counts: pub_key only names the key an id is PINNED to, which a
+	// non-stable id never gets, so a sender's phantom rows used to count
+	// against nobody and its share stayed at zero while it filled the table.
+	signer := ""
+	if signed {
+		signer = row.PubKey
+	}
 	// Upsert: recordPeerPubKey may have created the row a moment ago, and a
 	// hello-learned row may already exist — never a plain insert.
+	//
+	// learned_via records the FIRST hop that brought us this id. A row may
+	// already exist when the upsert runs (recordPeerPubKey creates a
+	// provenance-less skeleton for a self-certifying id), so fill the column
+	// only while it is empty; letting every refresh overwrite it would move
+	// the row's provenance to whichever relay forwarded the newest copy, and
+	// the share accounting keys unsigned rows on it.
 	_, err = c.db.ExecContext(ctx, `
-		INSERT INTO employee_cache (id, dir_row_json, dir_sig, seen_at,
+		INSERT INTO employee_cache (id, dir_row_json, dir_sig, dir_signer, seen_at,
 		       content_hash, learned_via, status, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?, 'offline', 0)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 'offline', 0)
 		ON CONFLICT(id) DO UPDATE SET
 			dir_row_json=excluded.dir_row_json, dir_sig=excluded.dir_sig,
+			dir_signer=excluded.dir_signer,
 			seen_at=excluded.seen_at, content_hash=excluded.content_hash,
-			learned_via=excluded.learned_via`,
-		row.ID, string(canon), row.Sig, seenAt, hash, via)
+			learned_via=CASE WHEN employee_cache.learned_via = ''
+			                 THEN excluded.learned_via
+			                 ELSE employee_cache.learned_via END`,
+		row.ID, string(canon), row.Sig, signer, seenAt, hash, via)
 	if err != nil {
 		return false
 	}

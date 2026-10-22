@@ -309,6 +309,31 @@ func (c *Core) rerouteDeclined(ctx context.Context, taskID string) bool {
 			revival = true
 		}
 	}
+	if decision.Action == scheduler.ActionLocal {
+		// The best remaining place to run is this node. The row is queued
+		// with owner=self; mark it schedulable and drive it through the same
+		// runner the queue uses. Returning false here was a dead end: the
+		// delegator was told the task failed while holding a capability that
+		// could do it, and a synchronous Submit waited on a row nothing would
+		// ever run.
+		if err := c.store.SetQueueMeta(ctx, taskID, t.Priority, t.SessionID, t.WorkDir, t.ResourceKeys); err != nil {
+			c.logger.Warn("reroute: mark local schedulable", "task", taskID, "err", err)
+			return false
+		}
+		// Claim before running: the queue runner's ClaimLocal is what moves
+		// queued -> dispatched, and run() refuses a row still in queued. The
+		// state-guarded UPDATE is the race arbiter against the queue runner.
+		if err := c.store.ClaimLocal(ctx, taskID, c.nodeID); err != nil {
+			c.logger.Warn("reroute: claim local", "task", taskID, "err", err)
+			return false
+		}
+		c.queueWake()
+		c.goGuarded("reroute local run", func() {
+			c.runScheduled(context.WithoutCancel(ctx), taskID)
+		})
+		c.logger.Info("reroute: running locally", "task", taskID, "reason", decision.Reason)
+		return true
+	}
 	if decision.Action != scheduler.ActionForward {
 		c.logger.Info("reroute: no alternate node", "task", taskID, "action", decision.Action,
 			"reason", c.enrichDeclineReason(ctx, taskID, decision.Reason))
@@ -817,11 +842,20 @@ func (c *Core) finishCancel(ctx context.Context, cancelled []string) {
 // post-cancel behaviour of the wire handler. The cancelled id set is the
 // store cascade's, so a caller can still report how many tasks it touched.
 func (c *Core) CancelTree(ctx context.Context, taskID string) ([]string, error) {
+	// An inbound delegate parked for ADMISSION review was never dispatched
+	// anywhere by this node, so forwardCancelDownstream has no target and the
+	// delegator's copy just sat in dispatched until its lease expired. Read
+	// the row before the cascade rewrites it, and tell the delegator
+	// explicitly afterwards.
+	admission := c.admissionPark(ctx, taskID)
 	cancelled, err := c.store.CancelCascade(ctx, taskID)
 	if err != nil {
 		return nil, err
 	}
 	c.finishCancel(ctx, cancelled)
+	if admission != nil {
+		c.relayAdmissionVerdict(ctx, admission, "cancelled at admission review", "admission_cancel_relayed")
+	}
 	return cancelled, nil
 }
 
@@ -844,6 +878,7 @@ func (c *Core) RejectTree(ctx context.Context, taskID, reason string) error {
 			}
 		}
 	}
+	admission := c.admissionPark(ctx, taskID)
 	if err := c.store.Reject(ctx, taskID, reason); err != nil {
 		return err
 	}
@@ -860,7 +895,42 @@ func (c *Core) RejectTree(ctx context.Context, taskID, reason string) error {
 		c.audit(ctx, taskID, "self:merge", selfMergeID, "rejected", reason)
 	}
 	c.forwardCancelDownstream(ctx, taskID, "", "rejected by delegator: "+reason)
+	if admission != nil {
+		c.relayAdmissionVerdict(ctx, admission, "rejected at admission review: "+reason, "admission_reject_relayed")
+	}
 	return nil
+}
+
+// admissionPark returns a copy of an inbound delegate parked for admission
+// review (chain longer than this node, disposition admission_review), or nil.
+// Read BEFORE a reject/cancel mutates the row: the chain and attempt are what
+// the verdict frame needs, and the state transition is what erases them.
+func (c *Core) admissionPark(ctx context.Context, taskID string) *Task {
+	t, err := c.store.Get(ctx, taskID)
+	if err != nil {
+		return nil
+	}
+	if t.State != StateReview || t.ApprovalDisposition != ApprovalAdmissionReview || len(t.Chain) <= 1 {
+		return nil
+	}
+	return &t
+}
+
+// relayAdmissionVerdict tells the delegator that this node refused an
+// inbound delegate it had parked for admission review. Without it the
+// delegator's copy waited out its lease and re-forwarded the same work to
+// the same park — the operator's refusal never reached the origin.
+func (c *Core) relayAdmissionVerdict(ctx context.Context, t *Task, reason, event string) {
+	c.relayToParent(ctx, bus.MsgTaskDecline, t.Chain, bus.TaskDeclinePayload{
+		TaskID:     t.TaskID,
+		AttemptID:  t.AttemptID,
+		Reason:     reason,
+		ReasonCode: bus.DeclineCodeTrustRefused,
+	})
+	c.EvTrace(ctx, t.TaskID, event, map[string]any{
+		"reason": reason,
+		"parent": scheduler.Predecessor(t.Chain, c.nodeID),
+	})
 }
 
 // forwardCancelDownstream propagates a cancel to the remote executor holding

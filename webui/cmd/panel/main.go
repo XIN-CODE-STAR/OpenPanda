@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -28,6 +29,8 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/memory"
 	projectstore "github.com/Xustalis/OpenPanda/internal/projects"
 	"github.com/Xustalis/OpenPanda/internal/reminders"
+	"github.com/Xustalis/OpenPanda/internal/sessions"
+	"github.com/Xustalis/OpenPanda/internal/skills"
 	"github.com/Xustalis/OpenPanda/internal/storage"
 	"github.com/Xustalis/OpenPanda/internal/todos"
 	"github.com/Xustalis/OpenPanda/webui/panel"
@@ -187,13 +190,25 @@ func main() {
 				Project: cfg.Memory.Limits.Project,
 			}),
 			ProjectStore: projectstore.NewStore(db),
-			Push:         pushSvc,
-			Reminders:    reminderStore,
-			Todos:        todos.NewStore(db),
-			Cfg:          cfg,
-			ConfigPath:   configPathOrDefault(*configPath),
-			StaticDir:    *staticDir,
-			Token:        cfg.Network.PanelToken,
+			// The console's thread page, worktree isolation and skills page
+			// are first-class views; without these the standalone sidecar
+			// (what `make run-local` launches) served their API routes as
+			// 404 and every thread click landed on a blank error.
+			Sessions:  sessions.NewStore(filepath.Join(filepath.Dir(cfg.Storage.DBPath), "sessions")),
+			Worktrees: openWorktreesBestEffort(cfg.Storage.WorkPath),
+			SkillStore: func() *skills.Store {
+				st := skills.NewStore(cfg.Storage.SkillsPath)
+				_ = st.EnsureBuiltins()
+				return st
+			}(),
+			Push:       pushSvc,
+			Reminders:  reminderStore,
+			Todos:      todos.NewStore(db),
+			Cfg:        cfg,
+			ConfigPath: configPathOrDefault(*configPath),
+			CardPath:   *cardPath,
+			StaticDir:  *staticDir,
+			Token:      cfg.Network.PanelToken,
 			// This process's executable is panda-webui, not the panda install
 			// target a self-merge swap replaces. Refuse those approvals here.
 			Sidecar: true,
@@ -222,6 +237,17 @@ func main() {
 			fatal("panel server", err)
 		}
 	}
+}
+
+// openWorktreesBestEffort mirrors `panda web`: worktree isolation is an
+// optional capability of a git-backed work path, and a non-repo work path
+// simply leaves it off rather than failing the console.
+func openWorktreesBestEffort(workPath string) *sessions.Worktrees {
+	wt, err := sessions.OpenWorktrees(workPath)
+	if err != nil {
+		return nil
+	}
+	return wt
 }
 
 func fatal(step string, err error) {

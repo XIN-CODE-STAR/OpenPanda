@@ -907,7 +907,7 @@ const (
 func (h *handler) sessionUploadDir(sess *sessions.Session) (string, error) {
 	if sess.Worktree != "" {
 		dir := filepath.Join(sess.Worktree, ".openpanda", "uploads")
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return "", err
 		}
 		return dir, nil
@@ -918,7 +918,7 @@ func (h *handler) sessionUploadDir(sess *sessions.Session) (string, error) {
 		return "", errors.New("session has no worktree and no work path")
 	}
 	dir := filepath.Join(workPath, ".openpanda", "uploads", sess.ID)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
 	return dir, nil
@@ -1008,7 +1008,7 @@ func (h *handler) uploadSessionFile(w http.ResponseWriter, r *http.Request) {
 		// each other mid-conversation.
 		stamped := fmt.Sprintf("%d-%s", time.Now().UnixMilli(), name)
 
-		dst, err := os.OpenFile(filepath.Join(dir, stamped), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		dst, err := os.OpenFile(filepath.Join(dir, stamped), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, errors.New("save failed"))
 			return
