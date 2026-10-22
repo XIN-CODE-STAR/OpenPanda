@@ -268,7 +268,18 @@ type Scheduler struct {
 	// owner (core's resolvePin), nil in tests — a nil resolver treats every
 	// pin as local, preserving the pre-feature conservative serialization.
 	selfPin func(ctx context.Context, ref string) bool
+
+	// runners tracks in-flight Runner.Run calls so a shutdown can WAIT for
+	// them instead of returning while one is still writing. Cancelling ctx
+	// stops Run's dispatch loop, but a runner already inside Run does not
+	// observe that cancellation until it finishes — and its writes (memory
+	// consolidation, artifacts) then land after the owner closed the store.
+	wg sync.WaitGroup
 }
+
+// Wait blocks until every in-flight runner has returned. Callers bound it
+// with their own deadline: a wedged adapter must not hold a shutdown open.
+func (s *Scheduler) Wait() { s.wg.Wait() }
 
 // The fallback poll relaxes once the queue has been empty for a while: 400ms
 // exists for cross-process pickup latency and stays the cadence while work
@@ -441,7 +452,9 @@ func (s *Scheduler) tick(ctx context.Context) int {
 		}
 		active++
 		s.logger.Info("queue: starting task", "task", t.ID, "resources", keys)
+		s.wg.Add(1)
 		guard.Go(s.logger, "queue: runner "+t.ID, nil, func() {
+			defer s.wg.Done()
 			defer s.registry.Release(t.ID)
 			defer s.Wake()
 			s.runner.Run(ctx, t.ID)
