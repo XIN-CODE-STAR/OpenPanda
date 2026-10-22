@@ -111,6 +111,8 @@ e2e-relay（本机第二实例，127.0.0.1:17846）
 - [x] CLI `panda version` → `v0.1.0 Constellation`
 - [x] 控制台侧车 API 与静态页面可访问
 - [x] 五语 CHANGELOG / README 与版本元数据同步
+- [x] `make package` 产出 9 个 `panda-0.1.0-*` 归档（含 lite Linux 三架构）并通过 `scripts/verify-release.sh 0.1.0`；解包后的 darwin-arm64 二进制报告 `v0.1.0 Constellation`，adapters/voice/drivers 齐全
+- [x] 受影响的最终包再跑一遍：`internal/core`（含新恢复测试）、`cmd/panda`、`internal/config`、`internal/install` 全部通过；新增恢复用例在 `-race` 下通过
 - [ ] 打标签 `v0.1.0` 并推送（由发布者执行；CI release 使用 `OPENPANDA_RELEASE_KEY` 签名校验和）
 - [ ] 正式发布前确认 release secret `OPENPANDA_RELEASE_KEY` 可用；否则产物无 `checksums.txt.sig`，更新器会按设计拒绝更新
 
