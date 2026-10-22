@@ -8,7 +8,7 @@
 | Linux   | `curl … \| sh`             |
 | Windows | PowerShell 一键脚本            |
 
-安装器会做四件事：**下载**对应平台/架构的 release 包 → **SHA-256 校验** → **解压到前缀目录** → **软链/加入 PATH**；随后（交互式）询问是否**注册开机自启服务**。
+安装器会做五件事：**下载**对应平台/架构的 release 包 → **SHA-256 校验** → **验签**（`checksums.txt.sig`，本机 openssl 支持 Ed25519 时）→ **解压到前缀目录** → **软链/加入 PATH**；随后（交互式）询问是否**注册开机自启服务**。
 
 ## 1. macOS / Linux 一键安装
 
@@ -19,11 +19,12 @@ curl -fsSL https://raw.githubusercontent.com/Xustalis/OpenPanda/main/scripts/ins
 等效的显式写法：
 
 ```bash
-sh scripts/install.sh --version 0.1.0   # 安装指定版本（如稳定版 0.1.0、历史预发布版 0.0.12-preview；默认 latest，即最新稳定版）
+sh scripts/install.sh --version 0.1.0-preview   # 安装指定版本（默认 latest，即最新稳定版；预发布版必须显式指定）
 sh scripts/install.sh --prefix /opt/openpanda  # 自定义安装目录
 sh scripts/install.sh --lite                   # lite 构建：无内嵌 Web 控制台/TUI（仅 Linux）
 sh scripts/install.sh --yes                    # 额外注册开机自启（不询问）
 sh scripts/install.sh --no-service             # 不碰开机自启
+sh scripts/install.sh --force                  # 强制安装：跳过“版本低于数据目录 schema”的拒绝
 ```
 
 默认前缀（与 Go 的 XDG/用户目录约定对齐）：
@@ -38,6 +39,12 @@ ${XDG_DATA_HOME:-~/.local/share}/openpanda/
 ```
 
 `~/.local/bin/panda` 是指向真实二进制的软链。若当前 shell 的 PATH 里还没有 `~/.local/bin`，脚本会像 `panda install` 一样把带标记的 `export PATH` 块写进 shell 启动文件（`~/.zshrc`、`~/.bashrc` 等；无任何 rc 文件时创建 `~/.profile`），新开终端即生效；`panda uninstall` 会精确移除这个标记块。
+
+### 版本降级保护与发布验签
+
+**降级保护**：二进制的迁移上限低于数据目录的 `user_version` 时，装上去会直接死在启动阶段（`schema version N is newer than this binary's highest migration`），数据目录随之搁浅。安装器因此会在**解包之后、覆盖前缀之前**用新二进制的 `panda version --json`（`schema` = 该版本支持的迁移上限，`db_schema` = 当前数据目录的版本）做比对，更旧的版本一律拒绝；`--force`（或 `OPENPANDA_FORCE=1`）用于有意的降级。`panda install` 与 `panda update apply` 有同一道守卫。
+
+**发布验签**：`checksums.txt` 与安装包同源下载，SHA-256 只能防传输损坏，防不住"两个文件一起被换掉"。真正的信任根是 Ed25519 签名 `checksums.txt.sig`——自更新器（`panda update apply`）在替换二进制前**强制**验签。安装器在本机 openssl 支持 Ed25519（`pkeyutl -rawin`，OpenSSL ≥ 1.1.1）时同样验签，签名不符直接中止；macOS 自带的 LibreSSL 3.3 不支持 Ed25519，此时降级为一条明确警告（SHA-256 仍已通过）。`OPENPANDA_REQUIRE_SIG=1` 把"无法验签"也当作失败，`OPENPANDA_SKIP_SIG=1` 显式跳过。Windows 的 `install.ps1` 无法验签（.NET/PowerShell 5.1 无 Ed25519），只做 SHA-256。
 
 ### Lite 构建：树莓派与纯命令行设备
 
@@ -67,10 +74,11 @@ irm https://raw.githubusercontent.com/Xustalis/OpenPanda/main/scripts/install.ps
 或下载后运行：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.1.0 -Yes
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.1.0-preview -Yes
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Force    # 强制降级（跳过 schema 守卫）
 ```
 
-安装到 `%LOCALAPPDATA%\OpenPanda\`，并把 `bin` 加入**用户 PATH**（持久化）。交互式运行时询问是否注册**登录计划任务**（`schtasks /SC ONLOGON`）在后台跑 `panda daemon`。
+安装到 `%LOCALAPPDATA%\OpenPanda\`，并把 `bin` 加入**用户 PATH**（持久化）。交互式运行时询问是否注册**登录计划任务**（`schtasks /SC ONLOGON`）在后台跑 `panda daemon`。参数与 `install.sh` 一一对应：`-Version` / `-Prefix` / `-Yes` / `-NoService` / `-Force`，环境变量 `OPENPANDA_*` 同样生效。
 
 ## 4. 从源码 / Go
 
