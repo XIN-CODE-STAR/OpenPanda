@@ -108,6 +108,10 @@ _No unreleased changes yet._
 
 - **An unsealed transit frame is refused** — the exemption that lets a pair handshake ride a relay unsealed had no test at all: removing the guard left the suite green. A member could seal nothing around a delegate and have every relay that carried it read the plaintext.
 
+- **A relay can no longer reshape the scope the origin approved** — the consent digest was a hand-maintained field list, and the task's declared write lanes and worktree-isolation flag were added after it was written: an authenticated relay could rewrite either and the origin's Ed25519 grant still verified. Both are bound now; chain and budgets stay unbound because relays legitimately rewrite them.
+
+- **A child that loses its spawn bound fails instead of running weaker** — spawning persisted the child's depth, spawn cap, scope, isolation, work dir and budgets as warnings. The row is what every later hop and restart reads, so a lost isolation flag let a child promised a private copy run against the shared checkout, and a lost budget read as unbounded. Each failure now cancels the child and fails the spawn.
+
 
 - **A destructive command can no longer pass as reversible** — the tier classifier judged a command by its verb, so `cp`, `mv`, `chmod`, `chown`, `ln`, `tee` and `kill` were auto-approved in every form: `cp payload /etc/cron.d/x`, `chmod u+s /usr/bin/find`, `ln -sf /etc/passwd ./shadow` and `kill 1` all ran without asking. Those verbs stay Tier 1 in their ordinary form — copying a file into your own tree is not an incident — but the form that reaches a system path, sets a setuid bit, overwrites a system file through a link, or targets init now requires authorization. Code run through an interpreter is covered the same way: `unlink`, `rmtree` and `rm -rf` spelled inside a script escalate like the shell command does.
 
