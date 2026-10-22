@@ -5,7 +5,7 @@ name: Pages
 #
 # Repo Settings → Pages → Source is already "GitHub Actions"; this workflow is
 # what actually publishes. It was dropped in e141550 while the site was still
-# being written and is restored here with the site itself.
+# being written and restored when the site shipped.
 
 on:
   push:
@@ -26,17 +26,23 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # A deploy is upload + publish, a couple of minutes end to end. The first
+    # run after this workflow was restored sat in the queue for 20 minutes with
+    # no runner assigned and no failure — a bounded job at least turns that into
+    # a red X that can be re-run, instead of a yellow dot that looks like work
+    # in progress. Re-dispatch with `gh workflow run pages.yml` if it does.
+    timeout-minutes: 15
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: site/
 
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
