@@ -762,8 +762,7 @@ func runQueueClear(cfg *config.Config, yes bool, configPath string) {
 
 	if !yes {
 		if !stdinIsTTY() {
-			fmt.Fprintln(os.Stderr, "panda queue clear: pass --yes to clear non-interactively")
-			os.Exit(2)
+			fail(2, "panda queue clear: pass --yes to clear non-interactively")
 		}
 		fmt.Print(i18n.Tf(loc, "cli.queue.clear.confirm", "n", strconv.Itoa(n)))
 		var ans string
@@ -994,8 +993,7 @@ func runCancel(args []string) {
 	fs.Parse(reorderFlags(fs, args))
 	id := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	if id == "" {
-		fmt.Fprintln(os.Stderr, "usage: panda cancel [--config PATH] <task-id>")
-		os.Exit(2)
+		fail(2, "usage: panda cancel [--config PATH] <task-id>")
 	}
 
 	cfg, err := config.Load(*configPath)
@@ -1040,8 +1038,7 @@ func runApprove(args []string) {
 	fs.Parse(reorderFlags(fs, args))
 	id := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	if id == "" {
-		fmt.Fprintln(os.Stderr, "usage: panda approve [--config PATH] [-m ANSWER] <task-id>")
-		os.Exit(2)
+		fail(2, "usage: panda approve [--config PATH] [-m ANSWER] <task-id>")
 	}
 
 	cfg, err := config.Load(*configPath)
@@ -1156,8 +1153,7 @@ func runApprove(args []string) {
 			}
 			return
 		}
-		fmt.Fprintf(os.Stderr, "exit %d: %s\n", out.ExitCode, out.Stderr)
-		os.Exit(1)
+		failf(1, "exit %d: %s\n", out.ExitCode, out.Stderr)
 	}
 	if stdout := strings.TrimRight(out.Stdout, "\n"); stdout != "" {
 		fmt.Println(renderCliMd(stdout))
@@ -1177,8 +1173,7 @@ func runReject(args []string) {
 	fs.Parse(reorderFlags(fs, args))
 	id := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	if id == "" {
-		fmt.Fprintln(os.Stderr, "usage: panda reject [--config PATH] [--reason s] <task-id>")
-		os.Exit(2)
+		fail(2, "usage: panda reject [--config PATH] [--reason s] <task-id>")
 	}
 
 	cfg, err := config.Load(*configPath)
@@ -1212,8 +1207,7 @@ func runLogs(args []string) {
 	fs.Parse(reorderFlags(fs, args))
 	id := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	if id == "" {
-		fmt.Fprintln(os.Stderr, "usage: panda logs [--config PATH] <task-id>")
-		os.Exit(2)
+		fail(2, "usage: panda logs [--config PATH] <task-id>")
 	}
 
 	cfg, err := config.Load(*configPath)
@@ -1305,8 +1299,7 @@ func runAudit(args []string) {
 
 	if *taskID != "" {
 		if err := store.VerifyTaskEventChain(context.Background(), *taskID); err != nil {
-			fmt.Fprintf(os.Stderr, "panda: task event chain broken: %v\n", err)
-			os.Exit(1)
+			failf(1, "panda: task event chain broken: %v\n", err)
 		}
 		events, err := store.Events(context.Background(), *taskID)
 		if err != nil {
@@ -1329,8 +1322,7 @@ func runAudit(args []string) {
 
 	audit := verifyAudit(db)
 	if err := audit.VerifyChain(context.Background()); err != nil {
-		fmt.Fprintf(os.Stderr, "panda: audit chain broken: %v\n", err)
-		os.Exit(1)
+		failf(1, "panda: audit chain broken: %v\n", err)
 	}
 	if jsonOutput {
 		emitJSON(map[string]string{"scope": "global", "chain": "ok"})

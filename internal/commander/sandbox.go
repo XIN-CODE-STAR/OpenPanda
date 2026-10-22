@@ -3,9 +3,11 @@
 package commander
 
 import (
+	"os"
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/Xustalis/OpenPanda/internal/agents"
@@ -32,20 +34,63 @@ import (
 // the bookkeeping the drift detector and audit chain rely on). Returns the
 // backend name actually in effect ("" when the mode is off or the platform
 // has no backend) so the caller can log it.
-func SetSandboxConfig(sc config.SandboxConfig, protected []string) string {
+func SetSandboxConfig(sc config.SandboxConfig, protected, secretReads []string) string {
 	mode := security.Mode(sc.NormalizedMode())
 	if mode == security.ModeOff {
 		security.SetBasePolicy(security.Policy{Mode: security.ModeOff, AllowNetwork: true})
 		return ""
 	}
+	denyRead := slices.Clone(sc.DenyReadPaths)
+	if mode == security.ModeStrict {
+		// Strict promises that credential-shaped paths cannot be read. The
+		// node's own config/card (mesh secret, panel token, provider keys),
+		// SQLite file (node Ed25519/X25519 private keys) and OAuth token
+		// store are the highest-value files on the box, and the write-deny
+		// half alone left them readable by every sandboxed agent and native
+		// command. These are file-level entries on purpose: their parent
+		// directories also hold the task work trees an agent must read.
+		denyRead = append(denyRead, secretReads...)
+	}
 	security.SetBasePolicy(security.Policy{
 		Mode:           mode,
 		AllowNetwork:   sc.NetworkEnabled(),
 		WritablePaths:  sc.WritablePaths,
-		DenyReadPaths:  sc.DenyReadPaths,
+		DenyReadPaths:  denyRead,
 		DenyWritePaths: append(sc.DenyWritePaths, protected...),
 	})
 	return security.Backend()
+}
+
+// SecretReadDenyPaths lists the node-owned files a sandboxed process must not
+// read under strict mode: the config and capability card beside it, the
+// SQLite database and its WAL/SHM siblings (the node key pairs live in the
+// settings table), and the subscription OAuth token store. Only the files,
+// never their parent directories — the work trees share those.
+func SecretReadDenyPaths(cfg *config.Config, configPath, cardPath string) []string {
+	var out []string
+	add := func(p string) {
+		if strings.TrimSpace(p) == "" {
+			return
+		}
+		out = append(out, p)
+		// SQLite keeps -wal/-shm siblings; deny them by name too, since a
+		// deny on the main file does not cover a differently named path.
+		if strings.HasSuffix(strings.ToLower(p), ".db") {
+			out = append(out, p+"-wal", p+"-shm")
+		}
+	}
+	add(configPath)
+	add(cardPath)
+	if cfg != nil {
+		add(cfg.Storage.DBPath)
+	}
+	if state := os.Getenv("XDG_STATE_HOME"); state != "" {
+		add(filepath.Join(state, "openpanda", "auth.json"))
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		add(filepath.Join(home, ".local", "state", "openpanda", "auth.json"))
+	}
+	return out
 }
 
 // ProtectedPaths builds the node-state deny list shared by the daemon and

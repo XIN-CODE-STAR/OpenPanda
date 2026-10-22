@@ -162,7 +162,6 @@ func newTestStream(cancelled *bool) *askStream {
 		events:   make(chan tea.Msg, 256),
 		cancel:   func() { *cancelled = true },
 		dropped:  make(chan struct{}),
-		steer:    make(chan string, 32),
 		detached: false,
 	}
 }
@@ -317,7 +316,11 @@ func TestTUIRejectsEveryStaleStreamEvent(t *testing.T) {
 	}
 }
 
-func TestTUISteeringQueueFullKeepsDraft(t *testing.T) {
+// TestTUIPendingQueueFullKeepsDraft: a refused line is not swallowed. It goes
+// back into the input box with a loud error note, and the queue depth is
+// unchanged — silently growing memory, or silently dropping the text, are both
+// worse than saying no.
+func TestTUIPendingQueueFullKeepsDraft(t *testing.T) {
 	for _, useMouse := range []bool{false, true} {
 		name := "keyboard"
 		if useMouse {
@@ -328,9 +331,8 @@ func TestTUISteeringQueueFullKeepsDraft(t *testing.T) {
 			m = step(m, tea.WindowSizeMsg{Width: 100, Height: 40})
 			m.mode = modeAsking
 			m.stream = newTestStream(new(bool))
-			for i := 0; i < cap(m.stream.steer); i++ {
-				m.stream.steer <- "queued"
-			}
+			m.pendingPrompt = "the original request"
+			m.pendingInputs = make([]string, pendingMax)
 			m.ta.SetValue("keep this draft")
 
 			var msg tea.Msg = tea.KeyMsg{Type: tea.KeyEnter}
@@ -343,8 +345,11 @@ func TestTUISteeringQueueFullKeepsDraft(t *testing.T) {
 			if got.ta.Value() != "keep this draft" || got.mode != modeAsking || got.stream != m.stream {
 				t.Fatalf("full queue lost draft or turn: draft=%q mode=%v stream=%p", got.ta.Value(), got.mode, got.stream)
 			}
-			if strings.Contains(got.pendingPrompt, "keep this draft") || cmd == nil {
-				t.Fatalf("rejected steer was recorded or error feedback missing: prompt=%q cmd=%v", got.pendingPrompt, cmd)
+			if len(got.pendingInputs) != pendingMax {
+				t.Fatalf("a refused line must not grow the queue, depth=%d", len(got.pendingInputs))
+			}
+			if got.pendingPrompt != "the original request" || cmd == nil {
+				t.Fatalf("rejected line was recorded or error feedback missing: prompt=%q cmd=%v", got.pendingPrompt, cmd)
 			}
 		})
 	}
@@ -547,10 +552,11 @@ func TestTUIStreamingMultipleDeltasDoesNotPanic(t *testing.T) {
 	}
 }
 
-// TestTUIRuntimeSteeringInputAndStop tests that while an ask is running (modeAsking),
-// the user can see the input box, type a steering idea and inject it with Enter,
-// and stop the running task immediately with Esc.
-func TestTUIRuntimeSteeringInputAndStop(t *testing.T) {
+// TestTUIRuntimeQueueAndStop covers the busy-mode loop end to end: while an ask
+// runs the user can still see the input box, type a follow-up and park it with
+// Enter (it becomes the NEXT turn, it does not amend the streaming one), and
+// stop the running task with Esc.
+func TestTUIRuntimeQueueAndStop(t *testing.T) {
 	m := newTestTUI(t)
 	m = step(m, tea.WindowSizeMsg{Width: 100, Height: 40})
 	cancelled := false
@@ -573,40 +579,36 @@ func TestTUIRuntimeSteeringInputAndStop(t *testing.T) {
 		t.Fatalf("typing should not cancel asking mode: got %v", m.mode)
 	}
 
-	// 3. Press Enter to steer in-flight task
+	// 3. Enter parks the line as the next turn — never as an amendment to the
+	// prompt already streaming.
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = next.(tuiModel)
 	if m.mode != modeAsking {
-		t.Fatalf("steering with enter should stay in modeAsking: got %v", m.mode)
+		t.Fatalf("queueing with enter should stay in modeAsking: got %v", m.mode)
 	}
-	// The draft stays in the box on purpose: pressing Enter on it once more is
-	// the escalate gesture (stageNote / promoteStaged), so the note is editable
-	// and promotable until the user is done with it.
-	if m.ta.Value() != "also add benchmarks" {
-		t.Fatalf("the draft should stay for the second Enter: %q", m.ta.Value())
+	if m.ta.Value() != "" {
+		t.Fatalf("the queued line must leave the input box: %q", m.ta.Value())
 	}
-	if m.staged == nil {
-		t.Fatal("a queued note should stay staged so the next Enter can inject it")
+	if len(m.pendingInputs) != 1 || m.pendingInputs[0] != "also add benchmarks" {
+		t.Fatalf("the line should be parked in the queue: %+v", m.pendingInputs)
 	}
-	if !strings.Contains(m.pendingPrompt, "also add benchmarks") {
-		t.Fatalf("pendingPrompt should contain steering idea: %q", m.pendingPrompt)
+	if m.pendingPrompt != "Initial question" {
+		t.Fatalf("the queued line leaked into the in-flight prompt: %q", m.pendingPrompt)
 	}
 	if cmd == nil {
-		t.Fatal("steering should emit printBlock cmd")
+		t.Fatal("queueing should emit printBlock cmd")
 	}
 
-	// 4. Esc clears that draft first — the two-step Esc every chat mode uses —
-	// and only the second Esc stops the round.
+	// 4. Esc clears any new draft first — the two-step Esc every chat mode uses
+	// — and only the second Esc stops the round.
+	m = step(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("scratch")})
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m = next.(tuiModel)
 	if cancelled {
-		t.Fatal("the first Esc should clear the pending draft, not stop the round")
+		t.Fatal("the first Esc should clear the draft, not stop the round")
 	}
 	if m.ta.Value() != "" {
 		t.Fatalf("Esc should clear the draft: %q", m.ta.Value())
-	}
-	if m.staged != nil {
-		t.Fatalf("a cleared draft should stop being editable: %+v", m.staged)
 	}
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m = next.(tuiModel)
@@ -648,7 +650,7 @@ func TestTUIMouseClickActions(t *testing.T) {
 		}
 	}
 
-	// 2. modeAsking: clicking Inject button (X=30, Y=38) injects steer idea
+	// 2. modeAsking: clicking the queue button parks the draft as the next turn
 	{
 		m := newTestTUI(t)
 		m = step(m, tea.WindowSizeMsg{Width: 100, Height: 40})
@@ -660,7 +662,7 @@ func TestTUIMouseClickActions(t *testing.T) {
 
 		buttons := m.askingButtonRects()
 		if len(buttons) != 3 || buttons[1].w == 0 {
-			t.Fatalf("steer button has no rendered hitbox: %+v", buttons)
+			t.Fatalf("queue button has no rendered hitbox: %+v", buttons)
 		}
 		mouseMsg := tea.MouseMsg{
 			X:      buttons[1].x + buttons[1].w/2,
@@ -671,21 +673,21 @@ func TestTUIMouseClickActions(t *testing.T) {
 		next, cmd := m.Update(mouseMsg)
 		got := next.(tuiModel)
 		if got.mode != modeAsking {
-			t.Fatalf("clicking inject should keep modeAsking, got %v", got.mode)
+			t.Fatalf("clicking queue should keep modeAsking, got %v", got.mode)
 		}
-		if !strings.Contains(got.pendingPrompt, "refactor cleanly") {
-			t.Fatalf("pendingPrompt should contain injected steer: %q", got.pendingPrompt)
+		// The button and the Enter key are one gesture: both park the line as
+		// the next turn and neither touches the prompt already streaming.
+		if len(got.pendingInputs) != 1 || got.pendingInputs[0] != "refactor cleanly" {
+			t.Fatalf("clicking queue should park the draft: %+v", got.pendingInputs)
 		}
-		// Same contract as the Enter path: the draft survives so the button and
-		// the key describe one gesture — press again to inject.
-		if got.ta.Value() != "refactor cleanly" {
-			t.Fatalf("the draft should stay for the second press: %q", got.ta.Value())
+		if got.pendingPrompt != "Initial question" {
+			t.Fatalf("the queued line leaked into the in-flight prompt: %q", got.pendingPrompt)
 		}
-		if got.staged == nil {
-			t.Fatal("a queued note should stay staged so a second press can inject it")
+		if got.ta.Value() != "" {
+			t.Fatalf("the queued line must leave the input box: %q", got.ta.Value())
 		}
 		if cmd == nil {
-			t.Fatal("clicking inject should emit printBlock cmd")
+			t.Fatal("clicking queue should emit printBlock cmd")
 		}
 	}
 
@@ -983,46 +985,6 @@ func TestTUIOutOfBoundsMouseEvents(t *testing.T) {
 		m = step(m, click)
 		m.mode = modeApproving
 		m = step(m, click)
-	}
-}
-
-// TestTUIMultipleSteeringDrains verifies that multiple steering ideas injected during
-// execution are queued and drained safely without blocking or dropping.
-func TestTUIMultipleSteeringDrains(t *testing.T) {
-	s := &askStream{
-		events:  make(chan tea.Msg, 256),
-		cancel:  func() {},
-		dropped: make(chan struct{}),
-		steer:   make(chan string, 32),
-	}
-
-	ideas := []string{
-		"第一点要求：必须添加单元测试",
-		"第二点要求：优化内存开销",
-		"第三点要求：提供完整的中文文档",
-	}
-
-	for _, id := range ideas {
-		s.injectSteer(id)
-	}
-
-	var drained []string
-	for {
-		select {
-		case id := <-s.steer:
-			drained = append(drained, id)
-		default:
-			goto done
-		}
-	}
-done:
-	if len(drained) != len(ideas) {
-		t.Fatalf("expected %d drained ideas, got %d", len(ideas), len(drained))
-	}
-	for i, id := range ideas {
-		if drained[i] != id {
-			t.Errorf("drained[%d] = %q, want %q", i, drained[i], id)
-		}
 	}
 }
 

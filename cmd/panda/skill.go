@@ -63,9 +63,7 @@ func runSkill(args []string) {
 	case "install", "add":
 		skillInstall(cfg, store, positional)
 	default:
-		fmt.Fprintln(os.Stderr, i18n.Tf(i18n.Detect(), "cli.skill.unknown", "cmd", cmd))
-		printSkillUsage()
-		os.Exit(2)
+		failUsage(2, i18n.Tf(i18n.Detect(), "cli.skill.unknown", "cmd", cmd), printSkillUsage)
 	}
 }
 
@@ -515,6 +513,5 @@ func skillInstall(cfg *config.Config, store *skills.Store, args []string) {
 
 // fatalf reports a usage error and exits, mirroring fatal for non-error paths.
 func fatalf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "panda: %s\n", fmt.Sprintf(format, args...))
-	os.Exit(1)
+	failf(1, "panda: %s\n", fmt.Sprintf(format, args...))
 }

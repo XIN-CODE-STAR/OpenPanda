@@ -678,27 +678,31 @@ func splitModelKeyAlias(args []string) (model, key, alias string) {
 		pos = append(pos, a)
 	}
 	if key != "" {
-		// A token was recognised as the key; the rest are model/alias.
-		switch len(pos) {
-		case 1:
+		// A token was recognised as the key; whatever remains is model and
+		// then alias. Zero remaining is valid: `model add custom <key>` names
+		// no model and the provider default applies.
+		if len(pos) > 0 {
 			model = pos[0]
-		default:
-			model, alias = pos[0], pos[1]
+		}
+		if len(pos) > 1 {
+			alias = pos[1]
 		}
 		return model, key, alias
 	}
 	// No token looked like a key: with two+ positionals the last is the key
-	// and the first the model; a single positional is the model alone.
+	// and the first the model; a single positional is the model alone. No
+	// positionals at all is also legal (the caller reports missing input);
+	// indexing pos[0] unconditionally turned it into a panic.
 	switch len(pos) {
+	case 0:
+		return "", "", ""
 	case 1:
 		model = pos[0]
 	case 2:
 		model, key = pos[0], pos[1]
 	default:
 		model, key = pos[0], pos[len(pos)-1]
-		if len(pos) >= 3 {
-			alias = pos[1]
-		}
+		alias = pos[1]
 	}
 	return model, key, alias
 }

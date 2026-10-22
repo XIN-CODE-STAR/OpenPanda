@@ -160,3 +160,39 @@ func TestParseDirRowBounds(t *testing.T) {
 		t.Fatalf("canonical row failed parse: %v", err)
 	}
 }
+
+// TestDirRowContentHashIgnoresOrder pins the second half of content-hash
+// stability: the live adjacency and its link metrics are built by ranging
+// over maps, so two mints of the same directory state carry the same elements
+// in a different order. The hash must not move with that order (or with RTT),
+// while a genuine content change must still move it.
+func TestDirRowContentHashIgnoresOrder(t *testing.T) {
+	cardA := json.RawMessage(`{"device":"n","neighbors":["node-b","node-c"],"links":[{"peer":"node-b","rtt_ms":12,"kind":"ws"},{"peer":"node-c","kind":"udp"}]}`)
+	cardB := json.RawMessage(`{"device":"n","neighbors":["node-c","node-b"],"links":[{"peer":"node-c","rtt_ms":99,"kind":"udp"},{"peer":"node-b","rtt_ms":4,"kind":"ws"}]}`)
+	a := &DirRow{
+		ID:        "node-a",
+		Card:      cardA,
+		Neighbors: []string{"node-b", "node-c"},
+		Links: []LinkMetric{
+			{Peer: "node-b", RTTms: 12, Kind: "ws"},
+			{Peer: "node-c", Kind: "udp"},
+		},
+	}
+	b := &DirRow{
+		ID:        "node-a",
+		Card:      cardB,
+		Neighbors: []string{"node-c", "node-b"},
+		Links: []LinkMetric{
+			{Peer: "node-c", RTTms: 99, Kind: "udp"},
+			{Peer: "node-b", RTTms: 4, Kind: "ws"},
+		},
+	}
+	if ha, hb := DirRowContentHashHex(a), DirRowContentHashHex(b); ha != hb {
+		t.Fatalf("content hash follows array order: %s vs %s", ha, hb)
+	}
+	// A real change (one neighbor replaced) must still be visible.
+	b.Neighbors = []string{"node-c", "node-d"}
+	if DirRowContentHashHex(a) == DirRowContentHashHex(b) {
+		t.Fatal("content hash ignored a changed neighbor set")
+	}
+}

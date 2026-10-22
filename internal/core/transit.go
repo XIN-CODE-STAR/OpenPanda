@@ -23,12 +23,15 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/scheduler"
 )
 
-// transitMaxInner bounds the sealed body a transit frame may carry. Transit
-// exists for control-plane reachability — delegates, results, heartbeats —
-// not bulk transfer (artifacts move on direct conns), and an unbounded blob
-// would let any member spend a relay's readLimit on opaque garbage. 1 MiB
-// matches the design's per-response byte budgets elsewhere.
-const transitMaxInner = 1 << 20
+// transitMaxInner bounds the sealed body a transit frame may carry. It must
+// hold one artifact_chunk: 1 MiB of bytes is ~1.4 MiB of JSON, which the
+// transitInner envelope base64s again to ~1.86 MiB before sealing. 2 MiB
+// leaves room for the envelope while keeping the outer frame under the
+// transport's 4 MiB read limit (the wire base64s the sealed blob once more).
+// A relay buffers one frame of this size per session; larger single frames
+// are refused rather than split here — the artifact plane already chunks at
+// bus.ArtifactChunkBytes, so a bigger artifact simply takes more frames.
+const transitMaxInner = 2 << 20
 
 // transitInner is the sealed body: the original envelope verbatim plus the
 // sender's mandatory attestation. Pub identifies the signing identity; Sig
@@ -82,13 +85,15 @@ func transitEligible(typ string) bool {
 	// "none" (a joiner holds no shared secret and does not know the
 	// introducer's X25519 key) and that exemption is enforced type-by-type
 	// in deliverTransit and deliverToAttached.
-	// The artifact plane is a request/response pull whose replies are bulk
-	// chunks. A transit frame is capped at transitMaxInner, so a 1 MiB chunk
-	// can never ride back; letting the small fetch request through would
-	// therefore strand the requester until its retry budget ran out instead
-	// of falling back to the chain/hub relay path in fetchStageInputs.
-	case bus.MsgArtifactFetch, bus.MsgArtifactChunk,
-		bus.MsgArtifactPush, bus.MsgArtifactPushStatus, bus.MsgArtifactPushDone:
+	// The artifact plane rides transit as request/response: the fetch names
+	// its source, the chunk comes back to the fetch's From. Both inner
+	// envelopes keep their own From/To, so the reply reaches the requester
+	// even though the carrier hop was rewritten at every relay. The size
+	// budget below is what makes a 1 MiB chunk fit (its JSON is base64'd
+	// twice on the way out); a larger artifact simply takes more chunks.
+	// Push is deliberately absent: it is unsolicited, so a relayed push
+	// would have no authenticated fetch to bind its bytes to.
+	case bus.MsgArtifactPush, bus.MsgArtifactPushStatus, bus.MsgArtifactPushDone:
 		return false
 	}
 	return true

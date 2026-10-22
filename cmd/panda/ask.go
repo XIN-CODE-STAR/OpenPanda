@@ -111,14 +111,12 @@ func runAsk(args []string) {
 	}
 	loc := i18n.Detect()
 	if prompt == "" {
-		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.ask.usage"))
-		os.Exit(2)
+		fail(2, i18n.T(loc, "cli.ask.usage"))
 	}
 	switch *outputFormat {
 	case "", "json", "stream-json":
 	default:
-		fmt.Fprintln(os.Stderr, i18n.Tf(loc, "cli.ask.badFormat", "format", *outputFormat))
-		os.Exit(2)
+		fail(2, i18n.Tf(loc, "cli.ask.badFormat", "format", *outputFormat))
 	}
 
 	cfg, err := loadConfigQuietly(*configPath)
@@ -126,8 +124,7 @@ func runAsk(args []string) {
 		fatal("load config", err)
 	}
 	if !modelConfigured(cfg) {
-		fmt.Fprintln(os.Stderr, "panda: "+i18n.T(loc, "cli.ask.noModel"))
-		os.Exit(2)
+		fail(2, "panda: "+i18n.T(loc, "cli.ask.noModel"))
 	}
 
 	// With a live queue consumer (the daemon, or the console) tasks enqueue
@@ -191,8 +188,7 @@ func runAsk(args []string) {
 
 	out, streamedText, st, err := askStreaming(engine, history, prompt, cwd, *authorize, loc)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "panda: "+err.Error())
-		os.Exit(1)
+		fail(1, "panda: "+err.Error())
 	}
 	// Inline approval gate: a tier-2 task with no standing consent returns parked
 	// in review. On an interactive terminal, prompt and — on a yes — re-run it
@@ -298,8 +294,7 @@ func runAsk(args []string) {
 // user can follow along.
 func printAskPlan(loc i18n.Locale, out *askengine.Result) {
 	if !out.OK {
-		fmt.Fprintln(os.Stderr, "panda: "+i18n.Tf(loc, "cli.plan.failed", "err", out.Stderr))
-		os.Exit(1)
+		fail(1, "panda: "+i18n.Tf(loc, "cli.plan.failed", "err", out.Stderr))
 	}
 	fmt.Printf("plan:   %s\n", out.PlanID)
 	fmt.Printf("goal:   %s\n", out.PlanGoal)

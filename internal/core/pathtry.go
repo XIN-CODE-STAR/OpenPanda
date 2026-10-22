@@ -364,6 +364,23 @@ func (c *Core) autoPunch(ctx context.Context, id string) {
 	// the WS hint's IP at the advertised UDP port is the most likely
 	// reflexive endpoint. Same provenance gate as the dial rung.
 	c.seedPunchCandidates(ctx, id, port)
+	// A live route is the success the suspect mark records: clear it now
+	// rather than waiting for a window that will not be sprung. A peer that
+	// has been reachable again must not keep its ten-minute doubt.
+	if c.UDPRoute(id) != nil {
+		c.path.mu.Lock()
+		c.path.init()
+		had := c.path.punchTries[id] != 0 || c.path.natSuspect[id] != time.Time{}
+		delete(c.path.punchTries, id)
+		delete(c.path.natSuspect, id)
+		snapshot := c.snapshotNatStateLocked()
+		c.path.mu.Unlock()
+		if had {
+			c.mesh.punchSucceeded.Add(1)
+			c.saveNatState(context.Background(), snapshot)
+		}
+		return
+	}
 	c.path.mu.Lock()
 	c.path.init()
 	if until, ok := c.path.natSuspect[id]; ok && time.Now().Before(until) {
@@ -390,13 +407,13 @@ func (c *Core) autoPunch(ctx context.Context, id string) {
 		if err := c.PunchPeer(ctx, id); err != nil {
 			c.logger.Debug("auto-punch offer", "peer", id, "err", err)
 		}
-		c.notePunchAttempt(id)
+		c.deferPunchVerdict(id, punchWindow)
 		return
 	}
 	// The blind end: we saw the failure but the smaller side owns the
 	// offerer role. Ask it to punch us — a single routed envelope, no spray.
 	c.sendPunchWant(ctx, id)
-	c.notePunchAttempt(id)
+	c.deferPunchVerdict(id, punchWindow)
 }
 
 // seedPunchCandidates synthesizes spray targets for a peer we have never
@@ -435,9 +452,29 @@ func (c *Core) seedPunchCandidates(ctx context.Context, id string, udpPort int) 
 	}
 }
 
-// notePunchAttempt ages auto-punch bookkeeping: once a full window has
-// passed since the last attempt with still no route, a failure is counted;
-// natSuspectAfter of those park the peer as suspected-unreachable-by-punch.
+// deferPunchVerdict schedules the punch verdict for after the spray window:
+// a route confirmed meanwhile is the success, and only a window that ended
+// with no route counts as a failure.
+func (c *Core) deferPunchVerdict(id string, wait time.Duration) {
+	c.goGuarded("punch verdict "+id, func() {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		<-timer.C
+		c.notePunchAttempt(id)
+	})
+}
+
+// notePunchAttempt applies one punch attempt's outcome: a live route is a
+// success, a window that ended with none is a failure. natSuspectAfter of
+// those failures park the peer as suspected-unreachable-by-punch.
+//
+// The auto-punch path does NOT call this directly. The spray runs for
+// punchWindow (4s) after the offer goes out, and a pinhole confirmed inside
+// that window is the success this counter exists to notice — counting at
+// offer time, before the spray had a chance, marked every punch as a
+// failure, so two ordinary attempts parked the peer as unpunchable for ten
+// minutes and the success branch below was unreachable. autoPunch defers
+// the verdict by one window instead.
 func (c *Core) notePunchAttempt(id string) {
 	// UDPRoute takes the UDP lock; read it before path.mu so the two are
 	// never nested (the ladder's other direction, udpMu → path.mu, is the
@@ -490,7 +527,10 @@ func (c *Core) sendPunchWant(ctx context.Context, id string) {
 	if err != nil {
 		return
 	}
-	env, err := bus.NewEnvelope(bus.MsgPunchWant, c.nodeID, msgID, bus.PunchWantPayload{TTL: bus.PunchMaxTTL})
+	env, err := bus.NewEnvelope(bus.MsgPunchWant, c.nodeID, msgID, bus.PunchWantPayload{
+		Src: c.nodeID,
+		TTL: bus.PunchMaxTTL,
+	})
 	if err != nil {
 		return
 	}
@@ -500,9 +540,14 @@ func (c *Core) sendPunchWant(ctx context.Context, id string) {
 	}
 }
 
-// handlePunchWant honors a punch request: the sender (env.From) is the
+// handlePunchWant honors a punch request: the requester is the
 // lexicographically-larger side telling us — the elected offerer — to punch
 // it. TTL'd relay frames arrive here after the env.To check in dispatch.
+//
+// The requester is payload.Src, not env.From: a relayed want is re-minted as
+// the forwarder's, so env.From names the RELAY at that point. Reading
+// env.From would have the elected offerer punch the relay — the one node
+// that is already reachable — instead of the node that asked.
 func (c *Core) handlePunchWant(ctx context.Context, env bus.Envelope) {
 	var p bus.PunchWantPayload
 	if err := env.PayloadInto(&p); err != nil {
@@ -524,22 +569,28 @@ func (c *Core) handlePunchWant(ctx context.Context, env bus.Envelope) {
 		}
 		return
 	}
+	// The requester: the payload's Src when a relay carried it, else the
+	// direct sender.
+	requester := p.Src
+	if requester == "" {
+		requester = env.From
+	}
 	// Only the elected side acts — a want from the smaller side is nonsense
 	// (it IS the offerer), and ignoring it also kills a bounce loop between
 	// two nodes each sure the other is smaller.
-	if c.nodeID > env.From || env.From == "" || env.From == c.nodeID {
+	if c.nodeID > requester || requester == "" || requester == c.nodeID {
 		return
 	}
 	c.path.mu.Lock()
 	c.path.init()
-	if last, ok := c.path.punchAt[env.From]; ok && time.Since(last) < autoPunchEvery {
+	if last, ok := c.path.punchAt[requester]; ok && time.Since(last) < autoPunchEvery {
 		c.path.mu.Unlock()
 		return
 	}
-	c.path.punchAt[env.From] = time.Now()
+	c.path.punchAt[requester] = time.Now()
 	c.path.mu.Unlock()
-	if err := c.PunchPeer(ctx, env.From); err != nil {
-		c.logger.Debug("punch_want honored, offer failed", "peer", env.From, "err", err)
+	if err := c.PunchPeer(ctx, requester); err != nil {
+		c.logger.Debug("punch_want honored, offer failed", "peer", requester, "err", err)
 	}
 }
 

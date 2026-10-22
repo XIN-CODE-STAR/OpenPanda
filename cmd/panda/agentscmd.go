@@ -92,16 +92,14 @@ func runAgents(args []string) {
 	case "test":
 		name := strings.TrimSpace(fs.Arg(1))
 		if name == "" {
-			fmt.Fprintln(os.Stderr, "usage: panda agents test <name>")
-			os.Exit(2)
+			fail(2, "usage: panda agents test <name>")
 		}
 		runAgentTest(loc, name, *configPath)
 		return
 	case "install", "update":
 		name := strings.TrimSpace(fs.Arg(1))
 		if name == "" {
-			fmt.Fprintln(os.Stderr, "usage: panda agents install <name>")
-			os.Exit(2)
+			fail(2, "usage: panda agents install <name>")
 		}
 		runAgentInstall(loc, name)
 		return
@@ -111,9 +109,8 @@ func runAgents(args []string) {
 	// command ("agents claude_code" meaning "agents test claude_code") —
 	// listing anyway would report success on a misspelling.
 	if sub != "" {
-		fmt.Fprintf(os.Stderr, "panda: %s\n", i18n.Tf(loc, "cli.unknownNamedOpts",
+		failf(2, "panda: %s\n", i18n.Tf(loc, "cli.unknownNamedOpts",
 			"kind", "agents verb", "name", sub, "opts", "test, install"))
-		os.Exit(2)
 	}
 
 	statuses := probeAgentStatuses()
@@ -160,8 +157,7 @@ func runAgents(args []string) {
 func runAgentTest(loc i18n.Locale, name, configPath string) {
 	k, ok := agents.ByName(name)
 	if !ok {
-		fmt.Fprintf(os.Stderr, "panda: %s\n", i18n.Tf(loc, "cli.agents.unknown", "name", name))
-		os.Exit(2)
+		failf(2, "panda: %s\n", i18n.Tf(loc, "cli.agents.unknown", "name", name))
 	}
 	agent := probeAgentCLI(k)
 	if !agent.Installed {
@@ -217,8 +213,7 @@ func runAgentTest(loc i18n.Locale, name, configPath string) {
 func runAgentInstall(loc i18n.Locale, name string) {
 	k, ok := agents.ByName(name)
 	if !ok {
-		fmt.Fprintf(os.Stderr, "panda: %s\n", i18n.Tf(loc, "cli.agents.unknown", "name", name))
-		os.Exit(2)
+		failf(2, "panda: %s\n", i18n.Tf(loc, "cli.agents.unknown", "name", name))
 	}
 	if jsonOutput {
 		emitJSON(map[string]any{
@@ -273,6 +268,9 @@ func printAgentInstallHelp(statuses []agentStatus) int {
 func reportAgentTest(loc i18n.Locale, agent agentStatus, ok bool, detail string) {
 	if jsonOutput {
 		emitJSON(map[string]any{"name": agent.Name, "ok": ok, "path": agent.Path, "detail": detail})
+		if !ok {
+			os.Exit(1)
+		}
 		return
 	}
 	if ok {

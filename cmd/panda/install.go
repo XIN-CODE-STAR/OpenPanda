@@ -144,8 +144,7 @@ func runInstall(args []string) {
 	// Self-verify: run the installed copy, not the invoked one, so a
 	// broken install (bad copy, quarantined by AV, wrong arch) surfaces now.
 	if out, err := install.Verify(bin); err != nil {
-		fmt.Fprintln(os.Stderr, i18n.Tf(loc, "install.verify.fail", "err", err.Error()))
-		os.Exit(1)
+		fail(1, i18n.Tf(loc, "install.verify.fail", "err", err.Error()))
 	} else {
 		fmt.Println(i18n.Tf(loc, "install.verify.ok", "out", out))
 	}

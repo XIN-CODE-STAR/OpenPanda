@@ -134,8 +134,7 @@ func runUninstall(args []string) {
 	// Backup-only touches nothing destructive, so it needs no prompt.
 	if !*backupOnly && !*yes {
 		if !stdinIsTTY() {
-			fmt.Fprintln(os.Stderr, "panda: "+i18n.T(loc, "uninstall.noninteractive"))
-			os.Exit(1)
+			fail(1, "panda: "+i18n.T(loc, "uninstall.noninteractive"))
 		}
 		fmt.Print(i18n.T(loc, "uninstall.prompt"))
 		line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
@@ -165,9 +164,10 @@ func runUninstall(args []string) {
 	}
 	outcome := install.ExecuteUninstall(targets, opt)
 	if outcome.BackupErr != nil {
-		// A failed backup must not stop the uninstall halfway, but it
-		// must be loud — the user asked for reversibility.
-		fmt.Fprintln(os.Stderr, "panda: "+i18n.Tf(loc, "uninstall.backup.fail", "err", outcome.BackupErr.Error()))
+		// ExecuteUninstall stops before deleting when the archive could not
+		// be completed. Report it and exit non-zero: the user asked for a
+		// reversible uninstall, and scripts must not read this as success.
+		fail(1, "panda: "+i18n.Tf(loc, "uninstall.backup.fail", "err", outcome.BackupErr.Error()))
 	}
 
 	if *backupOnly {

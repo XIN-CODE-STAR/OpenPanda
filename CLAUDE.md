@@ -11,7 +11,7 @@ it coordinates the agent CLIs already on each device (Claude Code,
 Codex, and friends) plus direct shell execution and human-approved
 tasks.
 
-Requires Go 1.26+. The build deliberately avoids CGO: even SQLite comes
+Requires Go 1.26.10+ (the patch level is a security floor: 1.26.10 is where GO-2026-6809, reachable through crypto/x509 in the bus TLS path, is fixed). The build deliberately avoids CGO: even SQLite comes
 from `modernc.org/sqlite`, so cross-compilation is just `GOOS/GOARCH`.
 
 ## Licensing

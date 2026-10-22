@@ -68,3 +68,37 @@ func TestCheckStagedSchemaNoFloor(t *testing.T) {
 		t.Fatalf("expected allow with nil floor, got %v", err)
 	}
 }
+
+// TestCheckSelfRollbackSchema pins the rollback guard's fail-closed contract:
+// when the caller knows a non-zero floor and the fallback cannot report its
+// ceiling, the rollback is refused rather than waved through.
+func TestCheckSelfRollbackSchema(t *testing.T) {
+	tests := []struct {
+		name    string
+		floor   int
+		body    string
+		wantErr string // "" = allowed
+	}{
+		{"compatible", 27, `{"schema": 27}`, ""},
+		{"newer fallback", 25, `{"schema": 30}`, ""},
+		{"older fallback refused", 27, `{"schema": 25}`, "supports schema v25"},
+		{"unreportable refused at a known floor", 27, `{"schema": 0}`, "cannot report its schema ceiling"},
+		{"unknown floor uses the probe reading", 0, `{"schema": 25, "db_schema": 27}`, "supports schema v25"},
+		{"fresh directory needs no protection", 0, `{"schema": 0}`, ""},
+		{"unparsable probe", 27, `not json`, "unreadable version JSON"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkSelfRollbackSchema(fakeBinary(t, tt.body), tt.floor)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected allow, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+			}
+		})
+	}
+}

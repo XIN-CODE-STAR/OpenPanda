@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -318,5 +319,20 @@ index 1..2 100644
 	}
 	if _, _, err := TouchesCritical(dir, []string{"missing.patch"}); err == nil {
 		t.Fatal("missing patch file must error")
+	}
+}
+
+// TestPinnedBaseAcceptsBothObjectFormats pins the base grammar: a full SHA-1
+// or SHA-256 commit id, never a ref and never a truncated prefix.
+func TestPinnedBaseAcceptsBothObjectFormats(t *testing.T) {
+	for _, base := range []string{strings.Repeat("a", 40), strings.Repeat("B", 64)} {
+		if !pinnedBaseRe.MatchString(base) {
+			t.Fatalf("pinned base %q rejected", base)
+		}
+	}
+	for _, base := range []string{"main", "HEAD", strings.Repeat("a", 39), strings.Repeat("a", 41), strings.Repeat("a", 63), strings.Repeat("z", 40)} {
+		if pinnedBaseRe.MatchString(base) {
+			t.Fatalf("unpinned base %q accepted", base)
+		}
 	}
 }

@@ -99,6 +99,17 @@ type Options struct {
 	// it off: the flap a short-lived REPL causes on peers outweighs the
 	// benefit (and a co-resident daemon makes the row borrowed anyway).
 	MeshNode bool
+	// LocalOnly marks a process that writes to the store and exits: `panda
+	// task add`, `task send`, `task continue`. Such a command needs the
+	// schema, the card and the task store — not a network presence. Opening
+	// the LAN-discovery socket for the milliseconds between argv and exit
+	// buys nothing (nobody can pair with a process that is already gone) and
+	// costs real things: a wildcard UDP bind on every short command, a
+	// `bind: address already in use` warning when several run at once or a
+	// daemon holds the port, and a one-shot peer dial whose conns are torn
+	// down before a single hello completes. LocalOnly skips both; everything
+	// a write needs (schema, store, card, identity key) still happens.
+	LocalOnly bool
 	// ConfigPath is the file cfg was loaded from — the same path the caller
 	// passed to config.Load. It joins the sandbox's write-deny set so a
 	// sandboxed subprocess cannot rewrite the node's own configuration.
@@ -150,6 +161,13 @@ type Engine struct {
 	schedMu     sync.Mutex
 	schedCtx    context.Context
 	schedCancel context.CancelFunc
+	// bg tracks the long-lived duties this engine starts (heartbeat, task
+	// monitor, reconcile, discovery, ws listen, peer dials, the node-row
+	// watch). Close waits on it before closing the DB: cancelling schedCtx
+	// stops them, but it does not join them — a beat writing its liveness
+	// row after the close reopens a WAL file, and a test's temp dir is then
+	// removed under a live writer.
+	bg sync.WaitGroup
 
 	// selfRowForeign/selfRowWriteAt bracket this engine's own Register writes:
 	// the newest last_seen stamp observed strictly above our last write (a
@@ -211,6 +229,8 @@ type Engine struct {
 	asyncPeers bool
 	// meshNode mirrors Options.MeshNode.
 	meshNode bool
+	// localOnly mirrors Options.LocalOnly.
+	localOnly bool
 	// replyASCII mirrors Options.ReplyASCII (per-engine classify option).
 	replyASCII bool
 	// locale is the user's active UI/prompt locale. localeMu guards both
@@ -912,6 +932,7 @@ func New(ctx context.Context, cfg *config.Config, opts Options) (*Engine, error)
 		awaitQueued:    opts.AwaitQueued,
 		asyncPeers:     opts.AsyncPeers,
 		meshNode:       opts.MeshNode,
+		localOnly:      opts.LocalOnly,
 		replyASCII:     opts.ReplyASCII,
 		cardPath:       opts.CardPath,
 		configPath:     config.ResolvePath(opts.ConfigPath),
@@ -1125,7 +1146,8 @@ func (e *Engine) initSchedulerLocked(cardPath string) error {
 	// turned the sandbox off resets the process-wide base policy instead of
 	// leaving the previous mode armed.
 	if backend := commander.SetSandboxConfig(e.cfg.Sandbox,
-		commander.ProtectedPaths(e.cfg, e.configPath, cardPath)); e.cfg.Sandbox.NormalizedMode() != "off" {
+		commander.ProtectedPaths(e.cfg, e.configPath, cardPath),
+		commander.SecretReadDenyPaths(e.cfg, e.configPath, cardPath)); e.cfg.Sandbox.NormalizedMode() != "off" {
 		if backend == "" {
 			e.logger.Warn("sandbox mode configured but no backend on this platform",
 				"mode", e.cfg.Sandbox.NormalizedMode())
@@ -1157,7 +1179,7 @@ func (e *Engine) initSchedulerLocked(cardPath string) error {
 	if ownsRow {
 		var ownCancel context.CancelFunc
 		ownCtx, ownCancel = context.WithCancel(schedCtx)
-		guard.Go(e.logger, "askengine: node row watch", nil, func() {
+		e.goBG("askengine: node row watch", func() {
 			e.watchNodeRow(ownCtx, sched, ownCancel, card)
 		})
 	}
@@ -1170,12 +1192,12 @@ func (e *Engine) initSchedulerLocked(cardPath string) error {
 	// nothing else. A borrowed engine skips it entirely: the daemon holds
 	// the socket already.
 	sched.EnsureNodeKey()
-	if ownsRow && e.cfg.Network.DiscoveryAddr != "off" {
+	if ownsRow && !e.localOnly && e.cfg.Network.DiscoveryAddr != "off" {
 		// Auto-dial only for a mesh-owning process (web console, sidecar): a
 		// long-lived owner behaves like the daemon. An interactive seat is
 		// short-lived, so edges it opens would flap for peers on every exit —
 		// the seat listens for pending hints only.
-		guard.Go(e.logger, "askengine: discovery", nil, func() {
+		e.goBG("askengine: discovery", func() {
 			sched.RunDiscovery(ownCtx, e.cfg.Network.DiscoveryAddrOrDefault(), e.cfg.Network.ListenAddr, e.meshNode)
 		})
 	}
@@ -1187,7 +1209,7 @@ func (e *Engine) initSchedulerLocked(cardPath string) error {
 			// Bind the address eagerly: a config reload swaps e.cfg, and a
 			// closure that reads it lazily would listen on the new address.
 			listenAddr := e.cfg.Network.ListenAddr
-			guard.Go(e.logger, "askengine: ws listen", nil, func() {
+			e.goBG("askengine: ws listen", func() {
 				if err := sched.Listen(ownCtx, listenAddr); err != nil {
 					e.logger.Warn("websocket listener failed", "addr", listenAddr, "err", err)
 				}
@@ -1224,7 +1246,7 @@ func (e *Engine) initSchedulerLocked(cardPath string) error {
 	// would read its live queue consumer as dead. The wire half of the beat is
 	// a no-op when the engine has no peer conns.
 	if ownsRow && (e.meshNode || e.queueTasks) {
-		guard.Go(e.logger, "askengine: heartbeat", nil, func() { sched.RunHeartbeat(ownCtx) })
+		e.goBG("askengine: heartbeat", func() { sched.RunHeartbeat(ownCtx) })
 	}
 
 	// Only queue-mode surfaces own a background consumer, and only the row
@@ -1239,12 +1261,12 @@ func (e *Engine) initSchedulerLocked(cardPath string) error {
 		// the task-lifecycle sweeps: without them a waiting_context park never
 		// times out, an orphaned forward is never rescued, and an expired
 		// lease is never enforced — the task would stall with nobody told.
-		guard.Go(e.logger, "askengine: task monitor", nil, func() { sched.RunTaskMonitor(ownCtx) })
+		e.goBG("askengine: task monitor", func() { sched.RunTaskMonitor(ownCtx) })
 	}
 	// Every engine reconciles its own executions against the store: a task
 	// cancelled or failed by another process must stop here too, not run on
 	// as a zombie the user believes is still working.
-	guard.Go(e.logger, "askengine: reconcile", nil, func() { sched.RunReconcile(schedCtx) })
+	e.goBG("askengine: reconcile", func() { sched.RunReconcile(schedCtx) })
 
 	if !ownsRow {
 		// The daemon owns the peer edges for this identity — its keepalive
@@ -1262,10 +1284,16 @@ func (e *Engine) initSchedulerLocked(cardPath string) error {
 		// double-dial into the arbitration it exists to deduplicate.
 		return nil
 	}
+	if e.localOnly {
+		// A write-and-exit command has no use for a live edge: the task it
+		// just enqueued is routed by whatever daemon or console owns the
+		// queue, and a conn this process opened would close with it.
+		return nil
+	}
 	peerAddrs := e.cfg.Network.PeerAddrs()
 	if e.asyncPeers {
 		for _, peer := range peerAddrs {
-			guard.Go(e.logger, "askengine: peer dial "+peer, nil, func() {
+			e.goBG("askengine: peer dial "+peer, func() {
 				if err := sched.DialPeer(schedCtx, peer); err != nil {
 					e.logger.Debug("peer dial failed", "peer", peer, "err", err)
 				}
@@ -1275,7 +1303,7 @@ func (e *Engine) initSchedulerLocked(cardPath string) error {
 		var wg sync.WaitGroup
 		for _, peer := range peerAddrs {
 			wg.Add(1)
-			guard.Go(e.logger, "askengine: peer dial "+peer, nil, func() {
+			e.goBG("askengine: peer dial "+peer, func() {
 				defer wg.Done()
 				if err := sched.DialPeer(schedCtx, peer); err != nil {
 					e.logger.Debug("peer dial failed", "peer", peer, "err", err)
@@ -2405,33 +2433,6 @@ func (e *Engine) startClassifiedPlan(ctx context.Context, spec *entry.PlanSpec, 
 	return res, nil
 }
 
-// gateAuthorized resolves the effective tier-2 consent for a task from the
-// configured approval mode and any standing session authorization. It is the
-// single decision point for the three modes so the semantics stay auditable
-// (and unit-testable) in one place:
-//
-//   - never       — tier-2 runs as classified; consent is implied.
-//   - on-request  — the default; consent is withheld until the user approves
-//     at the inline gate (a tier-2 task parks in review otherwise), unless an
-//     explicit session grant (--authorize / /authorize on) already consented.
-//   - always      — consent is always withheld at submission: every tier-2
-//     task parks in review and is decided per-task in the foreground. A
-//     standing session grant must not silently satisfy the gate — "每次都需
-//     审批" means the approval happens after the task exists and says what it
-//     will do, not as a flag covering whatever the session produces. The
-//     approval itself (ResumeApproved) carries its own consent and does not
-//     pass through this function.
-func gateAuthorized(mode string, sessionAuthorized bool) bool {
-	switch mode {
-	case config.ApprovalModeNever:
-		return true
-	case config.ApprovalModeAlways:
-		return false
-	default:
-		return sessionAuthorized
-	}
-}
-
 // submitTask executes a classified task spec through the scheduler core and
 // maps the outcome to a Result. In queue mode the task is Enqueued and the
 // call returns immediately (TaskState "queued"); the queue scheduler starts
@@ -3115,12 +3116,34 @@ func (e *Engine) recordEntryUsage(ctx context.Context, res *Result, client *entr
 
 // Close releases the engine's resources (DB handle, scheduler core, MCP
 // server). The engine must not be used afterwards.
+// goBG starts a long-lived duty tracked by e.bg, so Close can join it
+// before closing the store. The guard still recovers a panic; the WaitGroup
+// is what makes shutdown observe completion.
+func (e *Engine) goBG(name string, fn func()) {
+	e.bg.Add(1)
+	guard.Go(e.logger, name, nil, func() {
+		defer e.bg.Done()
+		fn()
+	})
+}
+
 func (e *Engine) Close() {
 	e.schedMu.Lock()
 	cancel := e.schedCancel
 	e.schedMu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+	// Wait for in-flight queue runners BEFORE the core's shutdown and the
+	// db close: cancelling schedCtx stops dispatch, but a runner already
+	// inside Run keeps going until it finishes, and its writes (memory,
+	// artifacts, events) would otherwise land on a closed store — or after
+	// a test's temp dir was removed. Bounded, so a wedged adapter cannot
+	// hold shutdown open.
+	if sched := e.sched.Load(); sched != nil {
+		wctx, wcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		sched.WaitQueue(wctx)
+		wcancel()
 	}
 	// schedCtx cancellation only stops the scheduler's goroutines; peer
 	// conns survive until their read deadline unless Shutdown closes them —
@@ -3136,6 +3159,24 @@ func (e *Engine) Close() {
 	e.regMu.RUnlock()
 	if mcp != nil {
 		mcp.Close()
+	}
+	// Join the long-lived duties (heartbeat, monitor, reconcile, discovery,
+	// ws, peer dials) before the store closes: their writes would otherwise
+	// land on a closed DB — or recreate a WAL file in a directory the caller
+	// is already tearing down. Bounded like the queue drain above.
+	{
+		done := make(chan struct{})
+		go func() {
+			e.bg.Wait()
+			close(done)
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		select {
+		case <-done:
+		case <-ctx.Done():
+			e.logger.Warn("engine duties still running at shutdown deadline", "err", ctx.Err())
+		}
+		cancel()
 	}
 	if e.db != nil {
 		e.db.Close()

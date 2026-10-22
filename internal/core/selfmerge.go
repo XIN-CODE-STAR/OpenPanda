@@ -310,6 +310,13 @@ func (c *Core) resumeSelfMerge(ctx context.Context, cur Task) (Task, bus.TaskRes
 	// sets can carry the same stamp. Allocate the next free +self.N here,
 	// under the worktree lock, so the swapped binary's provenance is unique.
 	targetVersion := c.selfMgr.NextVersion(selfVersionBase(spec.Version))
+	// Persist the stamp BEFORE the build/swap. The high-water mark exists to
+	// stop a purge from reissuing a version the node already ran; a crash
+	// between the swap and a later write would reopen exactly that window.
+	// Burning a number on a failed build is harmless.
+	if err := c.selfMgr.NoteVersionUsed(targetVersion); err != nil {
+		return fail(fmt.Errorf("record version high-water: %w", err))
+	}
 	stage, err := os.MkdirTemp("", "openpanda-selfbuild-")
 	if err != nil {
 		return fail(err)
@@ -335,9 +342,6 @@ func (c *Core) resumeSelfMerge(ctx context.Context, cur Task) (Task, bus.TaskRes
 		return fail(fmt.Errorf("apply build: %w", err))
 	}
 	swapped = true
-	// The stamp this build carries is now spent: remember it so the next
-	// patch set never reuses it (a purge must not reset the counter).
-	c.selfMgr.NoteVersionUsed(targetVersion)
 	res := bus.TaskResultPayload{
 		OK: true, TaskID: cur.TaskID, State: StateDone,
 		Stdout: fmt.Sprintf("merged %s → %s; release gate green (%d legs), binary swapped",

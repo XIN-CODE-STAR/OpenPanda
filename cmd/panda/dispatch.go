@@ -146,8 +146,7 @@ func dispatchSub(sub string, args []string) {
 			fmt.Fprintf(os.Stderr, "  %s\n", i18n.Tf(loc, "repl.didyoumean", "cmd", p.Command(s)))
 		}
 		fmt.Fprintf(os.Stderr, "  %s\n", p.Muted(i18n.T(loc, "cli.unknownSub.askHint")))
-		fmt.Fprintf(os.Stderr, "  %s\n", p.Muted(i18n.T(loc, "cli.help.more")))
-		os.Exit(2)
+		failf(2, "  %s\n", p.Muted(i18n.T(loc, "cli.help.more")))
 	}
 }
 

@@ -131,27 +131,30 @@ func TestTUIAskingForegroundCommandQueues(t *testing.T) {
 	}
 }
 
-// TestTUIPlainTextStillSteers guards the split's third way: text without a
-// command prefix stays a steer — it rides the turn's steer channel, not the
-// submission queue and not an exec.
-func TestTUIPlainTextStillSteers(t *testing.T) {
+// TestTUIPlainTextQueuesAsNextTurn guards the split's third way: text without a
+// command prefix is neither an exec nor a command — it is the user's next turn,
+// parked in the pending queue. It must NOT reach the running turn: a mid-stream
+// "steer" made the model read the same sentence twice (once inline in the user
+// turn, once folded back from the task board) and rewrote the persisted
+// transcript to include words typed after sending.
+func TestTUIPlainTextQueuesAsNextTurn(t *testing.T) {
 	m := newTestTUI(t)
 	m.mode = modeAsking
-	s := newTestStream(new(bool))
-	m.stream = s
+	m.chatHistory = &chatHistory{}
+	m.stream = newTestStream(new(bool))
+	m.pendingPrompt = "the original request"
 
 	m = step(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("focus the tests")})
 	m = step(m, tea.KeyMsg{Type: tea.KeyEnter})
-	select {
-	case idea := <-s.steer:
-		if idea != "focus the tests" {
-			t.Fatalf("steer payload = %q", idea)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("plain text mid-turn must reach the steer channel")
+
+	if len(m.pendingInputs) != 1 || m.pendingInputs[0] != "focus the tests" {
+		t.Fatalf("plain text mid-turn must queue as the next turn: %v", m.pendingInputs)
 	}
-	if len(m.pendingInputs) != 0 {
-		t.Fatalf("a steer is not a queued submission: %v", m.pendingInputs)
+	if m.pendingPrompt != "the original request" {
+		t.Fatalf("a queued line must not join the in-flight prompt: %q", m.pendingPrompt)
+	}
+	if m.mode != modeAsking || m.stream == nil {
+		t.Fatalf("queueing must leave the running turn alone: mode=%v stream=%v", m.mode, m.stream != nil)
 	}
 }
 

@@ -21,8 +21,13 @@ import (
 )
 
 // worktreeDir is the directory (inside the repo) where session worktrees
-// live. It is added to .git/info/exclude so it never pollutes git status.
-const worktreeDir = ".openpanda/worktrees"
+// live. The whole runtime tree (worktrees, composer uploads, task scratch) is
+// added to .git/info/exclude: `git add -A` in a session worktree used to pick
+// up .openpanda/uploads and merge a user's pasted files into their branch.
+const (
+	worktreeDir = ".openpanda/worktrees"
+	runtimeDir  = ".openpanda"
+)
 
 // ErrNotARepo is returned when the work path is not inside a git work tree;
 // the caller degrades to running without isolation.
@@ -536,6 +541,18 @@ func (w *Worktrees) excludeWorktreeDir() error {
 			return err
 		}
 	}
-	_, err = fmt.Fprintf(f, "# openpanda session worktrees\n%s/\n", worktreeDir)
+	// The whole runtime tree, not just worktrees/. Repos that already carry
+	// the old narrower line get the broader one appended; git honours both.
+	present := false
+	for _, line := range strings.Split(string(existing), "\n") {
+		if strings.TrimSpace(line) == runtimeDir+"/" {
+			present = true
+			break
+		}
+	}
+	if present {
+		return nil
+	}
+	_, err = fmt.Fprintf(f, "# openpanda runtime state (worktrees, uploads, task scratch)\n%s/\n", runtimeDir)
 	return err
 }

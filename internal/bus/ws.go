@@ -651,19 +651,33 @@ func (s *Server) SetLimits(maxConns, maxConnsPerIP int) {
 }
 
 // Listen blocks serving WebSocket requests until ctx is done.
+//
+// The bind happens here, synchronously, before anything is announced or
+// served. ListenAndServe would do the same bind internally but reports the
+// failure only after the fact, which meant the "websocket listening" line was
+// printed first: a daemon whose port was already held logged that it was
+// listening, then logged the bind failure, and repeated both every retry. The
+// announcement is now true when it is printed, and a bind error comes back to
+// the caller as a return value instead of racing a goroutine.
 func (s *Server) Listen(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handle)
 	srv := &http.Server{
-		Addr:              s.addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	ln, err := net.Listen("tcp", s.addr)
+	if err != nil {
+		return err
+	}
+
 	errCh := make(chan error, 1)
 	guard.Go(s.logger, "bus: accept loop", nil, func() {
-		s.logger.Info("websocket listening", "addr", s.addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		// ln.Addr() rather than s.addr: with a port of 0 the operator needs the
+		// port that was actually chosen, not the one they asked for.
+		s.logger.Info("websocket listening", "addr", ln.Addr().String())
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
 	})

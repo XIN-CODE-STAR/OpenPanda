@@ -215,6 +215,30 @@ func (c *Core) StartQueueScheduler(ctx context.Context) *queue.Scheduler {
 	return s
 }
 
+// WaitQueue blocks until the queue scheduler's in-flight runners have
+// returned, bounded by ctx. Cancelling the scheduler's context stops its
+// dispatch loop but does NOT interrupt a runner already inside Run — and a
+// runner that finishes after the owner closed the store writes into a
+// closed database. Shutdown paths call this before closing.
+func (c *Core) WaitQueue(ctx context.Context) {
+	c.mu.RLock()
+	s := c.queueSched
+	c.mu.RUnlock()
+	if s == nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		s.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		c.logger.Warn("queue runners still in flight at shutdown deadline", "err", ctx.Err())
+	}
+}
+
 // enrichDeclineReason attaches the recorded refusal trail to a route decline,
 // so "no capability matches" stops masquerading as the verdict when capable
 // nodes already refused — "declined by B (capacity full)" is the actionable

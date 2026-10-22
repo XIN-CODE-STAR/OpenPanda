@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,8 +47,13 @@ func updateEnvOptions(opts updater.Options) updater.Options {
 	if opts.ReleaseKey == "" {
 		opts.ReleaseKey = versionpkg.ReleasePubKey
 	}
-	if os.Getenv("OPENPANDA_UPDATE_UNSIGNED") != "" {
-		opts.AllowUnsigned = true
+	// Parse, don't test presence: OPENPANDA_UPDATE_UNSIGNED=0 used to be a
+	// non-empty string and therefore ENABLED checksum-only updates — the
+	// opposite of what an operator writing 0 to enforce signatures asked for.
+	if v := strings.TrimSpace(os.Getenv("OPENPANDA_UPDATE_UNSIGNED")); v != "" {
+		if on, err := strconv.ParseBool(v); err == nil && on {
+			opts.AllowUnsigned = true
+		}
 	}
 	return opts
 }
@@ -85,8 +91,7 @@ func runUpdate(args []string) {
 		loc := i18n.Detect()
 		p := palFor(os.Stderr)
 		fmt.Fprintf(os.Stderr, "panda: %s %s\n", i18n.T(loc, "cli.unknownSub"), p.Command("update "+action))
-		fmt.Fprintf(os.Stderr, "  %s %s | %s\n", i18n.T(loc, "cli.help.more"), p.Command("panda update check"), p.Command("panda update apply"))
-		os.Exit(2)
+		failf(2, "  %s %s | %s\n", i18n.T(loc, "cli.help.more"), p.Command("panda update check"), p.Command("panda update apply"))
 	}
 }
 

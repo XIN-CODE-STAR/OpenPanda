@@ -76,8 +76,7 @@ func runPlanStart(args []string) {
 	}
 	prio, ok := parseCLIPriority(*priority)
 	if !ok {
-		fmt.Fprintln(os.Stderr, "panda: "+i18n.Tf(i18n.Detect(), "cli.task.add.badPriority", "level", *priority, "list", cliPriorities))
-		os.Exit(2)
+		fail(2, "panda: "+i18n.Tf(i18n.Detect(), "cli.task.add.badPriority", "level", *priority, "list", cliPriorities))
 	}
 
 	var data []byte
@@ -94,8 +93,7 @@ func runPlanStart(args []string) {
 	if err != nil {
 		// A plan that does not validate has created nothing, so this is the one
 		// failure that costs the user only a re-edit. Say what is wrong and stop.
-		fmt.Fprintf(os.Stderr, "panda: %v\n", err)
-		os.Exit(1)
+		failf(1, "panda: %v\n", err)
 	}
 
 	if *dryRun {
@@ -181,8 +179,7 @@ func runPlanShow(args []string) {
 		fatal("read plan", err)
 	}
 	if len(stages) == 0 {
-		fmt.Fprintln(os.Stderr, "panda: "+i18n.Tf(i18n.Detect(), "cli.noSuch.plan", "id", id))
-		os.Exit(1)
+		fail(1, "panda: "+i18n.Tf(i18n.Detect(), "cli.noSuch.plan", "id", id))
 	}
 	if jsonOutput {
 		emitJSON(planToJSON(id, "", stages))

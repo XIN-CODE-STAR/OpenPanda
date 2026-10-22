@@ -59,15 +59,6 @@ type (
 	// pump is not re-armed.
 	droppedMsg struct{}
 
-	// steerAckMsg reports that the round loop folded one steering idea into its
-	// prompt. The enqueue note already said "queued"; this is the only event
-	// that can turn that into "the model has it", because a buffered channel
-	// write proves nothing — the turn can end before anything polls it again.
-	steerAckMsg struct {
-		stream *askStream
-		text   string
-		round  int
-	}
 	// taskRowMsg names the task row this ask created, delivered before that
 	// task runs. A mid-turn Enter needs it to address the board: without it
 	// the only target would be whatever the user last opened in the picker.
@@ -77,28 +68,12 @@ type (
 	}
 )
 
-// stagedNote is a note this model queued mid-turn and can still escalate. key
-// is the board slot (`user:<seq>`) when the turn is task-backed; empty for a
-// plain answer turn, whose only channel is the in-process steer queue and
-// which therefore cannot be interrupted — the second Enter says so instead of
-// pretending otherwise.
-type stagedNote struct {
-	taskID string
-	key    string
-	text   string
-	// appended is the exact suffix stageNote added to pendingPrompt. Keeping it
-	// lets an edit (or a drop) rewrite that one line instead of stacking every
-	// draft the user typed into the turn's persisted user side.
-	appended string
-}
-
 // askStream carries one in-flight ask: the channel the callbacks write to, the
 // context that cancels it (Esc/interrupt), and the outcome slot. It is created
 // per ask and discarded when doneMsg lands.
 type askStream struct {
 	events chan tea.Msg
 	cancel context.CancelFunc
-	steer  chan string
 
 	// detached records that the user stopped waiting on this ask (Esc/Ctrl+C),
 	// and prevents its late completion from being committed over a newer turn.
@@ -112,21 +87,6 @@ type askStream struct {
 	// only ever closed, never sent on, so releasing an ask can never race an
 	// engine send into a closed channel.
 	dropped chan struct{}
-}
-
-// injectSteer pushes a user steering idea to the in-flight engine ask loop and
-// reports whether the bounded queue accepted it. A full queue must remain
-// visible to the caller so it can preserve the draft instead of claiming success.
-func (s *askStream) injectSteer(idea string) bool {
-	if s == nil || idea == "" || s.detached {
-		return false
-	}
-	select {
-	case s.steer <- idea:
-		return true
-	default:
-		return false
-	}
 }
 
 // drop releases an ask: it cancels the engine's context (which unblocks any
@@ -167,27 +127,19 @@ func startAsk(engine *askengine.Engine, history []entry.Turn, prompt, workDir, s
 		events:  make(chan tea.Msg, 256),
 		cancel:  cancel,
 		dropped: make(chan struct{}),
-		steer:   make(chan string, 32),
 	}
 
 	cb := askengine.StreamCallbacks{
 		OnDelta:     func(text string) { s.send(ctx, deltaMsg{stream: s, text: text}) },
 		OnReasoning: func(text string) { s.send(ctx, reasoningMsg{stream: s, text: text}) },
 		OnProgress:  func(p askengine.Progress) { s.send(ctx, progressMsg{stream: s, progress: p}) },
-		GetSteer: func() string {
-			select {
-			case idea := <-s.steer:
-				return idea
-			default:
-				return ""
-			}
-		},
-		// The round loop tells us when a note actually became part of the
-		// prompt — the difference between "accepted into a channel" and
-		// "the model will read it".
-		OnSteerConsumed: func(text string, round int) {
-			s.send(ctx, steerAckMsg{stream: s, text: text, round: round})
-		},
+		// GetSteer / OnSteerConsumed stay nil on purpose. Mid-turn input is the
+		// user's NEXT turn, not a late fragment of the one already streaming: a
+		// steer channel let the model read the same words twice (once in the
+		// user turn, once folded back from the task board) and could not be
+		// taken back. The pending queue in tui_update.go replaces it; the
+		// durable /queue and /inject commands still cover cross-process
+		// steering through the board.
 		// The task this turn is about to run, reported while the row still
 		// has work ahead of it — see StageNote in tui_actions.go.
 		OnTaskRow: func(taskID string) {
@@ -251,7 +203,6 @@ func startResume(engine *askengine.Engine, taskID, planID, workDir string) (*ask
 		events:  make(chan tea.Msg, 256),
 		cancel:  cancel,
 		dropped: make(chan struct{}),
-		steer:   make(chan string, 1),
 	}
 	cb := askengine.StreamCallbacks{
 		OnProgress: func(p askengine.Progress) {

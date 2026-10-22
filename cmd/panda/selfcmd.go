@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -31,8 +32,7 @@ import (
 func runSelf(args []string) {
 	loc := i18n.Detect()
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.self.usage"))
-		os.Exit(2)
+		fail(2, i18n.T(loc, "cli.self.usage"))
 	}
 	switch args[0] {
 	case "status":
@@ -52,9 +52,7 @@ func runSelf(args []string) {
 	case "reset":
 		runSelfReset(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, i18n.T(loc, "cli.self.unknown")+"\n", args[0])
-		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.self.usage"))
-		os.Exit(2)
+		failf(2, i18n.T(loc, "cli.self.unknown")+"\n"+i18n.T(loc, "cli.self.usage")+"\n", args[0])
 	}
 }
 
@@ -223,8 +221,7 @@ func runSelfPropose(args []string) {
 	id := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	loc := i18n.Detect()
 	if id == "" {
-		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.self.propose.usage"))
-		os.Exit(2)
+		fail(2, i18n.T(loc, "cli.self.propose.usage"))
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -261,8 +258,7 @@ func runSelfRebase(args []string) {
 	rest := fs.Args()
 	loc := i18n.Detect()
 	if len(rest) != 2 {
-		fmt.Fprintln(os.Stderr, i18n.T(loc, "cli.self.rebase.usage"))
-		os.Exit(2)
+		fail(2, i18n.T(loc, "cli.self.rebase.usage"))
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -314,7 +310,14 @@ func runSelfRollback(args []string) {
 		fatal("open store", err)
 	}
 	defer db.Close()
-	if err := updater.RollbackToRelease(schemaFloor(db)); err != nil {
+	floor, err := schemaFloor(db)
+	if err != nil {
+		// Fail closed: without the live floor the fallback's own reading
+		// describes a different data directory, so compatibility cannot be
+		// proven. Rolling back blind is exactly how a node gets bricked.
+		fatal("read schema floor", err)
+	}
+	if err := updater.RollbackToRelease(floor); err != nil {
 		fatal("rollback", err)
 	}
 	// Audit the rollback on the signed chain — reverting the running binary
@@ -332,6 +335,7 @@ func runSelfRollback(args []string) {
 func runSelfReset(args []string) {
 	fs, configPath := selfFlags("reset")
 	purge := fs.Bool("purge", false, "also delete every queued and archived patch set")
+	force := fs.Bool("force", false, "clear the self state even if the release binary cannot be restored")
 	fs.Parse(reorderFlags(fs, args))
 	loc := i18n.Detect()
 	rejectExtraArgs(fs, i18n.T(loc, "cli.self.reset.usage"))
@@ -344,16 +348,21 @@ func runSelfReset(args []string) {
 	// after the feature was disabled — the state may predate that.
 	mgr := selfManager(cfg, false)
 	if versionpkg.ProvenanceClass() == versionpkg.ProvenanceSelf {
-		db, _, err := panelStore(cfg)
-		if err != nil {
-			fmt.Println(pal().Warn(fmt.Sprintf(i18n.T(loc, "cli.self.reset.restoreFailed"), err)))
-		} else {
-			defer db.Close()
-			if err := updater.RollbackToRelease(schemaFloor(db)); err != nil {
-				fmt.Println(pal().Warn(fmt.Sprintf(i18n.T(loc, "cli.self.reset.restoreFailed"), err)))
-			} else {
-				fmt.Println(fmt.Sprintf(i18n.T(loc, "cli.self.reset.restored"), updater.ReleaseFallbackPath()))
-			}
+		restoreErr := restoreReleaseForReset(cfg)
+		switch {
+		case restoreErr == nil:
+			fmt.Println(fmt.Sprintf(i18n.T(loc, "cli.self.reset.restored"), updater.ReleaseFallbackPath()))
+		case errors.Is(restoreErr, errNoReleaseFallback):
+			// Nothing signed to put back. Clearing the state is still the
+			// escape hatch back to "no self-evolution state".
+			fmt.Println(pal().Warn(fmt.Sprintf(i18n.T(loc, "cli.self.reset.restoreFailed"), restoreErr)))
+		case *force:
+			fmt.Println(pal().Warn(fmt.Sprintf(i18n.T(loc, "cli.self.reset.restoreFailed"), restoreErr)))
+		default:
+			// The restore is the point of reset while a self build runs.
+			// Clearing the queue/archive now would leave the node on the bad
+			// binary with its last recovery material deleted. Stop instead.
+			fatal("reset", fmt.Errorf("%w (use --force to clear the self state anyway)", restoreErr))
 		}
 	}
 	if err := mgr.Reset(context.Background(), *purge); err != nil {
@@ -366,18 +375,51 @@ func runSelfReset(args []string) {
 	fmt.Println(fmt.Sprintf(i18n.T(loc, "cli.self.reset.cleared"), suffix))
 }
 
+// errNoReleaseFallback marks "there is nothing installed to restore". It is
+// the one restore failure that may be ignored: with no signed fallback on
+// disk there is no binary to put back, so clearing the self state is still a
+// valid escape hatch.
+var errNoReleaseFallback = errors.New("no release fallback")
+
+// restoreReleaseForReset puts the retained release binary back before reset
+// erases the state. A missing fallback is reported as errNoReleaseFallback;
+// every other failure means a fallback exists but could not be proven safe,
+// and the caller must not clear the state and strand the node on the self
+// build.
+func restoreReleaseForReset(cfg *config.Config) error {
+	fallback := updater.ReleaseFallbackPath()
+	if fallback == "" {
+		return errNoReleaseFallback
+	}
+	if _, err := os.Stat(fallback); err != nil {
+		return fmt.Errorf("%w: %v", errNoReleaseFallback, err)
+	}
+	db, _, err := panelStore(cfg)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer db.Close()
+	floor, err := schemaFloor(db)
+	if err != nil {
+		return err
+	}
+	return updater.RollbackToRelease(floor)
+}
+
 // schemaFloor reports the live data directory's migration level. The rollback
 // guard needs it: the fallback binary is probed in isolation and cannot see
-// the store it would be rolled back onto.
-func schemaFloor(db *sql.DB) int {
+// the store it would be rolled back onto. An unreadable floor is an ERROR, not
+// zero: zero means "nothing to protect" to the guard, which would turn a
+// failed read into a fail-open rollback.
+func schemaFloor(db *sql.DB) (int, error) {
 	if db == nil {
-		return 0
+		return 0, errors.New("no store to read the schema floor from")
 	}
 	var v int
 	if err := db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
-		return 0
+		return 0, fmt.Errorf("read schema floor: %w", err)
 	}
-	return v
+	return v, nil
 }
 
 // selfCore builds the minimal Core a CLI verb needs — propose parks a row on

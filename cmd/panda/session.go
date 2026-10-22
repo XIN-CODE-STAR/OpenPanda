@@ -66,9 +66,7 @@ func runSession(args []string) {
 	case "help", "-h", "--help":
 		sessionUsage()
 	default:
-		fmt.Fprintln(os.Stderr, "panda: "+i18n.Tf(i18n.Detect(), "cli.unknownNamed", "kind", "session verb", "name", verb))
-		sessionUsage()
-		os.Exit(2)
+		failUsage(2, "panda: "+i18n.Tf(i18n.Detect(), "cli.unknownNamed", "kind", "session verb", "name", verb), sessionUsage)
 	}
 }
 
@@ -205,8 +203,7 @@ func runSessionShow(args []string) {
 	fs.Parse(reorderFlags(fs, args))
 	id := strings.TrimSpace(fs.Arg(0))
 	if id == "" {
-		fmt.Fprintln(os.Stderr, "usage: panda session show <id>")
-		os.Exit(2)
+		fail(2, "usage: panda session show <id>")
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -215,8 +212,7 @@ func runSessionShow(args []string) {
 	sess, err := sessions.NewStore(sessionStoreRoot(cfg)).Get(id)
 	if err != nil {
 		if errors.Is(err, sessions.ErrNotFound) {
-			fmt.Fprintln(os.Stderr, "panda: "+i18n.Tf(i18n.Detect(), "cli.noSuch.session", "id", id))
-			os.Exit(1)
+			fail(1, "panda: "+i18n.Tf(i18n.Detect(), "cli.noSuch.session", "id", id))
 		}
 		fatal("load session", err)
 	}
@@ -267,8 +263,7 @@ func runSessionMove(args []string) {
 	fs.Parse(reorderFlags(fs, args))
 	id := strings.TrimSpace(fs.Arg(0))
 	if id == "" {
-		fmt.Fprintln(os.Stderr, "usage: panda session mv <id> --project <name>")
-		os.Exit(2)
+		fail(2, "usage: panda session mv <id> --project <name>")
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -324,8 +319,7 @@ func runSessionRm(args []string) {
 	if !filtered {
 		refs := fs.Args()
 		if len(refs) == 0 {
-			fmt.Fprintln(os.Stderr, "usage: panda session rm <id> [id …] | --project P | --older-than D | --all [--yes]")
-			os.Exit(2)
+			fail(2, "usage: panda session rm <id> [id …] | --project P | --older-than D | --all [--yes]")
 		}
 		deleted, failed := 0, 0
 		for _, ref := range refs {
@@ -357,8 +351,7 @@ func runSessionRm(args []string) {
 	if *olderThan != "" {
 		d, err := parseOlderThan(*olderThan)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "panda: "+i18n.Tf(loc, "cli.session.rm.olderBad", "val", *olderThan))
-			os.Exit(2)
+			fail(2, "panda: "+i18n.Tf(loc, "cli.session.rm.olderBad", "val", *olderThan))
 		}
 		cutoff = time.Now().Add(-d)
 	}
@@ -373,13 +366,16 @@ func runSessionRm(args []string) {
 		candidates = append(candidates, s)
 	}
 	if len(candidates) == 0 {
+		if jsonOutput {
+			emitJSON(map[string]any{"deleted": 0, "failed": 0})
+			return
+		}
 		fmt.Println(i18n.T(loc, "cli.session.rm.none"))
 		return
 	}
 	if !*yes {
 		if !stdinIsTTY() {
-			fmt.Fprintln(os.Stderr, "panda session rm: "+i18n.T(loc, "cli.session.rm.nonTTY"))
-			os.Exit(2)
+			fail(2, "panda session rm: "+i18n.T(loc, "cli.session.rm.nonTTY"))
 		}
 		fmt.Print(i18n.Tf(loc, "cli.session.rm.confirm", "n", strconv.Itoa(len(candidates))))
 		var ans string
@@ -392,16 +388,23 @@ func runSessionRm(args []string) {
 	}
 
 	deleted, failed := 0, 0
+	failures := make([]map[string]string, 0)
 	for _, s := range candidates {
 		if _, err := rmOneSession(ctx, store, wt, s.ID); err != nil {
 			failed++
-			printSessionRmErr(loc, s.ID, err)
+			failures = append(failures, map[string]string{"id": s.ID, "error": err.Error()})
+			if !jsonOutput {
+				printSessionRmErr(loc, s.ID, err)
+			}
 			continue
 		}
 		deleted++
 	}
 	if jsonOutput {
-		emitJSON(map[string]any{"deleted": deleted, "failed": failed})
+		emitJSON(map[string]any{"deleted": deleted, "failed": failed, "errors": failures})
+		if failed > 0 {
+			os.Exit(1)
+		}
 		return
 	}
 	fmt.Println(i18n.Tf(loc, "cli.session.rm.done", "n", strconv.Itoa(deleted)))
@@ -510,8 +513,7 @@ func runSessionFork(args []string) {
 	fs.Parse(reorderFlags(fs, args))
 	id := strings.TrimSpace(fs.Arg(0))
 	if id == "" {
-		fmt.Fprintln(os.Stderr, "usage: panda session fork <id> [--at N]")
-		os.Exit(2)
+		fail(2, "usage: panda session fork <id> [--at N]")
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -521,8 +523,7 @@ func runSessionFork(args []string) {
 	parent, err := store.Get(id)
 	if err != nil {
 		if errors.Is(err, sessions.ErrNotFound) {
-			fmt.Fprintln(os.Stderr, "panda: "+i18n.Tf(i18n.Detect(), "cli.noSuch.session", "id", id))
-			os.Exit(1)
+			fail(1, "panda: "+i18n.Tf(i18n.Detect(), "cli.noSuch.session", "id", id))
 		}
 		fatal("load session", err)
 	}
@@ -596,8 +597,7 @@ func runSessionTree(args []string) {
 	if scope != "" {
 		s := byID[scope]
 		if s == nil {
-			fmt.Fprintln(os.Stderr, "panda: "+i18n.Tf(i18n.Detect(), "cli.noSuch.session", "id", scope))
-			os.Exit(1)
+			fail(1, "panda: "+i18n.Tf(i18n.Detect(), "cli.noSuch.session", "id", scope))
 		}
 		for s.ParentID != "" && byID[s.ParentID] != nil {
 			s = byID[s.ParentID]
@@ -656,8 +656,7 @@ func runSessionAsk(args []string) {
 	id := strings.TrimSpace(fs.Arg(0))
 	prompt := strings.TrimSpace(strings.Join(fs.Args()[1:], " "))
 	if id == "" || prompt == "" {
-		fmt.Fprintln(os.Stderr, "usage: panda session ask <id> <prompt> [--authorize] [--card PATH]")
-		os.Exit(2)
+		fail(2, "usage: panda session ask <id> <prompt> [--authorize] [--card PATH]")
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -685,8 +684,7 @@ func runSessionAsk(args []string) {
 	sess, err := store.Get(id)
 	if err != nil {
 		if errors.Is(err, sessions.ErrNotFound) {
-			fmt.Fprintln(os.Stderr, "panda: "+i18n.Tf(i18n.Detect(), "cli.noSuch.session", "id", id))
-			os.Exit(1)
+			fail(1, "panda: "+i18n.Tf(i18n.Detect(), "cli.noSuch.session", "id", id))
 		}
 		fatal("load session", err)
 	}
@@ -720,9 +718,8 @@ func runSessionAsk(args []string) {
 
 	out, streamedText, err := askSessionTurns(engine, history, prompt, workDir, sess.ID, *authorize)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "panda: "+err.Error())
 		_, _ = store.AppendTurn(sess.ID, sessions.Turn{Role: "assistant", Text: "⚠ " + err.Error(), Kind: "error"})
-		os.Exit(1)
+		fail(1, "panda: "+err.Error())
 	}
 	// A tier-2 task with no standing consent parks in review; on an
 	// interactive terminal prompt for it here so the thread records the
@@ -792,9 +789,9 @@ func runSessionAsk(args []string) {
 			// OK=false with no stderr, and "exit 0: " there would report a
 			// failure that never happened.
 			if out.ExitCode != 0 || strings.TrimSpace(out.Stderr) != "" {
-				fmt.Fprintf(os.Stderr, "exit %d: %s\n", out.ExitCode, out.Stderr)
+				failf(1, "exit %d: %s\n", out.ExitCode, out.Stderr)
 			}
-			os.Exit(1)
+			fail(1, "panda: session ask failed")
 		}
 	case "plan":
 		printAskPlan(loc, out)
@@ -836,8 +833,7 @@ func runSessionDiff(args []string) {
 	fs.Parse(reorderFlags(fs, args))
 	id := strings.TrimSpace(fs.Arg(0))
 	if id == "" {
-		fmt.Fprintln(os.Stderr, "usage: panda session diff [--stat] <id>")
-		os.Exit(2)
+		fail(2, "usage: panda session diff [--stat] <id>")
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -912,8 +908,7 @@ func runSessionMerge(args []string) {
 	fs.Parse(reorderFlags(fs, args))
 	id := strings.TrimSpace(fs.Arg(0))
 	if id == "" {
-		fmt.Fprintln(os.Stderr, "usage: panda session merge <id> [--message M]")
-		os.Exit(2)
+		fail(2, "usage: panda session merge <id> [--message M]")
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -932,8 +927,7 @@ func runSessionMerge(args []string) {
 	subject, err := wt.Merge(ctx, id, *message)
 	if err != nil {
 		if errors.Is(err, sessions.ErrMergeConflict) {
-			fmt.Fprintf(os.Stderr, "panda: %v\n", err)
-			os.Exit(1)
+			failf(1, "panda: %v\n", err)
 		}
 		fatal("session merge", err)
 	}
@@ -950,8 +944,7 @@ func runSessionRevert(args []string) {
 	id := strings.TrimSpace(fs.Arg(0))
 	loc := i18n.Detect()
 	if id == "" {
-		fmt.Fprintln(os.Stderr, "usage: panda session revert <id>")
-		os.Exit(2)
+		fail(2, "usage: panda session revert <id>")
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -965,11 +958,9 @@ func runSessionRevert(args []string) {
 	if err != nil {
 		switch {
 		case errors.Is(err, sessions.ErrNothingToRevert):
-			fmt.Fprintln(os.Stderr, "panda: "+i18n.Tf(loc, "cli.session.revert.none", "id", id))
-			os.Exit(1)
+			fail(1, "panda: "+i18n.Tf(loc, "cli.session.revert.none", "id", id))
 		case errors.Is(err, sessions.ErrRevertDirty):
-			fmt.Fprintln(os.Stderr, "panda: "+i18n.T(loc, "cli.session.revert.dirty"))
-			os.Exit(1)
+			fail(1, "panda: "+i18n.T(loc, "cli.session.revert.dirty"))
 		default:
 			fatal("session revert", err)
 		}

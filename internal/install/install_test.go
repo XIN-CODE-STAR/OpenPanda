@@ -611,3 +611,45 @@ func TestCopySelf(t *testing.T) {
 	// test suite. The real install flow (bin/panda install → smoke-tested
 	// in a sandboxed HOME) covers it.
 }
+
+// TestBackupZipPrivateAndAbortsOnHole pins the two uninstall guarantees from
+// the release audit: the archive is 0600 (it carries the mesh secret, provider
+// keys and node private keys), and an entry the backup could not read aborts
+// the uninstall instead of deleting originals the archive never captured.
+func TestBackupZipPrivateAndAbortsOnHole(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "keep.txt")
+	if err := os.WriteFile(victim, []byte("irreplaceable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A dangling symlink is an entry WalkDir reports but os.Open cannot read.
+	if err := os.Symlink(filepath.Join(dir, "missing"), filepath.Join(dir, "dangling")); err != nil {
+		t.Fatal(err)
+	}
+	zipPath := filepath.Join(t.TempDir(), "backup.zip")
+	targets := []Target{{Path: dir, Kind: KindData, Exists: true, Delete: true, Bytes: 1}}
+
+	if _, err := BackupZip(zipPath, targets); err == nil {
+		t.Fatal("BackupZip reported success with an unreadable entry")
+	}
+	st, err := os.Stat(zipPath)
+	if err != nil {
+		t.Fatalf("stat backup: %v", err)
+	}
+	// Windows has no Unix permission bits: os.OpenFile's 0600 is a no-op and
+	// Stat reports 0666 for every ordinary file. The privacy guarantee there
+	// is the ACL inherited from the (owner-only) home directory, not a mode.
+	if runtime.GOOS != "windows" {
+		if got := st.Mode().Perm(); got != 0o600 {
+			t.Fatalf("backup mode = %o, want 600", got)
+		}
+	}
+
+	out := ExecuteUninstall(targets, UninstallOptions{BackupPath: zipPath})
+	if out.BackupErr == nil {
+		t.Fatal("ExecuteUninstall ignored the backup failure")
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatalf("uninstall deleted data after a partial backup: %v", err)
+	}
+}
