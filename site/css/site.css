@@ -99,6 +99,11 @@ button { font: inherit; }
 img, svg { display: block; }
 ::selection { background: rgba(12, 122, 85, .18); }
 [hidden] { display: none !important; }
+/* Set by the head bootstrap when the saved/preferred language is English: the
+   markup is Chinese, so the first frame is held back for the few milliseconds
+   js/i18n.js needs to swap the dictionary in. The bootstrap also clears it on a
+   timer, so a failed module never leaves a blank page. */
+html.lang-pending body { opacity: 0; }
 :focus-visible { outline: 2px solid var(--jade); outline-offset: 3px; border-radius: 3px; }
 .hero :focus-visible,
 .night-section :focus-visible,
@@ -185,6 +190,7 @@ img, svg { display: block; }
   font-size: 12.5px;
   letter-spacing: .005em;
   opacity: .68;
+  white-space: nowrap;
   transition: opacity .22s;
 }
 .nav-links a::before {
@@ -206,25 +212,33 @@ img, svg { display: block; }
 .lang-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: 4px;
   padding: 7px 10px;
   background: transparent;
   border: 1px solid rgba(250, 249, 245, .22);
   border-radius: 999px;
   color: inherit;
-  font: 600 10px var(--mono);
-  letter-spacing: .04em;
+  /* 11px, not 10: the CJK half of this control has no mono face and renders in
+     the system sans, which needs the extra pixel to stay crisp. */
+  font: 600 11px var(--mono), 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  letter-spacing: .02em;
+  line-height: 1;
   cursor: pointer;
+  white-space: nowrap;
   transition: border-color .2s, background .2s;
 }
 .site-nav.solid .lang-toggle { border-color: var(--line); }
 .lang-toggle:hover { border-color: currentColor; }
 .lang-sep { opacity: .32; }
-.lang-en, .lang-zh { opacity: .62; }
+.lang-en, .lang-zh { opacity: .55; transition: opacity .2s, color .2s; }
 html[data-lang='en'] .lang-en,
 html[data-lang='zh'] .lang-zh { opacity: 1; color: var(--jade-bright); }
-.site-nav.solid html[data-lang='en'] .lang-en,
-.site-nav.solid html[data-lang='zh'] .lang-zh { color: var(--jade); }
+html[data-lang='en'] .site-nav.solid .lang-en,
+html[data-lang='zh'] .site-nav.solid .lang-zh { color: var(--jade); }
+/* The same control on the mobile sheet, which is paper, not sky. */
+.lang-toggle-menu { border-color: var(--line); color: var(--ink); }
+html[data-lang='en'] .lang-toggle-menu .lang-en,
+html[data-lang='zh'] .lang-toggle-menu .lang-zh { color: var(--jade); }
 .nav-gh {
   display: inline-flex;
   align-items: center;
@@ -401,6 +415,15 @@ body.no-webgl .hero-canvas { display: none; }
   font-size: clamp(17px, 1.55vw, 22px);
   line-height: 1.5;
   color: rgba(250, 249, 245, .76);
+}
+/* The pairing flips with the language: in English the headline is English and
+   this line carries the Chinese. Upright, not italic — synthetic oblique on CJK
+   is a smear, and the line is a subtitle here, not a translation. */
+html[data-lang='en'] .hero-en {
+  font-style: normal;
+  font-size: clamp(15px, 1.35vw, 19px);
+  letter-spacing: .05em;
+  color: rgba(250, 249, 245, .62);
 }
 .hero-sub {
   max-width: 530px;
@@ -2616,6 +2639,18 @@ kbd {
 body.palette-open { overflow: hidden; }
 
 /* ── responsive: second pass ────────────────────────────────────────── */
+/* English nav labels are longer than the Chinese ones, and between ~820 and
+   ~950px they no longer fit at the default rhythm. Tighten the gap and the
+   type, and drop the ⌘K chip (still reachable by keyboard and from the mobile
+   index) before anything wraps or pushes the GitHub pill off the edge. */
+@media (min-width: 821px) and (max-width: 950px) {
+  .nav-links { gap: 12px; }
+  .nav-links a { font-size: 11px; }
+  .nav-actions { gap: 8px; }
+  .nav-gh { padding: 8px 10px; }
+  .lang-toggle { padding: 6px 8px; }
+  .nav-k { display: none; }
+}
 @media (max-width: 1100px) {
   .adapter-list { gap: 12px 30px; }
   .license-grid { grid-template-columns: 1fr; border-top: 0; }
