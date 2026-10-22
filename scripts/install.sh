@@ -19,6 +19,9 @@
 #   OPENPANDA_REPO_URL     override the source repository
 #   OPENPANDA_RELEASE_API  override the "latest release" API endpoint
 #   OPENPANDA_RELEASE_BASE override the release download base URL
+#   OPENPANDA_FORCE        "1" behaves like --force
+#   OPENPANDA_REQUIRE_SIG  "1" makes an unverifiable release signature fatal
+#   OPENPANDA_SKIP_SIG     "1" skips the signature check entirely
 #
 # Installs the `panda` binary and its agent adapters (adapters/*.py) into
 #   $OPENPANDA_PREFIX  (default: ${XDG_DATA_HOME:-~/.local/share}/openpanda)
@@ -222,6 +225,9 @@ trap 'rm -rf "$WORK"' EXIT
 download "$BASE/$ARCHIVE" "$WORK/$ARCHIVE" || die "$(T "下载失败: $BASE/$ARCHIVE" "download failed: $BASE/$ARCHIVE")"
 download "$BASE/checksums.txt" "$WORK/checksums.txt" 2>/dev/null \
     || die "$(T "下载 checksums.txt 失败，拒绝在无法校验的情况下安装" "checksums.txt download failed — refusing to install unverified")"
+# The detached signature is optional at the transport level (older releases
+# shipped none); whether it is *required* is decided below.
+download "$BASE/checksums.txt.sig" "$WORK/checksums.txt.sig" 2>/dev/null || true
 
 if [ -f "$WORK/checksums.txt" ]; then
     want="$(awk -v f="$ARCHIVE" '$2==f {print $1; exit}' "$WORK/checksums.txt")"
@@ -231,6 +237,68 @@ if [ -f "$WORK/checksums.txt" ]; then
         die "$(T "SHA-256 校验失败（期望 $want，得到 $got）" "SHA-256 mismatch (expected $want, got $got)")"
     fi
     ok "$(T "SHA-256 校验通过" "SHA-256 verified")"
+fi
+
+# ── Release signature ──────────────────────────────────────────────────────
+# checksums.txt.sig is the artifact the self-updater actually trusts: without a
+# valid Ed25519 signature `panda update apply` refuses to swap a binary. The
+# installer checks the same signature whenever the local OpenSSL can do
+# Ed25519 (`pkeyutl -rawin`), which turns a substituted checksums.txt into a
+# hard failure instead of a lucky guess. Stock macOS ships LibreSSL 3.3, whose
+# pkeyutl cannot even load an Ed25519 key — there the check degrades to a
+# warning, and OPENPANDA_REQUIRE_SIG=1 turns that degradation into a failure
+# for hosts that need the guarantee. OPENPANDA_SKIP_SIG=1 opts out entirely.
+#
+# The key below must stay identical to internal/version.ReleasePubKey
+# (hex a84a556b…128560). scripts/package.sh bakes that value into release
+# binaries; rotating it means updating this constant too, otherwise every
+# install starts reporting a signature that does not verify.
+RELEASE_PUBKEY_PEM='-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAqEpVa9Re53Q0N9e5sMT24N80xJb2ObWgRdXeSE8ShWA=
+-----END PUBLIC KEY-----'
+
+verify_release_sig() { # <sums> <sig> → 0 verified, 1 bad signature, 2 no verifier
+    command -v openssl >/dev/null 2>&1 || return 2
+    # sign-release emits a single base64 line; a leading comment line (the
+    # minisign-style shape) is tolerated — the last field is the signature.
+    sig_text="$(awk 'NF { f = $NF } END { print f }' "$2" 2>/dev/null)"
+    [ -n "$sig_text" ] || return 1
+    printf '%s' "$sig_text" | openssl base64 -d -A -out "$WORK/sig.bin" 2>/dev/null || return 1
+    [ "$(wc -c < "$WORK/sig.bin" | tr -d ' ')" = "64" ] || return 1
+    printf '%s\n' "$RELEASE_PUBKEY_PEM" > "$WORK/release.pem"
+    if openssl pkeyutl -verify -pubin -inkey "$WORK/release.pem" -rawin \
+            -in "$1" -sigfile "$WORK/sig.bin" >/dev/null 2>"$WORK/sig.err"; then
+        return 0
+    fi
+    # Tell "this OpenSSL has no Ed25519" apart from "the signature is wrong":
+    # LibreSSL reports an unsupported algorithm, pre-1.1.1 OpenSSL an unknown
+    # flag. Anything else is a real mismatch.
+    if grep -qiE 'unsupported|unknown option|illegal option|usage:|unable to load' "$WORK/sig.err" 2>/dev/null; then
+        return 2
+    fi
+    return 1
+}
+
+if [ -n "${OPENPANDA_SKIP_SIG:-}" ]; then
+    warn "$(T "已按 OPENPANDA_SKIP_SIG 跳过发布签名校验" "release signature check skipped (OPENPANDA_SKIP_SIG)")"
+elif [ ! -f "$WORK/checksums.txt.sig" ]; then
+    if [ -n "${OPENPANDA_REQUIRE_SIG:-}" ]; then
+        die "$(T "该发布没有 checksums.txt.sig，且已要求强制验签" "the release ships no checksums.txt.sig and OPENPANDA_REQUIRE_SIG is set")"
+    fi
+    warn "$(T "该发布未附带 checksums.txt.sig（仅做了 SHA-256 校验）" "the release ships no checksums.txt.sig (SHA-256 only)")"
+else
+    rc=0
+    verify_release_sig "$WORK/checksums.txt" "$WORK/checksums.txt.sig" || rc=$?
+    case "$rc" in
+        0) ok "$(T "发布签名校验通过" "release signature verified")" ;;
+        1) die "$(T "发布签名校验失败：checksums.txt 已被篡改" "release signature does not verify — checksums.txt has been tampered with")" ;;
+        *)
+            if [ -n "${OPENPANDA_REQUIRE_SIG:-}" ]; then
+                die "$(T "本机 openssl 不支持 Ed25519，无法验签（OPENPANDA_REQUIRE_SIG 已设置）" "this host's openssl cannot verify Ed25519 and OPENPANDA_REQUIRE_SIG is set")"
+            fi
+            warn "$(T "本机 openssl 不支持 Ed25519（macOS 自带 LibreSSL 即如此）：跳过签名校验，SHA-256 已通过" "this host's openssl cannot verify Ed25519 (stock macOS LibreSSL) — signature not checked; SHA-256 passed")"
+            ;;
+    esac
 fi
 
 # Unpack into the work dir first so the new binary can be probed before the
