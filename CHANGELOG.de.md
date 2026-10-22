@@ -42,11 +42,11 @@ OpenPanda (**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **A
 
 Noch keine unveröffentlichten Änderungen.
 
-## [0.1.0] - 2026-10-22
+## [0.1.0-preview] - 2026-10-22
 
-**Die erste Version in Release-Qualität** — Codename **Constellation**: dieselbe Flotte, die die Vorschau v0.0.12 gezeichnet hat, jetzt mit der gesamten Korrektheits- und Sicherheitsarbeit der Release-Prüfung dahinter abgeschlossen.
+**Der erste Schnitt der Release-Qualitätslinie** — Codename **Constellation**: dieselbe Flotte, die die Vorschau v0.0.12 gezeichnet hat, jetzt mit der gesamten Korrektheits- und Sicherheitsarbeit der Release-Prüfung dahinter abgeschlossen.
 
-Alles davor war eine Vorschau-Linie, und jedes Release sagte das auch: Das Protokoll konnte sich bewegen, der Speicher unter einem migrieren, und der Installer hatte die Aufgabe, das Neueste zu liefern statt das Gesetzte. `0.1.0` ist die erste Version, für die wir einstehen — die, die `install.sh` einem Fremden gibt, die, auf die der Updater einen laufenden Knoten heben darf, und die, die die Prüfung nach einem echten Lauf Mac → Relay → Cloud abzeichnet. Der Funktionsumfang ist der von Constellation. Geändert hat sich, was dahinter steht.
+Alles davor war eine Vorschau-Linie, und jedes Release sagte das auch: Das Protokoll konnte sich bewegen, der Speicher unter einem migrieren, und der Installer hatte die Aufgabe, das Neueste zu liefern statt das Gesetzte. `0.1.0-preview` ist die erste Version, für die wir einstehen — die, die `install.sh` einem Fremden gibt, die, auf die der Updater einen laufenden Knoten heben darf, und die, die die Prüfung nach einem echten Lauf Mac → Relay → Cloud abzeichnet. Der Funktionsumfang ist der von Constellation. Geändert hat sich, was dahinter steht.
 
 Worauf diese Aussage ruht:
 
@@ -144,6 +144,12 @@ Worauf diese Aussage ruht:
 - **Store-and-Forward-Verwahrung liefert nach einem Linkflattern in der richtigen Reihenfolge** — geparkte Cancels werden vor geparkten Delegates geflusht (das Stand-Down trifft immer vor der Wiederzustellung ein, die es ablösen sollte), ein geparkter menschlicher Tree-Cancel wird nie durch das Parken einer neueren Zustellung gelöscht, `task_outbox`-Zeilen erwecken keine terminierten/fehlgeschlagenen Arbeiten wieder, und ein neu gestarteter Daemon holt seine geparkte Verwahrung unter seiner stabilen Identität ab statt unter der verstorbenen Instanz-ID.
 - **Delegierte Runs rechnen über den gemeinsamen Retry-Loop ab und liefern schlankere Output-Packs** — die drei executor-seitigen Ausführungspfade leiten ihr Ergebnis jetzt einheitlich durch `settleDelegated`, sodass Checkpoint-Wiederaufnahme, budgetierte Retries und das Decline nach upstream für delegierte wie lokale Arbeit gleich ausfallen; per Context bzw. Artifact wiederaufgenommene Runs declinen mit dem geparkten Attempt statt mit dem, den die Zeile später trägt; und Output-Packs überspringen regenerierbare Verzeichnisse (ein gemessenes 389-MB-Ergebnispaket schrumpfte auf 84,6 MB) (f53ddcf).
 - **Die Restart-Recovery setzt das Überlebte fort und benennt den Blockierer** — unterbrochene Runs werden fortgesetzt statt von vorn gestartet, Agent-Wechsel-Fortschritt wird früh sichtbar, Projekt-Key-Matching ignoriert Groß-/Kleinschreibung, die Restart-Recovery zieht keine von Peers ausgeführten Zeilen mehr an sich, fremd gepinnte Warteschlangen-Tasks werden korrekt entpinnt, Exec-Lock-Wartezeiten melden, wer die Spur hält, und fehlerhaftes Adapter-JSON ist abgefangen (e0c7bec, 5044f4a).
+
+- **Auch der Windows-Installer lehnt einen Downgrade ab** — `install.sh`, `panda install` und `panda update apply` lehnen ein Binary ab, dessen Migrationsobergrenze unter dem `user_version` des Datenverzeichnisses liegt; `install.ps1` kopierte das Archiv bedingungslos über das Präfix, sodass sich eine ältere Version über eine neuere Datenbank installieren ließ — zurück blieb ein Daemon, der beim Start stirbt und die Daten verschüttet. Jetzt wird das entpackte Archiv mit `panda version --json` geprüft, bevor das Präfix angefasst wird; `-Force` / `OPENPANDA_FORCE=1` deckt einen bewussten Downgrade ab.
+
+- **Der Shell-Installer prüft die Release-Signatur, nicht nur die Prüfsumme** — `checksums.txt` kommt vom selben Ursprung wie das Archiv, SHA-256 konnte also nicht erkennen, wenn beides zusammen ersetzt wurde. `install.sh` prüft nun `checksums.txt.sig` mit demselben fest eingebauten Ed25519-Schlüssel, den der Selbst-Updater erzwingt: bei Abweichung bricht die Installation ab, und nur wo openssl kein Ed25519 kann (LibreSSL an Bord von macOS), bleibt es bei einer ausdrücklichen Warnung. `OPENPANDA_REQUIRE_SIG=1` macht «nicht prüfbar» zum Fehler.
+
+- **`install.ps1` löst Versionen aus dem Repository auf, aus dem es lädt** — der API-Endpunkt war auf das Upstream-Repository festgelegt, während `OPENPANDA_REPO_URL` nur die Download-Basis verschob, sodass ein Fork oder Mirror ein Tag auflöste, das er nicht ausliefert.
 
 ## [0.0.12-preview] - 2026-10-19
 

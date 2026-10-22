@@ -152,7 +152,14 @@ English translation of [status.md](status.md)（中文版为准）· English
 > panda-screen missing-value guards, shell completions for `task
 > board`/`task artifact`; version turned `0.0.11`, `make gate` green).
 
-> 2026-10-22 (`v0.1.0` "Constellation", the first release-grade version. The
+> 2026-10-22 (`v0.1.0-preview` "Constellation", the first cut of the
+> release-grade line. The installers were hardened in the same pass: every
+> path now refuses a downgrade (Windows gained the schema guard and
+> `-Force`), `install.sh` verifies the release signature where the local
+> openssl supports Ed25519 and aborts on a mismatch, and `install.ps1`
+> resolves versions from the repository it actually downloads from.
+> Installer coverage grew to 21 checks in `scripts/test-installers.sh`,
+> adding downgrade refusal, a foreign signature and `--lite`. The
 > cross-network mesh P1–P5 landed whole (dual-key identity and reachability
 > cards, transitive blind relay, epidemic directory sync, K=2 rendezvous edges
 > and the reachability ladder, the policy surface and relay budgets,
