@@ -372,6 +372,16 @@ func (s *Store) Stamps() ([]Stamp, error) {
 // arriving without a stamp gets one here, so every transcript written from
 // now on can be placed on the usage calendar.
 func (s *Store) AppendTurn(id string, turn Turn) (*Session, error) {
+	// Cross-process first, then in-process: the CLI and a panel can both be
+	// appending to one thread, and the read-modify-write below would drop one
+	// side's turn without the file lock. Order matters — the file lock is the
+	// outer one so a goroutine waiting in-process cannot hold a half-claimed
+	// file lock.
+	unlock, err := lockStore(s.root)
+	if err != nil {
+		return nil, fmt.Errorf("sessions: lock: %w", err)
+	}
+	defer unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess, err := s.load(id)
@@ -485,6 +495,11 @@ func (s *Store) CompactHistory(ctx context.Context, id string, budget int, summa
 // Callers must pass the exact operation id when updating an existing snapshot;
 // a stale completion can therefore never overwrite a newer generation.
 func (s *Store) SetOperation(id string, op Operation) (bool, error) {
+	unlock, err := lockStore(s.root)
+	if err != nil {
+		return false, fmt.Errorf("sessions: lock: %w", err)
+	}
+	defer unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess, err := s.load(id)

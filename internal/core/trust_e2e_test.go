@@ -336,3 +336,54 @@ func TestForeignConsentStripE2E(t *testing.T) {
 		t.Fatal("an honored foreign grant was not adopted")
 	}
 }
+
+// TestAdmissionRejectRelaysVerdictUpstream pins the refusal path for an
+// inbound delegate parked for operator admission: the node never dispatched
+// it, so forwardCancelDownstream finds no target and the origin used to wait
+// out its lease and re-forward the same work to the same park. The reject
+// must now send an explicit decline to the chain predecessor.
+func TestAdmissionRejectRelaysVerdictUpstream(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	entry := newCoreWithNative(t, "entry-rej", "127.0.0.1:18805",
+		ledger.NativeAbility{ID: "sys:info", Command: "echo", Args: []string{"entry"}})
+	worker := newCoreWithNative(t, "worker-rej", "127.0.0.1:18806",
+		ledger.NativeAbility{ID: "sys:info", Command: "echo", Args: []string{"worker"}})
+	startPair(t, ctx, entry, worker, "127.0.0.1:18805", "127.0.0.1:18806")
+
+	if err := ledger.SetPeerTrust(worker.db, "entry-rej", "guarded"); err != nil {
+		t.Fatalf("pin guarded: %v", err)
+	}
+	worker.SetTrustConfig(testTrustConfig("review", "off"))
+
+	env, _ := bus.NewEnvelope(bus.MsgTaskDelegate, "entry-rej", "m-rej", bus.TaskDelegatePayload{
+		TaskID: "guarded-reject", Title: "t", Intent: "x", Requires: []string{"sys:info"},
+		Chain: []string{"entry-rej"},
+	})
+	if err := entry.sendTo("worker-rej", env); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	tk := waitTaskState(t, worker, "guarded-reject", StateReview)
+	if tk.ApprovalDisposition != ApprovalAdmissionReview {
+		t.Fatalf("disposition = %q, want %q", tk.ApprovalDisposition, ApprovalAdmissionReview)
+	}
+
+	if err := worker.RejectTree(ctx, "guarded-reject", "operator said no"); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	events, err := worker.store.Events(ctx, "guarded-reject")
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	found := false
+	for _, ev := range events {
+		if ev.Type == "admission_reject_relayed" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("reject did not relay a decline upstream; events: %+v", events)
+	}
+}

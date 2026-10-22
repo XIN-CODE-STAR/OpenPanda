@@ -24,6 +24,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -663,6 +664,7 @@ func (c *Core) adoptProjectOutput(ctx context.Context, t Task, from, hash string
 				if _, err := c.FetchArtifact(ctx, from, t.TaskID, hash); err != nil {
 					c.logger.Warn("adopt project artifact", "task", t.TaskID,
 						"project", t.Project, "hash", hash, "from", from, "err", err)
+					c.recordAdoptFailure(ctx, t.TaskID, "project-fetch", dir, from, hash, err)
 					return
 				}
 			}
@@ -670,6 +672,7 @@ func (c *Core) adoptProjectOutput(ctx context.Context, t Task, from, hash string
 		m, err := c.artifacts.ExtractExcept(hash, dir, c.extractSkipSet(dir))
 		if err != nil {
 			c.logger.Warn("extract project artifact", "task", t.TaskID, "hash", hash, "err", err)
+			c.recordAdoptFailure(ctx, t.TaskID, "project-extract", dir, from, hash, err)
 			return
 		}
 		if c.projects != nil {
@@ -693,6 +696,24 @@ func (c *Core) adoptProjectOutput(ctx context.Context, t Task, from, hash string
 		})
 		c.logger.Info("project tree adopted", "task", t.TaskID, "project", t.Project,
 			"dir", dir, "files", len(m.Entries))
+	})
+}
+
+// recordAdoptFailure puts the return leg's failure on the task timeline. The
+// row is already terminal (done) by the time adoption runs, so it cannot be
+// flipped to failed without contradicting work that did happen on the
+// executor; what it CAN do is stop the success from being the only record.
+// The artifact hash is kept with the error so the bytes can still be pulled
+// by hand (`panda task artifact`) once the link is back.
+func (c *Core) recordAdoptFailure(ctx context.Context, taskID, stage, dir, from, hash string, err error) {
+	c.EvTrace(ctx, taskID, EvProjectSync, map[string]any{
+		"ok":     false,
+		"stage":  stage,
+		"dir":    dir,
+		"from":   from,
+		"hash":   hash,
+		"failed": true,
+		"error":  err.Error(),
 	})
 }
 
@@ -736,6 +757,7 @@ func (c *Core) adoptWorktreeOutput(ctx context.Context, t Task, from, hash strin
 		if err := c.store.SetOutputArtifact(ctx, t.TaskID, hash); err != nil {
 			c.logger.Warn("record worktree output", "task", t.TaskID, "err", err)
 		}
+		c.recordAdoptFailure(ctx, t.TaskID, "worktree", dir, from, hash, errors.New("origin work dir is gone"))
 		return
 	}
 	ctx = context.WithoutCancel(ctx)
@@ -745,6 +767,7 @@ func (c *Core) adoptWorktreeOutput(ctx context.Context, t Task, from, hash strin
 				if _, err := c.FetchArtifact(ctx, from, t.TaskID, hash); err != nil {
 					c.logger.Warn("adopt worktree artifact", "task", t.TaskID,
 						"hash", hash, "from", from, "err", err)
+					c.recordAdoptFailure(ctx, t.TaskID, "worktree-fetch", dir, from, hash, err)
 					return
 				}
 			}
@@ -752,6 +775,7 @@ func (c *Core) adoptWorktreeOutput(ctx context.Context, t Task, from, hash strin
 		m, err := c.artifacts.ExtractExcept(hash, dir, c.extractSkipSet(dir))
 		if err != nil {
 			c.logger.Warn("extract worktree artifact", "task", t.TaskID, "hash", hash, "err", err)
+			c.recordAdoptFailure(ctx, t.TaskID, "worktree-extract", dir, from, hash, err)
 			return
 		}
 		if err := c.store.SetOutputArtifact(ctx, t.TaskID, hash); err != nil {
