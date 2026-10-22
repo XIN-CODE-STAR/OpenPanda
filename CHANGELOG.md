@@ -30,7 +30,7 @@ OpenPanda (**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **A
 
 ## Versioning
 
-- Versions follow `MAJOR.MINOR.PATCH`. The project is in initial development (`0.0.x`): a patch release may add features, fix bugs, and — exceptionally — introduce breaking changes, which are always listed under **Breaking changes**.
+- Versions follow `MAJOR.MINOR.PATCH`. `0.0.x` was the preview line: a patch release could add features, fix bugs and — exceptionally — break the wire, and each cut said so. From `0.1.0` on a release is release-grade, which is a promise about stability rather than about features: a `0.1.x` patch fixes defects and does not break configuration, stored data or the wire; new capability lands in a minor (`0.2.0`); and a break that cannot be avoided still gets a deprecation window and a **Breaking changes** entry rather than arriving unannounced.
 
 - A release is cut by tagging `vX.Y.Z`; every commit since the previous tag belongs to the new version's section. `[Unreleased]` collects work since the last tag.
 
@@ -49,6 +49,32 @@ OpenPanda (**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **A
 _No unreleased changes yet._
 
 ## [0.1.0] - 2026-10-22
+
+**The first release-grade version** — codename **Constellation**: the same fleet the v0.0.12 preview drew, with the release audit's correctness and security work closed behind it.
+
+Everything before this was a preview line, and every cut said so: the wire could move, the store could migrate under you, and the installer's job was to hand you the newest thing rather than the settled one. `0.1.0` is the first version we are willing to stand behind — the one `install.sh` hands a stranger, the one the updater may move a running node onto, and the one the audit signs off on after a live Mac → relay → cloud run. The feature set is Constellation's. What changed is what stands behind it.
+
+What that claim rests on:
+
+- **An audit that was closed, not deferred.** Security, task execution and the storage/UI boundary were reviewed in parallel with a live three-node deployment, and every release blocker the review found is fixed with a regression test behind it. The report — including what was deliberately pushed to v0.1.1 — is `docs/reports/release-audit-2026-10-22.md`.
+- **A chain, not a loopback.** Multi-hop work was verified across a WAN link: Mac → relay → cloud VM, two hops, a 3 MiB project tree landing on the executor with a matching SHA-256.
+- **A boundary that is stated.** What is not finished is written down rather than implied: UPnP/NAT-PMP port mapping, signature convergence for punch and directory frames, mesh counters across the panel's IPC, and cross-node hello replay — a protocol-level challenge scheduled for v0.1.1.
+
+### Highlights
+
+- **The fleet reaches across networks.** Identity is two-key (a stable signing key plus a rotating one), a blind relay carries work between nodes that cannot dial each other, directories converge by epidemic delta sync, rendezvous edges are elected K=2, and the reachability ladder falls back from direct dial to hole-punch to relay to store-and-forward — with `panda://join` bringing a new device in from one URI.
+- **One project runs in parallel.** `--paths` scopes a task to the directories it declares, `--isolate` gives it a private worktree merged back three-way, and delegation bounds tighten at every hop instead of being laundered by a permissive forwarder.
+- **A release-grade safety posture.** Destructive commands can no longer pass as reversible, `sandbox.mode: strict` denies reading node secrets, an unreadable trust assertion fails closed, a relay can no longer reshape the scope the origin approved, and a known node cannot be impersonated by omitting its key.
+- **The console became a place to work.** A task page that leads with its verdict, a to-do board that hands work to the fleet, a roster that hires a thread's own team, and a transcript that draws a screenshot as a picture.
+- **Failure is now a state, not an exit.** A lost link waits for the network and replays the call, a model that reports failure is recorded as failed, every wire verdict is fenced by its dispensation attempt, and restart recovery resumes what survived instead of restarting it.
+- **Self-evolution, off by default.** `panda self` carries signed patch sets through a queue, a merge worktree, an approval task, `make gate`, a staged swap and a `panda.release` rollback target — [Experimental], opt-in, and never in the path of ordinary work.
+
+### Upgrading from 0.0.x
+
+- No breaking changes: configuration, capability cards, stored data and the wire format are all carried forward, and migrations apply on first start.
+- An existing install upgrades in place with the same install command; `panda update apply` moves a node from the preview line onto 0.1.0.
+- Building from source now requires Go 1.26.10 (a security floor, not a preference — see the `govulncheck` entry below).
+- `v0.0.12-preview` stays downloadable by explicit version; `/releases/latest` and the Homebrew tap now point here.
 
 ### Added
 

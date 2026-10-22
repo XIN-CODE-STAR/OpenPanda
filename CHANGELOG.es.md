@@ -30,7 +30,7 @@ OpenPanda (**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **A
 
 ## Reglas de versiones
 
-- Las versiones siguen `MAJOR.MINOR.PATCH`. El proyecto está en desarrollo inicial (`0.0.x`): un parche puede añadir funciones, corregir errores y —excepcionalmente— introducir cambios importantes, que siempre se listan bajo **Cambios importantes**.
+- Las versiones siguen `MAJOR.MINOR.PATCH`. `0.0.x` fue la línea de vista previa: un parche podía añadir funciones, corregir errores y —excepcionalmente— romper el protocolo, y cada entrega lo decía. Desde `0.1.0` una versión es «release-grade», que es una promesa sobre la estabilidad y no sobre la cantidad de funciones: un parche `0.1.x` corrige defectos y no rompe la configuración, los datos guardados ni el protocolo; la capacidad nueva llega en un minor (`0.2.0`); y una ruptura inevitable sigue teniendo ventana de deprecación y entrada en **Cambios importantes**, en lugar de aparecer sin avisar.
 - Un lanzamiento se corta etiquetando `vX.Y.Z`; cada commit desde la etiqueta anterior pertenece a la sección de la nueva versión. `[Unreleased]` recoge el trabajo desde la última etiqueta.
 - Cada versión se documenta en cuatro categorías: **Añadido** (nuevas funciones), **Corregido** (correcciones), **Mejorado** (mejoras y refinamientos), **Cambios importantes** (requiere acción al actualizar).
 - Cada entrada nombra el cambio y su efecto visible en una a tres líneas; se cita el commit que lo introdujo cuando ayuda a la arqueología.
@@ -43,6 +43,32 @@ OpenPanda (**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **A
 Aún no hay cambios sin publicar.
 
 ## [0.1.0] - 2026-10-22
+
+**La primera versión de calidad de release** — nombre en clave **Constellation**: la misma flota que dibujó la vista previa v0.0.12, ahora con todo el trabajo de corrección y seguridad de la auditoría cerrado detrás.
+
+Todo lo anterior fue una línea de vista previa, y cada entrega lo decía: el protocolo podía moverse, el almacén podía migrar bajo tus pies y el instalador servía para darte lo más nuevo, no lo asentado. `0.1.0` es la primera versión que estamos dispuestos a respaldar: la que `install.sh` entrega a un desconocido, la que el actualizador puede aplicar sobre un nodo en marcha y la que la auditoría firma tras una ejecución real Mac → relay → nube. El conjunto de funciones es el de Constellation. Lo que cambió es lo que hay detrás.
+
+En qué se apoya esa afirmación:
+
+- **Una auditoría cerrada, no aplazada.** Seguridad, ejecución de tareas y el límite entre almacenamiento e interfaz se revisaron en paralelo a un despliegue real de tres nodos, y todo bloqueante de release que apareció está corregido con una prueba de regresión detrás. El informe —incluido lo que se pospuso deliberadamente a v0.1.1— es `docs/reports/release-audit-2026-10-22.md`.
+- **Una cadena, no un loopback.** El trabajo multi-salto se verificó por un enlace WAN: Mac → relay → VM en la nube, dos saltos, un árbol de proyecto de 3 MiB llegando al ejecutor con el mismo SHA-256.
+- **Un límite que está escrito.** Lo que no está terminado se documenta en lugar de insinuarse: mapeo de puertos UPnP/NAT-PMP, convergencia de firmas para tramas de punch y de directorio, contadores de mesh a través del IPC del panel, y la repetición de hello entre nodos —un desafío a nivel de protocolo previsto para v0.1.1.
+
+### Aspectos destacados
+
+- **La flota cruza redes.** La identidad es de dos claves (una de firma estable y otra rotatoria), un relay ciego transporta trabajo entre nodos que no pueden marcarse, los directorios convergen por sincronización epidémica de deltas, las aristas de encuentro se eligen con K=2 y la escalera de alcanzabilidad retrocede de la marcación directa al hole-punching, al relay y al store-and-forward — con `panda://join` incorporando un dispositivo nuevo desde una sola URI.
+- **Un proyecto corre en paralelo.** `--paths` limita la tarea a los directorios que declara, `--isolate` le da un worktree privado que se fusiona de vuelta a tres bandas, y los límites de delegación se aprietan en cada salto en vez de dejarse lavar por un reenviador permisivo.
+- **Una postura de seguridad de release.** Los comandos destructivos ya no pasan por reversibles, `sandbox.mode: strict` deniega la lectura de secretos del nodo, una aserción de confianza ilegible falla en cerrado, un relay ya no puede reescribir el alcance que aprobó el origen y un nodo conocido no puede suplantarse omitiendo su clave.
+- **La consola se volvió un lugar de trabajo.** Una página de tarea que empieza por su veredicto, un tablero de tareas pendientes que entrega trabajo a la flota, una plantilla con la que un hilo contrata a su propio equipo y una transcripción que dibuja la captura como imagen.
+- **El fallo es ahora un estado, no una salida.** Una conexión perdida espera a la red y reproduce la llamada, un modelo que reporta fallo se registra como fallido, cada veredicto del protocolo queda cercado por su intento de dispensación y la recuperación tras reinicio reanuda lo que sobrevivió en lugar de reiniciarlo.
+- **Autoevolución, desactivada por defecto.** `panda self` lleva conjuntos de parches firmados por una cola, un worktree de fusión, una tarea de aprobación, `make gate`, un intercambio por etapas y un objetivo de reversión `panda.release` — [Experimental], opcional y nunca en el camino del trabajo ordinario.
+
+### Actualizar desde 0.0.x
+
+- Sin cambios importantes: la configuración, las tarjetas de capacidad, los datos guardados y el formato de protocolo se conservan, y las migraciones se aplican en el primer arranque.
+- Una instalación existente se actualiza en su sitio con el mismo comando de instalación; `panda update apply` mueve un nodo de la línea de vista previa a 0.1.0.
+- Compilar desde el código exige ahora Go 1.26.10 (es un suelo de seguridad, no una preferencia — ver la entrada de `govulncheck` más abajo).
+- `v0.0.12-preview` sigue descargable por versión explícita; `/releases/latest` y el tap de Homebrew apuntan ahora aquí.
 
 ### Añadido
 
@@ -69,7 +95,7 @@ Aún no hay cambios sin publicar.
 
 - **La página de detalle de tarea empieza por el veredicto y pliega lo que no puede resumir** — la página abría con una banda de datos: cinco columnas de identificadores grises, una tira de traza y luego una sección de resultado cuya única línea útil era un error de 300 caracteres, con el registro de dieciocho eventos (55% de la página) impreso entero debajo. Ahora lo primero es un bloque de veredicto: la insignia de estado, una frase de lo que pasó (el fallo que reportó la ejecución, su propio veredicto o la última línea que escribió) y lo que costó la respuesta (duración, rondas, tokens, dinero), con el motivo recortado a tres líneas y el resto a un clic. Debajo, los datos de referencia se pliegan en una línea (`#id · proyecto · nodo · creación`), el encargo se pliega a su primera frase más el número de restricciones y el registro abre en sus cinco últimos eventos. La sección de resultado ya no repite el estado, el motivo, los tokens ni el coste que el veredicto enuncia; desaparece cuando solo traía un fallo, y la última fila de resultado del registro deja de imprimir la misma salida por segunda vez. Los archivos temporales de sesión del agente (`.claude/…`) ya no cuentan como archivos modificados.
 
-### Fixed
+### Corregido
 
 - **Un fallo con `--json` también es JSON** — `--json` prometía una respuesta legible por máquina y la rompía en el camino de error; ahora el fallo sale como `{"error":{"code":…,"message":…}}` en stderr.
 - **Una escritura en cola ya no abre un socket de red** — `task add`/`task send`/`task continue` arrancaban un Core completo y competían por el puerto de descubrimiento LAN; la escritura local usa ahora el camino ligero.
