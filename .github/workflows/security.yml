@@ -56,4 +56,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Homebrew tap still points at a real release
+        env:
+          # Without it every api.github.com call is anonymous (60/h/IP) and a
+          # hosted runner shares its IP, so the check kept answering SKIP — a
+          # green job that verified nothing.
+          GITHUB_TOKEN: ${{ github.token }}
         run: sh scripts/check-homebrew-tap.sh
