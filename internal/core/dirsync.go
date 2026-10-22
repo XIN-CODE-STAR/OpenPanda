@@ -596,11 +596,16 @@ func (c *Core) dirRowBudget(ctx context.Context, peer string) (room, share int) 
 	var total, mine int
 	var err error
 	if pub != "" {
+		// A row counts against the sender that SIGNED it (dir_signer) and
+		// against the sender it was learned from (learned_via). dir_signer is
+		// what makes the share cap bite: without it a member that signed rows
+		// for fresh ids contributed nothing to its own share and could fill
+		// the table until no honest peer had room to publish.
 		err = c.db.QueryRowContext(ctx, `
 			SELECT COUNT(1),
 			       COALESCE(SUM(CASE
-			         WHEN dir_sig <> '' AND pub_key = ? THEN 1
-			         WHEN dir_sig = '' AND learned_via IN
+			         WHEN dir_signer = ? THEN 1
+			         WHEN dir_signer = '' AND dir_sig = '' AND learned_via IN
 			              (SELECT id FROM employee_cache WHERE pub_key = ?) THEN 1
 			         ELSE 0 END), 0)
 			FROM employee_cache`, pub, pub).Scan(&total, &mine)
@@ -968,6 +973,15 @@ func (c *Core) applyDirRowLimited(ctx context.Context, raw json.RawMessage, via 
 		return false
 	}
 	hash := bus.DirRowContentHash(row)
+	// dir_signer records who SIGNED the row. The signature covers it, so it
+	// is proof rather than a claim — and it is what the share accounting
+	// counts: pub_key only names the key an id is PINNED to, which a
+	// non-stable id never gets, so a sender's phantom rows used to count
+	// against nobody and its share stayed at zero while it filled the table.
+	signer := ""
+	if signed {
+		signer = row.PubKey
+	}
 	// Upsert: recordPeerPubKey may have created the row a moment ago, and a
 	// hello-learned row may already exist — never a plain insert.
 	//
@@ -978,16 +992,17 @@ func (c *Core) applyDirRowLimited(ctx context.Context, raw json.RawMessage, via 
 	// the row's provenance to whichever relay forwarded the newest copy, and
 	// the share accounting keys unsigned rows on it.
 	_, err = c.db.ExecContext(ctx, `
-		INSERT INTO employee_cache (id, dir_row_json, dir_sig, seen_at,
+		INSERT INTO employee_cache (id, dir_row_json, dir_sig, dir_signer, seen_at,
 		       content_hash, learned_via, status, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?, 'offline', 0)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 'offline', 0)
 		ON CONFLICT(id) DO UPDATE SET
 			dir_row_json=excluded.dir_row_json, dir_sig=excluded.dir_sig,
+			dir_signer=excluded.dir_signer,
 			seen_at=excluded.seen_at, content_hash=excluded.content_hash,
 			learned_via=CASE WHEN employee_cache.learned_via = ''
 			                 THEN excluded.learned_via
 			                 ELSE employee_cache.learned_via END`,
-		row.ID, string(canon), row.Sig, seenAt, hash, via)
+		row.ID, string(canon), row.Sig, signer, seenAt, hash, via)
 	if err != nil {
 		return false
 	}
