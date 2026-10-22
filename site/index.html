@@ -4,8 +4,8 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>OpenPanda — 让异构的智能体与设备，像一个整体一样工作</title>
-<meta name="description" content="OpenPanda 是本地优先的图状编排内核。它不替代 Claude Code、Codex，而是把你所有设备上已有的 Agent 连成一张网：意图、拆解、路由、监督、验收，全部在本地完成。" />
+<title data-i18n-content="meta.title">OpenPanda — 让异构的智能体与设备，像一个整体一样工作</title>
+<meta name="description" data-i18n-content="meta.desc" content="OpenPanda 是本地优先的图状编排内核。它不替代 Claude Code、Codex，而是把你所有设备上已有的 Agent 连成一张网：意图、拆解、路由、监督、验收，全部在本地完成。" />
 <meta name="author" content="Xustalis" />
 <link rel="canonical" href="https://xustalis.github.io/OpenPanda/" />
 
@@ -16,16 +16,16 @@
 <meta property="og:locale" content="zh_CN" />
 <meta property="og:locale:alternate" content="en_US" />
 <meta property="og:url" content="https://xustalis.github.io/OpenPanda/" />
-<meta property="og:title" content="OpenPanda — 让异构的智能体与设备，像一个整体一样工作" />
-<meta property="og:description" content="本地优先的图状编排内核：把 Claude Code、Codex 与每一台设备连成一张会自己调度、监督、验收的网。零云端中转。" />
+<meta property="og:title" data-i18n-content="meta.title" content="OpenPanda — 让异构的智能体与设备，像一个整体一样工作" />
+<meta property="og:description" data-i18n-content="meta.ogDesc" content="本地优先的图状编排内核：把 Claude Code、Codex 与每一台设备连成一张会自己调度、监督、验收的网。零云端中转。" />
 <meta property="og:image" content="https://xustalis.github.io/OpenPanda/og-cover.jpg" />
 <meta property="og:image:type" content="image/jpeg" />
 <meta property="og:image:width" content="1200" />
 <meta property="og:image:height" content="630" />
-<meta property="og:image:alt" content="OpenPanda — 深空银河与地球边缘上的项目标题" />
+<meta property="og:image:alt" data-i18n-content="meta.ogAlt" content="OpenPanda — 深空银河与地球边缘上的项目标题" />
 <meta name="twitter:card" content="summary_large_image" />
-<meta name="twitter:title" content="OpenPanda — Local-first graph orchestration" />
-<meta name="twitter:description" content="把异构的智能体与设备，编成一张会自己调度、监督、验收的网。零云端中转。" />
+<meta name="twitter:title" data-i18n-content="meta.title" content="OpenPanda — Local-first graph orchestration" />
+<meta name="twitter:description" data-i18n-content="meta.ogDesc" content="把异构的智能体与设备，编成一张会自己调度、监督、验收的网。零云端中转。" />
 <meta name="twitter:image" content="https://xustalis.github.io/OpenPanda/og-cover.jpg" />
 
 <meta name="theme-color" content="#05070b" media="(prefers-color-scheme: dark)" />
@@ -36,6 +36,31 @@
 <link rel="preload" href="fonts/inter-normal-400_700.woff2" as="font" type="font/woff2" crossorigin />
 <link rel="preload" href="fonts/newsreader-normal-300_500.woff2" as="font" type="font/woff2" crossorigin />
 <link rel="stylesheet" href="css/site.css" />
+
+<!-- Language bootstrap. Runs before the body parses so <html lang>, the toggle
+     state and the "hold the paint" guard are right on the first frame; the
+     dictionary itself is applied by js/i18n.js once the module loads. Order of
+     preference: ?lang= → saved choice → browser language (zh* → 中文, else EN). -->
+<script>
+(function () {
+  var KEY = 'openpanda.site.lang'
+  var q = new URLSearchParams(location.search).get('lang')
+  var lang = q === 'en' || q === 'zh' ? q : null
+  if (!lang) { try { var s = localStorage.getItem(KEY); if (s === 'en' || s === 'zh') lang = s } catch (e) {} }
+  if (!lang) lang = /^zh/i.test(navigator.language || '') ? 'zh' : 'en'
+  var root = document.documentElement
+  root.setAttribute('data-lang', lang)
+  root.setAttribute('lang', lang === 'zh' ? 'zh-CN' : 'en')
+  // English copy lives in the dictionary, not the markup: hide the Chinese
+  // paint for the few milliseconds until i18n.js swaps it in. The timer is the
+  // guard — a broken module must never leave a blank page.
+  if (lang === 'en') {
+    root.classList.add('lang-pending')
+    setTimeout(function () { root.classList.remove('lang-pending') }, 1200)
+  }
+})()
+</script>
+<noscript><style>html.lang-pending body { opacity: 1 !important; }</style></noscript>
 
 <script type="application/ld+json">
 {
@@ -114,7 +139,7 @@
 </head>
 <body>
 
-<a class="skip-link" href="#why">跳到正文</a>
+<a class="skip-link" href="#why" data-i18n="skip">跳到正文</a>
 <div class="scroll-progress" id="scroll-progress" aria-hidden="true"><i></i></div>
 
 <!-- ═══════════════════════════════ NAV ═══════════════════════════════ -->
@@ -128,16 +153,19 @@
     <a href="#product" data-i18n="nav.product">产品</a>
     <a href="#constitution" data-i18n="nav.constitution">薄宪法</a>
     <a href="#roadmap" data-i18n="nav.roadmap">路线图</a>
-    <a href="#license">许可</a>
-    <a href="#faq">常见问题</a>
+    <a href="#license" data-i18n="nav.license">许可</a>
+    <a href="#faq" data-i18n="nav.faq">常见问题</a>
     <a href="#install" data-i18n="nav.install">安装</a>
   </div>
   <div class="nav-actions">
-    <button class="nav-k" id="nav-k" aria-label="快速跳转（⌘K）" title="快速跳转">
+    <button class="lang-toggle" type="button" data-lang-toggle aria-label="切换语言" data-i18n-aria="lang.switch" title="中文 / English">
+      <span class="lang-zh" lang="zh-CN">中文</span><span class="lang-sep" aria-hidden="true">/</span><span class="lang-en" lang="en">EN</span>
+    </button>
+    <button class="nav-k" id="nav-k" aria-label="快速跳转（⌘K）" data-i18n-aria="nav.palette" title="快速跳转">
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg>
       <span>K</span>
     </button>
-    <button class="menu-toggle" id="menu-toggle" aria-label="Open menu" aria-expanded="false" aria-controls="mobile-menu">
+    <button class="menu-toggle" id="menu-toggle" aria-label="Open menu" data-i18n-aria="nav.menu" aria-expanded="false" aria-controls="mobile-menu">
       <span></span><span></span>
     </button>
     <a class="nav-gh" href="https://github.com/Xustalis/OpenPanda" target="_blank" rel="noopener">
@@ -156,11 +184,14 @@
     <a href="#product"><b>03</b><span data-i18n="nav.product">产品</span></a>
     <a href="#constitution"><b>04</b><span data-i18n="nav.constitution">薄宪法</span></a>
     <a href="#roadmap"><b>05</b><span data-i18n="nav.roadmap">路线图</span></a>
-    <a href="#license"><b>06</b><span>许可</span></a>
-    <a href="#faq"><b>07</b><span>常见问题</span></a>
+    <a href="#license"><b>06</b><span data-i18n="nav.license">许可</span></a>
+    <a href="#faq"><b>07</b><span data-i18n="nav.faq">常见问题</span></a>
     <a href="#install"><b>08</b><span data-i18n="nav.install">安装</span></a>
     <div class="mobile-menu-foot">
       <a href="https://github.com/Xustalis/OpenPanda" target="_blank" rel="noopener">GitHub ↗</a>
+      <button class="lang-toggle lang-toggle-menu" type="button" data-lang-toggle aria-label="切换语言" data-i18n-aria="lang.switch">
+        <span class="lang-zh" lang="zh-CN">中文</span><span class="lang-sep" aria-hidden="true">/</span><span class="lang-en" lang="en">EN</span>
+      </button>
     </div>
   </div>
 </div>
@@ -214,9 +245,9 @@
 <!-- The first question a developer asks is "does it work with what I already
      run?" — answer it before the argument starts. Text only: inventing logos
      for tools we merely wrap would be a lie, and mono names match the sheet. -->
-<section class="adapters" aria-label="支持的 Agent 与执行器">
+<section class="adapters" aria-label="支持的 Agent 与执行器" data-i18n-aria="adapters.aria">
   <div class="wrap">
-    <p class="mono-label adapters-label">不要求你换掉现有的 Agent</p>
+    <p class="mono-label adapters-label" data-i18n="adapters.label">不要求你换掉现有的 Agent</p>
     <ul class="adapter-list">
       <li>Claude Code</li>
       <li>Codex</li>
@@ -227,7 +258,7 @@
       <li>OpenClaw</li>
       <li>Pi</li>
       <li>DeepSeek Harness</li>
-      <li class="adapter-any">任意无头 CLI</li>
+      <li class="adapter-any" data-i18n="adapters.any">任意无头 CLI</li>
     </ul>
   </div>
 </section>
@@ -266,9 +297,9 @@
           <!-- Labels live inside the SVG, not as absolutely-positioned spans:
                the old tags drifted off their nodes at every width, and the centre
                one overflowed its circle. Coordinates here scale with the figure. -->
-          <svg viewBox="0 0 440 320" class="topo-svg" role="img" aria-label="星状拓扑：四个阶段的消息都要经中心 MainAgent 转达">
+          <svg viewBox="0 0 440 320" class="topo-svg" role="img" aria-label="星状拓扑：四个阶段的消息都要经中心 MainAgent 转达" data-i18n-aria="s2.star.aria">
             <path class="topo-dash" d="M88 74 Q 220 8 352 74" />
-            <text class="tl-note" x="220" y="34">上报 → 转达 · 两跳延迟</text>
+            <text class="tl-note" x="220" y="34" data-i18n="s2.star.hop">上报 → 转达 · 两跳延迟</text>
             <path class="topo-line" d="M220 160 L88 74 M220 160 L352 74 M220 160 L88 246 M220 160 L352 246" />
             <circle class="topo-node" cx="88" cy="74" r="21" />
             <circle class="topo-node" cx="352" cy="74" r="21" />
@@ -277,10 +308,10 @@
             <circle class="topo-warn-ring" cx="220" cy="160" r="54" />
             <circle class="topo-center" cx="220" cy="160" r="40" />
             <text class="tl-in" x="220" y="164">MainAgent</text>
-            <text class="tl" x="88" y="116">阶段 A</text>
-            <text class="tl" x="352" y="116">阶段 B</text>
-            <text class="tl" x="88" y="288">阶段 C</text>
-            <text class="tl" x="352" y="288">阶段 D</text>
+            <text class="tl" x="88" y="116" data-i18n="s2.stage.a">阶段 A</text>
+            <text class="tl" x="352" y="116" data-i18n="s2.stage.b">阶段 B</text>
+            <text class="tl" x="88" y="288" data-i18n="s2.stage.c">阶段 C</text>
+            <text class="tl" x="352" y="288" data-i18n="s2.stage.d">阶段 D</text>
           </svg>
         </div>
         <figcaption data-i18n="s2.star.note">中心 = 调度器 · 消息总线 · 单点故障</figcaption>
@@ -289,10 +320,10 @@
       <figure class="topo graph reveal">
         <div class="topo-head"><span class="mono-label" data-i18n="s2.graph">图状</span><span class="mono-label">GRAPH</span></div>
         <div class="topo-stage">
-          <svg viewBox="0 0 440 320" class="topo-svg" role="img" aria-label="图状拓扑：兄弟节点直接互发消息，不必经过中心">
+          <svg viewBox="0 0 440 320" class="topo-svg" role="img" aria-label="图状拓扑：兄弟节点直接互发消息，不必经过中心" data-i18n-aria="s2.graph.aria">
             <path class="topo-edge" d="M220 88 L88 158 M220 88 L352 158 M88 158 L352 158 M88 158 L148 262 M352 158 L322 262 M148 262 L322 262" />
             <circle class="topo-node jade" cx="220" cy="58" r="30" />
-            <text class="tl-inv" x="220" y="62">发起节点</text>
+            <text class="tl-inv" x="220" y="62" data-i18n="s2.graph.root">发起节点</text>
             <circle class="topo-node" cx="88" cy="158" r="21" />
             <circle class="topo-node" cx="352" cy="158" r="21" />
             <circle class="topo-node" cx="148" cy="262" r="21" />
@@ -300,14 +331,14 @@
             <!-- A label riding the wire it describes: the sibling hop never
                  touches the root, so it never pays the centre's queue. -->
             <rect class="tl-chip" x="146" y="146" width="148" height="24" rx="12" />
-            <text class="tl-note" x="220" y="162">沟通成本不进中心</text>
+            <text class="tl-note" x="220" y="162" data-i18n="s2.graph.chip">沟通成本不进中心</text>
             <circle class="topo-packet"><animateMotion dur="3.4s" repeatCount="indefinite" path="M220 88 L88 158" /></circle>
             <circle class="topo-packet"><animateMotion dur="4.2s" begin="1.1s" repeatCount="indefinite" path="M220 88 L352 158" /></circle>
             <circle class="topo-packet"><animateMotion dur="4.8s" begin="0.5s" repeatCount="indefinite" path="M322 262 L148 262" /></circle>
-            <text class="tl" x="88" y="200">阶段 A</text>
-            <text class="tl" x="352" y="200">阶段 B</text>
-            <text class="tl" x="148" y="304">子任务</text>
-            <text class="tl" x="322" y="304">子任务</text>
+            <text class="tl" x="88" y="200" data-i18n="s2.stage.a">阶段 A</text>
+            <text class="tl" x="352" y="200" data-i18n="s2.stage.b">阶段 B</text>
+            <text class="tl" x="148" y="304" data-i18n="s2.graph.sub">子任务</text>
+            <text class="tl" x="322" y="304" data-i18n="s2.graph.sub">子任务</text>
           </svg>
         </div>
         <figcaption data-i18n="s2.graph.note">兄弟直接说话 · 节点可继续向下委派</figcaption>
@@ -334,9 +365,9 @@
          answers "how do I drive it". Real product pages show both; a single
          static screenshot only ever proves the first. -->
     <div class="product-view reveal">
-      <div class="view-tabs" role="tablist" aria-label="产品视图">
-        <button class="view-tab on" role="tab" aria-selected="true" aria-controls="view-console" data-view="console">控制台</button>
-        <button class="view-tab" role="tab" aria-selected="false" aria-controls="view-term" data-view="term">终端</button>
+      <div class="view-tabs" role="tablist" aria-label="产品视图" data-i18n-aria="s3.tabs.aria">
+        <button class="view-tab on" role="tab" aria-selected="true" aria-controls="view-console" data-view="console" data-i18n="s3.tab.console">控制台</button>
+        <button class="view-tab" role="tab" aria-selected="false" aria-controls="view-term" data-view="term" data-i18n="s3.tab.term">终端</button>
       </div>
       <div class="console-bleed">
       <div class="console-frame" id="view-console" data-panel="console" role="tabpanel">
@@ -406,14 +437,14 @@
           <span class="term-tag">CLI</span>
         </div>
         <div class="term-body">
-          <p class="t-prompt"><span class="t-path">~/project</span> <span class="t-arrow">❯</span> panda ask <em>"修掉 scheduler 的失败测试，在构建机上跑完，结果发我手机"</em></p>
+          <p class="t-prompt"><span class="t-path">~/project</span> <span class="t-arrow">❯</span> panda ask <em data-i18n="s3.term.cmd">"修掉 scheduler 的失败测试，在构建机上跑完，结果发我手机"</em></p>
           <div class="t-flow">
-            <div class="t-row"><span class="t-sign">◇</span><span class="t-key">entry</span><span class="t-text">classify 意图 → <b>task.graph</b></span></div>
+            <div class="t-row"><span class="t-sign">◇</span><span class="t-key">entry</span><span class="t-text" data-i18n="s3.term.classify">classify 意图 → <b>task.graph</b></span></div>
             <div class="t-row"><span class="t-sign">◇</span><span class="t-key">plan</span><span class="t-text"><b>3 stages</b> · 4 artifacts · 2 machines</span></div>
             <div class="t-row"><span class="t-sign">◇</span><span class="t-key">route</span><span class="t-text">macbook-pro · claude-code · <b>0.91</b></span></div>
             <div class="t-row"><span class="t-sign">◇</span><span class="t-key">route</span><span class="t-text">build-box · codex · <b>0.87</b> <span class="t-dim">hop +1</span></span></div>
             <div class="t-row"><span class="t-sign">◇</span><span class="t-key">route</span><span class="t-text">phone · notify · <b>0.74</b></span></div>
-            <div class="t-row"><span class="t-sign">◇</span><span class="t-key">judge</span><span class="t-text">round 1/5 <span class="t-bad">FAIL</span> <span class="t-dim">artifact missing → 带因重派</span></span></div>
+            <div class="t-row"><span class="t-sign">◇</span><span class="t-key">judge</span><span class="t-text">round 1/5 <span class="t-bad">FAIL</span> <span class="t-dim" data-i18n="s3.term.replan">artifact missing → 带因重派</span></span></div>
             <div class="t-row"><span class="t-sign">◇</span><span class="t-key">judge</span><span class="t-text">round 2/5 <span class="t-ok">PASS</span> <span class="t-dim">214 tests</span></span></div>
           </div>
           <p class="t-done"><span class="t-ok">✔</span> done <b>2m14s</b> · 4 artifacts · <span class="t-hl">0 bytes to cloud</span><i class="t-caret"></i></p>
@@ -565,25 +596,25 @@
         <span class="mile-ver">v0.0.10</span>
         <h3 data-i18n="s8.m1.name">Apoapsis</h3>
         <p data-i18n="s8.m1.d">跨节点委派、工作树随行、actuator 派发。</p>
-        <span class="mile-state">已发布</span>
+        <span class="mile-state" data-i18n="s8.m1.state">已发布</span>
       </article>
       <article class="mile done reveal">
         <span class="mile-ver">v0.0.11</span>
         <h3 data-i18n="s8.m2.name">Rendezvous</h3>
         <p data-i18n="s8.m2.d">会话 AEAD、蓝牙式配对、信任三档、多跳中继、computer-use。</p>
-        <span class="mile-state">稳定版</span>
+        <span class="mile-state" data-i18n="s8.m2.state">稳定版</span>
       </article>
       <article class="mile current reveal">
         <span class="mile-ver">v0.1.0</span>
         <h3 data-i18n="s8.m3.name">Constellation</h3>
         <p data-i18n="s8.m3.d">第一个发布级版本：跨网组网、同项目并行、审计收口、控制台一体化。</p>
-        <span class="mile-state">当前版本</span>
+        <span class="mile-state" data-i18n="s8.m3.state">当前版本</span>
       </article>
       <article class="mile reveal">
         <span class="mile-ver">v0.1.x</span>
         <h3 data-i18n="s8.m4.name">Assistant</h3>
         <p data-i18n="s8.m4.d">桌面薄壳（托盘常驻、全局热键、自更新）、稠密网格层、现状如实呈现。</p>
-        <span class="mile-state">计划中</span>
+        <span class="mile-state" data-i18n="s8.m4.state">计划中</span>
       </article>
     </div>
     <p class="roadmap-note reveal" data-i18n="s8.note">一键安装默认装最新发布级版本；要预览版，显式指定版本号。</p>
@@ -598,52 +629,52 @@
   <div class="wrap">
     <div class="section-label reveal"><span>LICENSING</span><span>09 / 11</span></div>
     <div class="section-head">
-      <h2 class="h2 reveal">开源，<br>价格也写在明处。</h2>
-      <p class="lede reveal">代码是 AGPL-3.0-or-later。个人用、学习、公司内部工具，都不花钱。只有当你把它关进闭源产品里，才需要谈授权——这一条写在许可证里，不写在销售话术里。</p>
+      <h2 class="h2 reveal" data-i18n="lic.title">开源，<br>价格也写在明处。</h2>
+      <p class="lede reveal" data-i18n="lic.lede">代码是 AGPL-3.0-or-later。个人用、学习、公司内部工具，都不花钱。只有当你把它关进闭源产品里，才需要谈授权——这一条写在许可证里，不写在销售话术里。</p>
     </div>
 
     <div class="license-grid">
       <article class="lic reveal">
-        <div class="lic-head"><span class="mono-label">COMMUNITY</span><span class="lic-flag">默认路径</span></div>
+        <div class="lic-head"><span class="mono-label">COMMUNITY</span><span class="lic-flag" data-i18n="lic.c1.flag">默认路径</span></div>
         <p class="lic-price"><b>¥0</b></p>
-        <p class="lic-desc">个人使用、学习、公司内部工具、二次开发。</p>
+        <p class="lic-desc" data-i18n="lic.c1.desc">个人使用、学习、公司内部工具、二次开发。</p>
         <ul class="lic-list">
-          <li>全部源码与预编译产物</li>
-          <li>10 个 Agent 适配器，持续增加</li>
-          <li>可自行修改；对外分发时改动同样开源</li>
-          <li>GitHub Issues 支持</li>
+          <li data-i18n="lic.c1.l1">全部源码与预编译产物</li>
+          <li data-i18n="lic.c1.l2">10 个 Agent 适配器，持续增加</li>
+          <li data-i18n="lic.c1.l3">可自行修改；对外分发时改动同样开源</li>
+          <li data-i18n="lic.c1.l4">GitHub Issues 支持</li>
         </ul>
-        <a class="lic-cta" href="#install">开始安装 <span aria-hidden="true">→</span></a>
+        <a class="lic-cta" href="#install" data-i18n="lic.c1.cta">开始安装 <span aria-hidden="true">→</span></a>
       </article>
 
       <article class="lic reveal">
         <div class="lic-head"><span class="mono-label">COMMERCIAL</span></div>
-        <p class="lic-price lic-price-text"><b>按需报价</b></p>
-        <p class="lic-desc">把它变成你产品的一部分，而不必开源你的产品。</p>
+        <p class="lic-price lic-price-text"><b data-i18n="lic.c2.price">按需报价</b></p>
+        <p class="lic-desc" data-i18n="lic.c2.desc">把它变成你产品的一部分，而不必开源你的产品。</p>
         <ul class="lic-list">
-          <li>闭源嵌入与分发</li>
-          <li>对外托管修改版（SaaS）</li>
-          <li>OEM / 硬件预装</li>
-          <li>商标与品牌使用许可</li>
+          <li data-i18n="lic.c2.l1">闭源嵌入与分发</li>
+          <li data-i18n="lic.c2.l2">对外托管修改版（SaaS）</li>
+          <li data-i18n="lic.c2.l3">OEM / 硬件预装</li>
+          <li data-i18n="lic.c2.l4">商标与品牌使用许可</li>
         </ul>
-        <a class="lic-cta" href="mailto:fing2024@outlook.com?subject=OpenPanda%20%E5%95%86%E4%B8%9A%E6%8E%88%E6%9D%83">说明你的用法 <span aria-hidden="true">→</span></a>
+        <a class="lic-cta" href="mailto:fing2024@outlook.com?subject=OpenPanda%20%E5%95%86%E4%B8%9A%E6%8E%88%E6%9D%83" data-i18n="lic.c2.cta">说明你的用法 <span aria-hidden="true">→</span></a>
       </article>
 
       <article class="lic reveal">
         <div class="lic-head"><span class="mono-label">ENTERPRISE</span></div>
-        <p class="lic-price lic-price-text"><b>年度合约</b></p>
-        <p class="lic-desc">授权之外，还要有人对交付负责。</p>
+        <p class="lic-price lic-price-text"><b data-i18n="lic.c3.price">年度合约</b></p>
+        <p class="lic-desc" data-i18n="lic.c3.desc">授权之外，还要有人对交付负责。</p>
         <ul class="lic-list">
-          <li>架构评审与接入方案</li>
-          <li>私有适配器 / 执行器开发</li>
-          <li>安全评估与合规材料</li>
-          <li>响应时限与升级支持</li>
+          <li data-i18n="lic.c3.l1">架构评审与接入方案</li>
+          <li data-i18n="lic.c3.l2">私有适配器 / 执行器开发</li>
+          <li data-i18n="lic.c3.l3">安全评估与合规材料</li>
+          <li data-i18n="lic.c3.l4">响应时限与升级支持</li>
         </ul>
-        <a class="lic-cta" href="mailto:fing2024@outlook.com?subject=OpenPanda%20%E4%BC%81%E4%B8%9A%E6%94%AF%E6%8C%81">约一次通话 <span aria-hidden="true">→</span></a>
+        <a class="lic-cta" href="mailto:fing2024@outlook.com?subject=OpenPanda%20%E4%BC%81%E4%B8%9A%E6%94%AF%E6%8C%81" data-i18n="lic.c3.cta">约一次通话 <span aria-hidden="true">→</span></a>
       </article>
     </div>
 
-    <p class="license-note reveal">拿不准自己的用法算不算「闭源分发」？<a href="mailto:fing2024@outlook.com?subject=OpenPanda%20%E6%8E%88%E6%9D%83%E5%92%A8%E8%AF%A2">写一句话描述场景</a>，通常当天回复。</p>
+    <p class="license-note reveal" data-i18n="lic.note">拿不准自己的用法算不算「闭源分发」？<a href="mailto:fing2024@outlook.com?subject=OpenPanda%20%E6%8E%88%E6%9D%83%E5%92%A8%E8%AF%A2">写一句话描述场景</a>，通常当天回复。</p>
   </div>
 </section>
 
@@ -653,84 +684,84 @@
     <div class="section-label reveal"><span>QUESTIONS</span><span>10 / 11</span></div>
     <div class="faq-grid">
       <div class="faq-intro">
-        <h2 class="h2 reveal">你可能想问的。</h2>
-        <p class="lede reveal">关于定位、许可、数据去向和「现在到底能不能用」——按最常被问到的顺序排。</p>
+        <h2 class="h2 reveal" data-i18n="faq.title">你可能想问的。</h2>
+        <p class="lede reveal" data-i18n="faq.lede">关于定位、许可、数据去向和「现在到底能不能用」——按最常被问到的顺序排。</p>
         <a class="faq-ask reveal" href="https://github.com/Xustalis/OpenPanda/issues/new/choose" target="_blank" rel="noopener">
-          <span>没找到答案？开一个 Issue</span>
+          <span data-i18n="faq.ask">没找到答案？开一个 Issue</span>
           <span aria-hidden="true">↗</span>
         </a>
         <!-- The intro column is sticky, so the space under the pill is the one
              place on the page where "where do I read further" belongs. -->
         <ul class="faq-links reveal">
-          <li><a href="https://github.com/Xustalis/OpenPanda/blob/main/README.md" target="_blank" rel="noopener">文档与快速开始</a></li>
-          <li><a href="https://github.com/Xustalis/OpenPanda/blob/main/docs/status.md" target="_blank" rel="noopener">项目现状与已知边界</a></li>
-          <li><a href="https://github.com/Xustalis/OpenPanda/blob/main/CHANGELOG.md" target="_blank" rel="noopener">更新日志</a></li>
+          <li><a href="https://github.com/Xustalis/OpenPanda/blob/main/README.md" target="_blank" rel="noopener" data-i18n="faq.link.docs">文档与快速开始</a></li>
+          <li><a href="https://github.com/Xustalis/OpenPanda/blob/main/docs/status.md" target="_blank" rel="noopener" data-i18n="faq.link.status">项目现状与已知边界</a></li>
+          <li><a href="https://github.com/Xustalis/OpenPanda/blob/main/CHANGELOG.md" target="_blank" rel="noopener" data-i18n="faq.link.changelog">更新日志</a></li>
         </ul>
       </div>
 
       <div class="faq-list">
         <details class="faq reveal" open>
           <summary>
-            <span class="faq-q">OpenPanda 和 LangGraph、CrewAI 有什么区别？</span>
+            <span class="faq-q" data-i18n="faq.q1.q">OpenPanda 和 LangGraph、CrewAI 有什么区别？</span>
             <span class="faq-icon" aria-hidden="true"></span>
           </summary>
-          <div class="faq-body"><p>那些是编排框架，冻结的是「怎么想」——节点、边、状态机怎么写。OpenPanda 冻结的是关系事实：身份、授权、边界、生命周期。它不替你写 Agent，而是把你已经装好的 Agent 连成一张可路由、可监督、可验收的网。</p></div>
+          <div class="faq-body"><p data-i18n="faq.q1.a">那些是编排框架，冻结的是「怎么想」——节点、边、状态机怎么写。OpenPanda 冻结的是关系事实：身份、授权、边界、生命周期。它不替你写 Agent，而是把你已经装好的 Agent 连成一张可路由、可监督、可验收的网。</p></div>
         </details>
 
         <details class="faq reveal">
           <summary>
-            <span class="faq-q">需要 GPU 或额外的模型额度吗？</span>
+            <span class="faq-q" data-i18n="faq.q2.q">需要 GPU 或额外的模型额度吗？</span>
             <span class="faq-icon" aria-hidden="true"></span>
           </summary>
-          <div class="faq-body"><p>不需要 GPU。路由、监督和验收都用你已经配置的模型提供方，本机模型或 API 都可以。守护进程常驻内存约 20MB，空闲时几乎不占 CPU。</p></div>
+          <div class="faq-body"><p data-i18n="faq.q2.a">不需要 GPU。路由、监督和验收都用你已经配置的模型提供方，本机模型或 API 都可以。守护进程常驻内存约 20MB，空闲时几乎不占 CPU。</p></div>
         </details>
 
         <details class="faq reveal">
           <summary>
-            <span class="faq-q">数据会不会经过你们的服务器？</span>
+            <span class="faq-q" data-i18n="faq.q3.q">数据会不会经过你们的服务器？</span>
             <span class="faq-icon" aria-hidden="true"></span>
           </summary>
-          <div class="faq-body"><p>不会，也没有「我们的服务器」。节点之间 P2P 直连，会话内容 AEAD 加密，并按信任三档逐跳钳制。断网时走 DTN 存储转发，链路恢复后再送。</p></div>
+          <div class="faq-body"><p data-i18n="faq.q3.a">不会，也没有「我们的服务器」。节点之间 P2P 直连，会话内容 AEAD 加密，并按信任三档逐跳钳制。断网时走 DTN 存储转发，链路恢复后再送。</p></div>
         </details>
 
         <details class="faq reveal">
           <summary>
-            <span class="faq-q">支持哪些平台和 Agent？</span>
+            <span class="faq-q" data-i18n="faq.q4.q">支持哪些平台和 Agent？</span>
             <span class="faq-icon" aria-hidden="true"></span>
           </summary>
-          <div class="faq-body"><p>六个发布目标：macOS、Linux、Windows × amd64 / arm64，另有 lite-linux 变体。目前 10 个适配器，包括 Claude Code、Codex、Antigravity、OpenCode、Grok Build、Hermes、OpenClaw、Pi、DeepSeek Harness，以及一个可以接任意无头 CLI 的通用适配器。</p></div>
+          <div class="faq-body"><p data-i18n="faq.q4.a">六个发布目标：macOS、Linux、Windows × amd64 / arm64，另有 lite-linux 变体。目前 10 个适配器，包括 Claude Code、Codex、Antigravity、OpenCode、Grok Build、Hermes、OpenClaw、Pi、DeepSeek Harness，以及一个可以接任意无头 CLI 的通用适配器。</p></div>
         </details>
 
         <details class="faq reveal">
           <summary>
-            <span class="faq-q">现在能用在生产环境吗？</span>
+            <span class="faq-q" data-i18n="faq.q5.q">现在能用在生产环境吗？</span>
             <span class="faq-icon" aria-hidden="true"></span>
           </summary>
-          <div class="faq-body"><p>v0.1.0「Constellation」是第一个发布级版本，可以日常用。单机、三台真机组网，以及 Mac → 中继 → 云主机的真实跨网多跳都跑通了（3 MiB 项目树哈希一致），自用、跑内部工具没问题，但还不建议直接对外托管。没做完的写在 <a href="https://github.com/Xustalis/OpenPanda/blob/main/docs/status.md" target="_blank" rel="noopener">status.md</a> 里：UPnP/NAT-PMP 端口映射、punch 与目录帧的源签名收敛、跨节点 hello 重放。逐条列出，不含糊。</p></div>
+          <div class="faq-body"><p data-i18n="faq.q5.a">v0.1.0「Constellation」是第一个发布级版本，可以日常用。单机、三台真机组网，以及 Mac → 中继 → 云主机的真实跨网多跳都跑通了（3 MiB 项目树哈希一致），自用、跑内部工具没问题，但还不建议直接对外托管。没做完的写在 <a href="https://github.com/Xustalis/OpenPanda/blob/main/docs/status.md" target="_blank" rel="noopener">status.md</a> 里：UPnP/NAT-PMP 端口映射、punch 与目录帧的源签名收敛、跨节点 hello 重放。逐条列出，不含糊。</p></div>
         </details>
 
         <details class="faq reveal">
           <summary>
-            <span class="faq-q">免费吗？许可证怎么算？</span>
+            <span class="faq-q" data-i18n="faq.q6.q">免费吗？许可证怎么算？</span>
             <span class="faq-icon" aria-hidden="true"></span>
           </summary>
-          <div class="faq-body"><p>个人、学习、公司内部自用都不花钱。只有把修改版对外分发或托管，<a href="https://github.com/Xustalis/OpenPanda/blob/main/LICENSE" target="_blank" rel="noopener">AGPL</a> 才要求你同样开源；不愿意开源，才需要买商业授权——可以直接<a href="mailto:fing2024@outlook.com">邮件联系</a>。</p></div>
+          <div class="faq-body"><p data-i18n="faq.q6.a">个人、学习、公司内部自用都不花钱。只有把修改版对外分发或托管，<a href="https://github.com/Xustalis/OpenPanda/blob/main/LICENSE" target="_blank" rel="noopener">AGPL</a> 才要求你同样开源；不愿意开源，才需要买商业授权——可以直接<a href="mailto:fing2024@outlook.com">邮件联系</a>。</p></div>
         </details>
 
         <details class="faq reveal">
           <summary>
-            <span class="faq-q">我要怎么参与？</span>
+            <span class="faq-q" data-i18n="faq.q7.q">我要怎么参与？</span>
             <span class="faq-icon" aria-hidden="true"></span>
           </summary>
-          <div class="faq-body"><p>提 Issue、开 PR 都欢迎。main 上有 10 项必过检查，PR 合并前会全部跑一遍。也可以先在 GitHub 上 Star，或者从 status.md 里列出的已知边界挑一条去复现。</p></div>
+          <div class="faq-body"><p data-i18n="faq.q7.a">提 Issue、开 PR 都欢迎。main 上有 10 项必过检查，PR 合并前会全部跑一遍。也可以先在 GitHub 上 Star，或者从 status.md 里列出的已知边界挑一条去复现。</p></div>
         </details>
 
         <details class="faq reveal">
           <summary>
-            <span class="faq-q">会出桌面 App 吗？</span>
+            <span class="faq-q" data-i18n="faq.q8.q">会出桌面 App 吗？</span>
             <span class="faq-icon" aria-hidden="true"></span>
           </summary>
-          <div class="faq-body"><p>v0.1.0 先把内核做成发布级：CLI 加本地控制台已经可以日常用，配置、数据与协议向前兼容。桌面薄壳排在 v0.1.x 线上——托盘常驻、全局热键、原生通知、自更新，配上稠密网格层。</p></div>
+          <div class="faq-body"><p data-i18n="faq.q8.a">v0.1.0 先把内核做成发布级：CLI 加本地控制台已经可以日常用，配置、数据与协议向前兼容。桌面薄壳排在 v0.1.x 线上——托盘常驻、全局热键、原生通知、自更新，配上稠密网格层。</p></div>
         </details>
       </div>
     </div>
@@ -779,7 +810,7 @@
         <p>macOS <b>arm64 · amd64</b></p>
         <p>Linux <b>amd64 · arm64</b></p>
         <p>Windows <b>amd64 · arm64</b></p>
-        <a href="https://github.com/Xustalis/OpenPanda/releases/latest" target="_blank" rel="noopener">全部安装包与校验值 ↗</a>
+        <a href="https://github.com/Xustalis/OpenPanda/releases/latest" target="_blank" rel="noopener" data-i18n="s9.all">全部安装包与校验值 ↗</a>
       </div>
     </div>
   </div>
@@ -802,7 +833,7 @@
       <a href="#graph" data-i18n="foot.why">为什么是图</a>
       <a href="#constitution" data-i18n="foot.thin">薄宪法</a>
       <a href="#roadmap" data-i18n="foot.roadmap">路线图</a>
-      <a href="#faq">常见问题</a>
+      <a href="#faq" data-i18n="foot.faq">常见问题</a>
       <a href="#install" data-i18n="foot.install">安装</a>
     </div>
     <div class="footer-col">
@@ -810,14 +841,14 @@
       <a href="https://github.com/Xustalis/OpenPanda/blob/main/README.md" target="_blank" rel="noopener" data-i18n="foot.docs">文档</a>
       <a href="https://github.com/Xustalis/OpenPanda/blob/main/docs/status.md" target="_blank" rel="noopener" data-i18n="foot.status">项目现状</a>
       <a href="https://github.com/Xustalis/OpenPanda/releases" target="_blank" rel="noopener" data-i18n="foot.releases">版本发布</a>
-      <a href="https://github.com/Xustalis/OpenPanda/blob/main/CHANGELOG.md" target="_blank" rel="noopener">更新日志</a>
+      <a href="https://github.com/Xustalis/OpenPanda/blob/main/CHANGELOG.md" target="_blank" rel="noopener" data-i18n="foot.changelog">更新日志</a>
       <a href="https://github.com/Xustalis/OpenPanda/blob/main/LICENSE" target="_blank" rel="noopener">AGPL-3.0</a>
     </div>
     <div class="footer-col">
       <h4 data-i18n="foot.contact">社区</h4>
       <a href="https://github.com/Xustalis/OpenPanda" target="_blank" rel="noopener">GitHub</a>
       <a href="https://github.com/Xustalis/OpenPanda/issues" target="_blank" rel="noopener">Issues</a>
-      <a href="https://github.com/Xustalis/OpenPanda/blob/main/SECURITY.md" target="_blank" rel="noopener">安全策略</a>
+      <a href="https://github.com/Xustalis/OpenPanda/blob/main/SECURITY.md" target="_blank" rel="noopener" data-i18n="foot.security">安全策略</a>
       <a href="mailto:fing2024@outlook.com" data-i18n="foot.invest">合作 / 投资</a>
       <a href="mailto:fing2024@outlook.com">fing2024@outlook.com</a>
     </div>
@@ -825,14 +856,14 @@
   <!-- A policy statement, not a live probe: claiming "all green" from a static
        page would be a lie the first time a check fails. -->
   <div class="wrap footer-status">
-    <span class="status-pill"><i aria-hidden="true"></i>main 分支全绿才允许合并</span>
+    <span class="status-pill"><i aria-hidden="true"></i><span data-i18n="foot.green">main 分支全绿才允许合并</span></span>
     <span class="status-sep" aria-hidden="true">·</span>
-    <span>10 项必过检查 · 6 个发布目标 · 每周安全扫描</span>
-    <a class="status-link" href="https://github.com/Xustalis/OpenPanda/releases/latest" target="_blank" rel="noopener">最新版本 v0.1.0 Constellation <span aria-hidden="true">↗</span></a>
+    <span data-i18n="foot.checks">10 项必过检查 · 6 个发布目标 · 每周安全扫描</span>
+    <a class="status-link" href="https://github.com/Xustalis/OpenPanda/releases/latest" target="_blank" rel="noopener" data-i18n="foot.latest">最新版本 v0.1.0 Constellation <span aria-hidden="true">↗</span></a>
   </div>
   <div class="wrap footer-bottom">
     <p class="footer-credit" data-i18n="foot.credit">影像：ESO/S. Brunier 银河全景（CC BY 4.0）；NASA Blue Marble 与 Black Marble DNB 城市灯（公有领域）。代码以 AGPL-3.0-or-later 发布；闭源嵌入与托管修改可另行授权。</p>
-    <div class="footer-meta"><span>© 2026 OpenPanda</span><span data-i18n="foot.built">Built for machines you own.</span><a href="#top" aria-label="Back to top">↑</a></div>
+    <div class="footer-meta"><span>© 2026 OpenPanda</span><span data-i18n="foot.built">Built for machines you own.</span><a href="#top" aria-label="Back to top" data-i18n-aria="foot.top">↑</a></div>
   </div>
 </footer>
 
@@ -842,16 +873,16 @@
      the nav and footer, so this is an accelerator, never the only path. -->
 <div class="palette" id="palette" hidden>
   <div class="palette-scrim" data-palette-close></div>
-  <div class="palette-box" role="dialog" aria-modal="true" aria-label="快速跳转">
+  <div class="palette-box" role="dialog" aria-modal="true" aria-label="快速跳转" data-i18n-aria="pal.aria">
     <div class="palette-head">
       <svg class="palette-ico" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg>
-      <input class="palette-input" id="palette-input" type="text" placeholder="跳转章节、打开链接、复制命令…" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="true" aria-controls="palette-list" aria-autocomplete="list" />
+      <input class="palette-input" id="palette-input" type="text" placeholder="跳转章节、打开链接、复制命令…" data-i18n-placeholder="pal.placeholder" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="true" aria-controls="palette-list" aria-autocomplete="list" />
       <kbd>ESC</kbd>
     </div>
-    <ul class="palette-list" id="palette-list" role="listbox" aria-label="结果"></ul>
+    <ul class="palette-list" id="palette-list" role="listbox" aria-label="结果" data-i18n-aria="pal.results"></ul>
     <div class="palette-foot">
-      <span><kbd>↑</kbd><kbd>↓</kbd>选择</span>
-      <span><kbd>↵</kbd>打开</span>
+      <span><kbd>↑</kbd><kbd>↓</kbd><span data-i18n="pal.select">选择</span></span>
+      <span><kbd>↵</kbd><span data-i18n="pal.open">打开</span></span>
       <span class="palette-count" id="palette-count"></span>
     </div>
   </div>
