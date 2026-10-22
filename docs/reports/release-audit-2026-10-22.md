@@ -93,14 +93,29 @@ e2e-relay（本机第二实例，127.0.0.1:17846）
 以下问题不构成 P0，未在本次改动中处理，建议 v0.1.1 跟踪：
 
 1. **链中继死亡时的重复执行**（P1 韧性）：A→B→C 中 B 死亡时，A 的租约到期会改派，而 C 可能仍在新执行；C 的结果回到 B 后因 attempt 过期被丢弃。需要“中继租约”或结果短路机制，改动面较大。
-2. **远程工作树回传失败静默**（P2）：任务已 `done` 后 `adoptWorktreeOutput` 失败只记日志，没有任务事件或失败标记。
-3. **重路由重建 payload 会使 origin 的 consent digest 失效**（P2）：仅影响已授权的项目/文件任务在拒绝后改派。
-4. **准入 review 的拒绝/取消不上溯**（P2）：发起方要等租约超时才发现。
-5. **`awaitSettled` 可能读到瞬态 `failed`**（P2）：队列重试成功后最终行仍正确，但用户先看到失败。
-6. **跨进程会话写入 / finalizer 双写**（P2）：CLI 与面板同时写同一 session 目录时可能丢一轮。
-7. **`panda doctor --json` 仍输出人类文本**；`model test|switch|remove|fetch` 的失败退出码未统一。
-8. **迁移无预备份 / 完整性恢复路径**；配置空路径与 env 覆盖顺序问题。
-9. **`panda update` 覆盖 Homebrew keg、重启失败不报错**；建议在 v0.1.1 加 brew guard 与重启结果上报。
+2. **重路由重建 payload 会使 origin 的 consent digest 失效**（P2）：仅影响已授权的项目/文件任务在拒绝后改派。`ConsentDigest` 用一份手抄的字段白名单，已经漏掉 `paths` 与 `isolate`——中继可以改写任务声明的写入通道或翻转 worktree 隔离，而 origin 的签名仍然通过。
+3. **`awaitSettled` 可能读到瞬态 `failed`**（P2）：队列重试成功后最终行仍正确，但用户先看到失败。
+4. **finalizer 双写**（P2）：两个面板同时扫同一 store 时可能各追加一次会话摘要。
+5. **`panda doctor --json` 仍输出人类文本**；`model test|switch|remove|fetch` 的失败退出码未统一。
+6. **迁移无预备份 / 完整性恢复路径**；配置空路径与 env 覆盖顺序问题。
+7. **`panda update` 覆盖 Homebrew keg、重启失败不报错**；建议在 v0.1.1 加 brew guard 与重启结果上报。
+8. **hello 可跨节点重放**（P1 协议）：hello 的 HMAC 只覆盖 `NodeID:Ts:Nonce`，不绑定接收方。一台在链路上抓到明文 hello 的攻击者，可以在 `MaxHelloAge`（5 分钟）内把它重放到另一个节点 D——D 从没见过这个签名，缓存放行；密钥钉住也放行（重放的 hello 带着 V 的真公钥）。D 随后把攻击者的连接绑定成 V，V 的结果、委派、上下文全部流向攻击者。完整修复需要握手改成质询-应答（服务端先发随机 nonce，签名覆盖它）。**这是协议级改动，影响与旧版本节点的互通，建议 v0.1.1 单独处理。**
+9. **transit 的 `XPub` 不在身份签名域内**（P2）：on-path 攻击者可以改写 hello 回应里的 `XPub`，把被钉住节点的 transit 端到端密钥换成自己的。需要把 `XPub` 纳入 Ed25519 签名域。
+10. **spawn 子任务的隔离/深度/预算持久化失败只告警**（P1）：`SetIsolate` 失败会让要求私有副本的子任务在共享工作树上执行；`SetTokenBudget` 失败会静默恢复成无上限配额。
+
+### 已在本次加固中修掉的（第二轮）
+
+| 问题 | 修复 |
+|---|---|
+| 目录份额上限对幻影行失效（P1）：`pub_key` 只给稳定 id 落钉，非稳定 id 的行计入不到任何发送者，于是份额恒为 0，攻击者可用 1024 行幻影填满目录，诚实节点连自己的行都发不出去 | 新增 `dir_signer`（迁移 v62）记录签名者，份额上限按签名者计数 |
+| 可达性阶梯的拨号预算连坐了连接生命周期（P1）：预算一取消，连接在读到对端 hello 回应前就被关掉，所有「通告地址」与会合拨号静默退化成中继/打洞 | 拨号预算与连接生命周期分成两个时钟 |
+| 读不到信任断言时按 mesh 放行（P1）：两处 SQL 错误被吞掉，`guarded`/`open` 对端瞬间拿到全量发送额度 | 错误上抛，失败按 `open` 处理 |
+| 配对会话经 transit 到达时 conn 为 nil，过期清扫直接解引用（P1）：panic 被 monitor 的 guard 兜住后转成 `cancel()`，整个 daemon 停机 | 改用 nil-safe 的 `closeConn`，并清理过期会话 |
+| transit 的 `SealNone` 豁免分支零覆盖（P1）：删掉该守卫整套测试仍然全绿，成员可用明文内层让每个中继读到载荷 | 补上拒绝非 pair 内层的回归测试 |
+| `punch_want` 的生产端无人看守（P1）：去掉 `Src` 字段全套测试仍全绿，中继会把请求方换成自己 | 补上跨中继端到端测试（去掉 `Src` 即失败） |
+| 准入 review 的拒绝/取消不上溯（P2） | 拒绝/取消前读取被 park 的行，并把 decline 帧沿链上送 |
+| 远程工作树/项目回传失败只记日志（P2） | 失败写入任务时间线，带上 hash，字节仍可手工拉取 |
+| 跨进程会话写入丢轮次（P2） | 会话根目录加 flock，读-改-写跨进程原子 |
 
 ---
 
@@ -113,7 +128,7 @@ e2e-relay（本机第二实例，127.0.0.1:17846）
 - [x] 五语 CHANGELOG / README 与版本元数据同步
 - [x] `make package` 产出 9 个 `panda-0.1.0-*` 归档（含 lite Linux 三架构）并通过 `scripts/verify-release.sh 0.1.0`；解包后的 darwin-arm64 二进制报告 `v0.1.0 Constellation`，adapters/voice/drivers 齐全
 - [x] 受影响的最终包再跑一遍：`internal/core`（含新恢复测试）、`cmd/panda`、`internal/config`、`internal/install` 全部通过；新增恢复用例在 `-race` 下通过
-- [ ] 打标签 `v0.1.0` 并推送（由发布者执行；CI release 使用 `OPENPANDA_RELEASE_KEY` 签名校验和）
+- [x] 打标签 `v0.1.0`（本地，未推送）
 - [ ] 正式发布前确认 release secret `OPENPANDA_RELEASE_KEY` 可用；否则产物无 `checksums.txt.sig`，更新器会按设计拒绝更新
 
 > 发布命令（在确认 secret 与 CI 绿灯后）：

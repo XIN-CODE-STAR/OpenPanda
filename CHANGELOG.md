@@ -96,6 +96,18 @@ _No unreleased changes yet._
 - **Session runtime state is never merged into the user's branch** — the whole `.openpanda/` tree (worktrees, composer uploads, task scratch) is excluded from the session merge's `git add -A`; a pasted screenshot or secret no longer becomes a commit.
 - **`--json` forms exit non-zero on failure** for `agents test`, `config model test` and `session rm`, and `session rm` emits only JSON (errors included) instead of human text mixed into the stream.
 
+- **The directory's share cap now counts the row's signer** — one member could sign rows for arbitrary fresh ids, and because a non-stable id is never pinned, those rows counted against nobody: its share stayed at zero while the table grew to the 1024-row cap, leaving an honest new peer with no room to publish its own row at all. One member could silence the fleet's directory. The signature covers the row's own key, so who signed a row is now proof, and the cap counts that.
+
+- **A dial timeout no longer closes the connection it started** — the reachability ladder gave each candidate address a timeout and handed the same context to the connection's read loop, so the timeout's cancel closed the socket before the peer's hello reply was read. Every gossip-address dial and every rendezvous dial died on arrival and silently degraded to relay-or-punch. The dial budget and the connection lifetime are two different clocks now.
+
+- **An unreadable trust assertion fails closed** — both directory lookups swallowed their SQL error, so a transient busy database made a `guarded` (or `open`) peer read as full-trust `mesh`: the send ceiling, the artifact-input clamps, relay admission and the screen-output exemption all applied. A peer whose tier cannot be read is treated as `open`.
+
+- **A cross-NAT pairing can no longer take the node down** — a pairing that arrived over a relay has no connection, and the expiry sweep closed it unconditionally. The nil dereference was caught by the monitor's panic guard, whose cancel stopped the whole daemon. The sweep now uses the nil-safe close and drops the expired session.
+
+- **A relayed punch request reaches the node that asked** — the request's origin rode the envelope, and a relay re-mints the envelope as itself, so the elected offerer punched the relay (already reachable) instead of the requester. The origin now rides the payload, and the regression test drives the real relayed path.
+
+- **An unsealed transit frame is refused** — the exemption that lets a pair handshake ride a relay unsealed had no test at all: removing the guard left the suite green. A member could seal nothing around a delegate and have every relay that carried it read the plaintext.
+
 
 - **A destructive command can no longer pass as reversible** — the tier classifier judged a command by its verb, so `cp`, `mv`, `chmod`, `chown`, `ln`, `tee` and `kill` were auto-approved in every form: `cp payload /etc/cron.d/x`, `chmod u+s /usr/bin/find`, `ln -sf /etc/passwd ./shadow` and `kill 1` all ran without asking. Those verbs stay Tier 1 in their ordinary form — copying a file into your own tree is not an incident — but the form that reaches a system path, sets a setuid bit, overwrites a system file through a link, or targets init now requires authorization. Code run through an interpreter is covered the same way: `unlink`, `rmtree` and `rm -rf` spelled inside a script escalate like the shell command does.
 
