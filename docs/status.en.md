@@ -183,6 +183,21 @@ English translation of [status.md](status.md)（中文版为准）· English
 > and hello replay across peers (a protocol-level challenge-response, for
 > v0.1.1).
 >
+> 2026-10-23 (`v0.1.0` "Constellation" promoted: the same code as
+> `v0.1.0-preview` — same feature set, same wire format, same store schema,
+> same audit sign-off; what moved is the default channel. `/releases/latest`,
+> the one-liner, the Homebrew tap and `panda update` on a stable node serve
+> `v0.1.0` from now on, and the `v0.1.0-preview` tag stays published for
+> anyone who pinned it. Two claims were corrected before the promotion: the
+> site named `v0.1.0` while only the preview existed, and the preview's
+> release notes said the default channels already served it; the release
+> workflow now appends a pre-release block to any hyphenated tag. The repo was
+> tidied in the same pass — the old preview tags and releases
+> (`v0.0.8-preview` through `v0.0.12-preview`) and the local backup tags are
+> gone, leaving `v0.1.0-preview` as the only pre-release; only `main` remains
+> on the remote, and the scratch worktrees and stale branches are cleared.
+> The 23-check installer suite passes and `make gate` is green.)
+
 > 2026-10-21 (cross-network mesh P1–P5: dual-key identity and reachability cards,
 > transitive blind relay, epidemic directory sync, K=2 rendezvous edges and the
 > reachability ladder, policy surface and relay budgets, `panda://join`, pair over

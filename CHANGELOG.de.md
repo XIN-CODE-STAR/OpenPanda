@@ -42,6 +42,19 @@ OpenPanda (**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **A
 
 Noch keine unveröffentlichten Änderungen.
 
+## [0.1.0] - 2026-10-23 — "Constellation"
+
+**Die Beförderung** — Codename **Constellation**: `v0.1.0` ist `v0.1.0-preview`, verschoben auf den Standardkanal. Gleicher Funktionsumfang, gleiches Wire-Format, gleiches Store-Schema, gleiche Audit-Freigabe. Nichts wurde hinzugefügt, um die Versionsnummer zu verdienen; geändert hat sich, wer sie ohne Nachfrage bekommt.
+
+Die vollständige Funktionsliste und die Befunde des Audits stehen im Abschnitt `0.1.0-preview` weiter unten. Dieser Abschnitt hält nur fest, was sich zwischen jenem Schnitt und diesem bewegt hat.
+
+- **Die Standardkanäle zeigen hierher.** `/releases/latest`, der Ein-Zeilen-Installer, der Homebrew-Tap und `panda update` auf einem Knoten der stabilen Linie liefern ab jetzt `v0.1.0`; das Tag `v0.1.0-preview` bleibt für alle veröffentlicht, die es festgelegt haben.
+- **Der Ein-Zeilen-Installer braucht kein `--version` mehr.** Er löst die neueste stabile Version auf, also diesen Schnitt; die festgelegte Form funktioniert weiter für alle, die eine exakte Version wollen.
+- **Nichts Brechendes ist hinzugekommen.** Konfiguration, Capability-Karten, gespeicherte Daten und das Wire-Format sind gegenüber der Vorschau unverändert, sodass eine Installation auf beiden Linien an Ort und Stelle aktualisiert — ohne Migration, die die Vorschau nicht schon ausgeführt hätte.
+- **Zwei Oberflächen wurden vor der Beförderung korrigiert.** Die Website nannte `v0.1.0`, als es nur die Vorschau gab, und die Release-Notizen der Vorschau behaupteten, die Standardkanäle lieferten sie bereits; beide sagen jetzt, was stimmt, und der Release-Workflow hängt an jedes Tag mit Bindestrich einen Vorabveröffentlichungs-Hinweis, damit die nächste Vorschau den Fehler nicht wiederholt.
+- **Die Zahl der Installer-Prüfungen in den Statusdokumenten war falsch.** Es sind 23 Prüfungen, nicht 21 — die Warnung bei unsignierten Releases und die Ablehnung durch `OPENPANDA_REQUIRE_SIG` waren die beiden, die nicht mitgezählt wurden.
+- **Was offen bleibt, wird benannt, nicht angedeutet.** Der knotenübergreifende hello-Replay und die fehlende `XPub`-Bindung an die Signaturdomäne sind Protokollebene und kommen in v0.1.1; `docs/status.md` und `docs/reports/release-audit-2026-10-22.md` führen sie mit dem Rest auf.
+
 ## [0.1.0-preview] - 2026-10-22
 
 **Der erste Schnitt der Release-Qualitätslinie** — Codename **Constellation**: dieselbe Flotte, die die Vorschau v0.0.12 gezeichnet hat, jetzt mit der gesamten Korrektheits- und Sicherheitsarbeit der Release-Prüfung dahinter abgeschlossen.
@@ -68,7 +81,7 @@ Worauf diese Aussage ruht:
 - Keine Breaking Changes: Konfiguration, Capability Cards, gespeicherte Daten und das Protokollformat werden übernommen, Migrationen laufen beim ersten Start.
 - Eine bestehende Installation aktualisiert sich an Ort und Stelle: `panda update` hebt einen Knoten der Vorschau-Linie auf diesen Schnitt, und eine Neuinstallation ist `install.sh --version 0.1.0-preview`.
 - Der Build aus dem Quellcode verlangt jetzt Go 1.26.10 (eine Sicherheitsuntergrenze, keine Vorliebe — siehe den `govulncheck`-Eintrag unten).
-- `v0.0.11` bleibt der stabile Kanal: `/releases/latest`, der Ein-Zeilen-Installer und der Homebrew-Tap liefern weiterhin `v0.0.11`, und `v0.0.12-preview` bleibt per expliziter Version herunterladbar. Wer diesen Schnitt fahren will, pinnt ihn: `install.sh --version 0.1.0-preview`.
+- Zum Zeitpunkt dieses Schnitts war `v0.0.11` noch der stabile Kanal: `/releases/latest`, der Ein-Zeilen-Installer und der Homebrew-Tap lieferten ihn, also musste dieser Schnitt festgelegt werden — `install.sh --version 0.1.0-preview`. `v0.1.0` hat ihn später zum Standardkanal befördert.
 
 ### Hinzugefügt
 

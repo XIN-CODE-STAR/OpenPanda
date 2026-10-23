@@ -29,13 +29,15 @@ curl -fsSL https://raw.githubusercontent.com/Xustalis/OpenPanda/main/scripts/ins
 Equivalent explicit invocations:
 
 ```bash
-sh scripts/install.sh --version 0.1.0-preview   # install a specific version (default `latest` = newest stable; pre-releases must be pinned)
+sh scripts/install.sh --version 0.1.0           # install a specific version (default `latest` = newest stable; pre-releases must be pinned)
 sh scripts/install.sh --prefix /opt/openpanda  # custom install directory
 sh scripts/install.sh --lite                   # lite build: no embedded Web console/TUI (Linux only)
 sh scripts/install.sh --yes                    # also register auto-start (no prompt)
 sh scripts/install.sh --no-service             # do not touch auto-start
 sh scripts/install.sh --force                  # force a version older than the data directory's schema
 ```
+
+The current stable is `0.1.0`; the previous stable, `0.0.11`, is still installable by naming it (`--version 0.0.11`), as is any pre-release — `latest` only ever resolves the newest stable.
 
 Default prefix (aligned with Go's XDG/user-directory convention):
 
@@ -118,7 +120,7 @@ irm https://raw.githubusercontent.com/Xustalis/OpenPanda/main/scripts/install.ps
 Or download first and run:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.1.0-preview -Yes
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.1.0 -Yes
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -Force    # deliberate downgrade (skips the schema guard)
 ```
 
