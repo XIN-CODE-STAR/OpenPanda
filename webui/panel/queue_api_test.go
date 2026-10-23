@@ -144,7 +144,10 @@ func TestApproveAuthorizationReviewExecutesOnce(t *testing.T) {
 		t.Fatalf("decode create result: %+v, %v", created, err)
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
+	// Windows CI runners stall loopback/process work for seconds at a time
+	// (the cross-platform job reruns failures for the same reason). Give the
+	// engine a generous window so a slow runner is not read as a regression.
+	deadline := time.Now().Add(30 * time.Second)
 	for {
 		task, err := store.Get(context.Background(), created.TaskID)
 		if err == nil && task.State == core.StateReview {
@@ -171,7 +174,7 @@ func TestApproveAuthorizationReviewExecutesOnce(t *testing.T) {
 		t.Fatalf("decode approve operation: %+v, %v", op, err)
 	}
 
-	deadline = time.Now().Add(5 * time.Second)
+	deadline = time.Now().Add(30 * time.Second)
 	var (
 		task core.Task
 		err  error
@@ -182,7 +185,10 @@ func TestApproveAuthorizationReviewExecutesOnce(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("approved task did not reach done: %+v, %v", task, err)
+			// Distinguish "the command never ran" from "it ran but the state
+			// did not settle" — the counter is the execution's only trace.
+			ran, readErr := os.ReadFile(counter)
+			t.Fatalf("approved task did not reach done: %+v, %v (counter=%q readErr=%v)", task, err, ran, readErr)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
