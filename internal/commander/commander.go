@@ -299,10 +299,35 @@ func costMultiplier(tier string) float64 {
 	}
 }
 
-// RankAgents scores every agent that satisfies any of required and returns
-// the candidates sorted by descending score (ties broken by name, so the
-// choice stays deterministic across map iteration orders).
-//
+// PinnedAgentName reports whether req is an "agent:<name>" requirement and, if
+// so, the registry key it names on this router's card. known is false when the
+// pin names no agent the card carries — an uninstalled CLI or one this node
+// never registered — so a caller can tell "not a pin" from "a pin this node
+// cannot honour" instead of treating both as "no opinion".
+func (r *Router) PinnedAgentName(req string) (name string, pinned, known bool) {
+	if _, ok := strings.CutPrefix(req, "agent:"); !ok {
+		return "", false, false
+	}
+	name, _, known = r.resolveAgentName(req)
+	return name, true, known
+}
+
+// RosterOnCard returns the entries of names this node's capability card
+// actually carries. A thread's team can legitimately name agents that only a
+// peer has (the pick is mesh-wide), so an executor needs to know whether the
+// team it was handed can be staffed HERE before it routes: WithAgents degrades
+// to the unrestricted card when none of the names resolve, which silently
+// re-staffs a task the user scoped to agents this machine does not have.
+func (r *Router) RosterOnCard(names []string) []string {
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if _, ok := r.card.Agents[n]; ok {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // resolveAgentName resolves an agent requirement (e.g. "agent:claude_code", "claude",
 // "claude-code", "grok") to the registered agent on the card, accounting for
 // name variations and CLI binary aliases.
@@ -906,7 +931,11 @@ func (r *Router) runAdapterDefault(ctx context.Context, adapter string, prompt s
 	// different failure under injection is not more informative than the
 	// original failure — swapping it in would mask the real reason the task
 	// failed (e.g. report exit-code noise instead of "quota exhausted").
-	if !res.OK && !dec.Inject && !ModelCredsWithheld(ctx) && modelConfigured(injModel) && supportsModelInjection(name, adapter, injModel) && injModel.APIKey != "" && isProviderFailureOrAuth(res.Result+" "+res.Stderr) {
+	//
+	// injection.model=never opts out of this too: "never" is documented as
+	// "agents always use their own models", and a retry that hands the task
+	// panda's key is exactly the override the setting promises not to do.
+	if !res.OK && !dec.Inject && r.injectionModel != config.InjectionModelNever && !ModelCredsWithheld(ctx) && modelConfigured(injModel) && supportsModelInjection(name, adapter, injModel) && injModel.APIKey != "" && isProviderFailureOrAuth(res.Result+" "+res.Stderr) {
 		if injModel.BaseURL == "" || security.NewNetworkGuard(security.EndpointHost(injModel.BaseURL)).CheckURL(injModel.BaseURL) == nil {
 			injectedEnv := modelEnvForAdapter(injModel, name, adapter)
 			if len(injectedEnv) > 0 {

@@ -46,8 +46,13 @@ func TestInjectionAnnouncementFlow(t *testing.T) {
 	if !strings.Contains(result.Stdout, "work done") {
 		t.Fatalf("output must keep the agent result after the announcement, got %q", result.Stdout)
 	}
-	if !strings.Contains(result.Stdout, "injection.model=always") {
-		t.Fatalf("announcement must state the reason, got %q", result.Stdout)
+	if !strings.Contains(result.Stdout, "(always)") {
+		t.Fatalf("announcement must name the strategy that caused it, got %q", result.Stdout)
+	}
+	// The notice is a footnote, not a report: one short line, so the agent's
+	// own answer stays the first thing a reader sees.
+	if line, _, _ := strings.Cut(result.Stdout, "\n"); len(line) > 140 {
+		t.Fatalf("injection notice must stay one short line, got %d chars: %q", len(line), line)
 	}
 
 	events, err := c.store.Events(ctx, task.TaskID)
@@ -136,6 +141,11 @@ func TestInjectionCredentialRescueFlow(t *testing.T) {
 	}
 	if !strings.Contains(result.Stdout, "deepseek-v4-flash") {
 		t.Fatalf("announcement must include the rescued model name, got %q", result.Stdout)
+	}
+	// The notice has to say *rescue*, not repeat the policy answer it
+	// overrode: the decision said "don't inject" and the retry did anyway.
+	if !strings.Contains(result.Stdout, "(rescue)") {
+		t.Fatalf("announcement must name the rescue strategy, got %q", result.Stdout)
 	}
 
 	events, err := c.store.Events(ctx, task.TaskID)

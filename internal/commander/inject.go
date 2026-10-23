@@ -14,14 +14,32 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/providers"
 )
 
+// InjectionKind classifies why an injection happened, in the compact form the
+// task-output notice prints. The full sentence lives in Decision.Reason,
+// which is audit and event material — the notice is a one-line footnote on
+// the agent's own output, so it carries the config value, not prose.
+type InjectionKind string
+
+const (
+	// InjectionKindAuto is the "agent had no credentials of its own" path.
+	InjectionKindAuto InjectionKind = "auto"
+	// InjectionKindAlways is the injection.model=always override.
+	InjectionKindAlways InjectionKind = "always"
+	// InjectionKindRescue is the failure-time retry: the agent's own model
+	// failed with a provider/auth error, so panda's model ran the second
+	// attempt.
+	InjectionKindRescue InjectionKind = "rescue"
+)
+
 // InjectionDecision is the outcome of the model-injection policy check for
 // one agent adapter: whether panda overrides the agent's model endpoint via
 // env, and a secret-free human-readable reason for announcements/audit.
 type InjectionDecision struct {
 	Inject  bool
 	Reason  string
-	Model   string // model name injected (empty when Inject is false)
-	BaseURL string // endpoint injected (empty when Inject is false)
+	Model   string        // model name injected (empty when Inject is false)
+	BaseURL string        // endpoint injected (empty when Inject is false)
+	Kind    InjectionKind // why it injected; empty when Inject is false
 }
 
 // injectionModelFor resolves the model used when injecting into one agent.
@@ -100,6 +118,7 @@ func (r *Router) InjectionDecision(name, adapter string) InjectionDecision {
 		return InjectionDecision{
 			Inject:  true,
 			Reason:  "injection.model=always",
+			Kind:    InjectionKindAlways,
 			Model:   effectiveModelNameFor(name, adapter, m),
 			BaseURL: effectiveBaseURLFor(name, adapter, m),
 		}
@@ -145,6 +164,7 @@ func (r *Router) InjectionDecision(name, adapter string) InjectionDecision {
 	return InjectionDecision{
 		Inject:  true,
 		Reason:  "agent has no own model credentials and panda has a model configured",
+		Kind:    InjectionKindAuto,
 		Model:   effectiveModelNameFor(name, adapter, m),
 		BaseURL: effectiveBaseURLFor(name, adapter, m),
 	}
@@ -522,26 +542,58 @@ func jsonFieldNonEmpty(obj map[string]json.RawMessage, path string) bool {
 	return true // non-string, non-empty value (object/array)
 }
 
-// InjectionNotice renders the explicit one-line announcement prepended to
-// the task output whenever a model injection happens, so the user always
-// sees what was injected and why (no secrets included).
+// InjectedModelEndpoint returns the model name and endpoint this node would
+// inject into the named agent, resolved through the per-agent pin
+// (injection.agents) and the adapter's dialect. The failure-time rescue needs
+// it: the policy decision said "don't inject", so it carries no endpoint of
+// its own, and falling back to the node model's URL would announce an
+// endpoint the retry never used whenever that agent pins its own.
+func (r *Router) InjectedModelEndpoint(name, adapter string) (string, string) {
+	m := r.injectionModelFor(name, adapter)
+	return effectiveModelNameFor(name, adapter, m), effectiveBaseURLFor(name, adapter, m)
+}
+
+// InjectionNotice renders the one-line announcement prepended to a task's
+// output whenever a model injection happens, so the user always sees what was
+// injected and why (no secrets included).
+//
+// Deliberately one short line, one language: it is a footnote on someone
+// else's output. The endpoint drops its scheme (the full URL is in the audit
+// log and the model_injection event) and the reason collapses to the config
+// value that caused it — the old form duplicated the whole sentence in
+// English and Chinese, which buried the agent's actual answer.
 func InjectionNotice(d InjectionDecision, agent string) string {
-	params := ""
+	var b strings.Builder
+	b.WriteString("[panda] injected model")
+	if agent != "" {
+		b.WriteString(" for ")
+		b.WriteString(agent)
+	}
 	if d.Model != "" {
-		params = "model=" + d.Model
-		if d.BaseURL != "" {
-			params += ", endpoint=" + d.BaseURL
-		}
+		b.WriteString(": ")
+		b.WriteString(d.Model)
 	}
-	en := "[panda] model dispatch: injected model capability for agent \"" + agent + "\""
-	zh := "模型调度：已为 agent「" + agent + "」注入模型能力"
-	if params != "" {
-		en += " (" + params + ")"
-		zh += "（" + params + "）"
+	if host := noticeEndpoint(d.BaseURL); host != "" {
+		b.WriteString(" @ ")
+		b.WriteString(host)
 	}
-	if d.Reason != "" {
-		en += ", config: " + d.Reason
-		zh += "，配置：" + d.Reason
+	if d.Kind != "" {
+		b.WriteString(" (")
+		b.WriteString(string(d.Kind))
+		b.WriteString(")")
 	}
-	return en + " / " + zh
+	return b.String()
+}
+
+// noticeEndpoint trims a base URL to host+path for the notice line.
+func noticeEndpoint(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return strings.TrimRight(raw, "/")
+	}
+	return u.Host + strings.TrimRight(u.Path, "/")
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/Xustalis/OpenPanda/internal/core"
 	"github.com/Xustalis/OpenPanda/internal/guard"
+	"github.com/Xustalis/OpenPanda/internal/i18n"
 	"github.com/Xustalis/OpenPanda/internal/log"
 	"github.com/Xustalis/OpenPanda/internal/sessions"
 )
@@ -99,7 +100,45 @@ func (h *handler) taskSummary(ctx context.Context, t core.Task) string {
 	if t.State != core.StateDone {
 		reason = h.failureReason(ctx, t.TaskID)
 	}
-	return summaryText(t, reason, h.taskAgent(ctx, t))
+	agent := h.taskAgent(ctx, t)
+	return summaryText(t, reason, agent, h.substitutedFrom(ctx, t.TaskID, agent))
+}
+
+// substitutedFrom names the agent the plan had chosen when the executor could
+// not run it and the fallback chain finished the round instead. Empty when the
+// agent that answered is the one the plan picked.
+//
+// The swap is deliberate (core/run.go annotateAgentSubstitution explains why
+// refusing the whole task serves nobody) and it is recorded twice: as an
+// agent_fallback event, and as a note at the head of the result payload. The
+// thread keeps neither — it prints one closing paragraph — so a pinned
+// "agent:claude_code" answered by deepseek_harness read as a silent
+// bait-and-switch: the line named one employee for the job and another for the
+// reply. This is where that sentence is read, so this is where it gets said.
+func (h *handler) substitutedFrom(ctx context.Context, taskID, agent string) string {
+	if agent == "" {
+		return ""
+	}
+	events, err := h.store.Events(ctx, taskID)
+	if err != nil {
+		return ""
+	}
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type != "agent_fallback" {
+			continue
+		}
+		var d struct {
+			From string `json:"from"`
+			To   string `json:"to"`
+		}
+		if json.Unmarshal([]byte(events[i].DataJSON), &d) != nil {
+			continue
+		}
+		if d.From != "" && d.To == agent {
+			return d.From
+		}
+	}
+	return ""
 }
 
 // summaryText is the pure composition of the report, in two parts and no
@@ -114,12 +153,20 @@ func (h *handler) taskSummary(ctx context.Context, t core.Task) string {
 // into the model's own history spent the context window on its own past
 // prose. One conclusion paragraph is the summary — the sections above it are
 // the evidence behind it.
-func summaryText(t core.Task, reason, agent string) string {
+func summaryText(t core.Task, reason, agent, substituted string) string {
 	head := "[" + t.State + "] "
 	if agent != "" {
 		head += "@" + agent + " · "
 	}
 	head += t.Title
+	// The substitution note rides the orchestration line, right after the
+	// title: the reader who wonders "did it really test claude_code?" is
+	// already reading this line, and the body below belongs to the employee
+	// that actually spoke. The leading space is part of the Latin strings —
+	// CJK locales set the note in full-width brackets and need none.
+	if substituted != "" && agent != "" && substituted != agent {
+		head += i18n.Tf(t.GetUserLocale(), "web.session.agentSubstituted", "from", substituted, "to", agent)
+	}
 
 	// A failed run's own reason is its conclusion: there is no adapter answer
 	// to take a closing paragraph from, and the reason is what the reader

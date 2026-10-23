@@ -306,6 +306,54 @@ func (c *Core) taskAllowAgents(ctx context.Context, taskID string) []string {
 	return spec.AllowAgents
 }
 
+// rosterHonoursPins refuses a task whose requires pin an agent the thread's
+// roster excludes.
+//
+// The roster is the user's own pick and still outranks a model-emitted pin —
+// but a pin is also the only place a task says WHICH employee it is for. When
+// the two disagree the task is contradictory, not merely mis-routed: running it
+// on a roster member leaves the target text ("output a line proving
+// claude_code works") pointing at an agent that never started, and the agent
+// that did run has no way to know the line is a lie. Failing closed keeps the
+// roster authoritative and keeps a pass attributable to the agent that earned
+// it.
+//
+// A pin naming an agent this node does not carry at all is refused too: the
+// roster cannot honour it, and the substitute would be just as unrelated. The
+// raw name is compared after the same normalisation resolveAgentName applies
+// (case, "-" vs "_"), so "claude-code" and "claude_code" are one agent.
+func rosterHonoursPins(router *commander.Router, roster, required []string) error {
+	for _, req := range required {
+		name, pinned, known := router.PinnedAgentName(req)
+		if !pinned {
+			continue
+		}
+		if !known {
+			name = strings.TrimPrefix(req, "agent:")
+		}
+		if !rosterIncludes(roster, name) {
+			return fmt.Errorf("task pins agent %q, which this thread's roster (%s) does not include",
+				name, strings.Join(roster, ", "))
+		}
+	}
+	return nil
+}
+
+// rosterIncludes matches a pin against the roster the way routing does: exact
+// key first, then the case/dash-normalised form.
+func rosterIncludes(roster []string, name string) bool {
+	want := strings.ReplaceAll(strings.ToLower(name), "-", "_")
+	for _, n := range roster {
+		if n == name {
+			return true
+		}
+		if strings.ReplaceAll(strings.ToLower(n), "-", "_") == want {
+			return true
+		}
+	}
+	return false
+}
+
 // resolveRunPlan turns a task's requires into an executable plan: route
 // selection, the just-in-time usability and circuit-breaker gates, and the
 // failover/alternate pruning those gates imply. It is run()'s first phase —
@@ -322,6 +370,29 @@ func (c *Core) resolveRunPlan(ctx context.Context, taskID string, required []str
 	// spec_json, so a task delegated to another node arrives with the same
 	// restriction instead of being re-opened to every agent there.
 	if roster := c.taskAllowAgents(ctx, taskID); len(roster) > 0 {
+		// "The roster wins" used to mean "rank the roster instead", which
+		// swapped the employee while leaving the task's own text intact. A task
+		// that names an agent is a task ABOUT that agent: three "test
+		// agent:<name>" tasks pinned to claude_code, codex and deepseek_harness
+		// ran on a [deepseek_harness, opencode] roster, all three executed on
+		// deepseek_harness, and each printed "<name> 调用成功" for an agent that
+		// never started — three green passes, two of them fiction. Refuse the
+		// mismatch instead: nothing runs, and the reason names both sides.
+		if err := rosterHonoursPins(router, roster, required); err != nil {
+			return commander.Plan{}, nil, "", err
+		}
+		// A roster naming only agents this node does not carry cannot be
+		// staffed here. WithAgents degrades to the unrestricted card in that
+		// case (by design: the pick is mesh-wide and the task may have been
+		// meant for a peer), but this node has already been chosen to execute,
+		// so degrading means running on an agent the user explicitly did not
+		// pick. Say so instead — "grok was never tested" reads very differently
+		// once the reason is "grok_build is not installed on xin".
+		if len(router.RosterOnCard(roster)) == 0 {
+			return commander.Plan{}, nil, "", fmt.Errorf(
+				"this thread's roster (%s) names no agent installed on this node; install one of them or clear the team",
+				strings.Join(roster, ", "))
+		}
 		router = router.WithAgents(roster)
 	}
 	plan, err := router.Route(required)
@@ -1066,6 +1137,12 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 	beforeOK := w.beforeOK
 	attemptID := w.attemptID
 	shadowConflicts := w.shadowConflicts
+	// The injection decision is per task, not per round: a supervised task
+	// re-runs the same adapter with the same env, so recording the identical
+	// model_injection event once keeps the detail view from showing the same
+	// footnote on every round. A round that switches (policy injection, then a
+	// rescue) differs in the key and is recorded.
+	lastInjectionKey := ""
 	// Supervision loop. An agent task under a supervisor executes once and is
 	// then judged; a "continue" verdict re-delegates the follow-up instruction
 	// to the same plan (whose fallback chain may pick a different agent if the
@@ -1765,6 +1842,30 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 				if res.Model != "" {
 					injection.Model = res.Model
 				}
+				if rescued {
+					injection.Kind = commander.InjectionKindRescue
+					// The retry injected the per-agent pin (injection.agents),
+					// not the node model, so resolve the endpoint the same way
+					// the adapter did. Reporting the node's URL here would
+					// announce an endpoint the run never touched whenever the
+					// agent pins its own (e.g. deepseek_harness on the
+					// Anthropic-compatible endpoint). The adapter comes from
+					// the agent that actually ran: a fallback swaps res.Agent
+					// without rewriting the plan.
+					if router != nil {
+						adapter := plan.Adapter
+						if res.Agent != plan.Agent {
+							if ag, ok := router.Agent(res.Agent); ok {
+								adapter = ag.Adapter
+							}
+						}
+						model, endpoint := router.InjectedModelEndpoint(res.Agent, adapter)
+						if injection.Model == "" {
+							injection.Model = model
+						}
+						injection.BaseURL = endpoint
+					}
+				}
 				if injection.BaseURL == "" {
 					injection.BaseURL = commander.EffectiveBaseURL(c.model)
 				}
@@ -1781,10 +1882,15 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 				}
 				c.audit(ctx, taskID, "model:injected", res.Agent, "injected",
 					"model="+injection.Model+" endpoint="+injection.BaseURL+" reason="+injection.Reason)
-				if err := c.store.RecordEvent(ctx, taskID, EvModelInjection, map[string]any{
-					"agent": res.Agent, "model": injection.Model, "base_url": injection.BaseURL, "reason": injection.Reason,
-				}); err != nil {
-					c.logger.Warn("record model injection event", "task", taskID, "err", err)
+				key := res.Agent + "|" + injection.Model + "|" + injection.BaseURL + "|" + string(injection.Kind)
+				if key != lastInjectionKey {
+					lastInjectionKey = key
+					if err := c.store.RecordEvent(ctx, taskID, EvModelInjection, map[string]any{
+						"agent": res.Agent, "model": injection.Model, "base_url": injection.BaseURL,
+						"reason": injection.Reason, "kind": string(injection.Kind),
+					}); err != nil {
+						c.logger.Warn("record model injection event", "task", taskID, "err", err)
+					}
 				}
 			}
 			if res.OK {

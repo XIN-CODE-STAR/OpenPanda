@@ -157,15 +157,31 @@ func TestInjectionDecisionDefaultMode(t *testing.T) {
 }
 
 // TestInjectionNoticeNoSecrets: the announcement names the model/endpoint
-// and reason but never the API key.
+// and strategy but never the API key, and stays one short line — it is a
+// footnote on the agent's own output, not a report.
 func TestInjectionNoticeNoSecrets(t *testing.T) {
-	d := InjectionDecision{Inject: true, Reason: "injection.model=always", Model: "deepseek-v4-flash", BaseURL: "https://api.deepseek.com/anthropic"}
+	d := InjectionDecision{Inject: true, Kind: InjectionKindAlways, Reason: "injection.model=always", Model: "deepseek-v4-flash", BaseURL: "https://api.deepseek.com/anthropic"}
 	note := InjectionNotice(d, "claude_code")
 	if !strings.Contains(note, "deepseek-v4-flash") || !strings.Contains(note, "claude_code") {
 		t.Fatalf("notice should name model and agent: %q", note)
 	}
 	if strings.Contains(note, "sk-") {
 		t.Fatalf("notice must never contain secrets: %q", note)
+	}
+	if strings.Contains(note, "\n") {
+		t.Fatalf("notice must be a single line: %q", note)
+	}
+	if len(note) > 140 {
+		t.Fatalf("notice must stay short (%d chars): %q", len(note), note)
+	}
+	if !strings.Contains(note, "(always)") || !strings.Contains(note, "api.deepseek.com/anthropic") {
+		t.Fatalf("notice should carry the strategy and endpoint host: %q", note)
+	}
+	// A rescue reads differently from a policy injection: the reader has to
+	// know the agent's own model failed before panda's ran.
+	rescue := InjectionNotice(InjectionDecision{Inject: true, Kind: InjectionKindRescue, Model: "glm-5.3-flash", BaseURL: "https://open.bigmodel.cn/api/paas/v4"}, "opencode")
+	if !strings.Contains(rescue, "(rescue)") || strings.Contains(rescue, "https://") {
+		t.Fatalf("rescue notice should say rescue and drop the scheme: %q", rescue)
 	}
 }
 
@@ -557,6 +573,52 @@ func TestDynamicModelInjectionFallbackOnAuthError(t *testing.T) {
 	res := r.runAdapterDefault(context.Background(), "claude_code.py", "test prompt", "")
 	if !res.OK || attempts != 2 {
 		t.Fatalf("expected dynamic injection retry to succeed in 2 attempts: ok=%v attempts=%d res=%+v", res.OK, attempts, res)
+	}
+}
+
+// TestInjectionNeverBlocksRescue: injection.model=never is documented as
+// "agents always use their own models", so the failure-time rescue must not
+// quietly hand the task panda's key when the agent's own model errors out.
+func TestInjectionNeverBlocksRescue(t *testing.T) {
+	cleanCredentialEnv(t)
+	t.Setenv("ANTHROPIC_API_KEY", "agent-own-key-that-403s")
+	r := injectionRouter(flashModel, config.InjectionModelNever)
+	attempts := 0
+	r.SetAdapterProcessRunner(func(ctx context.Context, adapter, prompt, cwd string, env []string) AgentResult {
+		attempts++
+		return AgentResult{OK: false, Result: "API Error: 403 用户额度不足", ExitCode: 1}
+	})
+	res := r.runAdapterDefault(context.Background(), "claude_code.py", "p", "")
+	if attempts != 1 {
+		t.Fatalf("never mode must not retry with panda's model, attempts=%d", attempts)
+	}
+	if res.Injected {
+		t.Fatalf("never mode must not report an injection: %+v", res)
+	}
+	if !strings.Contains(res.Result, "403") {
+		t.Fatalf("the agent's own failure must be reported verbatim, got %q", res.Result)
+	}
+}
+
+// TestInjectedModelEndpointUsesAgentPin: the rescue notice resolves the
+// endpoint the retry actually used — the per-agent pin, in that agent's
+// dialect — not the node model's URL.
+func TestInjectedModelEndpointUsesAgentPin(t *testing.T) {
+	node := config.ModelConfig{
+		Provider: "zhipu", APIType: "openai",
+		BaseURL: "https://open.bigmodel.cn/api/paas/v4",
+		APIKey:  "sk-node", Model: "glm-5.3-flash",
+	}
+	pin := config.ModelConfig{APIType: "anthropic", BaseURL: "https://open.bigmodel.cn/api/anthropic"}
+	r := NewRouter(testCard(), NewExecutor(), node,
+		config.InjectionConfig{Model: config.InjectionModelAuto,
+			Agents: map[string]config.ModelConfig{"deepseek_harness": pin}}, config.RoutingConfig{})
+
+	if model, endpoint := r.InjectedModelEndpoint("deepseek_harness", "deepseek_harness.py"); endpoint != "https://open.bigmodel.cn/api/anthropic" || model != "glm-5.3-flash" {
+		t.Fatalf("pinned agent must resolve its own endpoint, got model=%q endpoint=%q", model, endpoint)
+	}
+	if _, endpoint := r.InjectedModelEndpoint("opencode", "opencode.py"); endpoint != "https://open.bigmodel.cn/api/paas/v4" {
+		t.Fatalf("unpinned agent must fall back to the node endpoint, got %q", endpoint)
 	}
 }
 
