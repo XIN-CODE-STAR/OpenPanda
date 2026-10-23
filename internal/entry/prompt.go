@@ -258,6 +258,15 @@ type PromptOptions struct {
 	// staged plan), or "spec" (write a detailed specification). Empty means
 	// the classifier decides on its own.
 	RequestMode string
+	// AgentRoster is the thread's team pick — the agents the user chose for
+	// this conversation, in the order they picked them. It is shown to the
+	// model because a roster the model cannot see is a roster it will
+	// contradict: asked to "test the agents I picked", an entry model that
+	// only knows the node's capability card invented claude_code, codex and
+	// deepseek_harness for a thread whose team was deepseek_harness and
+	// opencode, and pinned each task to an agent the thread had excluded.
+	// Empty means "no pick" (the scheduler routes by capability).
+	AgentRoster []string
 }
 
 // ClassifyOption tweaks the system prompt the Classify* entry points build.
@@ -283,6 +292,39 @@ func WithRequestMode(mode string) ClassifyOption {
 			p.RequestMode = mode
 		}
 	}
+}
+
+// WithAgentRoster records the thread's team pick so the entry model can name
+// the user's own agents instead of inventing them. Names are trimmed, empty
+// entries dropped, duplicates removed, order preserved.
+func WithAgentRoster(names []string) ClassifyOption {
+	return func(p *PromptOptions) {
+		seen := make(map[string]bool, len(names))
+		out := make([]string, 0, len(names))
+		for _, raw := range names {
+			name := strings.TrimSpace(raw)
+			if name == "" || seen[name] {
+				continue
+			}
+			seen[name] = true
+			out = append(out, name)
+		}
+		p.AgentRoster = out
+	}
+}
+
+// agentRosterLine renders the thread's team pick. It is deliberately blunt
+// about two things the model got wrong when this section did not exist: the
+// roster is a closed list (a task pinned elsewhere is refused, not re-staffed),
+// and "test the agents I picked" means one task per listed agent rather than
+// whatever names happen to appear in the capability summary.
+func agentRosterLine(names []string) string {
+	list := strings.Join(names, ", ")
+	return "The user picked these agents for this conversation: " + list + ".\n" +
+		"Only these agents may run this thread's tasks. A task whose requires pin an agent outside this list is refused.\n" +
+		"When the user asks you to test, compare, or exercise \"the agents I picked\", emit one task per agent on this list, each with requires [\"agent:<name>\"] — do not invent agents that are not on it, and do not assume a single task covers the whole team.\n" +
+		"本会话团队：" + list + "。只有名单内的 agent 可以执行本会话的任务；requires 点名名单外 agent 的任务会被拒绝。\n" +
+		"用户要求「测试我选的这几个 agent」时，为名单内每个 agent 各发一个任务，requires 用 [\"agent:<name>\"]；不得编造名单外的 agent，也不要用一个任务代表整个团队。"
 }
 
 // requestModeSection renders the slash-mode directive. It goes after the user
@@ -346,6 +388,10 @@ func BuildPrompt(opts PromptOptions) string {
 	}
 	b.WriteString("\n\n═══ Connected Devices ═══\n")
 	b.WriteString(devices)
+	if len(opts.AgentRoster) > 0 {
+		b.WriteString("\n\n═══ This Thread's Team ═══\n")
+		b.WriteString(agentRosterLine(opts.AgentRoster))
+	}
 	b.WriteString("\n\n═══ User Memory (Context Reference Only) ═══\n")
 	b.WriteString(memory)
 	if section, ok := requestModeSections[opts.RequestMode]; ok {

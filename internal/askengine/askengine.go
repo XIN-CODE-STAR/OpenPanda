@@ -1740,6 +1740,15 @@ func (e *Engine) AskTurnsScoped(ctx context.Context, history []entry.Turn, promp
 	if scope.Mode != "" {
 		classifyOpts = append(classifyOpts, entry.WithRequestMode(scope.Mode))
 	}
+	// The thread's roster goes into the prompt as well as into the task spec.
+	// The spec is what the executor enforces; the prompt is what keeps the
+	// entry model from proposing an agent the executor will refuse — asked to
+	// "test the agents I picked" with no roster in sight, it invented
+	// claude_code and codex for a thread whose team was deepseek_harness and
+	// opencode.
+	if len(scope.Agents) > 0 {
+		classifyOpts = append(classifyOpts, entry.WithAgentRoster(scope.Agents))
+	}
 
 	// Memory wall (design §17.2): Hermes personal memory enters only
 	// project-free conversations. A pinned workDir marks a project/workspace
@@ -1822,12 +1831,35 @@ func (e *Engine) AskTurnsScoped(ctx context.Context, history []entry.Turn, promp
 	toolAuthorized, toolDenied := verdict.gate(authorize)
 	approvalMode := verdict.mode
 	const maxRounds = 6
-	// maxTasks bounds how many sub-agent rounds one ask may run. A task round
-	// is minutes of work and a full agent transcript of tokens, so its budget
-	// is separate from (and inside) the round budget: the loop may still spend
-	// its remaining rounds converging on a report.
-	const maxTasks = 3
-	taskRounds := 0
+	// The sub-agent budget is derived, not fixed: a task round is minutes of
+	// work and a full agent transcript of tokens, so it stays separate from
+	// (and inside) the round budget — but its width comes from what the user
+	// actually asked for. The roster is their own count of hands; task_budget
+	// lets the model declare more for a fan-out nobody enumerated. See
+	// budget.go for why the prompt itself is not parsed.
+	budget := newTaskBudget(len(scope.Agents))
+	// dispatchedThisAsk answers a re-sent task_submit with the id it already
+	// has: a refusal teaches the model to retry, and retrying the whole batch
+	// must not run the tasks that already went out a second time.
+	dispatchedThisAsk := make(map[string]string)
+	// budgetAdvisory rides every exit: a dispatch the budget turned away is a
+	// decision the user must be able to see, not a task that quietly never
+	// existed.
+	budgetAdvisory := func(r *Result) *Result {
+		if r == nil {
+			return r
+		}
+		note := budgetWarning(budget, effectiveLocale)
+		if note == "" {
+			return r
+		}
+		if r.Warning == "" {
+			r.Warning = note
+		} else {
+			r.Warning += " · " + note
+		}
+		return r
+	}
 	// lastTask keeps the most recent task outcome so the converged Result
 	// carries the task fields (id/state/output) alongside the model's report.
 	var lastTask *Result
@@ -1889,6 +1921,10 @@ func (e *Engine) AskTurnsScoped(ctx context.Context, history []entry.Turn, promp
 	if reg != nil {
 		reg = reg.Copy()
 		reg.Register(e.dispatchTaskTool(prompt, scope, authorize, cb, &taskCapture, effectiveLocale))
+		// task_budget sits beside task_submit: the limit is derived (roster
+		// size or defaultTaskBudget), and this is how a model widens it for a
+		// fan-out the user described in prose instead of in the team picker.
+		reg.Register(e.taskBudgetTool(budget, effectiveLocale))
 	}
 
 rounds:
@@ -1974,16 +2010,19 @@ rounds:
 				if lastTask.Thought == "" {
 					lastTask.Thought = accumulatedReasoning.String()
 				}
-				return finalizeLastTask(lastTask), nil
+				return budgetAdvisory(finalizeLastTask(lastTask)), nil
 			}
-			return &Result{Kind: "answer", Answer: out.Answer, Thought: accumulatedReasoning.String()}, nil
+			return budgetAdvisory(&Result{Kind: "answer", Answer: out.Answer, Thought: accumulatedReasoning.String()}), nil
 		case entry.KindTask:
-			if taskRounds >= maxTasks {
+			if budget.exhausted() {
 				// Refuse before submitTask: the budget limits actual task
-				// execution, not merely how many outcomes are replayed.
+				// execution, not merely how many outcomes are replayed. The
+				// refusal is recorded so the surface can say what is missing
+				// — and so the model knows it may raise the limit and retry.
+				budget.refuse(out.Task.Title)
 				turns = append(turns,
 					entry.Turn{Role: "assistant", Content: taskDispatchNote(out.Task, effectiveLocale)},
-					entry.Turn{Role: "user", Content: taskBudgetNote(maxTasks, effectiveLocale)},
+					entry.Turn{Role: "user", Content: budgetRefusalNote(budget, out.Task.Title, effectiveLocale)},
 				)
 				break rounds
 			}
@@ -2003,7 +2042,7 @@ rounds:
 				// (awaitQueued) already followed the row to settle inside
 				// submitTask, so its res falls through to the ordinary
 				// observation loop like an inline outcome.
-				return res, nil
+				return budgetAdvisory(res), nil
 			}
 			if res.NeedsApproval {
 				// The inline gate parks the ask; the front-end prompts on its
@@ -2016,9 +2055,9 @@ rounds:
 				// context would fail the next model call anyway, and the task
 				// itself keeps running — a released front end never cancels
 				// queued work.
-				return res, nil
+				return budgetAdvisory(res), nil
 			}
-			taskRounds++
+			budget.spend()
 			lastTask = res
 			// The sub-agent round: the task is one step of this conversation,
 			// not its end. Replay the dispatch as the model's own words, feed
@@ -2046,14 +2085,33 @@ rounds:
 			// markup the model fell back to).
 			results := make([]string, len(calls))
 			var dispatched []*Result
+			refusedThisRound := 0
 			for i, call := range calls {
 				cb.progress(Progress{Kind: ProgressTool, Name: call.Tool})
-				if call.Tool == entry.ToolNameTaskSubmit && taskRounds >= maxTasks {
-					// task_submit is a real delegation hidden behind the native
-					// tool protocol. Refuse it before executeTool for the same
-					// hard execution budget as a classified task directive.
-					results[i] = taskBudgetNote(maxTasks, effectiveLocale)
-					continue
+				if call.Tool == entry.ToolNameTaskSubmit {
+					// A refused dispatch invites a retry: the model raises the
+					// budget and re-sends the batch. Re-sending the whole batch
+					// would re-run the tasks that already went out, so the same
+					// dispatch is answered with the id it already has instead of
+					// being executed twice.
+					key := dispatchKey(call.Arguments)
+					if id, done := dispatchedThisAsk[key]; done {
+						results[i] = alreadyDispatchedNote(id, effectiveLocale)
+						continue
+					}
+					if budget.exhausted() {
+						// task_submit is a real delegation hidden behind the
+						// native tool protocol. Refuse it before executeTool for
+						// the same hard execution budget as a classified task
+						// directive — and say which task, so the model can raise
+						// the limit (task_budget) and re-dispatch instead of
+						// losing it.
+						title, _ := call.Arguments["title"].(string)
+						budget.refuse(title)
+						refusedThisRound++
+						results[i] = budgetRefusalNote(budget, strings.TrimSpace(title), effectiveLocale)
+						continue
+					}
 				}
 				// Execute against the same registry snapshot classification
 				// saw: a mid-ask SetMCPCommand swap would otherwise make the
@@ -2063,7 +2121,11 @@ rounds:
 				for _, d := range taskCapture.takeAll() {
 					dispatched = append(dispatched, d)
 					if !d.NeedsApproval && d.TaskID != "" {
-						taskRounds++
+						budget.spend()
+						// A task refused in an earlier round and dispatched
+						// now is no longer missing.
+						budget.settled(d.TaskTitle)
+						dispatchedThisAsk[dispatchKey(call.Arguments)] = d.TaskID
 					}
 				}
 			}
@@ -2102,10 +2164,20 @@ rounds:
 				}
 			}
 			if queuedReceipt != nil {
-				return queuedReceipt, nil
+				if refusedThisRound == 0 {
+					return budgetAdvisory(queuedReceipt), nil
+				}
+				// Something was turned away this round. Ending the turn on the
+				// receipt is what made a dropped agent invisible: the receipt
+				// says "dispatched" and nothing says what did not go out. Give
+				// the model its next turn to act on the refusal (task_budget,
+				// then re-dispatch the named tasks), and keep the receipt as
+				// lastTask so a model that reports instead still lands on the
+				// task card — with the advisory attached.
+				lastTask = queuedReceipt
 			}
 		default:
-			return &Result{Kind: "answer", Answer: out.Answer}, nil
+			return budgetAdvisory(&Result{Kind: "answer", Answer: out.Answer}), nil
 		}
 	}
 
@@ -2167,10 +2239,11 @@ rounds:
 		if e.sched.Load() == nil {
 			return &Result{Kind: "answer", Answer: i18n.Tf(effectiveLocale, "ask.loop.noConvergeTask", "n", strconv.Itoa(maxRounds), "title", final.Task.Title)}, nil
 		}
-		if lastTask != nil && taskRounds >= maxTasks {
+		if lastTask != nil && budget.exhausted() {
 			// The loop exhausted the task budget and the model still wants
 			// another delegation: surface what ran instead of exceeding it.
-			return finalizeLastTask(lastTask), nil
+			budget.refuse(final.Task.Title)
+			return budgetAdvisory(finalizeLastTask(lastTask)), nil
 		}
 		cb.progress(Progress{Kind: ProgressTask, Name: final.Task.Title})
 		res := e.submitTask(ctx, final.Task, prompt, authorize, scope, accumulatedReasoning.String(), cb, e.awaitQueued)
@@ -2183,7 +2256,7 @@ rounds:
 				e.logger.Warn("askengine: task report degraded", "task", res.TaskID, "err", rerr)
 			}
 		}
-		return res, nil
+		return budgetAdvisory(res), nil
 	}
 	if final.Kind == entry.KindPlan {
 		if e.sched.Load() == nil {
@@ -2197,9 +2270,9 @@ rounds:
 	}
 	if lastTask != nil {
 		lastTask.Answer = final.Answer
-		return finalizeLastTask(lastTask), nil
+		return budgetAdvisory(finalizeLastTask(lastTask)), nil
 	}
-	return &Result{Kind: "answer", Answer: final.Answer}, nil
+	return budgetAdvisory(&Result{Kind: "answer", Answer: final.Answer}), nil
 }
 
 // WorkPath returns the configured work directory — the project workspace

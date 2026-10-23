@@ -499,6 +499,91 @@ func (e *Engine) dispatchTaskTool(prompt string, scope AskScope, authorize bool,
 	}
 }
 
+// taskBudgetTool builds task_budget — the model's own way to widen the round's
+// dispatch limit. The limit is derived (defaultTaskBudget, or the roster's
+// size; see budget.go), so a fan-out nobody enumerated — "check these five
+// modules", with no team picked — would otherwise be cut at the floor with the
+// model unable to do anything about it. Declaring the count here is auditable
+// (one tool call, one ceiling) where parsing a number out of prose is a guess
+// in five languages.
+//
+// Tier 1: it mutates nothing outside this ask's counter.
+func (e *Engine) taskBudgetTool(budget *taskBudget, loc ...i18n.Locale) entry.Tool {
+	targetLoc := i18n.ChineseSimp
+	if len(loc) > 0 && loc[0] != "" {
+		targetLoc = loc[0]
+	}
+	desc := "提高本轮对话的子任务派发上限。上限默认 3，会话选定的 agent 名单会按人数自动放宽；当你确实要派发的任务多于当前上限时，先调用它申报本轮需要的任务总数（最高 " + strconv.Itoa(taskCeiling) + "），再逐个派发。不要为了「以防万一」预先调高。"
+	props := map[string]any{
+		"count":  map[string]any{"type": "integer", "description": "本轮需要的子任务总数（含已派发的）"},
+		"reason": map[string]any{"type": "string", "description": "为什么需要这么多（一句话，会记录在案）"},
+	}
+	if targetLoc == i18n.English {
+		desc = "Raise this round's subagent dispatch limit. The limit defaults to 3 and a conversation roster raises it to the number of agents the user picked; when you genuinely need to dispatch more than the current limit, call this with the total number of tasks the round needs (ceiling " + strconv.Itoa(taskCeiling) + ") before dispatching them. Do not raise it pre-emptively."
+		props = map[string]any{
+			"count":  map[string]any{"type": "integer", "description": "Total subagent tasks this round needs, including ones already dispatched"},
+			"reason": map[string]any{"type": "string", "description": "Why that many (one sentence; recorded)"},
+		}
+	}
+	return entry.Tool{
+		Name:        entry.ToolNameTaskBudget,
+		Description: desc,
+		Tier:        defense.TierReversible,
+		Schema: map[string]any{
+			"type":       "object",
+			"properties": props,
+			"required":   []string{"count"},
+		},
+		Run: func(ctx context.Context, args map[string]any) (string, error) {
+			want := intArg(args, "count")
+			if want <= 0 {
+				if targetLoc == i18n.English {
+					return "", fmt.Errorf("count must be a positive integer")
+				}
+				return "", fmt.Errorf("count 必须是正整数")
+			}
+			limit := budget.request(want)
+			// The model gets the number in force, not the number it asked
+			// for: the ceiling can answer differently, and a model that
+			// believes it has ten slots when it has eight will lose two
+			// tasks to the very refusal this tool exists to prevent.
+			clamped := ""
+			if want > limit {
+				if targetLoc == i18n.English {
+					clamped = fmt.Sprintf(" (asked for %d; the ceiling is %d)", want, limit)
+				} else {
+					clamped = fmt.Sprintf("（申报 %d，上限为 %d）", want, limit)
+				}
+			}
+			if targetLoc == i18n.English {
+				return fmt.Sprintf("Round dispatch limit is now %d; %d used, %d remaining%s.", limit, budget.used, budget.remaining(), clamped), nil
+			}
+			return fmt.Sprintf("本轮子任务上限已提高到 %d：已用 %d，剩余 %d%s。", limit, budget.used, budget.remaining(), clamped), nil
+		},
+	}
+}
+
+// intArg reads a JSON number argument. Tool arguments arrive as decoded JSON,
+// so an integer the model emitted is a float64 — and a string ("4") is what
+// some compatible endpoints send instead.
+func intArg(args map[string]any, key string) int {
+	switch v := args[key].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case string:
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return 0
+		}
+		return n
+	}
+	return 0
+}
+
 // toolConsentHint tells the model — so it can tell the user — how to grant the
 // consent a refused tool needs: one standing grant per surface (the /authorize
 // toggle in the REPL, --authorize for one-shot asks, the authorize checkbox in

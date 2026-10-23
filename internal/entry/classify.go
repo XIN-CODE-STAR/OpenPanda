@@ -22,6 +22,12 @@ const classificationCacheNS = "classify"
 // package cycle, and so a rename has one edit point.
 const ToolNameTaskSubmit = "task_submit"
 
+// ToolNameTaskBudget is the wire name of the budget-declaration tool: the call
+// a model makes when the round needs more dispatches than the engine's derived
+// limit allows. Like task_submit it lives here so the tool loop can recognize
+// the call by name without importing the assembly package.
+const ToolNameTaskBudget = "task_budget"
+
 // classificationCacheVersion tags every cache row with the semantics that
 // produced it. Bump it whenever the key coverage or the cacheability rules
 // change, so rows written under the previous semantics can never be served
@@ -90,6 +96,13 @@ func classifyCacheKey(po PromptOptions, model string, registry *Registry) (k1, k
 	b.WriteString(string(promptLocale(po)))
 	if po.ASCIIOnly {
 		b.WriteString("\nascii")
+	}
+	// The team pick is part of the system prompt, so two threads that differ
+	// only in roster must not share a cached classification: one may legally
+	// pin agent:opencode where the other must refuse it.
+	if len(po.AgentRoster) > 0 {
+		b.WriteString("\nroster:")
+		b.WriteString(strings.Join(po.AgentRoster, ","))
 	}
 	b.WriteByte('\n')
 	for _, t := range po.History {

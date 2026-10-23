@@ -58,15 +58,8 @@ func TestSubagentMultiLanguage(t *testing.T) {
 		t.Errorf("Chinese dispatch missing target: %s", zhDispatch)
 	}
 
-	// Budget notes
-	enBudget := taskBudgetNote(3, i18n.English)
-	if !strings.Contains(enBudget, "subagent task budget for this conversation round (3)") {
-		t.Errorf("English budget note unexpected: %s", enBudget)
-	}
-	zhBudget := taskBudgetNote(3, i18n.ChineseSimp)
-	if !strings.Contains(zhBudget, "本轮对话的子代理任务预算（3 个）已用完") {
-		t.Errorf("Chinese budget note unexpected: %s", zhBudget)
-	}
+	// Budget notes live in budget.go now (budget_test.go): the refusal has to
+	// name the dropped task, which this file has no way to construct.
 
 	// Subagent observation (success)
 	resSuccess := &Result{

@@ -70,17 +70,6 @@ func taskDispatchNote(spec *entry.TaskSpec, loc ...i18n.Locale) string {
 	return b.String()
 }
 
-// taskBudgetNote is appended as a user turn when the loop refuses the model's
-// latest dispatch because the task budget is spent: the final tool-free call
-// then explains itself instead of silently dropping the model's intent.
-func taskBudgetNote(maxTasks int, loc ...i18n.Locale) string {
-	targetLoc := i18n.Detect()
-	if len(loc) > 0 && loc[0] != "" {
-		targetLoc = loc[0]
-	}
-	return i18n.Tf(targetLoc, "prompt.subagent.budget_note", "n", strconv.Itoa(maxTasks))
-}
-
 // taskObservation formats one executed task's outcome as the observation the
 // entry model reports on: state, exit code, and excerpts of the output. The
 // agent transcript behind a task can be tens of thousands of tokens, so the

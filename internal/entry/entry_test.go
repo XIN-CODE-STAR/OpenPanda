@@ -475,6 +475,41 @@ func TestBuildPromptIncludesDevices(t *testing.T) {
 	}
 }
 
+// TestBuildPromptCarriesAgentRoster: the thread's team pick reaches the prompt.
+// Without it the entry model answered "test the agents I picked" by naming
+// agents from the capability card that the thread had excluded — three tasks
+// pinned to claude_code, codex and deepseek_harness for a two-agent team.
+func TestBuildPromptCarriesAgentRoster(t *testing.T) {
+	p := BuildPrompt(PromptOptions{AgentRoster: []string{"deepseek_harness", "opencode"}})
+	if !strings.Contains(p, "═══ This Thread's Team ═══") {
+		t.Fatalf("prompt missing the team section:\n%s", p)
+	}
+	if !strings.Contains(p, "deepseek_harness, opencode") {
+		t.Fatalf("prompt missing the roster names:\n%s", p)
+	}
+	if !strings.Contains(p, `requires ["agent:<name>"]`) {
+		t.Fatalf("prompt does not say how to test a whole team:\n%s", p)
+	}
+	// No pick, no section: a thread without a roster must not be told it has
+	// one, or the model would treat an arbitrary agent as authorised.
+	if bare := BuildPrompt(PromptOptions{}); strings.Contains(bare, "═══ This Thread's Team ═══") {
+		t.Fatalf("team section appeared without a roster:\n%s", bare)
+	}
+}
+
+// TestAgentRosterChangesClassifyCacheKey: two threads that differ only in team
+// must not share a cached classification — one may pin agent:opencode where the
+// other must refuse it.
+func TestAgentRosterChangesClassifyCacheKey(t *testing.T) {
+	base := PromptOptions{Memory: "m"}
+	k1a, _ := classifyCacheKey(base, "model-x", nil)
+	base.AgentRoster = []string{"opencode"}
+	k1b, _ := classifyCacheKey(base, "model-x", nil)
+	if k1a == k1b {
+		t.Fatalf("roster did not change the classify cache key")
+	}
+}
+
 func TestClassifyTurnsSendsHistory(t *testing.T) {
 	var gotMessages int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
