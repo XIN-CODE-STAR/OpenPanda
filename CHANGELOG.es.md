@@ -43,6 +43,7 @@ OpenPanda (**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **A
 ### Añadido
 
 - `OPENPANDA_UPDATE_BASE` dirige la descarga de la autoactualización a un espejo de los assets de la versión: la salida para una red que alcanza `api.github.com` pero no `release-assets.githubusercontent.com`. `OPENPANDA_RELEASE_BASE`, el nombre que ya respetan los instaladores, se acepta como alias para que una sola variable gobierne ambos.
+- **La tarjeta de consentimiento muestra los términos, no un resumen** —— el asistente y el diálogo de Ajustes mostraban diez cláusulas condensadas: una segunda copia del texto legal que podía separarse del archivo que resumía. Ahora ambos muestran `TERMS.md` tal cual —las diecisiete secciones, en el idioma de la consola— con el mismo renderizador de Markdown que usa el transcript. El texto ya no se copia en la consola: cada traducción se incorpora desde el archivo del repositorio al compilar, así que solo hay un lugar que cambiar.
 
 ### Corregido
 

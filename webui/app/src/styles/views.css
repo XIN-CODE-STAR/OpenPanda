@@ -5531,6 +5531,9 @@ pre,
   border-color: var(--accent);
   background: var(--accent-soft);
 }
+/* The consent card renders TERMS.md itself, so its layout is `.md`'s; this only
+   frames it — a bounded scroll area on an inset background — and sets the type
+   for a document meant to be read rather than skimmed. */
 .wizard-terms {
   max-height: 46vh;
   overflow-y: auto;
@@ -5538,20 +5541,20 @@ pre,
   border-radius: var(--radius-md);
   background: var(--bg-inset);
   padding: var(--sp-4);
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-4);
 }
-.wizard-terms-section h3 {
-  margin: 0 0 4px;
-  font-size: var(--text-sm);
+.wizard-terms .md {
+  font-size: var(--text-md);
+  line-height: 1.65;
+  color: var(--text-secondary);
+}
+/* Seventeen sections: hierarchy comes from the accent and the weight, not from
+   a second type scale — a legal document does not need display headings. */
+.wizard-terms .md h3 {
+  font-size: var(--text-md);
   color: var(--accent);
 }
-.wizard-terms-section p {
-  margin: 0;
-  font-size: var(--text-sm);
-  line-height: 1.6;
-  color: var(--text-secondary);
+.wizard-terms .md ul {
+  padding-left: 18px;
 }
 .wizard-approvals {
   display: flex;

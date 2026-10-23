@@ -43,6 +43,7 @@ OpenPanda（**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **
 ### 新增
 
 - `OPENPANDA_UPDATE_BASE` 可把自更新的下载指向发布资产镜像——这是给"能连 `api.github.com`、连不上 `release-assets.githubusercontent.com`"的网络留的出口。安装脚本已支持的 `OPENPANDA_RELEASE_BASE` 作为别名一并接受，一个变量同时管安装与升级。
+- **同意卡片展示条款本身，而不是它的摘要** —— 引导向导与设置里的弹窗原先渲染十条压缩过的条款，那是同一份法律文本的第二份副本，随时可能与它所概括的文件脱节。现在两处都直接渲染 `TERMS.md` 本身——全部十七节，按控制台语言——走的是转写页同一个 Markdown 渲染器。正文完全不再复制进控制台：每份译本在构建时从仓库自己的文件内联进来，需要修改时只有一处。
 
 ### 修复
 

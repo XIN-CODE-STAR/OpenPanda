@@ -43,6 +43,7 @@ OpenPanda (**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **A
 ### Hinzugefügt
 
 - `OPENPANDA_UPDATE_BASE` lenkt den Download des Selbst-Updates auf einen Spiegel der Release-Assets um — der Ausweg für Netze, die `api.github.com` erreichen, `release-assets.githubusercontent.com` aber nicht. `OPENPANDA_RELEASE_BASE`, der Name, den die Installer bereits auswerten, wird als Alias akzeptiert, damit eine Variable beide steuert.
+- **Die Zustimmungskarte zeigt die Bedingungen selbst, nicht ihre Zusammenfassung** —— Assistent und Einstellungsdialog zeigten zehn zusammengefasste Klauseln: eine zweite Kopie des Rechtstexts, die von der Datei abweichen konnte, die sie zusammenfasste. Beide rendern jetzt `TERMS.md` selbst — alle siebzehn Abschnitte, in der Sprache der Konsole — mit demselben Markdown-Renderer wie das Transkript. Der Text wird nicht mehr in die Konsole kopiert: Jede Übersetzung wird beim Bauen aus der Datei des Repositories eingebunden, es gibt also nur eine Stelle zu ändern.
 
 ### Behoben
 

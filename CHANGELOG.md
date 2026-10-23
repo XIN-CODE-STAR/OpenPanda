@@ -49,6 +49,7 @@ OpenPanda (**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **A
 ### Added
 
 - `OPENPANDA_UPDATE_BASE` points the self-updater's download at a mirror of the release assets — the escape hatch for a network that reaches `api.github.com` but not `release-assets.githubusercontent.com`. `OPENPANDA_RELEASE_BASE`, the name the installers already honour, is accepted as an alias so one variable steers both.
+- **The consent card shows the terms, not a summary of them** — the wizard and the Settings dialog used to render ten condensed clauses: a second copy of the legal text that could drift from the file it summarized. Both now render `TERMS.md` itself — all seventeen sections, in the console's language — through the same markdown renderer the transcript uses. The prose is never copied into the console: each translation is folded in from the repository's own file at build time, so there is one text to change.
 
 ### Fixed
 
