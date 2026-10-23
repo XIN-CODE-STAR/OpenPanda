@@ -46,7 +46,7 @@ Aún no hay cambios sin publicar.
 
 **El primer corte de la línea de calidad de release** — nombre en clave **Constellation**: la misma flota que dibujó la vista previa v0.0.12, ahora con todo el trabajo de corrección y seguridad de la auditoría cerrado detrás.
 
-Todo lo anterior fue una línea de vista previa, y cada entrega lo decía: el protocolo podía moverse, el almacén podía migrar bajo tus pies y el instalador servía para darte lo más nuevo, no lo asentado. `0.1.0-preview` es la primera versión que estamos dispuestos a respaldar: la que `install.sh` entrega a un desconocido, la que el actualizador puede aplicar sobre un nodo en marcha y la que la auditoría firma tras una ejecución real Mac → relay → nube. El conjunto de funciones es el de Constellation. Lo que cambió es lo que hay detrás.
+Todo lo anterior fue una línea de vista previa, y cada entrega lo decía: el protocolo podía moverse, el almacén podía migrar bajo tus pies y el instalador servía para darte lo más nuevo, no lo asentado. `0.1.0-preview` es la primera versión que estamos dispuestos a respaldar: la que la auditoría firma tras una ejecución real Mac → relay → nube y a la que `panda update` mueve un nodo que ya está en la línea de vista previa. Aun así se publica como prelanzamiento, así que los canales por defecto no se han movido: `/releases/latest`, el instalador de una línea y el tap de Homebrew siguen sirviendo `v0.0.11`, y a un nodo de la línea estable no se le ofrece esta entrega. Para usarla, nombra la versión; pasará a `latest` cuando lleve un tiempo rodando. El conjunto de funciones es el de Constellation. Lo que cambió es lo que hay detrás.
 
 En qué se apoya esa afirmación:
 
@@ -66,9 +66,9 @@ En qué se apoya esa afirmación:
 ### Actualizar desde 0.0.x
 
 - Sin cambios importantes: la configuración, las tarjetas de capacidad, los datos guardados y el formato de protocolo se conservan, y las migraciones se aplican en el primer arranque.
-- Una instalación existente se actualiza en su sitio con el mismo comando de instalación; `panda update apply` mueve un nodo de la línea de vista previa a 0.1.0.
+- Una instalación existente se actualiza en su sitio: `panda update` mueve un nodo de la línea de vista previa a esta entrega, y una instalación nueva de ella es `install.sh --version 0.1.0-preview`.
 - Compilar desde el código exige ahora Go 1.26.10 (es un suelo de seguridad, no una preferencia — ver la entrada de `govulncheck` más abajo).
-- `v0.0.12-preview` sigue descargable por versión explícita; `/releases/latest` y el tap de Homebrew apuntan ahora aquí.
+- `v0.0.11` sigue siendo el canal estable: `/releases/latest`, el instalador de una línea y el tap de Homebrew lo siguen sirviendo, y `v0.0.12-preview` sigue descargable por versión explícita. Para ejecutar esta entrega, fíjala: `install.sh --version 0.1.0-preview`.
 
 ### Añadido
 

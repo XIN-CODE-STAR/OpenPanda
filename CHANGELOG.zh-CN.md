@@ -46,7 +46,7 @@ OpenPanda（**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **
 
 **发布级版本线的第一个切点**——代号 **Constellation**：v0.0.12 预览画出的那支舰队，原样保留，只是它身后多了发布审计的全部正确性与安全性收口。
 
-在此之前都是预览线，每一次发布也都直说自己是预览：wire 会变，存储会迁移，安装脚本的职责是给你最新的东西，而不是给你已经定下来的东西。`0.1.0-preview` 是第一个我们愿意为它背书的版本——`install.sh` 递给陌生人的是它，更新器允许把运行中的节点搬上去的是它，审计在真实的 Mac → 中继 → 云链路跑完之后签字的也是它。功能集是 Constellation 的；变的是它身后站着什么。
+在此之前都是预览线，每一次发布也都直说自己是预览：wire 会变，存储会迁移，安装脚本的职责是给你最新的东西，而不是给你已经定下来的东西。`0.1.0-preview` 是第一个我们愿意为它背书的版本——审计在真实的 Mac → 中继 → 云链路跑完之后签字的是它，预览线上的节点被 `panda update` 搬上去的也是它。但它仍以预发布发布，默认通道没有跟着动：`/releases/latest`、一键脚本和 Homebrew tap 继续给 `v0.0.11`，稳定线上的节点不会被推上这一支。要它，就显式指定版本号；在野外跑过一段时间，它才会升成 `latest`。功能集是 Constellation 的；变的是它身后站着什么。
 
 这个说法立在三件事上：
 
@@ -66,9 +66,9 @@ OpenPanda（**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **
 ### 从 0.0.x 升级
 
 - 无破坏性变更：配置、能力卡、已存数据与 wire 格式全部向前兼容，迁移在首次启动时自动应用。
-- 已安装的节点用同一条安装命令原地升级；`panda update apply` 可以把节点从预览线搬到 0.1.0。
+- 已安装的节点原地升级：预览线上的节点由 `panda update` 搬到这一支；全新安装它要显式指定 `install.sh --version 0.1.0-preview`。
 - 从源码构建现在要求 Go 1.26.10（这是安全下限，不是偏好——见下方 `govulncheck` 一条）。
-- `v0.0.12-preview` 仍可按版本号显式下载；`/releases/latest` 与 Homebrew tap 现在指向这里。
+- `v0.0.11` 仍是稳定通道：`/releases/latest`、一键脚本和 Homebrew tap 继续给 `v0.0.11`，`v0.0.12-preview` 仍可按版本号显式下载。要跑这一支，显式指定：`install.sh --version 0.1.0-preview`。
 
 ### 新增
 

@@ -52,7 +52,7 @@ _No unreleased changes yet._
 
 **The first cut of the release-grade line** — codename **Constellation**: the same fleet the v0.0.12 preview drew, with the release audit's correctness and security work closed behind it.
 
-Everything before this was a preview line, and every cut said so: the wire could move, the store could migrate under you, and the installer's job was to hand you the newest thing rather than the settled one. `0.1.0-preview` is the first version we are willing to stand behind — the one `install.sh` hands a stranger, the one the updater may move a running node onto, and the one the audit signs off on after a live Mac → relay → cloud run. The feature set is Constellation's. What changed is what stands behind it.
+Everything before this was a preview line, and every cut said so: the wire could move, the store could migrate under you, and the installer's job was to hand you the newest thing rather than the settled one. `0.1.0-preview` is the first version we are willing to stand behind — the one the audit signs off on after a live Mac → relay → cloud run, and the one `panda update` moves a node that is already on the preview line onto. It still ships as a pre-release, so the default channels have not moved with it: `/releases/latest`, the one-liner and the Homebrew tap keep serving `v0.0.11`, and a node on the stable line is not offered this cut. Opt in by naming the version; it is promoted to `latest` once it has been out in the wild. The feature set is Constellation's. What changed is what stands behind it.
 
 What that claim rests on:
 
@@ -72,9 +72,9 @@ What that claim rests on:
 ### Upgrading from 0.0.x
 
 - No breaking changes: configuration, capability cards, stored data and the wire format are all carried forward, and migrations apply on first start.
-- An existing install upgrades in place with the same install command; `panda update apply` moves a node from the preview line onto 0.1.0.
+- An existing install upgrades in place: `panda update` moves a node on the preview line onto this cut, and a fresh install of it is `install.sh --version 0.1.0-preview`.
 - Building from source now requires Go 1.26.10 (a security floor, not a preference — see the `govulncheck` entry below).
-- `v0.0.12-preview` stays downloadable by explicit version; `/releases/latest` and the Homebrew tap now point here.
+- `v0.0.11` stays the stable channel: `/releases/latest`, the one-liner and the Homebrew tap keep serving it, and `v0.0.12-preview` stays downloadable by explicit version. To run this cut, pin it — `install.sh --version 0.1.0-preview`.
 
 ### Added
 
