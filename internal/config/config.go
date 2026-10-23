@@ -58,7 +58,8 @@ type Config struct {
 	// already serves.
 	ASR ASRConfig `yaml:"asr"`
 	// SelfEvolution is the opt-in self-modification pipeline. Entirely inert
-	// while enabled=false: no worktree, no queue, no merge proposals.
+	// while enabled=false: no
+	// worktree, no queue, no merge proposals.
 	SelfEvolution SelfEvolutionConfig `yaml:"self_evolution"`
 }
 
