@@ -122,6 +122,10 @@ export interface RunSummary {
   titles: string[]
   /** The last report's state — what the round ended on. */
   state: string
+  /** Every report's state, in the order they landed. A round is a batch, so
+   *  one employee's failure is not the batch's verdict: the roll-up reads the
+   *  split off this instead of stamping the whole round with `state`. */
+  outcomes: string[]
   /** Where the round's work lives, when the round dispatched exactly one thing:
    *  a task page, or the plan board. Empty when there is nothing single to
    *  point at. */
@@ -134,9 +138,20 @@ export interface RunSummary {
  *  running. */
 const SETTLED = new Set(['done', 'failed', 'cancelled', 'expired', 'review'])
 
-/** States where a task still has an employee's hands on it. `review` is not
- *  one of them — the work has stopped and a person has the say. */
+/** States where a task still has an employee's hands on it. */
 const IN_FLIGHT = new Set(['submitted', 'queued', 'dispatched', 'waiting_context', 'running'])
+
+/** Review parks that still owe the round work.
+ *
+ *  `review` is two different things wearing one badge. An `accept_work` park
+ *  holds finished output and asks a person to sign it off — the employee is
+ *  done. A pre-execution park asks whether the employee may start at all:
+ *  `resume_execution` (consent or a clarification question), `admission_review`
+ *  (the trust gate), `needs_changed_input` (the budget ran out and the prompt
+ *  must change). Nothing has been delivered in those cases, so a round that
+ *  closed on a colleague's report would claim "本轮工作已全部完成" while an
+ *  employee had not run a single step. */
+const PARKED_BEFORE_WORK = new Set(['resume_execution', 'admission_review', 'needs_changed_input'])
 
 /** roundStillOpen answers "is the batch this round dispatched finished?".
  *
@@ -146,10 +161,16 @@ const IN_FLIGHT = new Set(['submitted', 'queued', 'dispatched', 'waiting_context
  *  home would close the round — "本轮工作已全部完成" — while its colleagues
  *  were still running, and the roll-up then rewrote itself (headcount,
  *  titles) every time another one landed. The transcript cannot see the
- *  batch; the task board can, so the caller hands its states in here. */
-export function roundStillOpen(states: Iterable<string>): boolean {
-  for (const s of states) {
-    if (IN_FLIGHT.has(s)) return true
+ *  batch; the task board can, so the caller hands its rows in here.
+ *
+ *  A row parked in review counts as in flight when approving it would resume
+ *  work rather than accept it (see `PARKED_BEFORE_WORK`); rows that predate
+ *  `approval_disposition` carry no disposition and keep the old reading — the
+ *  store defaults them to `accept_work`. */
+export function roundStillOpen(tasks: Iterable<{ state: string; approval_disposition?: string }>): boolean {
+  for (const task of tasks) {
+    if (IN_FLIGHT.has(task.state)) return true
+    if (task.state === 'review' && PARKED_BEFORE_WORK.has(task.approval_disposition ?? '')) return true
   }
   return false
 }
@@ -181,6 +202,7 @@ export function trailingRunSummary(turns: CastTurn[]): RunSummary | null {
 
   const agents: string[] = []
   const titles: string[] = []
+  const outcomes: string[] = []
   const refs: { ref: string; kind: 'task' | 'plan' }[] = []
   for (let i = start; i < turns.length; i++) {
     const t = turns[i]!
@@ -190,13 +212,58 @@ export function trailingRunSummary(turns: CastTurn[]): RunSummary | null {
     if (i === start) continue
     const h = splitReportHead(t.text ?? '')
     if (!h) continue
+    if (SETTLED.has(h.state)) outcomes.push(h.state)
     if (h.agent && !agents.includes(h.agent)) agents.push(h.agent)
     if (h.title && !titles.includes(h.title)) titles.push(h.title)
   }
   // One destination only: a round that dispatched two things has no single
   // page to send the reader to, and a link that guesses is worse than none.
   const only = refs.length === 1 ? refs[0]! : null
-  return { agents, titles, state: head.state, ref: only?.ref ?? '', refKind: only?.kind ?? '' }
+  return { agents, titles, state: head.state, outcomes, ref: only?.ref ?? '', refKind: only?.kind ?? '' }
+}
+
+/** roundTally counts a round's reports by state, in one fixed order, so the
+ *  same batch always reads the same way ("2 位完成、1 位失败"). */
+export function roundTally(outcomes: string[]): { state: string; n: number }[] {
+  const order = ['done', 'failed', 'cancelled', 'expired', 'review']
+  const out: { state: string; n: number }[] = []
+  for (const state of order) {
+    const n = outcomes.filter((s) => s === state).length
+    if (n > 0) out.push({ state, n })
+  }
+  return out
+}
+
+/** stateTone is the colour a settled state paints: green for work delivered,
+ *  amber for a decision still owed, red for a job that will not deliver. */
+export function stateTone(state: string): 'ok' | 'warn' | 'bad' {
+  if (state === 'done') return 'ok'
+  if (state === 'failed' || state === 'cancelled' || state === 'expired') return 'bad'
+  return 'warn'
+}
+
+/** sharedTitlePrefix returns the head every job title in a round shares, when
+ *  that head ends on a separator, or '' when there is nothing worth dropping.
+ *
+ *  A round's jobs usually share their dispatch template — "连通性测试：调用
+ *  agent:claude_code", "…:codex", "…:deepseek_harness" — and printing the head
+ *  three times buries the part that differs. Only a prefix that ends on a colon
+ *  is cut: "Fix bug in " is half a phrase, and a reader who loses it cannot
+ *  tell what the line means. */
+export function sharedTitlePrefix(titles: string[]): string {
+  if (titles.length < 2) return ''
+  let prefix = titles[0]!
+  for (const title of titles.slice(1)) {
+    let i = 0
+    while (i < prefix.length && i < title.length && prefix[i] === title[i]) i++
+    prefix = prefix.slice(0, i)
+  }
+  const cut = Math.max(prefix.lastIndexOf('：'), prefix.lastIndexOf(':'))
+  if (cut < 0) return ''
+  const head = prefix.slice(0, cut + 1)
+  // Every title must keep something to say once the head is gone.
+  if (titles.some((title) => title.slice(head.length).trim() === '')) return ''
+  return head
 }
 
 /** castAgent names the employee that ran a task, from the task's own trace.

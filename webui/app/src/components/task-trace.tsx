@@ -3,8 +3,9 @@
 import type { ComponentChildren } from 'preact'
 import { useMemo, useState } from 'preact/hooks'
 import type { ScoredCandidate, Task, TraceEvent } from '../api/client'
-import { t } from '../i18n'
+import { locale, t } from '../i18n'
 import { orbitPhaseFromTraces, useTraceForTask } from '../hooks'
+import { AgentTag } from './agent-tag'
 import { Icon } from './icons'
 import { latestActivity } from './task-activity'
 
@@ -30,12 +31,26 @@ interface Step {
   key: string
   label: string
   fact?: string
+  /** Set when the fact is an agent's name — it is drawn as the agent chip
+   *  rather than as grey text, so the one identity on the strip reads first. */
+  agent?: string
   state: StepState
   /** Tooltip when the fact is clipped. */
   hint?: string
 }
 
-export function TaskTrace({ task, defaultOpen }: { task: Task; defaultOpen?: boolean }) {
+export function TaskTrace({
+  task,
+  defaultOpen,
+  bare,
+}: {
+  task: Task
+  defaultOpen?: boolean
+  /** Render the strip for a panel that already names it: no label, no fold,
+   *  detail always shown. The chat card gives each section one button and one
+   *  shared panel, so the strip's own chevron would be a second fold. */
+  bare?: boolean
+}) {
   // Same seeding as the orbit: the task's newest event may be the only row
   // that says what a mid-flight run is doing on first paint.
   const seed = useMemo(() => {
@@ -45,9 +60,12 @@ export function TaskTrace({ task, defaultOpen }: { task: Task; defaultOpen?: boo
   }, [task.traces, task.last_event])
   const traces = useTraceForTask(task.id, seed)
 
-  const classify = useMemo(() => firstData<ClassifyData>(traces, 'classify_result'), [traces])
-  const route = useMemo(() => firstData<RouteData>(traces, 'route_decision'), [traces])
-  const exec = useMemo(() => firstData<ExecData>(traces, 'exec_agent_start'), [traces])
+  const classifyEv = useMemo(() => firstEvent(traces, 'classify_result'), [traces])
+  const routeEv = useMemo(() => firstEvent(traces, 'route_decision'), [traces])
+  const execEv = useMemo(() => firstEvent(traces, 'exec_agent_start'), [traces])
+  const classify = (classifyEv?.data ?? null) as ClassifyData | null
+  const route = (routeEv?.data ?? null) as RouteData | null
+  const exec = (execEv?.data ?? null) as ExecData | null
   const supervision = useMemo(
     () => lastData<SupervisionData>(traces, 'supervision_round'),
     [traces],
@@ -104,6 +122,7 @@ export function TaskTrace({ task, defaultOpen }: { task: Task; defaultOpen?: boo
       key: 'exec',
       label: execLabel,
       fact: exec?.agent || (queued ? t('detail.trace.waiting') : undefined),
+      agent: exec?.agent,
       state: failed ? 'failed' : settled ? 'done' : running ? 'active' : 'idle',
     })
     return out
@@ -129,12 +148,13 @@ export function TaskTrace({ task, defaultOpen }: { task: Task; defaultOpen?: boo
   // Folded on the page, where the strip is one of eight sections and the
   // reader is scrolling; open in the chat card, where clicking the task *was*
   // the request to see how it ran.
-  const [open, setOpen] = useState(Boolean(defaultOpen))
+  const [unfolded, setUnfolded] = useState(Boolean(defaultOpen))
+  const open = bare || unfolded
 
   return (
     <section class="tt" aria-label={t('detail.trace')}>
       <div class="tt-row">
-        <span class="tt-label">{t('detail.trace')}</span>
+        {!bare && <span class="tt-label">{t('detail.trace')}</span>}
 
         <ol class="tt-steps">
           {steps.map((s, i) => (
@@ -148,10 +168,14 @@ export function TaskTrace({ task, defaultOpen }: { task: Task; defaultOpen?: boo
                 ) : null}
               </span>
               <span class="tt-name">{s.label}</span>
-              {s.fact && (
-                <span class="tt-fact" title={s.hint ?? s.fact}>
-                  {s.fact}
-                </span>
+              {s.agent ? (
+                <AgentTag name={s.agent} />
+              ) : (
+                s.fact && (
+                  <span class="tt-fact" title={s.hint ?? s.fact}>
+                    {s.fact}
+                  </span>
+                )
               )}
             </li>
           ))}
@@ -166,14 +190,14 @@ export function TaskTrace({ task, defaultOpen }: { task: Task; defaultOpen?: boo
           )}
           {round && <span class="tt-meta">{round}</span>}
           {running && <span class="tt-meta tt-pct">{progress}%</span>}
-          {hasDetail && (
+          {hasDetail && !bare && (
             <button
               type="button"
               class={'tt-toggle' + (open ? ' is-open' : '')}
               aria-expanded={open}
               aria-label={t('detail.trace.detail')}
               title={t('detail.trace.detail')}
-              onClick={() => setOpen((v) => !v)}
+              onClick={() => setUnfolded((v) => !v)}
             >
               <Icon name="chevron-down" size={14} />
             </button>
@@ -196,46 +220,64 @@ export function TaskTrace({ task, defaultOpen }: { task: Task; defaultOpen?: boo
 
       {open && hasDetail && (
         <div class="tt-detail">
-          <TraceCell label={t('orbit.step.classify')}>
+          {/* One cell per step, and every fact the trace actually carries: the
+              panel is where a reader comes to ask "which machine, which model,
+              with what permission" — a cell that answered with one word left
+              them opening the raw log instead. */}
+          <TraceCell label={t('orbit.step.classify')} at={classifyEv?.ts}>
             {classify ? (
               <>
-                {classifyText && <span>{classifyText}</span>}
-                {(classify.plan_goal ?? classify.note ?? classify.label) && (
-                  <span class="dim">{classify.plan_goal ?? classify.note ?? classify.label}</span>
-                )}
-                {!classifyText && !(classify.plan_goal ?? classify.note ?? classify.label) && (
-                  <span class="dim">—</span>
-                )}
+                {classifyText && <span class="tt-lead">{classifyText}</span>}
+                <KV k={t('detail.trace.goal')} v={classify.plan_goal} />
+                <KV k={t('detail.trace.note')} v={classify.note ?? classify.label} />
+                <KV k={t('detail.trace.stages')} v={stagesOf(classify)} />
+                {!classifyText &&
+                  !classify.plan_goal &&
+                  !classify.note &&
+                  !classify.label &&
+                  !stagesOf(classify) && <span class="dim">—</span>}
               </>
             ) : (
               <span class="dim">{t('detail.trace.dispatch')}</span>
             )}
           </TraceCell>
 
-          <TraceCell label={t('orbit.step.route')}>
-            {route?.candidates?.length ? (
-              route.candidates.map((c) => {
-                const chosen = routedId(route) === c.node_id
-                const score = c.score_breakdown?.total ?? c.total_score
-                return (
-                  <span key={c.node_id} class={chosen ? 'tt-cand is-chosen' : 'tt-cand'}>
-                    <span>{c.node_name ?? c.node_id}</span>
-                    {typeof score === 'number' && (
-                      <span class="dim">{score.toFixed(2)}★</span>
-                    )}
-                  </span>
-                )
-              })
-            ) : (
-              <span class="dim">
-                {route ? routedName(route) ?? t('orbit.route.declined') : t('detail.trace.dispatch')}
-              </span>
-            )}
-          </TraceCell>
+          {/* No route decision means no routing happened — the task went
+              straight to an agent. The cell used to be drawn anyway, headed
+              "route" over the word "dispatch", which read as a step that ran
+              and decided nothing. */}
+          {route && (
+            <TraceCell label={t('orbit.step.route')} at={routeEv?.ts}>
+              {route.candidates?.length ? (
+                route.candidates.map((c) => {
+                  const chosen = routedId(route) === c.node_id
+                  const score = c.score_breakdown?.total ?? c.total_score
+                  return (
+                    <span key={c.node_id} class={chosen ? 'tt-cand is-chosen' : 'tt-cand'}>
+                      <span>{c.node_name ?? c.node_id}</span>
+                      {typeof score === 'number' && (
+                        <span class="dim">{score.toFixed(2)}★</span>
+                      )}
+                    </span>
+                  )
+                })
+              ) : (
+                <span class="dim">
+                  {routedName(route) ?? t('orbit.route.declined')}
+                </span>
+              )}
+              <KV k={t('detail.trace.decision')} v={route.action} />
+            </TraceCell>
+          )}
 
-          <TraceCell label={execLabel}>
-            {exec?.agent && <span>{exec.agent}</span>}
-            {exec?.node_name && <span class="dim">@{exec.node_name}</span>}
+          <TraceCell label={execLabel} at={execEv?.ts}>
+            {exec?.agent && <AgentTag name={exec.agent} />}
+            <KV k={t('detail.model')} v={exec?.model} mono />
+            <KV k={t('detail.adapter')} v={exec?.adapter} mono />
+            <KV k={t('detail.node')} v={exec?.node_name ? `@${exec.node_name}` : ''} mono />
+            <KV k={t('detail.trace.tier')} v={tierOf(exec)} />
+            <KV k={t('detail.trace.access')} v={accessOf(exec)} />
+            <KV k={t('detail.workdir')} v={exec?.workdir} mono />
             {/* The round is on the strip's own top line (`.tt-tail`), beside
                 the live status — repeating it down here put the same "轮次
                 1/5" twice in one card, one under the other. */}
@@ -254,13 +296,86 @@ export function TaskTrace({ task, defaultOpen }: { task: Task; defaultOpen?: boo
   )
 }
 
-function TraceCell({ label, children }: { label: string; children: ComponentChildren }) {
+function TraceCell({
+  label,
+  at,
+  children,
+}: {
+  label: string
+  /** When this step happened, on the cell's label row. A chain of steps with
+   *  no clock on it cannot answer "how long did routing take". */
+  at?: number
+  children: ComponentChildren
+}) {
   return (
     <div class="tt-cell">
-      <span class="tt-cell-label">{label}</span>
+      <span class="tt-cell-label">
+        {label}
+        {at ? <span class="tt-cell-at">{clock(at)}</span> : null}
+      </span>
       {children}
     </div>
   )
+}
+
+/** One labelled fact inside a cell: label in the muted tier, value beside it.
+ *  Renders nothing when there is no value — a row of dashes is not a fact. */
+function KV({ k, v, mono }: { k: string; v?: string; mono?: boolean }) {
+  if (!v) return null
+  return (
+    <span class="tt-kv">
+      <span class="tt-k">{k}</span>
+      <span class={'tt-v' + (mono ? ' mono' : '')} title={v}>
+        {v}
+      </span>
+    </span>
+  )
+}
+
+/** Clock time of a trace stamp, in the reader's locale. The date is left out
+ *  on purpose: every step of one task happens inside one sitting. */
+function clock(ts: number): string {
+  const d = new Date(ts * 1000)
+  if (Number.isNaN(d.getTime())) return ''
+  try {
+    return d.toLocaleTimeString(locale(), {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    })
+  } catch {
+    return ''
+  }
+}
+
+/** "1 · agent" — the scheduler tier plus the plan kind it implies. Both come
+ *  from the same decision and read as one fact. */
+function tierOf(exec: ExecData | null): string {
+  const parts: string[] = []
+  if (typeof exec?.tier === 'number') parts.push(String(exec.tier))
+  if (exec?.plan_kind) parts.push(exec.plan_kind)
+  return parts.join(' · ')
+}
+
+/** Whether the run was allowed to act, and whether it was confined. Two flags
+ *  that read as one line: "已授权 · 未受限" answers "could this have touched
+ *  anything" at a glance. */
+function accessOf(exec: ExecData | null): string {
+  if (!exec) return ''
+  const parts: string[] = []
+  if (typeof exec.authorized === 'boolean') {
+    parts.push(exec.authorized ? t('detail.trace.authorized') : t('detail.trace.unauthorized'))
+  }
+  if (typeof exec.restricted === 'boolean') {
+    parts.push(exec.restricted ? t('detail.trace.restricted') : t('detail.trace.unrestricted'))
+  }
+  return parts.join(' · ')
+}
+
+/** Stage count, when the classifier reported one. */
+function stagesOf(c: ClassifyData): string {
+  const n = c.stages_count ?? c.stage_count
+  return typeof n === 'number' && n > 0 ? String(n) : ''
 }
 
 // —---------------------------------------------------------------------------
@@ -290,9 +405,21 @@ interface RouteData {
   candidates?: ScoredCandidate[]
 }
 
+/** The exec_agent_start payload (submit.go / the adapter's own start frame).
+ *  Everything here was already on the wire; the panel used to read only the
+ *  first two fields of it. */
 interface ExecData {
   agent?: string
   node_name?: string
+  model?: string
+  adapter?: string
+  workdir?: string
+  /** Scheduler tier: 1 = local-direct, 2 = routed, 3 = plan. */
+  tier?: number
+  /** "agent" | "plan" — what shape the run was given. */
+  plan_kind?: string
+  authorized?: boolean
+  restricted?: boolean
 }
 
 interface SupervisionData {
@@ -356,8 +483,10 @@ function routedName(route: RouteData): string | undefined {
   return route.candidates?.[0]?.node_name ?? route.candidates?.[0]?.node_id
 }
 
-function firstData<T>(traces: TraceEvent[], type: TraceEvent['type']): T | null {
-  for (const e of traces) if (e?.type === type) return (e.data ?? null) as T | null
+/** The first frame of a kind — the whole row, not just its payload: the cell
+ *  header stamps the step with `ts`, which the data alone does not carry. */
+function firstEvent(traces: TraceEvent[], type: TraceEvent['type']): TraceEvent | null {
+  for (const e of traces) if (e?.type === type) return e
   return null
 }
 

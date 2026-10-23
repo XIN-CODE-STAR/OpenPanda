@@ -369,6 +369,11 @@ export interface Task {
    *  is set — a private copy whose changes merge back on completion. */
   scope_paths?: string[]
   isolate?: boolean
+  /** WorkDir is the submitter's pin (a session worktree); ExecWorkDir is where
+   *  the run actually happened. The detail card shows the latter — a finished
+   *  row should be locatable on the machine that ran it. */
+  work_dir?: string
+  exec_work_dir?: string
   /** Spawned sub-agents (getTask only): the tree a parent is orchestrating,
    *  with each child's live state and its own parallel mode. */
   children?: TaskChild[]

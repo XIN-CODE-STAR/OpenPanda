@@ -1221,6 +1221,18 @@
 .msg-cast-state.is-active {
   color: var(--accent-2);
 }
+/* A roll-up carries its batch's tone, not one employee's: a round where some
+   finished and some did not is amber, and only a round where nobody finished
+   is red. */
+.msg-cast-state.is-ok {
+  color: var(--good);
+}
+.msg-cast-state.is-warn {
+  color: var(--warn);
+}
+.msg-cast-state.is-bad {
+  color: var(--danger);
+}
 
 /* An employee's report: the job as the bubble's subject, their own closing
    paragraph under it. The state is on the head's chip. */
@@ -2061,63 +2073,110 @@
   box-shadow: var(--shadow-lg);
   animation: node-panel-in var(--dur-fast) var(--ease-enter);
 }
-/* The task page's own trace strip, mounted at 360px.
+/* The five sections as one control.
  *
- * On the page the row is one line: label, steps, tail. Here the steps are the
- * point of the card, so the row wraps instead of letting `.tt-steps` clip
- * them (that overflow:hidden is right at 980px and wrong at 360px): the label
- * and the tail — live line, percentage, fold — take the first line, and the
- * steps get the whole second one. A third line appears only when the live
- * line itself is long enough to need it. */
-.orch-orch-trace {
+ * The card used to stack them, each with its own fold, so reaching the fourth
+ * one was a scroll and every one of them was shut anyway — five titles and a
+ * scrollbar. Now: one row of pills under the identity line, one panel they
+ * share. A pill opens its section in the panel, a second press puts it away,
+ * pressing another swaps what the panel holds. The row wraps rather than
+ * scrolling sideways — five CJK labels fit one line at 420px and the German
+ * ones need two, and a second line is cheaper than a scroller nobody sees. */
+.orch-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
   padding: 0 4px;
 }
-.orch-orch-card .tt {
-  margin-top: 0;
-  background: var(--bg-inset);
-  border-color: var(--border-soft);
+.orch-tab {
+  padding: 4px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-pill);
+  background: var(--bg-raised);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
 }
-.orch-orch-card .tt-row {
+.orch-tab:hover {
+  border-color: var(--border);
+  color: var(--text);
+}
+/* Pressed = this is the section in the panel. Ink, not a hue: the card's only
+   colour is the state badge. */
+.orch-tab.is-on {
+  border-color: var(--border-strong);
+  background: var(--bg-active);
+  color: var(--text);
+  font-weight: 500;
+}
+.orch-tab:focus-visible {
+  outline: 2px solid var(--border-strong);
+  outline-offset: 1px;
+}
+/* The panel the five buttons share. One well, so switching sections reads as
+   the same card changing its contents rather than a new card appearing — and
+   the sections inside it are mounted unfolded (`bare`), because this panel is
+   the fold. */
+.orch-tab-panel {
+  margin: 0 4px;
+  padding: 10px 11px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--bg-inset);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+/* The sections bring their own frame on the page, where each one is a block in
+   a document. Here the panel is the frame, so the inner box is flattened: one
+   well, not a well inside a well. */
+.orch-orch-card .orch-tab-panel .tt,
+.orch-orch-card .orch-tab-panel .orch-detail-result {
+  margin-top: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+/* The trace strip at 420px, in the panel: no label (the pill above says it),
+   steps on their own line, then the round / live line under them. `.tt-steps`
+   keeps `overflow: hidden` on the page because the row is one line there; at
+   this width it has to wrap instead of clipping the last step. */
+.orch-orch-card .orch-tab-panel .tt-row {
   flex-wrap: wrap;
   gap: 6px 10px;
-  padding: 8px 10px;
+  padding: 0;
 }
-.orch-orch-card .tt-label {
+.orch-orch-card .orch-tab-panel .tt-steps {
   order: 1;
-}
-.orch-orch-card .tt-tail {
-  order: 2;
-}
-.orch-orch-card .tt-steps {
-  order: 3;
   flex: 1 1 100%;
   flex-wrap: wrap;
   overflow: visible;
   row-gap: 3px;
 }
-/* Two cells across at 420px, one on a narrow pane: the page fits all three
-   side by side at 980px, and the cells are what says where the run went. */
-.orch-orch-card .tt-detail {
-  grid-template-columns: repeat(auto-fit, minmax(165px, 1fr));
-  gap: 10px;
-  padding: 10px 11px 11px;
+.orch-orch-card .orch-tab-panel .tt-tail {
+  order: 2;
+  margin-left: 0;
 }
-/* The page's sections, at card spacing: the card already has a 9px flex gap
-   between its children, so the sections keep only their rule and their
-   padding — the 16px margin on top of that gap left holes. */
-.orch-orch-card .dt-sec {
-  margin-top: 0;
-  padding-top: 10px;
-  padding-inline: 4px;
-}
-.orch-orch-card .dt-sec-title {
-  margin-bottom: 6px;
-}
-.orch-orch-card .dt-sec-head {
-  margin-bottom: 6px;
+/* One cell per row, not two. Two 165px columns were right while a cell held a
+   single line; with the step's facts listed under it, half the width turned a
+   working directory into two broken lines. The card has one column of
+   everything else, so the cells follow. */
+.orch-orch-card .orch-tab-panel .tt-detail {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  margin-top: 8px;
+  padding: 9px 0 0;
+  border-top: 1px solid var(--border-soft);
+  background: none;
 }
 /* The page's fact grid folds into one column at this width, which is what the
-   band under a folded header wants anyway. */
+   panel wants anyway. */
 .orch-orch-card .dt-facts {
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 8px 16px;
@@ -2322,6 +2381,18 @@
   background: var(--bg-hover);
   color: var(--text);
 }
+/* Cancel kills a run, and it is the one control in this card that does
+   something irreversible — it says so in the same brick red the console uses
+   for 回滚变更. Text only, no border: the tile still belongs to its state
+   badge, and a boxed red button in a 160px tile would outshout it. The hover
+   is spelled out for the same specificity reason as `.orch-act.run` below. */
+.orch-act.cancel {
+  color: var(--semantic-danger);
+}
+.orch-act.cancel:hover:not(:disabled) {
+  background: var(--danger-soft);
+  color: var(--semantic-danger);
+}
 /* Run is the one action the card wants you to take on a parked task, so it
    carries the ink border the console gives a secondary button. Written with
    the hover state spelled out: `.orch-act:hover` and `.orch-act.run` have the
@@ -2398,19 +2469,16 @@
 .orch-detail-note.blocked {
   color: var(--warn);
 }
-/* The output panel: the page's markdown, in the card's own frame. Clamped with
-   a fade rather than scrolled — see `ResultBlock`. */
+/* The output panel: the page's markdown. It used to clamp at 220px behind a
+   fade because the card was one long scroller and the result sat in the
+   middle of it; the 执行结果 pill is the fold now, so it is shown whole and the
+   card scrolls around it. */
 .orch-detail-result {
   padding: 8px 10px;
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-sm);
   background: var(--bg-inset);
   font-size: var(--text-sm);
-}
-.orch-detail-result.is-clamped {
-  max-height: 220px;
-  overflow: hidden;
-  mask-image: linear-gradient(to bottom, #000 78%, transparent 100%);
 }
 .orch-detail-foot {
   display: flex;

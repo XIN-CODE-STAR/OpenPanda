@@ -366,6 +366,40 @@ input[type='checkbox'].check,
   font-family: var(--font-mono);
 }
 
+/* ---- Agent chip ------------------------------------------------------------ */
+/* An agent's name as an identity (see `components/agent-tag.tsx`): the second
+   accent — the palette's "a different kind of thing" hue — plus the mono face,
+   so `deepseek_harness` reads as a machine name and not as a file path. */
+.agent-tag {
+  display: inline-flex;
+  align-items: center;
+  /* Never stretched by a column parent (the trace cell is one): the pill is
+     the name's own width, not the column's. */
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 0 8px;
+  border: 1px solid var(--accent-2-border);
+  border-radius: var(--radius-pill);
+  background: var(--accent-2-soft);
+  color: var(--accent-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  line-height: 1.75;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* The same look on the result panel's chip rail, where the chip already owns
+   its frame and only the tone and the face change. */
+.result-chip.is-agent {
+  border-color: var(--accent-2-border);
+  background: var(--accent-2-soft);
+  color: var(--accent-2);
+  font-family: var(--font-mono);
+  font-weight: 500;
+}
+
 .chip {
   display: inline-flex;
   align-items: center;

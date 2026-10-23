@@ -718,41 +718,82 @@ function AgentsSection() {
       <ul class="agent-list">
         {agents.map((a) => {
           const r = results[a.name]
+          // The probe column reads as one of four states; the row itself stays
+          // identity-only so the eye scans names down the left edge.
+          const state = testing === a.name ? 'testing' : !r ? 'idle' : r.ok ? 'ok' : 'bad'
+          const label =
+            state === 'testing'
+              ? t('settings.agentTesting')
+              : state === 'ok'
+                ? t('settings.agentStatusOk')
+                : state === 'bad'
+                  ? t('settings.agentStatusFail')
+                  : t('settings.agentUntested')
+          // The probe reports the version the test actually saw — only worth a
+          // line when it disagrees with the one the row already lists.
+          const detail =
+            state === 'ok'
+              ? r?.version && r.version !== a.version
+                ? r.version
+                : ''
+              : state === 'bad'
+                ? (r?.error ?? '')
+                : ''
           return (
             <li key={a.name} class={`agent-row${a.installed ? '' : ' missing'}`}>
-              <div class="agent-main">
-                <span class="agent-name mono">{a.binary}</span>
-                {a.display_name && <span class="agent-version dim">{a.display_name}</span>}
-                <span class={`badge ${a.installed ? 'green' : 'red'}`}>
-                  {a.installed ? t('settings.agentInstalled') : t('settings.agentMissing')}
-                </span>
-                {a.installed && a.version && <span class="agent-version dim">{a.version}</span>}
-              </div>
-              {a.installed && a.path && <div class="agent-path dim mono">{a.path}</div>}
-              {!a.installed && (
-                <div class="agent-install">
-                  {a.install_hint && (
+              <div class="agent-body">
+                <div class="agent-main">
+                  <span class="agent-name mono">{a.binary}</span>
+                  {a.display_name && <span class="agent-version dim">{a.display_name}</span>}
+                  <span class={`badge ${a.installed ? 'green' : 'red'}`}>
+                    {a.installed ? t('settings.agentInstalled') : t('settings.agentMissing')}
+                  </span>
+                  {a.installed && a.version && <span class="agent-version dim">{a.version}</span>}
+                </div>
+                {a.installed && a.path && <div class="agent-path dim mono">{a.path}</div>}
+                {!a.installed && a.install_hint && (
+                  <div class="agent-install">
                     <div class="agent-path dim mono">
                       {t('settings.agentInstall')} {a.install_hint}
                     </div>
-                  )}
-                  {a.install_url && (
-                    <a class="btn small" href={a.install_url} target="_blank" rel="noreferrer">
+                  </div>
+                )}
+              </div>
+              <div class={`agent-probe ${a.installed ? state : 'missing'}`}>
+                {a.installed && (
+                  <div class="agent-probe-head">
+                    <span class="agent-probe-dot" />
+                    <span class="agent-probe-label">{label}</span>
+                  </div>
+                )}
+                {a.installed && detail && (
+                  <p class="agent-probe-detail" title={detail}>
+                    {detail}
+                  </p>
+                )}
+                {a.installed ? (
+                  <button
+                    class="btn small agent-probe-btn"
+                    disabled={testing !== ''}
+                    onClick={() => test(a.name)}
+                  >
+                    <Icon name="activity" />
+                    {t('settings.agentTest')}
+                  </button>
+                ) : (
+                  a.install_url && (
+                    <a
+                      class="btn small agent-probe-btn"
+                      href={a.install_url}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      <Icon name="download" />
                       {t('settings.agentDownload')}
                     </a>
-                  )}
-                </div>
-              )}
-              {r && (
-                <div class={`test-result ${r.ok ? 'ok' : 'bad'}`}>
-                  {r.ok
-                    ? t('settings.agentOk', { version: r.version ?? '' })
-                    : `${t('settings.agentFail')} ${r.error ?? ''}`}
-                </div>
-              )}
-              <button class="btn small" disabled={!a.installed || testing !== ''} onClick={() => test(a.name)}>
-                {testing === a.name ? t('settings.agentTesting') : t('settings.agentTest')}
-              </button>
+                  )
+                )}
+              </div>
             </li>
           )
         })}

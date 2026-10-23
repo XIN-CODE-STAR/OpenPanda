@@ -8,7 +8,10 @@ import {
   castAgent,
   prettyAgent,
   roundStillOpen,
+  roundTally,
+  sharedTitlePrefix,
   speakerOf,
+  stateTone,
   stripRefId,
   trailingRunSummary,
   type CastTurn,
@@ -114,6 +117,7 @@ describe('trailingRunSummary', () => {
       agents: ['claude_code'],
       titles: ['跑 HelloWorld'],
       state: 'done',
+      outcomes: ['done'],
       ref: 't1',
       refKind: 'task',
     })
@@ -128,8 +132,33 @@ describe('trailingRunSummary', () => {
     ])
     assert.deepEqual(got?.agents, ['claude_code', 'codex'])
     assert.deepEqual(got?.titles, ['阶段 1', '阶段 2'])
+    assert.deepEqual(got?.outcomes, ['done', 'done'])
     assert.equal(got?.ref, 'p1')
     assert.equal(got?.refKind, 'plan')
+  })
+
+  it('keeps every report in the round, not just the one that ended it', () => {
+    // Two home, one failed: the round's state is the last report's, but the
+    // batch's shape is the whole list — one failure must not speak for all.
+    const got = trailingRunSummary([
+      ask,
+      dispatch,
+      done('claude_code', 'a'),
+      done('codex', 'b'),
+      { role: 'assistant', kind: 'answer', text: '[failed] @deepseek_harness · c\n\n没权限。' },
+    ])
+    assert.equal(got?.state, 'failed')
+    assert.deepEqual(got?.outcomes, ['done', 'done', 'failed'])
+  })
+
+  it('leaves an unsettled report out of the tally', () => {
+    const got = trailingRunSummary([
+      ask,
+      dispatch,
+      { role: 'assistant', kind: 'answer', text: '[running] @codex · a\n\n在跑。' },
+      done('codex', 'a'),
+    ])
+    assert.deepEqual(got?.outcomes, ['done'])
   })
 
   it('says nothing while the round is still open', () => {
@@ -157,17 +186,71 @@ describe('trailingRunSummary', () => {
 describe('roundStillOpen', () => {
   it('waits for every task the round dispatched, not just the first home', () => {
     // One employee reported, two are still working: the roll-up must wait.
-    assert.equal(roundStillOpen(['done', 'running']), true)
-    assert.equal(roundStillOpen(['done', 'queued', 'done']), true)
-    assert.equal(roundStillOpen(['done', 'dispatched']), true)
-    assert.equal(roundStillOpen(['done', 'waiting_context']), true)
+    assert.equal(roundStillOpen([{ state: 'done' }, { state: 'running' }]), true)
+    assert.equal(roundStillOpen([{ state: 'done' }, { state: 'queued' }, { state: 'done' }]), true)
+    assert.equal(roundStillOpen([{ state: 'done' }, { state: 'dispatched' }]), true)
+    assert.equal(roundStillOpen([{ state: 'done' }, { state: 'waiting_context' }]), true)
   })
 
   it('closes once every row is settled', () => {
-    assert.equal(roundStillOpen(['done', 'done', 'failed']), false)
-    // A parked task has stopped the work; a person has the say.
-    assert.equal(roundStillOpen(['done', 'review']), false)
+    assert.equal(roundStillOpen([{ state: 'done' }, { state: 'done' }, { state: 'failed' }]), false)
+    // A parked task that already produced its work has stopped; a person has
+    // the say, and the roll-up is what tells them so.
+    assert.equal(roundStillOpen([{ state: 'done' }, { state: 'review', approval_disposition: 'accept_work' }]), false)
+    // Rows that predate the typed disposition keep the old reading: the store
+    // defaults them to accept_work.
+    assert.equal(roundStillOpen([{ state: 'done' }, { state: 'review' }]), false)
     assert.equal(roundStillOpen([]), false)
+  })
+
+  it('stays open while an employee is parked before it ever ran', () => {
+    // 待审批 with "尚未执行——批准后将继续执行": nothing was delivered, so the
+    // round cannot be summed up as finished just because a colleague reported.
+    for (const disposition of ['resume_execution', 'admission_review', 'needs_changed_input']) {
+      assert.equal(roundStillOpen([{ state: 'done' }, { state: 'review', approval_disposition: disposition }]), true)
+    }
+  })
+})
+
+describe('roundTally', () => {
+  it('counts a mixed batch in one fixed order', () => {
+    assert.deepEqual(roundTally(['failed', 'done', 'done']), [
+      { state: 'done', n: 2 },
+      { state: 'failed', n: 1 },
+    ])
+    assert.deepEqual(roundTally(['done']), [{ state: 'done', n: 1 }])
+    assert.deepEqual(roundTally([]), [])
+  })
+})
+
+describe('stateTone', () => {
+  it('paints delivered work green, a decision amber and a dead job red', () => {
+    assert.equal(stateTone('done'), 'ok')
+    assert.equal(stateTone('review'), 'warn')
+    assert.equal(stateTone('failed'), 'bad')
+    assert.equal(stateTone('cancelled'), 'bad')
+    assert.equal(stateTone('expired'), 'bad')
+  })
+})
+
+describe('sharedTitlePrefix', () => {
+  it('drops the dispatch template the jobs repeat', () => {
+    assert.equal(
+      sharedTitlePrefix([
+        '连通性测试：调用 agent:claude_code',
+        '连通性测试：调用 agent:codex',
+        '连通性测试：调用 agent:deepseek_harness',
+      ]),
+      '连通性测试：调用 agent:',
+    )
+    assert.equal(sharedTitlePrefix(['Build: the API', 'Build: the UI']), 'Build:')
+  })
+
+  it('keeps a prefix that is half a phrase, or that would empty a title', () => {
+    assert.equal(sharedTitlePrefix(['Fix bug in a', 'Fix bug in b']), '')
+    // One title is nothing but the template: dropping it would leave a blank.
+    assert.equal(sharedTitlePrefix(['连通性测试：', '连通性测试：调用 codex']), '')
+    assert.equal(sharedTitlePrefix(['only one job']), '')
   })
 })
 

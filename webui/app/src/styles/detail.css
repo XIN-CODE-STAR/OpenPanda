@@ -326,12 +326,48 @@
   color: var(--text-secondary);
 }
 .tt-cell-label {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   margin-bottom: 2px;
   font-size: 10.5px;
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-tertiary);
+}
+/* The step's clock, on its label row and pushed to the far edge: three cells
+   side by side are read as a sequence, and the sequence is the timestamps. */
+.tt-cell-at {
+  margin-left: auto;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+  opacity: 0.8;
+}
+/* The cell's headline — the agent, or what the classifier decided. */
+.tt-lead {
+  color: var(--text);
+}
+/* One labelled fact. Label in the muted tier, value beside it, wrapping under
+   itself rather than pushing the label out of the cell: a Windows path in a
+   165px column is one long word. */
+.tt-kv {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  line-height: 1.45;
+}
+.tt-k {
+  flex: none;
+  color: var(--text-tertiary);
+}
+.tt-v {
+  min-width: 0;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
 }
 .tt-cand {
   display: flex;
@@ -501,7 +537,10 @@
 
 .dt-spec-foot {
   display: grid;
-  grid-template-columns: 62px minmax(0, 1fr);
+  /* The label column grows to its longest label instead of being pinned at
+     62px: 允许的智能体 is wider than 范围, and a nowrap label in a fixed
+     column runs straight over the value beside it. */
+  grid-template-columns: minmax(62px, max-content) minmax(0, 1fr);
   gap: 6px 8px;
   margin: 12px 0 0;
   font-size: var(--text-sm);
@@ -518,6 +557,29 @@
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+}
+/* The user's own words, under the dispatcher's reading of them: a rule and a
+   label, not another card — it is the same brief, quoted. */
+.dt-spec-raw {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border-soft);
+}
+.dt-spec-raw-label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.dt-spec-raw-text {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* ---- Board -------------------------------------------------------------- */

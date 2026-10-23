@@ -742,15 +742,21 @@ export function formatTaskEvent(type: string, rawData?: string): FormattedEvent 
       }
     }
     case 'model_injection': {
-      const items = data?.items ?? data?.count ?? data?.injected
-      if (typeof items === 'number' && items > 0) {
-        tags.push({ key: t('events.tag.items'), value: String(items) })
-      }
+      // The event carries what the notice prints, in structured form: which
+      // agent got which model, from which endpoint, and why. That is what
+      // lets the one-line notice stay one line — the detail lives here.
+      const agent = str(data?.agent)
+      const model = str(data?.model)
+      const endpoint = str(data?.base_url)
+      const kind = str(data?.kind)
+      if (agent) tags.push({ key: t('events.tag.agent'), value: agent })
+      if (model) tags.push({ key: t('events.tag.model'), value: model })
+      if (kind) tags.push({ key: t('events.tag.mode'), value: kind })
       return {
         type,
         label: t('events.model_injection'),
         badgeClass: 'info',
-        summary: str(data?.note) || undefined,
+        summary: endpoint ? endpoint.replace(/^https?:\/\//, '').replace(/\/$/, '') : str(data?.reason) || undefined,
         tags,
         rawJson,
       }

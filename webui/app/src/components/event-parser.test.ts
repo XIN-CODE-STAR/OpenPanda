@@ -31,6 +31,31 @@ describe('event-parser', () => {
     assert.equal(formattedJa.label, 'モデル思考プロセス')
   })
 
+  it('formats model_injection with the agent, model and endpoint it really used', () => {
+    setLocale('en')
+    const formatted = formatTaskEvent(
+      'model_injection',
+      JSON.stringify({
+        agent: 'opencode',
+        model: 'glm-5.3-flash',
+        base_url: 'https://open.bigmodel.cn/api/paas/v4',
+        reason: 'credential rescue: the agent’s own model failed',
+        kind: 'rescue',
+      }),
+    )
+    assert.equal(formatted.label, 'Model injected')
+    assert.deepEqual(formatted.tags, [
+      { key: 'Agent', value: 'opencode' },
+      { key: 'Model', value: 'glm-5.3-flash' },
+      { key: 'Mode', value: 'rescue' },
+    ])
+    // The endpoint is the readable part of the summary — no scheme.
+    assert.equal(formatted.summary, 'open.bigmodel.cn/api/paas/v4')
+
+    setLocale('zh-CN')
+    assert.equal(formatTaskEvent('model_injection', '{"agent":"opencode"}').label, '模型注入')
+  })
+
   it('formats classify_result event into clear tags and note', () => {
     setLocale('en')
     const formatted = formatTaskEvent('classify_result', JSON.stringify({ kind: 'task', note: 'execute build' }))

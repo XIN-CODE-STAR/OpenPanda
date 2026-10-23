@@ -9,7 +9,7 @@ import { navigate } from '../nav'
 import { layerAboveOwnsEscape } from './card-dismiss'
 import { confirmDialog } from './confirm'
 import { Icon } from './icons'
-import { InfoSection, SpecCard, TimelineSection } from './task-sections'
+import { InfoSection, SpecCard, TimelineSection, parseResult, text } from './task-sections'
 import { StateBadge } from './state-badge'
 import { TaskTrace } from './task-trace'
 import { bindStripDrag } from './strip-drag'
@@ -397,7 +397,7 @@ function OrchChip(props: {
         {active && (
           <button
             type="button"
-            class="orch-act"
+            class="orch-act cancel"
             disabled={props.busy}
             onClick={props.onCancel}
             title={t('detail.cancelTask')}
@@ -422,7 +422,7 @@ function OrchChip(props: {
 }
 
 /** The picked task, in the card to the left of the list — the task detail page
- *  in 360px: how it was classified, routed and run (the same 执行链路 strip the
+ *  in 420px: how it was classified, routed and run (the same 执行链路 strip the
  *  page draws), what came back, what it was asked to do (任务简报), its ids and
  *  its log.
  *
@@ -432,10 +432,19 @@ function OrchChip(props: {
  *  settling for less than the page said, or leaving the conversation for the
  *  page. It now mounts the page's own sections — `TaskTrace`, `SpecCard`,
  *  `InfoSection`, `TimelineSection` — so the two surfaces cannot drift: the
- *  page lays them out at 980px, the card stacks them at 360px, and the only
+ *  page lays them out at 980px, the card stacks them at 420px, and the only
  *  thing that changes between them is the width. The message box and the
  *  delegation tree stay on the page; a task that needs those is a task worth
- *  opening in full, and the footer still goes there. */
+ *  opening in full, and the footer still goes there.
+ *
+ *  The sections are buttons now, not a stack. Five sections, each with its own
+ *  fold, made a card you had to scroll to reach the fourth one — and every one
+ *  of them was folded by default anyway, so the card was mostly five titles
+ *  and a scrollbar. One row of buttons under the identity line, one panel they
+ *  all share: pressing a button opens that section in the panel, pressing it
+ *  again closes it, pressing another swaps what the panel shows. The panel is
+ *  the fold, so the sections are mounted unfolded (`bare`) and a section that
+ *  has nothing to say gets no button at all. */
 function OrchTask(props: {
   task: Task
   busy: boolean
@@ -449,6 +458,15 @@ function OrchTask(props: {
   const active = isActiveState(task.state)
   const review = task.state === 'review'
   const blocked = task.approval_disposition === 'needs_changed_input'
+  // Which button's section the shared panel is showing; null when every
+  // section is put away, which is how the card opens.
+  const [tab, setTab] = useState<OrchTabKey | null>(null)
+  const tabs = orchTabs(task)
+  // A section can disappear between two paints — a result arrives, the log is
+  // emptied by a revert — and a panel left open on a section that no longer
+  // exists would show a blank card with a pressed button above it.
+  const openTab = tabs.find((x) => x.key === tab) ?? null
+
   return (
     <aside class="orch-orch-card" id="orch-detail" role="region" aria-label={t('orch.detail')}>
       <div class="orch-detail-head">
@@ -474,30 +492,57 @@ function OrchTask(props: {
           {t(`detail.reviewKind.${task.approval_disposition}`)}
         </p>
       )}
-      {/* A task that never went through the dispatcher has no classification,
-          no route and no execution trace, and the strip would draw two empty
-          steps, so the section is skipped. */}
-      {hasTrace(task) && (
-        <div class="orch-orch-trace">
-          <TaskTrace task={task} defaultOpen />
+
+      {/* The five sections as one control: what the run was routed through,
+          what it produced, what it was asked to do, what it is, and how it got
+          there. `aria-expanded` on each button, because each one both opens
+          and closes the panel under it. */}
+      <nav class="orch-tabs" aria-label={t('orch.detail')}>
+        {tabs.map((x) => (
+          <button
+            key={x.key}
+            type="button"
+            class={'orch-tab' + (openTab?.key === x.key ? ' is-on' : '')}
+            aria-expanded={openTab?.key === x.key}
+            aria-controls="orch-tab-panel"
+            onClick={() => setTab((cur) => (cur === x.key ? null : x.key))}
+          >
+            {x.label}
+          </button>
+        ))}
+      </nav>
+
+      {openTab && (
+        <div
+          class="orch-tab-panel"
+          id="orch-tab-panel"
+          role="region"
+          aria-label={openTab.label}
+        >
+          {openTab.key === 'trace' && <TaskTrace task={task} bare />}
+          {openTab.key === 'result' && <ResultBlock text={resultText(task.result ?? '')} />}
+          {openTab.key === 'brief' && (
+            <SpecCard spec={task.spec} fallback={taskBrief(task)} bare />
+          )}
+          {openTab.key === 'info' && <InfoSection task={task} bare />}
+          {openTab.key === 'timeline' && (
+            <TimelineSection
+              events={task.events ?? []}
+              suppressResult={Boolean(task.result)}
+              bare
+            />
+          )}
         </div>
       )}
-      {task.result && <ResultBlock text={resultText(task.result)} />}
-      {/* The page's brief section, with the intent as its fallback: a task
-          dispatched without a spec envelope still has the sentence that
-          started it, and dropping the section for those tasks left the card
-          with no "what was this asked to do" at all. */}
-      <SpecCard spec={task.spec} fallback={taskBrief(task)} />
-      <InfoSection task={task} />
-      <TimelineSection events={task.events ?? []} suppressResult={Boolean(task.result)} tail={4} />
+
       {/* The card mirrors the page, but not all of it: the message box, the
           delegation tree and the sub-agent list are decisions to make about a
-          run, and a 360px flyout is the wrong place to make them. The way out
+          run, and a 420px flyout is the wrong place to make them. The way out
           is therefore always here, not only for a task that still has actions
           — reading it in full should not require closing the card first. */}
       <div class="orch-detail-foot">
         {active && (
-          <button class="btn small" disabled={props.busy} onClick={props.onCancel}>
+          <button class="btn danger small" disabled={props.busy} onClick={props.onCancel}>
             {t('orch.cancel')}
           </button>
         )}
@@ -523,28 +568,49 @@ function OrchTask(props: {
   )
 }
 
-/** The run's output, rendered the way the task page renders it — markdown, not
- *  a mono dump of the envelope — but clamped instead of scrolled: the card is
- *  already one scroller, and a second one inside it traps the wheel halfway
- *  down the flyout. Short output is shown whole; a four-line report does not
- *  need a fold. */
-function ResultBlock({ text }: { text: string }) {
-  const [open, setOpen] = useState(false)
-  const long = text.length > 700
+type OrchTabKey = 'trace' | 'result' | 'brief' | 'info' | 'timeline'
+
+/** The card's five sections, in the order they are read — and only the ones
+ *  this task can actually fill. A 执行结果 button over a task that produced no
+ *  output opens an empty panel, which reads as a broken card rather than as
+ *  "this run said nothing"; 任务信息 is the one section every task has. The log
+ *  is offered only when there are events, for the same reason. */
+function orchTabs(task: Task): Array<{ key: OrchTabKey; label: string }> {
+  const out: Array<{ key: OrchTabKey; label: string }> = []
+  if (hasTrace(task)) out.push({ key: 'trace', label: t('detail.trace') })
+  if (resultText(task.result ?? '').trim()) out.push({ key: 'result', label: t('orch.result') })
+  if (hasBrief(task)) out.push({ key: 'brief', label: t('detail.spec.title') })
+  out.push({ key: 'info', label: t('detail.info') })
+  if ((task.events?.length ?? 0) > 0) out.push({ key: 'timeline', label: t('detail.timeline') })
+  return out
+}
+
+/** Whether `SpecCard` has anything to draw — the same test it makes for itself
+ *  before it renders, asked from outside so the card can decide whether the
+ *  button exists at all. */
+function hasBrief(task: Task): boolean {
+  if (taskBrief(task).trim()) return true
+  const s = task.spec ? parseResult(task.spec) : null
+  if (!s) return false
+  const constraints = Array.isArray(s.constraints) ? s.constraints : []
+  const agents = Array.isArray(s.allow_agents) ? s.allow_agents : []
   return (
-    <section class="dt-sec">
-      <div class="dt-sec-head">
-        <h2 class="dt-sec-title">{t('orch.result')}</h2>
-        {long && (
-          <button type="button" class="dt-sec-action" onClick={() => setOpen((v) => !v)}>
-            {open ? t('detail.result.collapse') : t('detail.result.expand')}
-          </button>
-        )}
-      </div>
-      <div class={'orch-detail-result' + (long && !open ? ' is-clamped' : '')}>
-        <Markdown text={text} />
-      </div>
-    </section>
+    constraints.length > 0 ||
+    agents.length > 0 ||
+    Boolean(text(s.scope)) ||
+    Boolean(text(s.success_definition))
+  )
+}
+
+/** The run's output, rendered the way the task page renders it — markdown, not
+ *  a mono dump of the envelope. It used to clamp at 220px behind its own fold;
+ *  the button above the panel is the fold now, and the card scrolls, so the
+ *  output is shown whole. */
+function ResultBlock({ text }: { text: string }) {
+  return (
+    <div class="orch-detail-result">
+      <Markdown text={text} />
+    </div>
   )
 }
 

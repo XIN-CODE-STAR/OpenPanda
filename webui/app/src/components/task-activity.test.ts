@@ -2,7 +2,7 @@
 
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { fmtElapsed, isActiveState, latestActivity } from './task-activity.ts'
+import { fmtElapsed, isActiveState, latestActivity, liveTaskIds } from './task-activity.ts'
 import { setLocale } from '../i18n/index.ts'
 import type { TraceEvent } from '../api/client.ts'
 
@@ -133,5 +133,32 @@ describe('task-activity', () => {
     } as unknown as TraceEvent
     const line = latestActivity([lastEvent], { state: 'running' })
     assert.equal(line, 'write · snake.py')
+  })
+
+  it('lists the jobs still running, in dispatch order', () => {
+    // A batch: two colleagues are home, one is still working. Only the live
+    // one gets a row, and it is the row the thread draws last.
+    const rows = [
+      { id: 'c', state: 'running', created_at: '2026-10-23T21:11:59+08:00' },
+      { id: 'a', state: 'done', created_at: '2026-10-23T21:11:59+08:00' },
+      { id: 'b', state: 'review', created_at: '2026-10-23T21:11:59+08:00' },
+    ]
+    assert.deepEqual(liveTaskIds(rows), ['c'])
+  })
+
+  it('keeps dispatch order when several jobs run at once', () => {
+    const rows = [
+      { id: 'late', state: 'running', created_at: '2026-10-23T21:12:00+08:00' },
+      { id: 'early', state: 'queued', created_at: '2026-10-23T21:11:58+08:00' },
+    ]
+    assert.deepEqual(liveTaskIds(rows), ['early', 'late'])
+  })
+
+  it('gives a spawned sub-agent no row of its own', () => {
+    const rows = [
+      { id: 'root', state: 'running', created_at: '2026-10-23T21:11:58+08:00' },
+      { id: 'child', state: 'running', created_at: '2026-10-23T21:11:59+08:00', spawn_depth: 1 },
+    ]
+    assert.deepEqual(liveTaskIds(rows), ['root'])
   })
 })

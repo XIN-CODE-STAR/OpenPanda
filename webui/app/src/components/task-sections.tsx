@@ -16,6 +16,8 @@
 import { useState } from 'preact/hooks'
 import type { Task, TaskEvent } from '../api/client'
 import { locale, t } from '../i18n'
+import { formatDuration } from '../format/time'
+import { AgentTag } from './agent-tag'
 import { EventTimeline } from './event-timeline'
 import { Icon } from './icons'
 
@@ -80,7 +82,18 @@ export function fmtShort(iso: string): string {
  *  the dispatcher did not fill a JSON field is a worse answer than showing the
  *  sentence that started the run. The detail page leaves it unset (its header
  *  already carries the intent); the chat card passes it. */
-export function SpecCard({ spec, fallback }: { spec?: string; fallback?: string }) {
+export function SpecCard({
+  spec,
+  fallback,
+  bare,
+}: {
+  spec?: string
+  fallback?: string
+  /** Render the brief's body alone — no section frame, no fold. The chat card
+   *  gives each section its own button and one shared panel, so a fold inside
+   *  the panel would be a fold on a fold. */
+  bare?: boolean
+}) {
   const [open, setOpen] = useState(false)
   const s = spec ? parseResult(spec) : null
   const target = text(s?.target) || (fallback ?? '').trim()
@@ -89,14 +102,97 @@ export function SpecCard({ spec, fallback }: { spec?: string; fallback?: string 
   const constraints = Array.isArray(s?.constraints)
     ? s.constraints.filter((c): c is string => typeof c === 'string' && c !== '')
     : []
-  if (!target && !success && !scope && constraints.length === 0) return null
+  // Which agents the dispatcher allowed this run to use. It is the one field
+  // that explains a task being run by the "wrong" CLI, and it was only ever
+  // readable in the raw spec blob.
+  const agents = Array.isArray(s?.allow_agents)
+    ? s.allow_agents.filter((a): a is string => typeof a === 'string' && a !== '')
+    : []
+  if (!target && !success && !scope && constraints.length === 0 && agents.length === 0) {
+    return null
+  }
   const scopeFiles = scope
     .split(/[,;\n]/)
     .map((f) => f.trim())
     .filter(Boolean)
+  // The sentence the user actually typed, when the dispatcher wrapped it into
+  // the intent envelope. The brief above is the dispatcher's *reading* of it —
+  // target, constraints, the bar — so the original is only worth a block when
+  // it says something those three do not.
+  const raw = rawRequestOf(fallback ?? '', target)
   // A brief that is only a target has nothing to unfold — the toggle used to
   // sit there re-printing the sentence directly above it.
-  const hasMore = constraints.length > 0 || scopeFiles.length > 0 || Boolean(success)
+  const hasMore =
+    constraints.length > 0 ||
+    scopeFiles.length > 0 ||
+    agents.length > 0 ||
+    Boolean(success) ||
+    Boolean(raw)
+
+  // The brief's body, drawn the same way wherever it is shown: the panel in the
+  // chat card gets exactly what the page's unfolded state shows.
+  const body = (
+    <>
+      {target && <p class="dt-spec-target">{target}</p>}
+      {constraints.length > 0 && (
+        <ul class="dt-spec-list">
+          {constraints.map((c, i) => (
+            <li key={i}>
+              {/* A dot, not a check: these are guardrails the run was
+                  held to, not items it ticked off. */}
+              <span class="dt-spec-dot" aria-hidden="true" />
+              <span>{c}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {(scopeFiles.length > 0 || agents.length > 0 || success) && (
+        <dl class="dt-spec-foot">
+          {scopeFiles.length > 0 && (
+            <>
+              <dt>{t('detail.spec.scope')}</dt>
+              <dd>
+                <span class="dt-spec-files">
+                  {scopeFiles.map((f, i) => (
+                    <code key={i} class="result-file-chip" title={f}>
+                      {f}
+                    </code>
+                  ))}
+                </span>
+              </dd>
+            </>
+          )}
+          {agents.length > 0 && (
+            <>
+              <dt>{t('detail.spec.agents')}</dt>
+              <dd>
+                <span class="dt-spec-files">
+                  {agents.map((a) => (
+                    <AgentTag key={a} name={a} />
+                  ))}
+                </span>
+              </dd>
+            </>
+          )}
+          {success && (
+            <>
+              <dt>{t('detail.spec.success')}</dt>
+              <dd>{success}</dd>
+            </>
+          )}
+        </dl>
+      )}
+      {raw && (
+        <div class="dt-spec-raw">
+          <span class="dt-spec-raw-label">{t('detail.spec.raw')}</span>
+          <p class="dt-spec-raw-text">{raw}</p>
+        </div>
+      )}
+    </>
+  )
+
+  if (bare) return <div class="dt-bare">{body}</div>
+
   return (
     <section class="dt-sec">
       <div class="dt-sec-head">
@@ -115,49 +211,37 @@ export function SpecCard({ spec, fallback }: { spec?: string; fallback?: string 
 
       {(!open || !hasMore) && target && <p class="dt-spec-preview">{target}</p>}
 
-      {open && hasMore && (
-        <>
-          {target && <p class="dt-spec-target">{target}</p>}
-          {constraints.length > 0 && (
-            <ul class="dt-spec-list">
-              {constraints.map((c, i) => (
-                <li key={i}>
-                  {/* A dot, not a check: these are guardrails the run was
-                      held to, not items it ticked off. */}
-                  <span class="dt-spec-dot" aria-hidden="true" />
-                  <span>{c}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-          {(scopeFiles.length > 0 || success) && (
-            <dl class="dt-spec-foot">
-              {scopeFiles.length > 0 && (
-                <>
-                  <dt>{t('detail.spec.scope')}</dt>
-                  <dd>
-                    <span class="dt-spec-files">
-                      {scopeFiles.map((f, i) => (
-                        <code key={i} class="result-file-chip" title={f}>
-                          {f}
-                        </code>
-                      ))}
-                    </span>
-                  </dd>
-                </>
-              )}
-              {success && (
-                <>
-                  <dt>{t('detail.spec.success')}</dt>
-                  <dd>{success}</dd>
-                </>
-              )}
-            </dl>
-          )}
-        </>
-      )}
+      {open && hasMore && body}
     </section>
   )
+}
+
+/** The sentence the user actually typed, lifted out of the dispatcher's intent
+ *  envelope.
+ *
+ *  The envelope is a title line, then 目标 / 约束 / 成功标准 in the dispatcher's
+ *  own words, then the user's message under a label line of its own. The brief
+ *  above already carries the first part, so only that tail is new — and the
+ *  label is localized, which is why it is recognised by its shape (a short line
+ *  ending in a colon, opening the last paragraph) rather than by its words. A
+ *  tail that merely repeats the target is dropped: printing the same sentence
+ *  twice, ten pixels apart, is the page's oldest habit. */
+function rawRequestOf(intent: string, target: string): string {
+  const paras = intent
+    .trim()
+    .split(/\n\s*\n/)
+    .map((p) => p.trim())
+    .filter(Boolean)
+  // One paragraph means there is no envelope to read the tail out of.
+  if (paras.length < 2) return ''
+  const last = paras[paras.length - 1] ?? ''
+  const nl = last.indexOf('\n')
+  if (nl < 0) return ''
+  const head = last.slice(0, nl).trim()
+  if (!head || head.length > 60 || !/[:：]$/.test(head)) return ''
+  const body = last.slice(nl + 1).trim()
+  if (!body || body === target.trim()) return ''
+  return body
 }
 
 // —---------------------------------------------------------------------------
@@ -168,8 +252,16 @@ export function SpecCard({ spec, fallback }: { spec?: string; fallback?: string 
 // header: five columns of grey ids ahead of the result. Folded, the header
 // line still carries the four that identify the run.
 // —---------------------------------------------------------------------------
-
-export function InfoSection({ task, onOpenTask }: { task: Task; onOpenTask?(id: string): void }) {
+export function InfoSection({
+  task,
+  onOpenTask,
+  bare,
+}: {
+  task: Task
+  onOpenTask?(id: string): void
+  /** The fact grid alone, without the fold header — see `SpecCard`. */
+  bare?: boolean
+}) {
   const [open, setOpen] = useState(false)
   const summary = [
     `#${shortId(task.id)}`,
@@ -179,6 +271,79 @@ export function InfoSection({ task, onOpenTask }: { task: Task; onOpenTask?(id: 
   ]
     .filter(Boolean)
     .join(' · ')
+  // Where the run actually happened, not where the submitter pinned it: a
+  // finished row is located on the machine that ran it.
+  const workDir = task.exec_work_dir || task.work_dir || ''
+  // The result envelope carries the run's bill. Same keys the verdict block
+  // reads on the task page; the card has no verdict block, so this is the one
+  // place they can appear.
+  const r = task.result ? parseResult(task.result) : null
+  const tokens = typeof r?.tokens === 'number' && r.tokens > 0 ? String(r.tokens) : ''
+  const cost = typeof r?.cost === 'number' && r.cost > 0 ? '$' + r.cost.toFixed(4) : ''
+  const queue = [queueWord(task.priority), task.seq ? `#${task.seq}` : ''].filter(Boolean).join(' · ')
+  const plan = task.plan_meta?.plan_id
+    ? [task.plan_meta.stage_id || '', task.plan_meta.plan_id].filter(Boolean).join(' / ')
+    : ''
+  const rounds =
+    task.supervision?.round !== undefined
+      ? `${task.supervision.round}/${task.supervision.budget ?? '?'}`
+      : ''
+  const elapsed = elapsedOf(task)
+  const facts = (
+    <dl class="dt-facts">
+      <Fact label={t('detail.id')} value={task.id} mono title={task.id} />
+      {task.parent_id && (
+        <div class="dt-fact">
+          <dt>{t('detail.parent')}</dt>
+          <dd>
+            <button
+              type="button"
+              class="linklike mono"
+              onClick={() => onOpenTask?.(task.parent_id)}
+              title={task.parent_id}
+            >
+              #{shortId(task.parent_id)}
+            </button>
+          </dd>
+        </div>
+      )}
+      <Fact label={t('detail.project')} value={task.project || '—'} />
+      <Fact label={t('detail.owner')} value={task.owner || '—'} />
+      <Fact label={t('detail.attempt')} value={task.attempt_id || '—'} mono title={task.attempt_id} />
+      <Fact label={t('detail.created')} value={fmtFull(task.created_at)} />
+      <Fact label={t('detail.updated')} value={fmtFull(task.updated_at)} />
+      {task.risk && <Fact label={t('detail.risk')} value={task.risk} />}
+      {/* Everything below is the card's alone. The task page answers these
+          questions in its own header, verdict block and trace strip; the
+          card's panel is the only surface it has, so it carries them all. */}
+      {bare && task.session_id && (
+        <Fact label={t('detail.session')} value={task.session_id} mono title={task.session_id} />
+      )}
+      {bare && workDir && <Fact label={t('detail.workdir')} value={workDir} mono title={workDir} />}
+      {bare && queue && <Fact label={t('detail.queue')} value={queue} />}
+      {bare && plan && <Fact label={t('detail.plan')} value={plan} mono title={plan} />}
+      {bare && rounds && <Fact label={t('detail.verdict.rounds')} value={rounds} />}
+      {bare && elapsed && <Fact label={t('detail.verdict.elapsed')} value={elapsed} />}
+      {bare && tokens && <Fact label={t('detail.verdict.tokens')} value={tokens} />}
+      {bare && cost && <Fact label={t('detail.verdict.cost')} value={cost} />}
+      {bare && (task.events?.length ?? 0) > 0 && (
+        <Fact label={t('detail.events')} value={String(task.events!.length)} />
+      )}
+      {bare && (task.children?.length ?? 0) > 0 && (
+        <Fact label={t('detail.subtasks')} value={String(task.children!.length)} />
+      )}
+      {bare && task.scope_paths && task.scope_paths.length > 0 && (
+        <Fact
+          label={t('detail.scoped')}
+          value={task.scope_paths.join(', ')}
+          mono
+          title={task.scope_paths.join('\n')}
+        />
+      )}
+      {bare && task.isolate && <Fact label={t('detail.isolated')} value={t('detail.isolateHint')} />}
+    </dl>
+  )
+  if (bare) return <div class="dt-bare">{facts}</div>
   return (
     <section class="dt-sec">
       <button
@@ -191,34 +356,25 @@ export function InfoSection({ task, onOpenTask }: { task: Task; onOpenTask?(id: 
         <span class="dt-fold-summary">{summary}</span>
         <Icon name={open ? 'chevron-down' : 'chevron-right'} size={13} class="dt-fold-ico" />
       </button>
-      {open && (
-        <dl class="dt-facts">
-          <Fact label={t('detail.id')} value={task.id} mono title={task.id} />
-          {task.parent_id && (
-            <div class="dt-fact">
-              <dt>{t('detail.parent')}</dt>
-              <dd>
-                <button
-                  type="button"
-                  class="linklike mono"
-                  onClick={() => onOpenTask?.(task.parent_id)}
-                  title={task.parent_id}
-                >
-                  #{shortId(task.parent_id)}
-                </button>
-              </dd>
-            </div>
-          )}
-          <Fact label={t('detail.project')} value={task.project || '—'} />
-          <Fact label={t('detail.owner')} value={task.owner || '—'} />
-          <Fact label={t('detail.attempt')} value={task.attempt_id || '—'} mono title={task.attempt_id} />
-          <Fact label={t('detail.created')} value={fmtFull(task.created_at)} />
-          <Fact label={t('detail.updated')} value={fmtFull(task.updated_at)} />
-          {task.risk && <Fact label={t('detail.risk')} value={task.risk} />}
-        </dl>
-      )}
+      {open && facts}
     </section>
   )
+}
+
+/** Priority as the queue words it, or '' when the row carries none. */
+function queueWord(priority?: string): string {
+  return priority ? t(`queue.priority.${priority}`) : ''
+}
+
+/** Wall-clock the run held the queue. Only for settled tasks: an open one
+ *  would read as a duration and then keep growing while the card sits. */
+function elapsedOf(task: Task): string {
+  if (['submitted', 'queued', 'dispatched', 'running', 'waiting_context'].includes(task.state)) {
+    return ''
+  }
+  const ms = Date.parse(task.updated_at) - Date.parse(task.created_at)
+  if (!Number.isFinite(ms) || ms <= 0) return ''
+  return formatDuration(ms)
 }
 
 function Fact({
@@ -256,16 +412,30 @@ export function TimelineSection({
   events,
   suppressResult,
   tail = TIMELINE_TAIL,
+  bare,
 }: {
   events: TaskEvent[]
   suppressResult?: boolean
   /** How many rows the folded state shows. The chat card, at 360px, has less
    *  room than the page and asks for fewer. */
   tail?: number
+  /** The log alone, unfolded and unlabelled — see `SpecCard`. */
+  bare?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const long = events.length > tail
   const shown = long && !open ? events.slice(-tail) : events
+  if (bare) {
+    return (
+      <div class="dt-bare">
+        {events.length > 0 ? (
+          <EventTimeline events={events} suppressResultBody={suppressResult} />
+        ) : (
+          <p class="dim">{t('common.empty')}</p>
+        )}
+      </div>
+    )
+  }
   return (
     <section class="dt-sec">
       <div class="dt-sec-head">

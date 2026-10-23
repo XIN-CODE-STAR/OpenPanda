@@ -375,7 +375,7 @@ export function DetailView({
             generic spec card. */}
         <SelfMergeCard spec={task.spec} />
 
-        <SpecCard spec={task.spec} />
+        <SpecCard spec={task.spec} fallback={task.intent} />
 
         {board && board.messages.length > 0 && (
           // The board scope is where queued user notes, steers and sibling
@@ -713,7 +713,7 @@ function ResultView({ raw, lead }: { raw: string; lead?: string }) {
   // so the section opened on three lines nobody could rank. A chip names its
   // own field, and the exit code carries the tone — a zero is the one fact
   // that answers "did it work" before anything is read.
-  const chips: Array<{ text: string; tone?: 'ok' | 'bad'; mono?: boolean }> = []
+  const chips: Array<{ text: string; tone?: 'ok' | 'bad'; mono?: boolean; agent?: boolean }> = []
   if (exit !== null) {
     chips.push({
       text: t('detail.result.exit', { n: String(exit) }),
@@ -721,7 +721,7 @@ function ResultView({ raw, lead }: { raw: string; lead?: string }) {
       mono: true,
     })
   }
-  if (agent) chips.push({ text: t('detail.result.agent', { agent }) })
+  if (agent) chips.push({ text: t('detail.result.agent', { agent }), agent: true })
   if (model) chips.push({ text: t('detail.result.model', { model }), mono: true })
   if (injected) chips.push({ text: t('detail.result.injected') })
   if (executor) chips.push({ text: t('detail.result.node', { node: executor }), mono: true })
@@ -756,7 +756,7 @@ function ResultView({ raw, lead }: { raw: string; lead?: string }) {
             {chips.map((c) => (
               <span
                 key={c.text}
-                class={`result-chip${c.tone ? ` is-${c.tone}` : ''}${c.mono ? ' mono' : ''}`}
+                class={`result-chip${c.tone ? ` is-${c.tone}` : ''}${c.mono ? ' mono' : ''}${c.agent ? ' is-agent' : ''}`}
                 title={c.text}
               >
                 {c.text}

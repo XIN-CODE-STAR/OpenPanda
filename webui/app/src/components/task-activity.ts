@@ -182,3 +182,31 @@ export function isActiveState(state: string | undefined): boolean {
   return state === 'submitted' || state === 'queued' || state === 'dispatched' ||
     state === 'waiting_context' || state === 'running'
 }
+
+/** The jobs a thread still has hands on, in dispatch order.
+ *
+ *  The chat draws one employee row per job that is still moving, and it draws
+ *  them after the last turn — not under the bubble that dispatched them. In a
+ *  batch the two differ: the session finalizer files one report per task the
+ *  moment each settles, so a colleague who finished first lands *below* a row
+ *  that is still working, and the thread reads as if the running job were
+ *  older than the work that overtook it. Whatever is still running is the
+ *  newest thing in the thread, so it goes at the foot of it.
+ *
+ *  Dispatch order (oldest first) rather than the board's own recency order: a
+ *  row that re-sorts itself every time its task takes a step is worse than one
+ *  that stays put. A spawned sub-agent is not its own row — the dispatch card
+ *  counts jobs, and a tree of three would read as three jobs. */
+export function liveTaskIds(
+  tasks: Iterable<Pick<Task, 'id' | 'state' | 'created_at' | 'spawn_depth'>>,
+): string[] {
+  const out: Pick<Task, 'id' | 'state' | 'created_at' | 'spawn_depth'>[] = []
+  for (const task of tasks) {
+    if (!isActiveState(task.state)) continue
+    if (task.spawn_depth && task.spawn_depth > 0) continue
+    out.push(task)
+  }
+  return out
+    .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))
+    .map((task) => task.id)
+}

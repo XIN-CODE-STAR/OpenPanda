@@ -40,10 +40,14 @@ import { atQuery, expandFileRefs, exportMarkdown, exportFilename, isImageFile, w
 import { isLiveSession } from '../components/session-guard'
 import { sortSessions, turnsChanged } from '../components/session-list'
 import { splitReportHead } from '../components/report-head'
+import { liveTaskIds } from '../components/task-activity'
 import {
   prettyAgent,
   roundStillOpen,
+  roundTally,
+  sharedTitlePrefix,
   speakerOf,
+  stateTone,
   stripRefId,
   trailingRunSummary,
   type RunSummary,
@@ -2013,12 +2017,15 @@ export function SessionsView({
   // turn per task as each settles, so closing on the last turn alone would
   // print "本轮工作已全部完成" while a colleague was still running — and then
   // rewrite the roll-up every time another one landed. The task board is the
-  // only place that knows the batch (see `useRoundOpen`).
-  const roundOpen = useRoundOpen(
-    activeId,
-    msgs.some((m) => m.kind === 'task' || m.kind === 'plan'),
-  )
+  // only place that knows the batch (see `useSessionTasks`).
+  const dispatched = msgs.some((m) => m.kind === 'task' || m.kind === 'plan')
+  const sessionTasks = useSessionTasks(activeId, dispatched)
+  const roundOpen = sessionTasks ? roundStillOpen(sessionTasks) : false
   const runSummary = busy || roundOpen ? null : trailingRunSummary(msgs)
+  // The employees still working, drawn after the last turn: a running job is
+  // the newest thing in the thread, whatever the position of the bubble that
+  // dispatched it (see `liveTaskIds`).
+  const liveIds = sessionTasks ? liveTaskIds(sessionTasks) : []
 
   return (
     <section class="chat">
@@ -2233,6 +2240,9 @@ export function SessionsView({
               liveFrom={liveFrom}
               onOpenTask={openTaskInPlace}
             />
+          ))}
+          {liveIds.map((id) => (
+            <LiveProgressRow key={id} taskId={id} />
           ))}
           {runSummary && <RunSummaryRow run={runSummary} onOpenTask={openTaskInPlace} />}
         </div>
@@ -3396,10 +3406,9 @@ function ChatBubble(props: {
   )
 }
 
-/** A chat row, plus the employee's own progress row while the task it
- *  dispatched is still running. The task is read once, here, and handed to
- *  both — the cast line inside the panda's bubble and the progress row under
- *  it are the same row of the database. */
+/** A chat row. The employee's own progress row does *not* hang off it any
+ *  more: a still-running job belongs at the foot of the thread, not under the
+ *  bubble that dispatched it (see `liveTaskIds` / `LiveProgressRow`). */
 function ChatTurn(props: {
   msg: ChatMsg
   onOpenTask(id: string): void
@@ -3409,12 +3418,19 @@ function ChatTurn(props: {
   const { msg } = props
   const task = useTaskBrief(msg.kind === 'task' ? msg.ref : undefined)
   const plan = usePlanBrief(msg.kind === 'plan' ? msg.ref : undefined)
-  return (
-    <>
-      <ChatBubble {...props} task={task} plan={plan} />
-      {task && <TaskProgress task={task} />}
-    </>
-  )
+  return <ChatBubble {...props} task={task} plan={plan} />
+}
+
+/** One employee's live row, at the tail of the thread while their job runs.
+ *
+ *  The board list carries the state, not the trace the row's face is named
+ *  from, so the row is read here on its own — and re-read on every change
+ *  frame, which is what keeps the line moving. It draws nothing once the job
+ *  settles: by then the finalizer's report turn is in the transcript, in this
+ *  same spot, saying more. */
+function LiveProgressRow({ taskId }: { taskId: string }) {
+  const task = useTaskBrief(taskId)
+  return task ? <TaskProgress task={task} /> : null
 }
 
 /** Whether the thread's round still has work in flight.
@@ -3423,10 +3439,15 @@ function ChatTurn(props: {
  *  appear once every task this thread dispatched has settled. The turns alone
  *  cannot answer that — the finalizer files one report per task as each one
  *  lands, so the newest turn is a finished employee while its colleagues are
- *  still running (see `roundStillOpen`). The task board knows the batch, so
- *  it is read here and re-read on every change frame. Only a thread that
- *  dispatched something pays for the read. */
-function useRoundOpen(sessionId: string | null, enabled: boolean): boolean {
+ *  still running (see `roundStillOpen`). Nor is every `review` row settled: a
+ *  row parked before execution — 待审批, "尚未执行——批准后将继续执行" — has not
+ *  done its work yet, so it holds the round open the same way a running row
+ *  does. The task board knows both, so it is read here and re-read on every
+ *  change frame. Only a thread that dispatched something pays for the read.
+ *
+ *  The same list answers the other half of the question — which employees are
+ *  working right now, see `liveTaskIds`. It is one read, not two. */
+function useSessionTasks(sessionId: string | null, enabled: boolean): Task[] | null {
   const change = useChangeSignal()
   const { data } = useAsync<Task[] | null>(
     () =>
@@ -3436,22 +3457,41 @@ function useRoundOpen(sessionId: string | null, enabled: boolean): boolean {
     [sessionId, enabled],
     change,
   )
-  if (!enabled || !data) return false
-  return roundStillOpen(data.map((task) => task.state))
+  return data
 }
 
 /** The panda's closing line for a round that just finished.
  *
  *  The employees have each said what they did; what a round still owes the
- *  reader is the roll-up — it is over, this many people worked on it, here is
- *  where the work lives. It is derived from the turns already in the thread
- *  (see `trailingRunSummary`), not a stored message: nothing new is written to
- *  the transcript, so the model's own history is untouched. */
+ *  reader is the roll-up — it is over, how the batch split, this many people
+ *  worked on it, here is where the work lives. It is derived from the turns
+ *  already in the thread (see `trailingRunSummary`), not a stored message:
+ *  nothing new is written to the transcript, so the model's own history is
+ *  untouched. */
 function RunSummaryRow({ run, onOpenTask }: { run: RunSummary; onOpenTask(id: string): void }) {
-  const line =
-    run.state === 'done'
+  // A round is a batch. Reading its verdict off the last report alone said
+  // "已失败" over two employees who finished, so the split is counted here and
+  // the headline names it: all home is "done", some home is "finished — 2 done,
+  // 1 failed", nothing home keeps the single-state line.
+  const total = run.outcomes.length
+  const ok = run.outcomes.filter((s) => s === 'done').length
+  const mixed = ok > 0 && ok < total
+  const line = mixed
+    ? t('sessions.runSummary.partial', {
+        parts: roundTally(run.outcomes)
+          .map(({ state, n }) => t(`sessions.runSummary.tally.${state}`, { n: String(n) }))
+          .join(t('sessions.runSummary.sep')),
+      })
+    : ok === total && total > 0
       ? t('sessions.runSummary.done')
       : t('sessions.runSummary.ended', { state: t(`state.${run.state}`) })
+  // The dot carries the batch's tone, not the last employee's: one failure
+  // among successes is amber, and only a round where nobody finished is red.
+  const tone = mixed ? 'warn' : ok === total && total > 0 ? 'ok' : stateTone(run.state)
+  // Three jobs off one dispatch template share a head ("连通性测试：调用
+  // agent:") that the reader does not need three times.
+  const prefix = sharedTitlePrefix(run.titles)
+  const titles = prefix ? run.titles.map((title) => title.slice(prefix.length).trim()) : run.titles
   const ref = run.ref
   const isTaskRef = run.refKind === 'task'
   const isPlanRef = run.refKind === 'plan'
@@ -3465,11 +3505,13 @@ function RunSummaryRow({ run, onOpenTask }: { run: RunSummary; onOpenTask(id: st
         </div>
         <div class="msg-bubble is-summary">
           <p class="msg-summary-line">
-            <span class={`msg-cast-state is-${run.state}`}>
+            <span class={`msg-cast-state is-${tone}`}>
               <span class="msg-report-dot" aria-hidden="true" />
               {line}
             </span>
-            {run.agents.length > 0 && (
+            {/* The mixed headline already counts everyone; repeating the
+                headcount under it would be the same number twice. */}
+            {!mixed && run.agents.length > 0 && (
               <span class="msg-summary-people">
                 {t('sessions.runSummary.people', { n: String(run.agents.length) })}
               </span>
@@ -3477,7 +3519,7 @@ function RunSummaryRow({ run, onOpenTask }: { run: RunSummary; onOpenTask(id: st
           </p>
           {/* A single job is already named by the row above; the recap only
               earns its line when the round covered more than one. */}
-          {run.titles.length > 1 && <p class="msg-summary-what">{run.titles.join(' · ')}</p>}
+          {titles.length > 1 && <p class="msg-summary-what">{titles.join(' · ')}</p>}
           {ref && isTaskRef && (
             <a
               class="msg-summary-link"
