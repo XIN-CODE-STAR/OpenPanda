@@ -1,11 +1,11 @@
 <!doctype html>
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
-<html lang="zh-CN">
+<html lang="zh-CN" data-lang="zh">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>404 — 这条航线没有节点 · OpenPanda</title>
+<title data-i18n="title">404 — 这条航线没有节点 · OpenPanda</title>
 <style>
   /* Self-contained on purpose: GitHub Pages serves this file for any missing
      path, so relative asset URLs would resolve against that path and 404 too.
@@ -91,6 +91,20 @@
   }
   .links a:hover { border-color: var(--jade); color: #fff; background: rgba(12,122,85,.24); }
   .links a.primary { border-color: rgba(111,199,161,.6); color: var(--jade); }
+  .links button {
+    padding: 11px 20px;
+    background: transparent;
+    border: 1px solid rgba(250,249,245,.22);
+    border-radius: 999px;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: rgba(250,249,245,.8);
+    cursor: pointer;
+    transition: border-color .2s, color .2s, background .2s;
+  }
+  .links button:hover { border-color: var(--jade); color: #fff; background: rgba(12,122,85,.24); }
   footer {
     position: relative;
     margin-top: 56px;
@@ -111,16 +125,67 @@
 
     <p class="code">404</p>
     <p class="kicker">No node at this coordinate</p>
-    <h1>这条航线没有节点。</h1>
-    <p class="lede">页面可能已经改名、被合并进别的章节，或者这一步本来就在你的计划之外。回到主场，或者去仓库里找找。</p>
+    <h1 data-i18n="h1">这条航线没有节点。</h1>
+    <p class="lede" data-i18n="lede">页面可能已经改名、被合并进别的章节，或者这一步本来就在你的计划之外。回到主场，或者去仓库里找找。</p>
 
     <div class="links">
-      <a class="primary" href="/OpenPanda/">返回首页</a>
+      <a class="primary" href="/OpenPanda/" data-i18n="home">返回首页</a>
       <a href="https://github.com/Xustalis/OpenPanda">GitHub</a>
-      <a href="https://github.com/Xustalis/OpenPanda/blob/main/docs/status.md">项目现状</a>
+      <a href="https://github.com/Xustalis/OpenPanda/blob/main/docs/status.md" data-i18n="status">项目现状</a>
+      <button type="button" id="lang-toggle" aria-label="切换语言 / Switch language">EN</button>
     </div>
 
     <footer>OpenPanda · Local-first orchestration kernel</footer>
   </main>
+
+<script>
+// Same contract as the main page: Chinese is the markup, English is a table,
+// and the choice persists under the site-wide key. Self-contained on purpose —
+// this file is served for any missing path, so it loads no other asset.
+(function () {
+  var KEY = 'openpanda.site.lang'
+  var EN = {
+    title: '404 — no node at this coordinate · OpenPanda',
+    h1: 'No node at this coordinate.',
+    lede: 'The page may have been renamed, merged into another section, or this step was never in your plan. Head back, or go digging in the repository.',
+    home: 'Back to home',
+    status: 'Project status',
+  }
+  var root = document.documentElement
+  var nodes = [].slice.call(document.querySelectorAll('[data-i18n]'))
+  var zh = new Map()
+  nodes.forEach(function (el) { zh.set(el, el.innerHTML) })
+  var btn = document.getElementById('lang-toggle')
+
+  function read() {
+    var q = new URLSearchParams(location.search).get('lang')
+    if (q === 'en' || q === 'zh') return q
+    try { var s = localStorage.getItem(KEY); if (s === 'en' || s === 'zh') return s } catch (e) {}
+    return /^zh/i.test(navigator.language || '') ? 'zh' : 'en'
+  }
+
+  function apply(lang) {
+    nodes.forEach(function (el) {
+      var key = el.getAttribute('data-i18n')
+      var value = lang === 'en' ? EN[key] : zh.get(el)
+      if (value == null) return
+      if (el.tagName === 'TITLE') el.textContent = value
+      else el.innerHTML = value
+    })
+    root.setAttribute('data-lang', lang)
+    root.setAttribute('lang', lang === 'zh' ? 'zh-CN' : 'en')
+    btn.textContent = lang === 'zh' ? 'EN' : '中文'
+    btn.setAttribute('aria-label', lang === 'zh' ? 'Switch to English' : '切换到中文')
+  }
+
+  btn.addEventListener('click', function () {
+    var next = root.getAttribute('data-lang') === 'zh' ? 'en' : 'zh'
+    try { localStorage.setItem(KEY, next) } catch (e) {}
+    apply(next)
+  })
+
+  apply(read())
+})()
+</script>
 </body>
 </html>

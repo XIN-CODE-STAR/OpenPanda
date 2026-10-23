@@ -18,6 +18,9 @@
 #   OPENPANDA_REPO_URL   source repository (default Xustalis/OpenPanda)
 #   OPENPANDA_TAP_REPO   tap repository (default Xustalis/homebrew-openpanda)
 #   OPENPANDA_TAP_BRANCH tap branch (default main)
+#   GITHUB_TOKEN / GH_TOKEN
+#                        optional; lifts api.github.com off the anonymous
+#                        60/hour budget. Only sent to api.github.com.
 set -u
 
 REPO_URL="${OPENPANDA_REPO_URL:-https://github.com/Xustalis/OpenPanda}"
@@ -33,43 +36,76 @@ skip() { printf 'SKIP: %s\n' "$1"; exit 0; }
 
 command -v curl >/dev/null 2>&1 || skip "curl not available"
 
-# get <url> [accept] → body on stdout, or empty on transport failure. The HTTP
-# status lands in $http_code so a caller can tell 404 (definitive) from 403
-# (rate limit).
-http_code=""
-get() {
+# http_get <url> [accept] → sets BODY and HTTP_CODE.
+#
+# Deliberately not a "print the body, stash the status in a variable" helper:
+# every caller wants the body, so it would be called as $(http_get …), and a
+# command substitution runs in a subshell — the status assigned inside it would
+# never reach the caller. That is how this script used to lose the HTTP status
+# entirely and print "HTTP ;" in its skip line. Callers use the two globals.
+#
+# An error response has a body too: api.github.com answers a rate-limited
+# request with 403 and a JSON notice, and that notice is not a formula. BODY is
+# therefore only set on 200, so each caller's "empty means fall back / skip"
+# test actually fires.
+#
+# GITHUB_TOKEN (or GH_TOKEN) is used when present, and only against
+# api.github.com. Anonymous api.github.com is 60 requests/hour/IP, and a hosted
+# runner shares its IP with everyone else on it — which is how the weekly
+# Security run kept landing on SKIP instead of checking anything. The token must
+# not ride along to the release CDN: a `releases/download` URL redirects to
+# objects.githubusercontent.com, which answers 401 to a bearer token it does not
+# own, so an authenticated HEAD made every asset look missing.
+HTTP_CODE=""
+BODY=""
+TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+auth_header() {
+    case "$1" in
+        https://api.github.com/*) [ -n "$TOKEN" ] && printf 'Authorization: Bearer %s' "$TOKEN" ;;
+    esac
+}
+http_get() {
     _url="$1"; _accept="${2:-}"
-    if [ -n "$_accept" ]; then
-        _out="$(curl -sSL --retry 2 --max-time 30 -H "Accept: $_accept" -w '\n%{http_code}' "$_url" 2>/dev/null || true)"
-    else
-        _out="$(curl -sSL --retry 2 --max-time 30 -w '\n%{http_code}' "$_url" 2>/dev/null || true)"
-    fi
-    http_code="$(printf '%s' "$_out" | tail -n1)"
-    printf '%s' "$_out" | sed '$d'
+    set -- -sSL --retry 2 --max-time 30 -w '\n%{http_code}'
+    [ -n "$_accept" ] && set -- "$@" -H "Accept: $_accept"
+    _auth="$(auth_header "$_url")"
+    [ -n "$_auth" ] && set -- "$@" -H "$_auth"
+    _out="$(curl "$@" "$_url" 2>/dev/null || true)"
+    HTTP_CODE="$(printf '%s' "$_out" | tail -n1)"
+    case "$HTTP_CODE" in
+        200) BODY="$(printf '%s' "$_out" | sed '$d')" ;;
+        *)   BODY="" ;;
+    esac
 }
 
 # head_status <url> → HTTP status of a HEAD request (no body).
 head_status() {
-    curl -sSL -o /dev/null -w '%{http_code}' --retry 2 --max-time 30 -I "$1" 2>/dev/null || echo 000
+    _url="$1"
+    set -- -sSL -o /dev/null -w '%{http_code}' --retry 2 --max-time 30 -I
+    _auth="$(auth_header "$_url")"
+    [ -n "$_auth" ] && set -- "$@" -H "$_auth"
+    curl "$@" "$_url" 2>/dev/null || echo 000
 }
 
 # ── 1. Read the formula ─────────────────────────────────────────────────────
 # The contents API is preferred over raw.githubusercontent.com: the raw
 # endpoint serves a cached copy for minutes after a push, which would report
 # the previous version right when a repair is being verified.
-formula="$(get "https://api.github.com/repos/${TAP_REPO}/contents/Formula/openpanda.rb?ref=${TAP_BRANCH}" 'application/vnd.github.raw')"
+http_get "https://api.github.com/repos/${TAP_REPO}/contents/Formula/openpanda.rb?ref=${TAP_BRANCH}" 'application/vnd.github.raw'
+formula="$BODY"
 if [ -z "$formula" ]; then
     # Fall back to the CDN (not rate limited) before giving up.
-    formula="$(get "https://raw.githubusercontent.com/${TAP_REPO}/${TAP_BRANCH}/Formula/openpanda.rb")"
+    http_get "https://raw.githubusercontent.com/${TAP_REPO}/${TAP_BRANCH}/Formula/openpanda.rb"
+    formula="$BODY"
 fi
 if [ -z "$formula" ]; then
-    case "$http_code" in
+    case "$HTTP_CODE" in
         404)
             bad "check-homebrew-tap: $TAP_REPO has no Formula/openpanda.rb on $TAP_BRANCH"
             note "check-homebrew-tap: FAILED"
             exit 1
             ;;
-        *) skip "could not read the tap formula (HTTP $http_code; rate limit or network?)" ;;
+        *) skip "could not read the tap formula (HTTP $HTTP_CODE; rate limit or network?)" ;;
     esac
 fi
 
@@ -81,14 +117,15 @@ if [ -z "$version" ]; then
 fi
 
 # ── 2. Does that release still exist, and is it stable? ─────────────────────
-meta="$(get "https://api.github.com/repos/${REPO_SLUG}/releases/tags/v${version}" 'application/vnd.github+json')"
+http_get "https://api.github.com/repos/${REPO_SLUG}/releases/tags/v${version}" 'application/vnd.github+json'
+meta="$BODY"
 if [ -z "$meta" ]; then
-    if [ "$http_code" = 404 ]; then
+    if [ "$HTTP_CODE" = 404 ]; then
         bad "check-homebrew-tap: formula pins v$version but that release does not exist (brew install is a 404)"
         note "check-homebrew-tap: FAILED"
         exit 1
     fi
-    skip "could not read release metadata for v$version (HTTP $http_code; rate limit or network?)"
+    skip "could not read release metadata for v$version (HTTP $HTTP_CODE; rate limit or network?)"
 fi
 
 case "$meta" in
@@ -110,7 +147,8 @@ for target in darwin-amd64 darwin-arm64 linux-amd64 linux-arm64; do
 done
 
 # ── 4. Do the recorded sha256 values still match the published checksums? ───
-sums="$(get "$REPO_URL/releases/download/v${version}/checksums.txt")"
+http_get "$REPO_URL/releases/download/v${version}/checksums.txt"
+sums="$BODY"
 if [ -z "$sums" ]; then
     bad "check-homebrew-tap: v$version publishes no checksums.txt"
 else

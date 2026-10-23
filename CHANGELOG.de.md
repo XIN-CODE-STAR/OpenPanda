@@ -46,11 +46,24 @@ OpenPanda (**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **A
 
 - **Der Arbeitsbereich zeigt Geräte, keine Karte** —— Panels aus Agenten-Marken ersetzen den Topologie-Ring: das Panel ist die Maschine, die Kachel der Agent und ob er gerade arbeitet. Und eine Runde endet nicht mehr mit dem ersten Bericht eines Stapels — `roundStillOpen()` liest das Taskboard, sodass „die Arbeit dieser Runde ist abgeschlossen" auf den letzten wartet.
 
-## [0.1.0] - 2026-10-22
+## [0.1.0] - 2026-10-23 — "Constellation"
 
-**Die erste Version in Release-Qualität** — Codename **Constellation**: dieselbe Flotte, die die Vorschau v0.0.12 gezeichnet hat, jetzt mit der gesamten Korrektheits- und Sicherheitsarbeit der Release-Prüfung dahinter abgeschlossen.
+**Die Beförderung** — Codename **Constellation**: `v0.1.0` ist `v0.1.0-preview`, verschoben auf den Standardkanal. Gleicher Funktionsumfang, gleiches Wire-Format, gleiches Store-Schema, gleiche Audit-Freigabe. Nichts wurde hinzugefügt, um die Versionsnummer zu verdienen; geändert hat sich, wer sie ohne Nachfrage bekommt.
 
-Alles davor war eine Vorschau-Linie, und jedes Release sagte das auch: Das Protokoll konnte sich bewegen, der Speicher unter einem migrieren, und der Installer hatte die Aufgabe, das Neueste zu liefern statt das Gesetzte. `0.1.0` ist die erste Version, für die wir einstehen — die, die `install.sh` einem Fremden gibt, die, auf die der Updater einen laufenden Knoten heben darf, und die, die die Prüfung nach einem echten Lauf Mac → Relay → Cloud abzeichnet. Der Funktionsumfang ist der von Constellation. Geändert hat sich, was dahinter steht.
+Die vollständige Funktionsliste und die Befunde des Audits stehen im Abschnitt `0.1.0-preview` weiter unten. Dieser Abschnitt hält nur fest, was sich zwischen jenem Schnitt und diesem bewegt hat.
+
+- **Die Standardkanäle zeigen hierher.** `/releases/latest`, der Ein-Zeilen-Installer, der Homebrew-Tap und `panda update` auf einem Knoten der stabilen Linie liefern ab jetzt `v0.1.0`; das Tag `v0.1.0-preview` bleibt für alle veröffentlicht, die es festgelegt haben.
+- **Der Ein-Zeilen-Installer braucht kein `--version` mehr.** Er löst die neueste stabile Version auf, also diesen Schnitt; die festgelegte Form funktioniert weiter für alle, die eine exakte Version wollen.
+- **Nichts Brechendes ist hinzugekommen.** Konfiguration, Capability-Karten, gespeicherte Daten und das Wire-Format sind gegenüber der Vorschau unverändert, sodass eine Installation auf beiden Linien an Ort und Stelle aktualisiert — ohne Migration, die die Vorschau nicht schon ausgeführt hätte.
+- **Zwei Oberflächen wurden vor der Beförderung korrigiert.** Die Website nannte `v0.1.0`, als es nur die Vorschau gab, und die Release-Notizen der Vorschau behaupteten, die Standardkanäle lieferten sie bereits; beide sagen jetzt, was stimmt, und der Release-Workflow hängt an jedes Tag mit Bindestrich einen Vorabveröffentlichungs-Hinweis, damit die nächste Vorschau den Fehler nicht wiederholt.
+- **Die Zahl der Installer-Prüfungen in den Statusdokumenten war falsch.** Es sind 23 Prüfungen, nicht 21 — die Warnung bei unsignierten Releases und die Ablehnung durch `OPENPANDA_REQUIRE_SIG` waren die beiden, die nicht mitgezählt wurden.
+- **Was offen bleibt, wird benannt, nicht angedeutet.** Der knotenübergreifende hello-Replay und die fehlende `XPub`-Bindung an die Signaturdomäne sind Protokollebene und kommen in v0.1.1; `docs/status.md` und `docs/reports/release-audit-2026-10-22.md` führen sie mit dem Rest auf.
+
+## [0.1.0-preview] - 2026-10-22
+
+**Der erste Schnitt der Release-Qualitätslinie** — Codename **Constellation**: dieselbe Flotte, die die Vorschau v0.0.12 gezeichnet hat, jetzt mit der gesamten Korrektheits- und Sicherheitsarbeit der Release-Prüfung dahinter abgeschlossen.
+
+Alles davor war eine Vorschau-Linie, und jedes Release sagte das auch: Das Protokoll konnte sich bewegen, der Speicher unter einem migrieren, und der Installer hatte die Aufgabe, das Neueste zu liefern statt das Gesetzte. `0.1.0-preview` ist die erste Version, für die wir einstehen — die, die die Prüfung nach einem echten Lauf Mac → Relay → Cloud abzeichnet, und die, auf die `panda update` einen Knoten der Vorschau-Linie hebt. Sie erscheint aber weiterhin als Vorabversion, also sind die Standardkanäle nicht mitgezogen: `/releases/latest`, der Ein-Zeilen-Installer und der Homebrew-Tap liefern weiter `v0.0.11`, und einem Knoten der stabilen Linie wird dieser Schnitt nicht angeboten. Wer ihn will, nennt die Version; zu `latest` wird er, wenn er eine Weile im Feld gelaufen ist. Der Funktionsumfang ist der von Constellation. Geändert hat sich, was dahinter steht.
 
 Worauf diese Aussage ruht:
 
@@ -70,9 +83,9 @@ Worauf diese Aussage ruht:
 ### Upgrade von 0.0.x
 
 - Keine Breaking Changes: Konfiguration, Capability Cards, gespeicherte Daten und das Protokollformat werden übernommen, Migrationen laufen beim ersten Start.
-- Eine bestehende Installation aktualisiert sich mit demselben Installationsbefehl an Ort und Stelle; `panda update apply` hebt einen Knoten von der Vorschau-Linie auf 0.1.0.
+- Eine bestehende Installation aktualisiert sich an Ort und Stelle: `panda update` hebt einen Knoten der Vorschau-Linie auf diesen Schnitt, und eine Neuinstallation ist `install.sh --version 0.1.0-preview`.
 - Der Build aus dem Quellcode verlangt jetzt Go 1.26.10 (eine Sicherheitsuntergrenze, keine Vorliebe — siehe den `govulncheck`-Eintrag unten).
-- `v0.0.12-preview` bleibt per expliziter Version herunterladbar; `/releases/latest` und der Homebrew-Tap zeigen jetzt hierher.
+- Zum Zeitpunkt dieses Schnitts war `v0.0.11` noch der stabile Kanal: `/releases/latest`, der Ein-Zeilen-Installer und der Homebrew-Tap lieferten ihn, also musste dieser Schnitt festgelegt werden — `install.sh --version 0.1.0-preview`. `v0.1.0` hat ihn später zum Standardkanal befördert.
 
 ### Hinzugefügt
 
@@ -148,6 +161,12 @@ Worauf diese Aussage ruht:
 - **Store-and-Forward-Verwahrung liefert nach einem Linkflattern in der richtigen Reihenfolge** — geparkte Cancels werden vor geparkten Delegates geflusht (das Stand-Down trifft immer vor der Wiederzustellung ein, die es ablösen sollte), ein geparkter menschlicher Tree-Cancel wird nie durch das Parken einer neueren Zustellung gelöscht, `task_outbox`-Zeilen erwecken keine terminierten/fehlgeschlagenen Arbeiten wieder, und ein neu gestarteter Daemon holt seine geparkte Verwahrung unter seiner stabilen Identität ab statt unter der verstorbenen Instanz-ID.
 - **Delegierte Runs rechnen über den gemeinsamen Retry-Loop ab und liefern schlankere Output-Packs** — die drei executor-seitigen Ausführungspfade leiten ihr Ergebnis jetzt einheitlich durch `settleDelegated`, sodass Checkpoint-Wiederaufnahme, budgetierte Retries und das Decline nach upstream für delegierte wie lokale Arbeit gleich ausfallen; per Context bzw. Artifact wiederaufgenommene Runs declinen mit dem geparkten Attempt statt mit dem, den die Zeile später trägt; und Output-Packs überspringen regenerierbare Verzeichnisse (ein gemessenes 389-MB-Ergebnispaket schrumpfte auf 84,6 MB) (f53ddcf).
 - **Die Restart-Recovery setzt das Überlebte fort und benennt den Blockierer** — unterbrochene Runs werden fortgesetzt statt von vorn gestartet, Agent-Wechsel-Fortschritt wird früh sichtbar, Projekt-Key-Matching ignoriert Groß-/Kleinschreibung, die Restart-Recovery zieht keine von Peers ausgeführten Zeilen mehr an sich, fremd gepinnte Warteschlangen-Tasks werden korrekt entpinnt, Exec-Lock-Wartezeiten melden, wer die Spur hält, und fehlerhaftes Adapter-JSON ist abgefangen (e0c7bec, 5044f4a).
+
+- **Auch der Windows-Installer lehnt einen Downgrade ab** — `install.sh`, `panda install` und `panda update apply` lehnen ein Binary ab, dessen Migrationsobergrenze unter dem `user_version` des Datenverzeichnisses liegt; `install.ps1` kopierte das Archiv bedingungslos über das Präfix, sodass sich eine ältere Version über eine neuere Datenbank installieren ließ — zurück blieb ein Daemon, der beim Start stirbt und die Daten verschüttet. Jetzt wird das entpackte Archiv mit `panda version --json` geprüft, bevor das Präfix angefasst wird; `-Force` / `OPENPANDA_FORCE=1` deckt einen bewussten Downgrade ab.
+
+- **Der Shell-Installer prüft die Release-Signatur, nicht nur die Prüfsumme** — `checksums.txt` kommt vom selben Ursprung wie das Archiv, SHA-256 konnte also nicht erkennen, wenn beides zusammen ersetzt wurde. `install.sh` prüft nun `checksums.txt.sig` mit demselben fest eingebauten Ed25519-Schlüssel, den der Selbst-Updater erzwingt: bei Abweichung bricht die Installation ab, und nur wo openssl kein Ed25519 kann (LibreSSL an Bord von macOS), bleibt es bei einer ausdrücklichen Warnung. `OPENPANDA_REQUIRE_SIG=1` macht «nicht prüfbar» zum Fehler.
+
+- **`install.ps1` löst Versionen aus dem Repository auf, aus dem es lädt** — der API-Endpunkt war auf das Upstream-Repository festgelegt, während `OPENPANDA_REPO_URL` nur die Download-Basis verschob, sodass ein Fork oder Mirror ein Tag auflöste, das er nicht ausliefert.
 
 ## [0.0.12-preview] - 2026-10-19
 

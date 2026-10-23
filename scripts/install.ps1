@@ -6,8 +6,9 @@
 #   Set-ExecutionPolicy -Scope Process Bypass
 #   irm https://raw.githubusercontent.com/Xustalis/OpenPanda/main/scripts/install.ps1 | iex
 # or download and run:
-#   powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.0.10 -Yes
+#   powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version <tag> -Yes
 #   powershell -ExecutionPolicy Bypass -File .\install.ps1 -Prefix D:\openpanda
+#   powershell -ExecutionPolicy Bypass -File .\install.ps1 -Force   # deliberate downgrade
 #
 # Env:
 #   OPENPANDA_VERSION      default version when -Version is not given
@@ -15,19 +16,28 @@
 #   OPENPANDA_REPO_URL     override the source repository
 #   OPENPANDA_RELEASE_API  override the "latest release" API endpoint
 #   OPENPANDA_RELEASE_BASE override the release download base URL
+#   OPENPANDA_FORCE        "1" behaves like -Force
 #
 # Installs panda.exe + adapters + voice sidecars into %LOCALAPPDATA%\OpenPanda, adds its bin
 # dir to the user PATH (persistent), and when run interactively asks
 # whether to register a logon scheduled task that runs `panda daemon` in the
 # background. Mirrors the UNIX installer (scripts/install.sh) option for
-# option, including the environment-variable defaults.
+# option, including the environment-variable defaults and the
+# schema-compatibility guard.
+#
+# Unlike install.sh this script cannot check the release signature
+# (checksums.txt.sig is Ed25519; neither .NET Framework nor PowerShell 5.1
+# ships a verifier): archives are authenticated by SHA-256 against
+# checksums.txt. The self-updater (`panda update apply`) does verify the
+# signature before it swaps a binary, so use that path where it matters.
 
 [CmdletBinding()]
 param(
     [string]$Version = "",
     [string]$Prefix = "",
     [switch]$Yes,
-    [switch]$NoService
+    [switch]$NoService,
+    [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
@@ -45,6 +55,9 @@ if (-not $Version) {
 }
 if (-not $Prefix -and $env:OPENPANDA_PREFIX) {
     $Prefix = $env:OPENPANDA_PREFIX
+}
+if (-not $Force -and $env:OPENPANDA_FORCE -eq "1") {
+    $Force = [switch]$true
 }
 
 # Windows PowerShell 5.1 may default to TLS 1.0/1.1, which GitHub rejects.
@@ -91,7 +104,11 @@ function Get-Json([string]$Url) {
 }
 
 $Repo = if ($env:OPENPANDA_REPO_URL) { $env:OPENPANDA_REPO_URL } else { "https://github.com/Xustalis/OpenPanda" }
-$Api  = if ($env:OPENPANDA_RELEASE_API) { $env:OPENPANDA_RELEASE_API } else { "https://api.github.com/repos/Xustalis/OpenPanda/releases/latest" }
+# The API endpoint has to follow $Repo: overriding the repository to a fork or
+# a mirror while the version lookup still queried upstream would resolve a tag
+# that the download base does not serve. install.sh derives the same slug.
+$RepoSlug = ($Repo -replace '^https?://github\.com/', '').TrimEnd('/')
+$Api  = if ($env:OPENPANDA_RELEASE_API) { $env:OPENPANDA_RELEASE_API } else { "https://api.github.com/repos/$RepoSlug/releases/latest" }
 
 # Arch detection
 $nativeArch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
@@ -151,6 +168,21 @@ $Base    = if ($env:OPENPANDA_RELEASE_BASE) { $env:OPENPANDA_RELEASE_BASE } else
 
 Info "Installing $Archive to $Prefix..."
 
+# Probe a binary for the two numbers the schema guard needs: `schema` (the
+# migration ceiling this build supports) and `db_schema` (the configured
+# database's current user_version). Both come from `panda version --json`;
+# a binary too old to report them, or one that cannot run at all, yields $null.
+function Get-SchemaProbe([string]$ExePath) {
+    if (-not (Test-Path $ExePath)) { return $null }
+    try {
+        $raw = & $ExePath version --json 2>$null | Out-String
+        if ($LASTEXITCODE -ne 0 -or -not $raw) { return $null }
+        return ($raw | ConvertFrom-Json)
+    } catch {
+        return $null
+    }
+}
+
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ("openpanda-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $work | Out-Null
 try {
@@ -176,6 +208,37 @@ try {
     New-Item -ItemType Directory -Path $extract | Out-Null
     Expand-Archive -Path $zip -DestinationPath $extract
     $root = Join-Path $extract "openpanda"
+
+    # ── Schema-compatibility guard (mirrors install.sh) ────────────────────
+    # A binary whose migration ceiling is below the database's user_version
+    # dies at startup ("schema version N is newer than this binary's highest
+    # migration"), so installing it strands the data directory. The staged
+    # archive is probed *before* it is copied over the prefix, so a refused
+    # install leaves the existing one untouched. A release too old to report
+    # its ceiling cannot prove it can open an existing database and is refused
+    # too. -Force / OPENPANDA_FORCE=1 overrides for deliberate downgrades.
+    $newProbe   = Get-SchemaProbe (Join-Path $root "bin\panda.exe")
+    $newSchema  = if ($newProbe -and $newProbe.schema) { [int]$newProbe.schema } else { 0 }
+    $floor      = if ($newProbe -and $newProbe.db_schema) { [int]$newProbe.db_schema } else { 0 }
+    if ($floor -eq 0) {
+        # The staged binary could not see the data directory (no config in this
+        # session, or a pre-`panda init` host): ask whatever is installed here.
+        foreach ($prev in @($Exe, (Join-Path $env:LOCALAPPDATA "OpenPanda\bin\panda.exe"))) {
+            $probe = Get-SchemaProbe $prev
+            if (-not $probe) { continue }
+            if ($probe.db_schema) { $floor = [int]$probe.db_schema }
+            elseif ($probe.schema) { $floor = [int]$probe.schema }
+            if ($floor -gt 0) { break }
+        }
+    }
+    if (-not $Force -and $floor -gt 0) {
+        if ($newSchema -eq 0) {
+            Fail "Refusing to install: this release is too old to report its schema ceiling while the data directory is already at schema v$floor - it would fail to start. Pass -Force to install anyway."
+        } elseif ($newSchema -lt $floor) {
+            Fail "Refusing to install: this release supports at most schema v$newSchema but the data directory is already at v$floor - it would fail to start. Pass -Force to install anyway."
+        }
+    }
+
     New-Item -ItemType Directory -Path $Prefix -Force | Out-Null
     Copy-Item -Path (Join-Path $root "*") -Destination $Prefix -Recurse -Force
 

@@ -13,10 +13,12 @@ directory with no root required.
 | Linux    | `curl … \| sh`                |
 | Windows  | PowerShell one-liner          |
 
-The installer does four things: **download** the release archive for
-your platform/architecture → **SHA-256 verify** → **unpack into the
-prefix directory** → **symlink / add to PATH**; then (interactively)
-asks whether to **register a boot-time auto-start service**.
+The installer does five things: **download** the release archive for
+your platform/architecture → **SHA-256 verify** → **verify the release
+signature** (`checksums.txt.sig`, where the local openssl can do
+Ed25519) → **unpack into the prefix directory** → **symlink / add to
+PATH**; then (interactively) asks whether to **register a boot-time
+auto-start service**.
 
 ## 1. macOS / Linux one-line install
 
@@ -27,12 +29,15 @@ curl -fsSL https://raw.githubusercontent.com/Xustalis/OpenPanda/main/scripts/ins
 Equivalent explicit invocations:
 
 ```bash
-sh scripts/install.sh --version 0.1.0   # install a specific version (e.g. stable 0.1.0, the older pre-release 0.0.12-preview; default `latest` = newest stable)
+sh scripts/install.sh --version 0.1.0           # install a specific version (default `latest` = newest stable; pre-releases must be pinned)
 sh scripts/install.sh --prefix /opt/openpanda  # custom install directory
 sh scripts/install.sh --lite                   # lite build: no embedded Web console/TUI (Linux only)
 sh scripts/install.sh --yes                    # also register auto-start (no prompt)
 sh scripts/install.sh --no-service             # do not touch auto-start
+sh scripts/install.sh --force                  # force a version older than the data directory's schema
 ```
+
+The current stable is `0.1.0`; the previous stable, `0.0.11`, is still installable by naming it (`--version 0.0.11`), as is any pre-release — `latest` only ever resolves the newest stable.
 
 Default prefix (aligned with Go's XDG/user-directory convention):
 
@@ -51,6 +56,31 @@ shell's PATH does not yet contain `~/.local/bin`, the script — like
 startup file (`~/.zshrc`, `~/.bashrc`, etc.; with no rc file at all it
 creates `~/.profile`), which takes effect in newly opened terminals;
 `panda uninstall` removes exactly this marked block.
+
+### Downgrade protection and release signatures
+
+**Downgrade protection.** When a binary's migration ceiling is below the
+data directory's `user_version`, it dies at startup (`schema version N is
+newer than this binary's highest migration`) and strands the data. The
+installer therefore compares, **after unpacking and before touching the
+prefix**, the staged binary's `panda version --json` (`schema` = the
+migration ceiling it supports, `db_schema` = the current data
+directory's version) and refuses anything older; `--force` (or
+`OPENPANDA_FORCE=1`) is for a deliberate downgrade. `panda install` and
+`panda update apply` carry the same guard.
+
+**Release signatures.** `checksums.txt` is downloaded from the same
+origin as the archive, so SHA-256 catches transport damage but not a
+pair of substituted files. The trust root is the Ed25519 signature
+`checksums.txt.sig` — the self-updater (`panda update apply`) verifies
+it unconditionally before swapping a binary. The installer verifies the
+same signature whenever the local openssl supports Ed25519 (`pkeyutl
+-rawin`, OpenSSL ≥ 1.1.1) and aborts on a mismatch; stock macOS ships
+LibreSSL 3.3, which cannot, and degrades to an explicit warning (SHA-256
+has still passed). `OPENPANDA_REQUIRE_SIG=1` makes "cannot verify" a
+failure too; `OPENPANDA_SKIP_SIG=1` opts out. Windows' `install.ps1`
+cannot verify signatures (.NET / PowerShell 5.1 ship no Ed25519) and
+does SHA-256 only.
 
 ### Lite builds: Raspberry Pi and pure-CLI devices
 
@@ -91,12 +121,15 @@ Or download first and run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.1.0 -Yes
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Force    # deliberate downgrade (skips the schema guard)
 ```
 
 Installs to `%LOCALAPPDATA%\OpenPanda\` and adds `bin` to the **user
 PATH** (persistent). When run interactively it asks whether to register
 a **logon scheduled task** (`schtasks /SC ONLOGON`) running
-`panda daemon` in the background.
+`panda daemon` in the background. Its switches mirror `install.sh`
+option for option: `-Version` / `-Prefix` / `-Yes` / `-NoService` /
+`-Force`, with the same `OPENPANDA_*` environment variables.
 
 ## 4. From source / Go
 

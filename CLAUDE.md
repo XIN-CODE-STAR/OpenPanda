@@ -171,6 +171,14 @@ prebuilt copy; only a placeholder `dist/index.html` is committed.
 - Before opening a PR run `make gate` — it is what CI enforces.
 - User-facing strings go through `internal/i18n` and
   `webui/app/src/i18n/` — all five locales are maintained in parallel.
+- The marketing site (`site/`) is bilingual, but by a different mechanism:
+  Chinese is the markup (every translatable node carries `data-i18n`,
+  `data-i18n-aria`, `data-i18n-placeholder` or `data-i18n-content`) and
+  English lives in the flat table in `site/js/i18n.js`. New copy needs the
+  attribute *and* an English entry — a key without one falls back to the
+  Chinese already in the page. Language comes from `?lang=`, then
+  `localStorage["openpanda.site.lang"]`, then the browser; there is no build
+  step, so Pages ships the files as they are.
 - New agent adapters plug into `adapters/` and speak the `_harness.py`
   wire contract; `make adapter-test` (`tests/adapter_contract_test.py`)
   exercises it against fake CLIs on PATH and is a prerequisite of

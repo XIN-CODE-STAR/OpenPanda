@@ -10,10 +10,18 @@
 
 import { initHero } from './scene.js'
 import { initDust } from './dust.js'
+import { initLangToggle, lang, onLangChange, ui } from './i18n.js'
 
 const $ = (id) => document.getElementById(id)
 const fine = matchMedia('(pointer: fine)').matches
 const calm = matchMedia('(prefers-reduced-motion: reduce)').matches
+
+/* ── language ──────────────────────────────────────────────────────────── */
+// i18n.js has already translated the document by the time this module runs
+// (it applies on import); here we only wire the toggle and re-render the
+// strings this file owns — the palette and its toasts.
+
+initLangToggle()
 
 /* ── scroll progress ───────────────────────────────────────────────────── */
 
@@ -383,31 +391,35 @@ function showToast(text) {
 /* ── ⌘K palette ────────────────────────────────────────────────────────── */
 // A literal table, not a scan of the DOM: it lets each section carry the words
 // people actually type ("价格", "dtn", "star") instead of only its title.
+//
+// Labels and hints are bilingual and the filter runs over both languages at
+// once, so "install" finds 安装 in Chinese and "许可" finds Licensing in
+// English — the palette is one index for the whole page, not one per locale.
 
 const REPO = 'https://github.com/Xustalis/OpenPanda'
 const INSTALL_SH =
   'curl -fsSL https://raw.githubusercontent.com/Xustalis/OpenPanda/main/scripts/install.sh | sh'
 
 const COMMANDS = [
-  { kind: '章节', label: '四堵墙', hint: '01 · 为什么需要多智能体', kv: 'why four walls 痛点 问题 动机', go: '#why' },
-  { kind: '章节', label: '星状 → 图状', hint: '02 · 组织方式', kv: 'graph star 拓扑 架构 中心', go: '#graph' },
-  { kind: '章节', label: '产品', hint: '03 · 一句话进，一张网出', kv: 'product console 控制台 终端 cli 演示', go: '#product' },
-  { kind: '章节', label: '薄宪法', hint: '04 · 冻结关系，不冻结认知', kv: 'constitution trust 信任 身份 授权 边界', go: '#constitution' },
-  { kind: '章节', label: '能力', hint: '05 · 每条边都有协议', kv: 'capabilities 功能 dtn 审批 路由 记忆', go: '#capabilities' },
-  { kind: '章节', label: '实证', hint: '06 · 三台真机，不是演示', kv: 'proof 测试 数据 真机 内存', go: '#proof' },
-  { kind: '章节', label: '三个尺度', hint: '07 · 桌面 / 集群 / 深空', kv: 'scales space 深空 卫星 机器人', go: '#scales' },
-  { kind: '章节', label: '路线图', hint: '08 · 飞行计划', kv: 'roadmap 版本 计划 release', go: '#roadmap' },
-  { kind: '章节', label: '许可', hint: '09 · 开源，但不假装免费', kv: 'license 价格 授权 商业 agpl 收费 purchase pricing', go: '#license' },
-  { kind: '章节', label: '常见问题', hint: '10 · 你可能想问的', kv: 'faq 问答 问题 gpu 平台', go: '#faq' },
-  { kind: '章节', label: '安装', hint: '11 · 三条命令入轨', kv: 'install 下载 download 开始 上手', go: '#install' },
-  { kind: '行动', label: '复制安装命令', hint: 'curl … install.sh | sh', kv: 'copy 复制 curl shell unix', copy: INSTALL_SH },
-  { kind: '行动', label: '复制 Homebrew 命令', hint: 'brew tap … && brew install', kv: 'brew homebrew copy 复制 macos', copy: 'brew tap Xustalis/openpanda && brew install openpanda' },
-  { kind: '链接', label: 'GitHub 仓库', hint: 'github.com/Xustalis/OpenPanda', kv: 'github repo star 源码 收藏', url: REPO },
-  { kind: '链接', label: '项目现状', hint: 'docs/status.md · 已知边界', kv: 'status 边界 现状 未完成', url: REPO + '/blob/main/docs/status.md' },
-  { kind: '链接', label: '更新日志', hint: 'CHANGELOG.md', kv: 'changelog 版本 更新 改动', url: REPO + '/blob/main/CHANGELOG.md' },
-  { kind: '链接', label: '版本发布', hint: 'releases · 安装包与校验值', kv: 'releases 下载 sha256 安装包', url: REPO + '/releases' },
-  { kind: '链接', label: '安全策略', hint: 'SECURITY.md', kv: 'security 漏洞 安全 报告', url: REPO + '/blob/main/SECURITY.md' },
-  { kind: '链接', label: '商业授权 / 合作', hint: 'fing2024@outlook.com', kv: 'contact 邮件 email 合作 投资 授权', url: 'mailto:fing2024@outlook.com?subject=OpenPanda' },
+  { kind: 'sec', label: { zh: '四堵墙', en: 'Four Walls' }, hint: { zh: '01 · 为什么需要多智能体', en: '01 · why multi-agent at all' }, kv: 'why four walls 痛点 问题 动机 motivation', go: '#why' },
+  { kind: 'sec', label: { zh: '星状 → 图状', en: 'Star → Graph' }, hint: { zh: '02 · 组织方式', en: '02 · how the work is organised' }, kv: 'graph star 拓扑 架构 中心 topology architecture', go: '#graph' },
+  { kind: 'sec', label: { zh: '产品', en: 'Product' }, hint: { zh: '03 · 一句话进，一张网出', en: '03 · one sentence in, a network out' }, kv: 'product console 控制台 终端 cli 演示 demo', go: '#product' },
+  { kind: 'sec', label: { zh: '薄宪法', en: 'Thin Constitution' }, hint: { zh: '04 · 冻结关系，不冻结认知', en: '04 · freeze relations, not cognition' }, kv: 'constitution trust 信任 身份 授权 边界 identity authorisation boundary', go: '#constitution' },
+  { kind: 'sec', label: { zh: '能力', en: 'Capabilities' }, hint: { zh: '05 · 每条边都有协议', en: '05 · every edge has a protocol' }, kv: 'capabilities 功能 dtn 审批 路由 记忆 approval routing memory', go: '#capabilities' },
+  { kind: 'sec', label: { zh: '实证', en: 'Proof' }, hint: { zh: '06 · 三台真机，不是演示', en: '06 · three real machines, not a demo' }, kv: 'proof 测试 数据 真机 内存 tests memory benchmarks', go: '#proof' },
+  { kind: 'sec', label: { zh: '三个尺度', en: 'Three Scales' }, hint: { zh: '07 · 桌面 / 集群 / 深空', en: '07 · desk / fleet / deep space' }, kv: 'scales space 深空 卫星 机器人 satellite robot', go: '#scales' },
+  { kind: 'sec', label: { zh: '路线图', en: 'Roadmap' }, hint: { zh: '08 · 飞行计划', en: '08 · flight plan' }, kv: 'roadmap 版本 计划 release version', go: '#roadmap' },
+  { kind: 'sec', label: { zh: '许可', en: 'Licensing' }, hint: { zh: '09 · 开源，但不假装免费', en: '09 · open source, not pretend-free' }, kv: 'license 价格 授权 商业 agpl 收费 purchase pricing commercial', go: '#license' },
+  { kind: 'sec', label: { zh: '常见问题', en: 'FAQ' }, hint: { zh: '10 · 你可能想问的', en: '10 · things you might ask' }, kv: 'faq 问答 问题 gpu 平台 platform questions', go: '#faq' },
+  { kind: 'sec', label: { zh: '安装', en: 'Install' }, hint: { zh: '11 · 三条命令入轨', en: '11 · three commands to orbit' }, kv: 'install 下载 download 开始 上手 setup', go: '#install' },
+  { kind: 'act', label: { zh: '复制安装命令', en: 'Copy install command' }, hint: { zh: 'curl … install.sh | sh', en: 'curl … install.sh | sh' }, kv: 'copy 复制 curl shell unix', copy: INSTALL_SH },
+  { kind: 'act', label: { zh: '复制 Homebrew 命令', en: 'Copy Homebrew command' }, hint: { zh: 'brew tap … && brew install', en: 'brew tap … && brew install' }, kv: 'brew homebrew copy 复制 macos', copy: 'brew tap Xustalis/openpanda && brew install openpanda' },
+  { kind: 'link', label: { zh: 'GitHub 仓库', en: 'GitHub repository' }, hint: { zh: 'github.com/Xustalis/OpenPanda', en: 'github.com/Xustalis/OpenPanda' }, kv: 'github repo star 源码 收藏 source', url: REPO },
+  { kind: 'link', label: { zh: '项目现状', en: 'Project status' }, hint: { zh: 'docs/status.md · 已知边界', en: 'docs/status.md · known boundaries' }, kv: 'status 边界 现状 未完成 boundaries unfinished', url: REPO + '/blob/main/docs/status.md' },
+  { kind: 'link', label: { zh: '更新日志', en: 'Changelog' }, hint: { zh: 'CHANGELOG.md', en: 'CHANGELOG.md' }, kv: 'changelog 版本 更新 改动 changes', url: REPO + '/blob/main/CHANGELOG.md' },
+  { kind: 'link', label: { zh: '版本发布', en: 'Releases' }, hint: { zh: 'releases · 安装包与校验值', en: 'releases · archives and checksums' }, kv: 'releases 下载 sha256 安装包 download', url: REPO + '/releases' },
+  { kind: 'link', label: { zh: '安全策略', en: 'Security policy' }, hint: { zh: 'SECURITY.md', en: 'SECURITY.md' }, kv: 'security 漏洞 安全 报告 vulnerability report', url: REPO + '/blob/main/SECURITY.md' },
+  { kind: 'link', label: { zh: '商业授权 / 合作', en: 'Commercial licence / partnership' }, hint: { zh: 'fing2024@outlook.com', en: 'fing2024@outlook.com' }, kv: 'contact 邮件 email 合作 投资 授权 partnership investment licence', url: 'mailto:fing2024@outlook.com?subject=OpenPanda' },
 ]
 
 const palette = $('palette')
@@ -425,7 +437,9 @@ function filterCommands(query) {
   if (!needle) return COMMANDS.slice(0, 11)
   const hits = []
   for (const cmd of COMMANDS) {
-    const hay = (cmd.label + ' ' + cmd.hint + ' ' + cmd.kv).toLowerCase()
+    const hay = [cmd.label.zh, cmd.label.en, cmd.hint.zh, cmd.hint.en, cmd.kv]
+      .join(' ')
+      .toLowerCase()
     const at = hay.indexOf(needle)
     if (at !== -1) hits.push({ cmd, at })
   }
@@ -436,6 +450,8 @@ function filterCommands(query) {
 
 function renderPalette(query) {
   if (!palList) return
+  const copy = ui()
+  const code = lang() === 'en' ? 'en' : 'zh'
   palItems = filterCommands(query)
   palActive = 0
   palList.replaceChildren()
@@ -443,7 +459,7 @@ function renderPalette(query) {
   if (!palItems.length) {
     const empty = document.createElement('li')
     empty.className = 'palette-empty'
-    empty.textContent = '没有匹配项。试试「安装」「许可」「graph」。'
+    empty.textContent = copy.empty
     palList.append(empty)
   } else {
     palItems.forEach((cmd, i) => {
@@ -456,20 +472,20 @@ function renderPalette(query) {
 
       const kind = document.createElement('span')
       kind.className = 'pi-kind'
-      kind.textContent = cmd.kind
+      kind.textContent = copy.kinds[cmd.kind]
       const label = document.createElement('span')
       label.className = 'pi-label'
-      label.textContent = cmd.label
+      label.textContent = cmd.label[code]
       const hint = document.createElement('span')
       hint.className = 'pi-hint'
-      hint.textContent = cmd.hint
+      hint.textContent = cmd.hint[code]
 
       row.append(kind, label, hint)
       palList.append(row)
     })
   }
 
-  if (palCount) palCount.textContent = palItems.length ? palItems.length + ' 项' : ''
+  if (palCount) palCount.textContent = palItems.length ? copy.count(palItems.length) : ''
   if (palInput) palInput.setAttribute('aria-activedescendant', palItems.length ? 'pal-0' : '')
 }
 
@@ -522,7 +538,7 @@ async function runCommand(cmd) {
   }
   if (cmd.copy) {
     const ok = await writeClipboard(cmd.copy)
-    showToast(ok ? '已复制到剪贴板' : '复制失败，请手动选择')
+    showToast(ok ? ui().copied : ui().copyFail)
   }
 }
 
@@ -545,6 +561,12 @@ palList?.addEventListener('pointerover', (e) => {
 })
 palette?.querySelector('[data-palette-close]')?.addEventListener('click', () => closePalette())
 $('nav-k')?.addEventListener('click', openPalette)
+
+// The palette is rendered from the table above, so it does not follow the DOM
+// translation — repaint it in place when the language changes underneath it.
+onLangChange(() => {
+  if (palette && !palette.hidden) renderPalette(palInput?.value ?? '')
+})
 
 addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {

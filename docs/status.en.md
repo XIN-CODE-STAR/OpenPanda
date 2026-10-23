@@ -152,7 +152,16 @@ English translation of [status.md](status.md)（中文版为准）· English
 > panda-screen missing-value guards, shell completions for `task
 > board`/`task artifact`; version turned `0.0.11`, `make gate` green).
 
-> 2026-10-22 (`v0.1.0` "Constellation", the first release-grade version. The
+> 2026-10-22 (`v0.1.0-preview` "Constellation", the first cut of the
+> release-grade line. The installers were hardened in the same pass: every
+> path now refuses a downgrade (Windows gained the schema guard and
+> `-Force`), `install.sh` verifies the release signature where the local
+> openssl supports Ed25519 and aborts on a mismatch, and `install.ps1`
+> resolves versions from the repository it actually downloads from.
+> Installer coverage grew to 23 checks in `scripts/test-installers.sh`,
+> adding downgrade refusal and the `--force` override, a foreign signature, an
+> unsigned release that must warn (and must be refused under
+> `OPENPANDA_REQUIRE_SIG`), and `--lite`. The
 > cross-network mesh P1–P5 landed whole (dual-key identity and reachability
 > cards, transitive blind relay, epidemic directory sync, K=2 rendezvous edges
 > and the reachability ladder, the policy surface and relay budgets,
@@ -174,6 +183,21 @@ English translation of [status.md](status.md)（中文版为准）· English
 > and hello replay across peers (a protocol-level challenge-response, for
 > v0.1.1).
 >
+> 2026-10-23 (`v0.1.0` "Constellation" promoted: the same code as
+> `v0.1.0-preview` — same feature set, same wire format, same store schema,
+> same audit sign-off; what moved is the default channel. `/releases/latest`,
+> the one-liner, the Homebrew tap and `panda update` on a stable node serve
+> `v0.1.0` from now on, and the `v0.1.0-preview` tag stays published for
+> anyone who pinned it. Two claims were corrected before the promotion: the
+> site named `v0.1.0` while only the preview existed, and the preview's
+> release notes said the default channels already served it; the release
+> workflow now appends a pre-release block to any hyphenated tag. The repo was
+> tidied in the same pass — the old preview tags and releases
+> (`v0.0.8-preview` through `v0.0.12-preview`) and the local backup tags are
+> gone, leaving `v0.1.0-preview` as the only pre-release; only `main` remains
+> on the remote, and the scratch worktrees and stale branches are cleared.
+> The 23-check installer suite passes and `make gate` is green.)
+
 > 2026-10-21 (cross-network mesh P1–P5: dual-key identity and reachability cards,
 > transitive blind relay, epidemic directory sync, K=2 rendezvous edges and the
 > reachability ladder, policy surface and relay budgets, `panda://join`, pair over

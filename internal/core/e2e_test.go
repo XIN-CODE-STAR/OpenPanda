@@ -5,6 +5,7 @@ package core
 import (
 	"context"
 	"errors"
+	"net"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1344,6 +1345,29 @@ func startPair(t *testing.T, ctx context.Context, entry, worker *Core, entryAddr
 	ed := registerAndListen(t, ctx, entry, entryAddr)
 	wd := registerAndListen(t, ctx, worker, workerAddr)
 	linkPair(t, ctx, entry, worker, workerAddr, ed, wd)
+}
+
+// waitListening blocks until addr accepts a TCP connection.
+//
+// Tests that start Listen in a goroutine used to follow it with a fixed
+// 200ms sleep. That is a race, not a wait: on an idle laptop the socket is
+// bound long before the sleep ends, but with several packages running at
+// once the goroutine can be scheduled late enough that the next DialPeer
+// sees ECONNREFUSED. Polling removes the guess.
+func waitListening(t *testing.T, addr string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err == nil {
+			_ = c.Close()
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("nothing listening on %s after 10s: %v", addr, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // waitPeer polls until core c has a live conn to the given peer id.
