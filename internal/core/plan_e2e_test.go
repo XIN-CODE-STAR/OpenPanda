@@ -344,7 +344,8 @@ func TestPlanStageNodePin(t *testing.T) {
 	}
 	go func() { _ = pi.Listen(ctx, "127.0.0.1:17995") }()
 	go func() { _ = mac.Listen(ctx, "127.0.0.1:17996") }()
-	time.Sleep(200 * time.Millisecond)
+	waitListening(t, "127.0.0.1:17995")
+	waitListening(t, "127.0.0.1:17996")
 	if err := pi.DialPeer(ctx, "127.0.0.1:17996"); err != nil {
 		t.Fatalf("dial mac: %v", err)
 	}

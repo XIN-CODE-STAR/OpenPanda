@@ -129,8 +129,9 @@ e2e-relay（本机第二实例，127.0.0.1:17846）
 - [x] 五语 CHANGELOG / README 与版本元数据同步
 - [x] `make package` 产出 9 个 `panda-0.1.0-*` 归档（含 lite Linux 三架构）并通过 `scripts/verify-release.sh 0.1.0`；解包后的 darwin-arm64 二进制报告 `v0.1.0 Constellation`，adapters/voice/drivers 齐全
 - [x] 受影响的最终包再跑一遍：`internal/core`（含新恢复测试）、`cmd/panda`、`internal/config`、`internal/install` 全部通过；新增恢复用例在 `-race` 下通过
-- [x] 打标签 `v0.1.0`（本地，未推送）
-- [ ] 正式发布前确认 release secret `OPENPANDA_RELEASE_KEY` 可用；否则产物无 `checksums.txt.sig`，更新器会按设计拒绝更新
+- [x] release secret `OPENPANDA_RELEASE_KEY` 可用 —— 已由 `v0.1.0-preview` 的实际产物证明：该 release 带 `checksums.txt.sig`，用内置发布公钥 `scripts/sign-release -verify` 校验通过（`signature OK`）。缺 secret 时产物不会带签名，更新器会按设计拒绝更新
+- [x] 预发布到稳定版的路径演练：`v0.1.0-preview` 以 pre-release 发布，`/releases/latest` 仍指 `v0.0.11`，验证了「预发布不抢默认通道」这条行为；`v0.1.0` 由维护者打标签转正
+- [ ] 打标签 `v0.1.0`（由维护者在合并后执行；CHANGELOG 的 `[0.1.0]` 段与版本元数据已就位）
 
 > 发布命令（在确认 secret 与 CI 绿灯后）：
 >

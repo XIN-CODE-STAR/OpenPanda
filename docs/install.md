@@ -19,13 +19,15 @@ curl -fsSL https://raw.githubusercontent.com/Xustalis/OpenPanda/main/scripts/ins
 等效的显式写法：
 
 ```bash
-sh scripts/install.sh --version 0.1.0-preview   # 安装指定版本（默认 latest，即最新稳定版；预发布版必须显式指定）
+sh scripts/install.sh --version 0.1.0           # 安装指定版本（默认 latest，即最新稳定版；预发布版必须显式指定）
 sh scripts/install.sh --prefix /opt/openpanda  # 自定义安装目录
 sh scripts/install.sh --lite                   # lite 构建：无内嵌 Web 控制台/TUI（仅 Linux）
 sh scripts/install.sh --yes                    # 额外注册开机自启（不询问）
 sh scripts/install.sh --no-service             # 不碰开机自启
 sh scripts/install.sh --force                  # 强制安装：跳过“版本低于数据目录 schema”的拒绝
 ```
+
+当前稳定版是 `0.1.0`；上一支稳定版 `0.0.11` 仍可按版本号显式安装（`--version 0.0.11`），预发布版同理，`latest` 永远只指最新稳定版。
 
 默认前缀（与 Go 的 XDG/用户目录约定对齐）：
 
@@ -74,7 +76,7 @@ irm https://raw.githubusercontent.com/Xustalis/OpenPanda/main/scripts/install.ps
 或下载后运行：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.1.0-preview -Yes
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.1.0 -Yes
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -Force    # 强制降级（跳过 schema 守卫）
 ```
 

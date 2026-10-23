@@ -42,6 +42,19 @@ OpenPanda (**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **A
 
 Aún no hay cambios sin publicar.
 
+## [0.1.0] - 2026-10-23 — "Constellation"
+
+**El ascenso** — nombre en clave **Constellation**: `v0.1.0` es `v0.1.0-preview` trasladado al canal por defecto. Mismo conjunto de funciones, mismo formato de cable, mismo esquema de almacenamiento, misma firma de la auditoría. No se añadió nada para ganar el número; lo que cambió es quién lo recibe sin preguntar.
+
+La lista completa de funciones y las conclusiones de la auditoría están en la sección `0.1.0-preview` de abajo. Esta sección registra solo lo que se movió entre aquel corte y este.
+
+- **Los canales por defecto apuntan aquí.** `/releases/latest`, el instalador de una línea, el tap de Homebrew y `panda update` en un nodo de la línea estable sirven `v0.1.0` desde ahora; la etiqueta `v0.1.0-preview` sigue publicada para quien la fijó.
+- **El instalador de una línea ya no necesita `--version`.** Resuelve la última estable, que es este corte; la forma fijada sigue funcionando para quien quiera una versión exacta.
+- **No entró nada que rompa.** La configuración, las tarjetas de capacidad, los datos guardados y el formato de cable no cambian respecto al avance, así que una instalación de cualquiera de las dos líneas se actualiza en el sitio sin una migración que el avance no hubiera ejecutado ya.
+- **Dos superficies se corrigieron antes del ascenso.** El sitio nombraba `v0.1.0` cuando solo existía el avance, y las notas de la versión preliminar afirmaban que los canales por defecto ya la servían; ahora ambas dicen lo que es cierto, y el flujo de publicación añade un bloque de prepublicación a cualquier etiqueta con guion para que el próximo avance no repita el error.
+- **El recuento de pruebas del instalador en los documentos de estado estaba mal.** Son 23 comprobaciones, no 21: el aviso de publicación sin firma y el rechazo de `OPENPANDA_REQUIRE_SIG` fueron las dos que quedaron sin contar.
+- **Lo que sigue abierto se dice, no se insinúa.** La repetición de hello entre nodos y la ausencia de `XPub` en el dominio de firma son de nivel de protocolo y llegan en v0.1.1; `docs/status.md` y `docs/reports/release-audit-2026-10-22.md` los enumeran junto al resto.
+
 ## [0.1.0-preview] - 2026-10-22
 
 **El primer corte de la línea de calidad de release** — nombre en clave **Constellation**: la misma flota que dibujó la vista previa v0.0.12, ahora con todo el trabajo de corrección y seguridad de la auditoría cerrado detrás.
@@ -68,7 +81,7 @@ En qué se apoya esa afirmación:
 - Sin cambios importantes: la configuración, las tarjetas de capacidad, los datos guardados y el formato de protocolo se conservan, y las migraciones se aplican en el primer arranque.
 - Una instalación existente se actualiza en su sitio: `panda update` mueve un nodo de la línea de vista previa a esta entrega, y una instalación nueva de ella es `install.sh --version 0.1.0-preview`.
 - Compilar desde el código exige ahora Go 1.26.10 (es un suelo de seguridad, no una preferencia — ver la entrada de `govulncheck` más abajo).
-- `v0.0.11` sigue siendo el canal estable: `/releases/latest`, el instalador de una línea y el tap de Homebrew lo siguen sirviendo, y `v0.0.12-preview` sigue descargable por versión explícita. Para ejecutar esta entrega, fíjala: `install.sh --version 0.1.0-preview`.
+- En el momento de este corte `v0.0.11` seguía siendo el canal estable: `/releases/latest`, el instalador de una línea y el tap de Homebrew lo servían, así que esta entrega había que fijarla: `install.sh --version 0.1.0-preview`. `v0.1.0` la ascendió después al canal por defecto.
 
 ### Añadido
 

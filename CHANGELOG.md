@@ -48,6 +48,19 @@ OpenPanda (**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **A
 
 _No unreleased changes yet._
 
+## [0.1.0] - 2026-10-23 — "Constellation"
+
+**The promotion** — codename **Constellation**: `v0.1.0` is `v0.1.0-preview` moved onto the default channel. Same feature set, same wire format, same store schema, same audit sign-off. Nothing was added to earn the number; what changed is who gets it without asking.
+
+The full feature list and the audit's findings live in the `0.1.0-preview` section below. This section records only what moved between that cut and this one.
+
+- **The default channels resolve here.** `/releases/latest`, the one-liner, the Homebrew tap and `panda update` on a stable node all serve `v0.1.0` from now on; the `v0.1.0-preview` tag stays published for anyone who pinned it.
+- **The one-liner needs no `--version`.** It resolves the latest stable, which is this cut — the pinned form keeps working for anyone who wants an exact version.
+- **Nothing breaking moved in.** Configuration, capability cards, stored data and the wire format are unchanged from the preview, so an install on either line upgrades in place without a migration the preview had not already run.
+- **Two surfaces were corrected before promotion.** The site named `v0.1.0` while only the preview existed, and the preview's release notes claimed the default channels already served it; both now match reality, and the release workflow appends a pre-release block to any hyphenated tag so the next preview cannot repeat the mistake.
+- **The installer suite count in the status docs was wrong.** It is 23 checks, not 21 — the unsigned-release warning and the `OPENPANDA_REQUIRE_SIG` refusal were the two that went uncounted.
+- **What is still open is stated, not implied.** The cross-node hello replay and the `XPub` signature-domain gap are protocol-level and land in v0.1.1; `docs/status.md` and `docs/reports/release-audit-2026-10-22.md` list them alongside the rest.
+
 ## [0.1.0-preview] - 2026-10-22
 
 **The first cut of the release-grade line** — codename **Constellation**: the same fleet the v0.0.12 preview drew, with the release audit's correctness and security work closed behind it.
@@ -74,7 +87,7 @@ What that claim rests on:
 - No breaking changes: configuration, capability cards, stored data and the wire format are all carried forward, and migrations apply on first start.
 - An existing install upgrades in place: `panda update` moves a node on the preview line onto this cut, and a fresh install of it is `install.sh --version 0.1.0-preview`.
 - Building from source now requires Go 1.26.10 (a security floor, not a preference — see the `govulncheck` entry below).
-- `v0.0.11` stays the stable channel: `/releases/latest`, the one-liner and the Homebrew tap keep serving it, and `v0.0.12-preview` stays downloadable by explicit version. To run this cut, pin it — `install.sh --version 0.1.0-preview`.
+- At the time of this cut `v0.0.11` was still the stable channel: `/releases/latest`, the one-liner and the Homebrew tap served it, so this one had to be pinned — `install.sh --version 0.1.0-preview`. `v0.1.0` later promoted it to the default channel.
 
 ### Added
 
