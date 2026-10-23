@@ -1,21 +1,44 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { useRef } from 'preact/hooks'
-import { t } from '../i18n'
+import { useMemo, useRef } from 'preact/hooks'
+import { locale, t, type Locale } from '../i18n'
+import { useLocaleRerender } from '../hooks'
+import { Markdown } from '../md/render'
 import { useModalFocus } from './modal-focus'
 
+// The card shows the repository's own TERMS files rather than a second copy of
+// the same prose: `?raw` folds each translation in at build time, so the text a
+// reader consents to and the text under version control cannot drift apart. The
+// five files map one-to-one onto the console's five locales.
+import termsDe from '../../../../TERMS.de.md?raw'
+import termsEn from '../../../../TERMS.md?raw'
+import termsEs from '../../../../TERMS.es.md?raw'
+import termsJa from '../../../../TERMS.ja.md?raw'
+import termsZh from '../../../../TERMS.zh-CN.md?raw'
+import { prepareTerms } from './terms-text'
+
+const SOURCES: Record<Locale, string> = {
+  en: termsEn,
+  'zh-CN': termsZh,
+  ja: termsJa,
+  es: termsEs,
+  de: termsDe,
+}
+
+/** The markdown the card renders, in the console's current language. */
+export function termsMarkdown(): string {
+  return prepareTerms(SOURCES[locale()])
+}
+
 /** The license & disclaimer body shared by the onboarding wizard and the
- *  Settings → General "read terms" entry point — ten sections, all strings
- *  live in the onboarding.* i18n keys. */
+ *  Settings → General "read terms" entry point — all seventeen sections of
+ *  TERMS.md, in the console's language. */
 export function TermsContent() {
+  useLocaleRerender()
+  const text = useMemo(() => termsMarkdown(), [locale()])
   return (
     <div class="wizard-terms">
-      {([1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const).map((n) => (
-        <section key={n} class="wizard-terms-section">
-          <h3>{t(`onboarding.terms${n}h`)}</h3>
-          <p>{t(`onboarding.terms${n}b`)}</p>
-        </section>
-      ))}
+      <Markdown text={text} />
     </div>
   )
 }

@@ -528,36 +528,6 @@ const de: Messages = {
   'onboarding.step.model': 'Modell',
   'onboarding.langTitle': 'Sprache wählen',
   'onboarding.termsTitle': 'Nutzungsbedingungen & Lizenz',
-  'onboarding.terms1h': '1. Open-Source-Lizenz (AGPL-3.0)',
-  'onboarding.terms1b':
-    'OpenPanda ist freie quelloffene Software unter der GNU Affero General Public License v3.0 oder später (AGPL-3.0-or-later). Du darfst sie ausführen, untersuchen, ändern und weiterverbreiten — auch kommerziell —, solange abgeleitete Werke unter der AGPL bleiben und jede über ein Netzwerk angebotene geänderte Version den Nutzern ihren Quellcode anbietet. Für die Nutzung in geschlossenem Code ist eine kommerzielle Lizenz erhältlich (siehe COMMERCIAL.md). Der vollständige Lizenztext und die Nutzungsbedingungen liegen in den Dateien LICENSE und TERMS.md bei und gehen dieser Zusammenfassung vor.',
-  'onboarding.terms2h': '2. Selbst gehostete Software, kein Managed Service',
-  'onboarding.terms2b':
-    'OpenPanda ist Software, die du auf eigener Hardware installierst, konfigurierst und betreibst. Die Autoren bieten kein Hosting, keine Servicelevels, keine Verfügbarkeitszusagen, keine Supportpflichten und keine Datenverwahrung. Installation, Betrieb, Wartung, Zugriffskontrolle, Monitoring und die Sicherheit deiner Bereitstellung liegen allein in deiner Verantwortung.',
-  'onboarding.terms3h': '3. Local-First & Datensouveränität',
-  'onboarding.terms3b':
-    'Quellcode, Arbeitsdateien, Gesprächsverläufe, Gedächtnisspeicher und API-Zugangsdaten verbleiben standardmäßig auf deinen Geräten. Die Software enthält keine Telemetrie, kein Tracking und keine Erhebung privater Daten. Daten verlassen einen Knoten nur dort, wo du ausdrücklich einen Modellanbieter oder Peer dafür konfigurierst — und ab dann gelten die Praktiken des Empfängers, nicht die von OpenPanda.',
-  'onboarding.terms4h': '4. Modellanbieter von Drittanbietern',
-  'onboarding.terms4b':
-    'KI-Funktionen laufen über Zugangsdaten, die du für einen selbst gewählten Anbieter bereitstellst (gehostete APIs oder lokale Endpunkte). Prompts, Arbeitskontext und Dateien, die an einen Anbieter gesendet werden, unterliegen ausschließlich dessen Bedingungen, Datenschutzrichtlinie, Aufbewahrung und Preisen. OpenPanda steht mit keinem Anbieter in Verbindung, wird von keinem unterstützt und übernimmt keine Verantwortung; Streitigkeiten, Mehrkosten und Datenverarbeitung sind ausschließlich Sache zwischen dir und dem Anbieter.',
-  'onboarding.terms5h': '5. P2P-Delegation & Netzwerkvertrauen',
-  'onboarding.terms5b':
-    'OpenPanda kann Aufgaben an durch Kopplung autorisierte Geräte delegieren. Payloads, Fähigkeitskarten, Dateien und Ergebnisse wandern über authentifizierte Kanäle zwischen Knoten — einschließlich Knoten, die von anderen Personen betrieben werden, mit denen du dich koppelst und deren Handlungen außerhalb der Kontrolle der Autoren liegen. Kopple nur mit vertrauenswürdigen Maschinen und behandle Node-Listener und Web-Konsole als private Endpunkte: Sie gegenüber nicht vertrauenswürdigen Netzen offenzulegen geschieht ausschließlich auf dein eigenes Risiko.',
-  'onboarding.terms6h': '6. KI-generierte Ausgaben',
-  'onboarding.terms6b':
-    'Code, Befehle, Analysen und andere Modellausgaben sind probabilistisch. Sie können fehlerhaft, halluziniert, unsicher, nicht funktionsfähig oder durch Rechte Dritter belastet sein — und stellen keine professionelle Beratung dar (weder rechtlich, medizinisch, finanziell noch in Sicherheitsfragen). Prüfe jede Ausgabe auf Inhalt und Lizenz und teste sie vor der Verwendung; Handlungen auf Grundlage generierter Ausgaben erfolgen auf dein alleiniges Risiko.',
-  'onboarding.terms7h': '7. Ausführung & Systemsicherheit',
-  'onboarding.terms7b':
-    'OpenPanda kann Shell-Befehle ausführen, Dateien verändern und den Systemzustand ändern, auch auf entfernten Knoten. Genehmigungsstufen, Sandboxing und Audit-Logs sind Risikominderung, keine Garantie: Fehler, Fehlkonfigurationen, Prompt-Injection oder ein kompromittierter Peer können weiterhin Schaden anrichten. Prüfe destruktive oder irreversible Aktionen vor der Freigabe und halte unabhängige Backups wichtiger Daten vor.',
-  'onboarding.terms8h': '8. Compliance & zulässige Nutzung',
-  'onboarding.terms8b':
-    'Du bist allein dafür verantwortlich, OpenPanda rechtmäßig und im Einklang mit allen für dich geltenden Pflichten zu nutzen — Datenschutzrecht, Export- und Sanktionskontrollen, Geräte- und Netzwerkrichtlinien deiner Organisation sowie die Bedingungen jeglicher Dienste, Repositories oder Netze, die du darüber erreichst. Nutze die Software nicht zur Rechtsverletzung, zum unbefugten Zugriff auf Systeme oder zur Verarbeitung von Daten, zu deren Handhabung du nicht berechtigt bist. Nichts hiervon überträgt diese Verantwortung.',
-  'onboarding.terms9h': '9. Gewährleistungsausschluss & Haftungsbeschränkung',
-  'onboarding.terms9b':
-    'Die Software wird „wie besehen" und „wie verfügbar" ohne jegliche ausdrückliche, stillschweigende oder gesetzliche Gewährleistung bereitgestellt — einschließlich Marktgängigkeit, Eignung für einen bestimmten Zweck, Sicherheit und Nichtverletzung. Soweit gesetzlich zulässig, haften die Autoren und Mitwirkenden nicht für direkte, indirekte, zufällige, besondere, Folge- oder Strafschäden — einschließlich Datenverlust, entgangener Gewinne, Ausfallzeiten, Kosten für Ersatzdienste oder Ansprüche Dritter — die aus der Software, ihren Ausgaben oder ihrer Nutzung entstehen, selbst wenn auf die Möglichkeit hingewiesen wurde. Wo eine Haftung nicht vollständig ausgeschlossen werden kann, ist sie auf das gesetzlich geforderte Mindestmaß beschränkt.',
-  'onboarding.terms10h': '10. Freistellung, Änderungen & salvatorische Klausel',
-  'onboarding.terms10b':
-    'Du stimmst zu, die Autoren und Mitwirkenden zu verteidigen, schadlos zu halten und von Ansprüchen, Schäden und Aufwendungen (einschließlich Anwaltskosten) freizustellen, die aus deiner Nutzung der Software, deiner Konfiguration, den von dir ausgelösten Aufgaben und Delegationen oder deinem Verstoß gegen diese Bedingungen, gegen Gesetze oder Rechte Dritter entstehen. Die Bedingungen können zusammen mit der Software aktualisiert werden; es gelten die Bedingungen des Builds, den du ausführst. Sollte eine Bestimmung undurchsetzbar sein, bleiben die übrigen uneingeschränkt wirksam.',
   'onboarding.agree': 'Zustimmen & weiter',
   'onboarding.next': 'Weiter',
   'onboarding.finish': 'Speichern & fertig',
