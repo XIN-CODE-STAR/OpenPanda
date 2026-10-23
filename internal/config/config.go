@@ -57,9 +57,8 @@ type Config struct {
 	// endpoint and `whisper-1`, which is what an OpenAI-compatible relay
 	// already serves.
 	ASR ASRConfig `yaml:"asr"`
-	// SelfEvolution is the opt-in self-modification pipeline (design doc
-	// docs/plans/design-self-evolution.md). Entirely inert while enabled=false: no
-	// worktree, no queue, no merge proposals.
+	// SelfEvolution is the opt-in self-modification pipeline. Entirely inert
+	// while enabled=false: no worktree, no queue, no merge proposals.
 	SelfEvolution SelfEvolutionConfig `yaml:"self_evolution"`
 }
 
@@ -404,7 +403,7 @@ type NodeConfig struct {
 
 // PeerEntry is one network.peers item. The scalar form ("host:port") is the
 // pre-trust-zones syntax and unmarshals to {Addr, ""}; the mapping form adds
-// a trust tier (trust_zone feature, docs/plans/design-trust-zones-*.md §3):
+// a trust tier (trust_zone feature §3):
 // "mesh" keeps today's full delegation, "guarded" narrows what delegates may
 // carry toward the peer, "open" admits the node to the directory but bars it
 // from task delegation entirely until the offer/bid market exists. Empty

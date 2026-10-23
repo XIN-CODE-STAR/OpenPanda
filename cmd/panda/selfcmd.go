@@ -25,7 +25,7 @@ import (
 )
 
 // runSelf implements `panda self <verb>` — the self-evolution pipeline's
-// operator surface (design doc docs/plans/design-self-evolution.md). All
+// operator surface. All
 // verbs are local: the queue, worktree and archive live under <data>/self/,
 // and the only mutation with cross-process effect is `propose`, which parks
 // a review task on the shared store for `panda approve` / the console.

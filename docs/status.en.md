@@ -121,7 +121,7 @@ English translation of [status.md](status.md)（中文版为准）· English
 > children boards by the parent's executing node — same rule as result
 > reporting), reads at supervision-tick boundaries never blocking a
 > running agent; `panda task board <id>` is the viewing entry, design
-> in `docs/plans/design-task-message-board.md`; unit tests and a
+> in the message-board notes; unit tests and a
 > three-node in-process e2e all green, real multi-device verification
 > pending); 2026-10-15 (a computer-use and security wrap-up on main
 > after v0.0.11-preview: computer-use "eye/hand" landed —
@@ -177,8 +177,7 @@ English translation of [status.md](status.md)（中文版为准）· English
 > the whole daemon), the transit SealNone guard's regression test, and the
 > relayed punch request keeping its origin. The live cross-network multi-hop
 > was verified (Mac → relay → cloud, a 3 MiB project tree hashing the same).
-> See `docs/reports/release-audit-2026-10-22.md` and
-> `docs/plans/design-cross-network-three-node.md`; not done: UPnP/NAT-PMP,
+> See `CHANGELOG.md`; not done: UPnP/NAT-PMP,
 > punch/dir source-signature convergence, a daemon→panel mesh-metrics IPC path,
 > and hello replay across peers (a protocol-level challenge-response, for
 > v0.1.1).
@@ -545,5 +544,4 @@ unbuilt.
    that is the **scout→plan two-phase protocol** (probe the codebase
    first, then split and dispatch dynamically on the report) — the
    message board is its communication substrate; the splitting protocol
-   itself is still to be designed (see
-   `docs/plans/design-task-message-board.md` §8).
+   itself is still to be designed (see §8 of the message-board notes).

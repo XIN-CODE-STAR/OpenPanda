@@ -7,7 +7,7 @@
 // pure functions — storage, transport and execution all live elsewhere, so
 // the whole policy surface is unit-testable in isolation.
 //
-// The model (docs/plans/design-trust-zones-agent-economy.md §3) hangs three
+// The model hangs three
 // levels on a peer's Ed25519 identity. Trust is always asserted locally —
 // configured by this node's operator or demoted by this node's key-change
 // rule — and a level a peer claims for itself is never honoured.

@@ -200,3 +200,9 @@ fetch_emails.py
 # They are scratch, not fixtures: a real regression test gets a descriptive
 # name and is committed deliberately.
 zz_*_test.go
+
+# Internal design, roadmap, test and report documents live under author/docs/
+# and are not part of the public source tree.
+/docs/plans/
+/docs/reports/
+/docs/testing/

@@ -54,28 +54,9 @@ OpenPanda (**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **A
 
 ## [0.1.0] - 2026-10-23 — "Constellation"
 
-**The promotion** — codename **Constellation**: `v0.1.0` is `v0.1.0-preview` moved onto the default channel. Same feature set, same wire format, same store schema, same audit sign-off. Nothing was added to earn the number; what changed is who gets it without asking.
+**The release-grade line begins here** — codename **Constellation**: the fleet drawn as one sky. Same-project tasks run in parallel through declared path scopes and isolated worktrees, under delegation bounds that tighten at every hop; a cross-network mesh carries work between nodes that cannot dial each other — two-key identity, blind relays, epidemic directory sync, K=2 rendezvous edges and the reachability ladder — and `panda://join` brings a new device in from one URI. One console commands it all: a verdict-first task page, a to-do board that hands work to the fleet, a thread roster, and a transcript that draws a screenshot as a picture — with the release audit's correctness and security work closed behind it, verified on a live Mac → relay → cloud chain.
 
-The full feature list and the audit's findings live in the `0.1.0-preview` section below. This section records only what moved between that cut and this one.
-
-- **The default channels resolve here.** `/releases/latest`, the one-liner, the Homebrew tap and `panda update` on a stable node all serve `v0.1.0` from now on; the `v0.1.0-preview` tag stays published for anyone who pinned it.
-- **The one-liner needs no `--version`.** It resolves the latest stable, which is this cut — the pinned form keeps working for anyone who wants an exact version.
-- **Nothing breaking moved in.** Configuration, capability cards, stored data and the wire format are unchanged from the preview, so an install on either line upgrades in place without a migration the preview had not already run.
-- **Two surfaces were corrected before promotion.** The site named `v0.1.0` while only the preview existed, and the preview's release notes claimed the default channels already served it; both now match reality, and the release workflow appends a pre-release block to any hyphenated tag so the next preview cannot repeat the mistake.
-- **The installer suite count in the status docs was wrong.** It is 23 checks, not 21 — the unsigned-release warning and the `OPENPANDA_REQUIRE_SIG` refusal were the two that went uncounted.
-- **What is still open is stated, not implied.** The cross-node hello replay and the `XPub` signature-domain gap are protocol-level and land in v0.1.1; `docs/status.md` and `docs/reports/release-audit-2026-10-22.md` list them alongside the rest.
-
-## [0.1.0-preview] - 2026-10-22
-
-**The first cut of the release-grade line** — codename **Constellation**: the same fleet the v0.0.12 preview drew, with the release audit's correctness and security work closed behind it.
-
-Everything before this was a preview line, and every cut said so: the wire could move, the store could migrate under you, and the installer's job was to hand you the newest thing rather than the settled one. `0.1.0-preview` is the first version we are willing to stand behind — the one the audit signs off on after a live Mac → relay → cloud run, and the one `panda update` moves a node that is already on the preview line onto. It still ships as a pre-release, so the default channels have not moved with it: `/releases/latest`, the one-liner and the Homebrew tap keep serving `v0.0.11`, and a node on the stable line is not offered this cut. Opt in by naming the version; it is promoted to `latest` once it has been out in the wild. The feature set is Constellation's. What changed is what stands behind it.
-
-What that claim rests on:
-
-- **An audit that was closed, not deferred.** Security, task execution and the storage/UI boundary were reviewed in parallel with a live three-node deployment, and every release blocker the review found is fixed with a regression test behind it. The report — including what was deliberately pushed to v0.1.1 — is `docs/reports/release-audit-2026-10-22.md`.
-- **A chain, not a loopback.** Multi-hop work was verified across a WAN link: Mac → relay → cloud VM, two hops, a 3 MiB project tree landing on the executor with a matching SHA-256.
-- **A boundary that is stated.** What is not finished is written down rather than implied: UPnP/NAT-PMP port mapping, signature convergence for punch and directory frames, mesh counters across the panel's IPC, and cross-node hello replay — a protocol-level challenge scheduled for v0.1.1.
+What is not finished is written down rather than implied: UPnP/NAT-PMP port mapping, signature convergence for punch and directory frames, mesh counters across the panel's IPC, and cross-node hello replay — a protocol-level challenge still open. `docs/status.md` lists them alongside the rest.
 
 ### Highlights
 
@@ -89,9 +70,8 @@ What that claim rests on:
 ### Upgrading from 0.0.x
 
 - No breaking changes: configuration, capability cards, stored data and the wire format are all carried forward, and migrations apply on first start.
-- An existing install upgrades in place: `panda update` moves a node on the preview line onto this cut, and a fresh install of it is `install.sh --version 0.1.0-preview`.
-- Building from source now requires Go 1.26.10 (a security floor, not a preference — see the `govulncheck` entry below).
-- At the time of this cut `v0.0.11` was still the stable channel: `/releases/latest`, the one-liner and the Homebrew tap served it, so this one had to be pinned — `install.sh --version 0.1.0-preview`. `v0.1.0` later promoted it to the default channel.
+- An existing install upgrades in place: `panda update` moves a node onto this cut, and a fresh install is `install.sh --version 0.1.0`.
+- Building from source requires Go 1.26.10 (a security floor, not a preference — see the `govulncheck` entry below).
 
 ### Added
 

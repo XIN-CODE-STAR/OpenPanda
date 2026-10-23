@@ -161,7 +161,7 @@ export const EN = {
   's4.table.r2.when': 'A commodity layer; no added value',
   's4.table.r3.freeze': 'Relations',
   's4.table.r3.when': 'Every node gets smarter; the network gets stronger',
-  's4.link': 'Read the design note',
+  's4.link': 'View project status',
   's4.diagram.outer': 'Agent / device',
   's4.diagram.outer.sub': 'replaceable',
   's4.diagram.mid': 'Cognition',

@@ -48,28 +48,9 @@ OpenPanda (**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **A
 
 ## [0.1.0] - 2026-10-23 — "Constellation"
 
-**El ascenso** — nombre en clave **Constellation**: `v0.1.0` es `v0.1.0-preview` trasladado al canal por defecto. Mismo conjunto de funciones, mismo formato de cable, mismo esquema de almacenamiento, misma firma de la auditoría. No se añadió nada para ganar el número; lo que cambió es quién lo recibe sin preguntar.
+**La línea de calidad de release empieza aquí** — nombre en clave **Constellation**: la flota dibujada en un solo cielo. Las tareas del mismo proyecto corren en paralelo mediante ámbitos de rutas declarados y worktrees aislados, con los límites de delegación apretándose en cada salto; una malla entre redes transporta trabajo entre nodos que no pueden marcarse —identidad de dos claves, relays ciegos, sincronización epidémica de directorios, aristas de encuentro K=2 y la escalera de alcanzabilidad—, y `panda://join` incorpora un dispositivo nuevo desde una sola URI. Una consola lo comanda todo: una página de tarea que empieza por su veredicto, un tablero de pendientes que entrega trabajo a la flota, una plantilla con la que un hilo contrata a su propio equipo y una transcripción que dibuja la captura como imagen — con la auditoría de release cerrada detrás: cada hallazgo de corrección y seguridad está corregido con una prueba de regresión, y la cadena real Mac → relay → nube quedó verificada.
 
-La lista completa de funciones y las conclusiones de la auditoría están en la sección `0.1.0-preview` de abajo. Esta sección registra solo lo que se movió entre aquel corte y este.
-
-- **Los canales por defecto apuntan aquí.** `/releases/latest`, el instalador de una línea, el tap de Homebrew y `panda update` en un nodo de la línea estable sirven `v0.1.0` desde ahora; la etiqueta `v0.1.0-preview` sigue publicada para quien la fijó.
-- **El instalador de una línea ya no necesita `--version`.** Resuelve la última estable, que es este corte; la forma fijada sigue funcionando para quien quiera una versión exacta.
-- **No entró nada que rompa.** La configuración, las tarjetas de capacidad, los datos guardados y el formato de cable no cambian respecto al avance, así que una instalación de cualquiera de las dos líneas se actualiza en el sitio sin una migración que el avance no hubiera ejecutado ya.
-- **Dos superficies se corrigieron antes del ascenso.** El sitio nombraba `v0.1.0` cuando solo existía el avance, y las notas de la versión preliminar afirmaban que los canales por defecto ya la servían; ahora ambas dicen lo que es cierto, y el flujo de publicación añade un bloque de prepublicación a cualquier etiqueta con guion para que el próximo avance no repita el error.
-- **El recuento de pruebas del instalador en los documentos de estado estaba mal.** Son 23 comprobaciones, no 21: el aviso de publicación sin firma y el rechazo de `OPENPANDA_REQUIRE_SIG` fueron las dos que quedaron sin contar.
-- **Lo que sigue abierto se dice, no se insinúa.** La repetición de hello entre nodos y la ausencia de `XPub` en el dominio de firma son de nivel de protocolo y llegan en v0.1.1; `docs/status.md` y `docs/reports/release-audit-2026-10-22.md` los enumeran junto al resto.
-
-## [0.1.0-preview] - 2026-10-22
-
-**El primer corte de la línea de calidad de release** — nombre en clave **Constellation**: la misma flota que dibujó la vista previa v0.0.12, ahora con todo el trabajo de corrección y seguridad de la auditoría cerrado detrás.
-
-Todo lo anterior fue una línea de vista previa, y cada entrega lo decía: el protocolo podía moverse, el almacén podía migrar bajo tus pies y el instalador servía para darte lo más nuevo, no lo asentado. `0.1.0-preview` es la primera versión que estamos dispuestos a respaldar: la que la auditoría firma tras una ejecución real Mac → relay → nube y a la que `panda update` mueve un nodo que ya está en la línea de vista previa. Aun así se publica como prelanzamiento, así que los canales por defecto no se han movido: `/releases/latest`, el instalador de una línea y el tap de Homebrew siguen sirviendo `v0.0.11`, y a un nodo de la línea estable no se le ofrece esta entrega. Para usarla, nombra la versión; pasará a `latest` cuando lleve un tiempo rodando. El conjunto de funciones es el de Constellation. Lo que cambió es lo que hay detrás.
-
-En qué se apoya esa afirmación:
-
-- **Una auditoría cerrada, no aplazada.** Seguridad, ejecución de tareas y el límite entre almacenamiento e interfaz se revisaron en paralelo a un despliegue real de tres nodos, y todo bloqueante de release que apareció está corregido con una prueba de regresión detrás. El informe —incluido lo que se pospuso deliberadamente a v0.1.1— es `docs/reports/release-audit-2026-10-22.md`.
-- **Una cadena, no un loopback.** El trabajo multi-salto se verificó por un enlace WAN: Mac → relay → VM en la nube, dos saltos, un árbol de proyecto de 3 MiB llegando al ejecutor con el mismo SHA-256.
-- **Un límite que está escrito.** Lo que no está terminado se documenta en lugar de insinuarse: mapeo de puertos UPnP/NAT-PMP, convergencia de firmas para tramas de punch y de directorio, contadores de mesh a través del IPC del panel, y la repetición de hello entre nodos —un desafío a nivel de protocolo previsto para v0.1.1.
+Lo que no está terminado se documenta en lugar de insinuarse: mapeo de puertos UPnP/NAT-PMP, convergencia de firmas para tramas de punch y de directorio, contadores de mesh a través del IPC del panel y la repetición de hello entre nodos —un desafío de protocolo que sigue abierto. `docs/status.md` los enumera junto al resto.
 
 ### Aspectos destacados
 
@@ -83,9 +64,8 @@ En qué se apoya esa afirmación:
 ### Actualizar desde 0.0.x
 
 - Sin cambios importantes: la configuración, las tarjetas de capacidad, los datos guardados y el formato de protocolo se conservan, y las migraciones se aplican en el primer arranque.
-- Una instalación existente se actualiza en su sitio: `panda update` mueve un nodo de la línea de vista previa a esta entrega, y una instalación nueva de ella es `install.sh --version 0.1.0-preview`.
+- Una instalación existente se actualiza en su sitio: `panda update` mueve un nodo a esta entrega, y una instalación nueva es `install.sh --version 0.1.0`.
 - Compilar desde el código exige ahora Go 1.26.10 (es un suelo de seguridad, no una preferencia — ver la entrada de `govulncheck` más abajo).
-- En el momento de este corte `v0.0.11` seguía siendo el canal estable: `/releases/latest`, el instalador de una línea y el tap de Homebrew lo servían, así que esta entrega había que fijarla: `install.sh --version 0.1.0-preview`. `v0.1.0` la ascendió después al canal por defecto.
 
 ### Añadido
 

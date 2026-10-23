@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package self is the self-evolution pipeline's local machinery (design doc
-// docs/plans/design-self-evolution.md §2–§5): signed patch-set manifests, the on-disk
+// Package self is the self-evolution pipeline's local machinery: signed
+// patch-set manifests, the on-disk
 // queue under <data>/self/, the git worktree the patch sets merge into, and
 // the release-equivalent gate runner. Everything here is opt-in — nothing in
 // this package runs unless the operator enabled self_evolution, minted or

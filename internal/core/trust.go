@@ -19,8 +19,8 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/version"
 )
 
-// Trust zones are an experimental feature (docs/plans/design-trust-zones-
-// agent-economy.md). A fleet that never configures a tier resolves every peer
+// Trust zones are an experimental feature. A fleet that never configures a
+// tier resolves every peer
 // to mesh, every SendPolicyFor(mesh) is a no-op clamp, and every
 // AcceptPolicyFor(mesh) auto-admits — the feature is absent by construction,
 // not merely by flag.

@@ -151,7 +151,7 @@ per episode (`messages.budget` is tunable), expiring after 24 hours.
 it is a channel within one collaboration domain, not private chat —
 directed messages are visible to same-domain members on the sender's
 node; delivery is best-effort and lost frames self-heal on the next
-send. Design details: `docs/plans/design-task-message-board.md`.
+send. Design details live in the project's internal design notes.
 
 **Can I dispatch tasks by speaking?**
 
