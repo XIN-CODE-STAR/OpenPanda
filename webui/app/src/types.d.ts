@@ -33,3 +33,10 @@ interface Window {
   SpeechRecognition?: new () => SpeechRecognitionController
   webkitSpeechRecognition?: new () => SpeechRecognitionController
 }
+
+// Vite's `?raw` suffix: the import resolves to the file's text. The terms card
+// reads ../../TERMS*.md this way, so the consent text has one home.
+declare module '*?raw' {
+  const text: string
+  export default text
+}

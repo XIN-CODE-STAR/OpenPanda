@@ -2,6 +2,7 @@
 
 import { defineConfig } from 'vite'
 import preact from '@preact/preset-vite'
+import { fileURLToPath } from 'node:url'
 
 // The build lands in webui/panel/dist/app so `go:embed` can fold it into the
 // panel binary (single-binary distribution). The placeholder index.html in
@@ -18,6 +19,15 @@ export default defineConfig({
   },
   server: {
     port: 5273,
+    // The terms card imports ../../TERMS*.md as raw text so the consent copy has
+    // one home. Vite's dev server only serves files under the project root, so
+    // the repo root has to be allowed explicitly (the build needs nothing).
+    fs: {
+      allow: [
+        fileURLToPath(new URL('.', import.meta.url)),
+        fileURLToPath(new URL('../..', import.meta.url)),
+      ],
+    },
     proxy: {
       '/api': process.env.PANDA_PANEL || 'http://127.0.0.1:7840',
     },
