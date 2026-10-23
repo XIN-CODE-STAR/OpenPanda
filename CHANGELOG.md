@@ -48,6 +48,8 @@ OpenPanda (**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **A
 
 _No unreleased changes yet._
 
+- **The consent card shows the terms, not a summary of them** — the wizard and the Settings dialog used to render ten condensed clauses: a second copy of the legal text that could drift from the file it summarized. Both now render `TERMS.md` itself — all seventeen sections, in the console's language — through the same markdown renderer the transcript uses. The prose is never copied into the console: each translation is folded in from the repository's own file at build time, so there is one text to change.
+
 ## [0.1.0] - 2026-10-23 — "Constellation"
 
 **The release-grade line begins here** — codename **Constellation**: the fleet drawn as one sky. Same-project tasks run in parallel through declared path scopes and isolated worktrees, under delegation bounds that tighten at every hop; a cross-network mesh carries work between nodes that cannot dial each other — two-key identity, blind relays, epidemic directory sync, K=2 rendezvous edges and the reachability ladder — and `panda://join` brings a new device in from one URI. One console commands it all: a verdict-first task page, a to-do board that hands work to the fleet, a thread roster, and a transcript that draws a screenshot as a picture — with the release audit's correctness and security work closed behind it, verified on a live Mac → relay → cloud chain.
