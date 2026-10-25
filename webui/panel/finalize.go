@@ -101,12 +101,14 @@ func (h *handler) taskSummary(ctx context.Context, t core.Task) string {
 		reason = h.failureReason(ctx, t.TaskID)
 	}
 	agent := h.taskAgent(ctx, t)
-	return summaryText(t, reason, agent, h.substitutedFrom(ctx, t.TaskID, agent))
+	from, why := h.substitutedFrom(ctx, t.TaskID, agent)
+	return summaryText(t, reason, agent, from, why)
 }
 
 // substitutedFrom names the agent the plan had chosen when the executor could
-// not run it and the fallback chain finished the round instead. Empty when the
-// agent that answered is the one the plan picked.
+// not run it and the fallback chain finished the round instead, together with
+// the reason that attempt recorded. Both empty when the agent that answered is
+// the one the plan picked.
 //
 // The swap is deliberate (core/run.go annotateAgentSubstitution explains why
 // refusing the whole task serves nobody) and it is recorded twice: as an
@@ -115,30 +117,36 @@ func (h *handler) taskSummary(ctx context.Context, t core.Task) string {
 // "agent:claude_code" answered by deepseek_harness read as a silent
 // bait-and-switch: the line named one employee for the job and another for the
 // reply. This is where that sentence is read, so this is where it gets said.
-func (h *handler) substitutedFrom(ctx context.Context, taskID, agent string) string {
+//
+// The reason is half of the sentence. "claude_code 未执行" tells the reader the
+// reply is not the one they asked for but not whether to retry, reinstall or
+// raise a turn cap; the fallback event carries the diagnosis the failed attempt
+// reported, and it rides along when it is there.
+func (h *handler) substitutedFrom(ctx context.Context, taskID, agent string) (string, string) {
 	if agent == "" {
-		return ""
+		return "", ""
 	}
 	events, err := h.store.Events(ctx, taskID)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	for i := len(events) - 1; i >= 0; i-- {
 		if events[i].Type != "agent_fallback" {
 			continue
 		}
 		var d struct {
-			From string `json:"from"`
-			To   string `json:"to"`
+			From   string `json:"from"`
+			To     string `json:"to"`
+			Reason string `json:"reason"`
 		}
 		if json.Unmarshal([]byte(events[i].DataJSON), &d) != nil {
 			continue
 		}
 		if d.From != "" && d.To == agent {
-			return d.From
+			return d.From, strings.TrimSpace(d.Reason)
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // summaryText is the pure composition of the report, in two parts and no
@@ -153,7 +161,7 @@ func (h *handler) substitutedFrom(ctx context.Context, taskID, agent string) str
 // into the model's own history spent the context window on its own past
 // prose. One conclusion paragraph is the summary — the sections above it are
 // the evidence behind it.
-func summaryText(t core.Task, reason, agent, substituted string) string {
+func summaryText(t core.Task, reason, agent, substituted, substitutedWhy string) string {
 	head := "[" + t.State + "] "
 	if agent != "" {
 		head += "@" + agent + " · "
@@ -165,7 +173,12 @@ func summaryText(t core.Task, reason, agent, substituted string) string {
 	// that actually spoke. The leading space is part of the Latin strings —
 	// CJK locales set the note in full-width brackets and need none.
 	if substituted != "" && agent != "" && substituted != agent {
-		head += i18n.Tf(t.GetUserLocale(), "web.session.agentSubstituted", "from", substituted, "to", agent)
+		if why := clipSubstitutionWhy(substitutedWhy); why != "" {
+			head += i18n.Tf(t.GetUserLocale(), "web.session.agentSubstitutedWhy",
+				"from", substituted, "to", agent, "why", why)
+		} else {
+			head += i18n.Tf(t.GetUserLocale(), "web.session.agentSubstituted", "from", substituted, "to", agent)
+		}
 	}
 
 	// A failed run's own reason is its conclusion: there is no adapter answer
@@ -179,6 +192,22 @@ func summaryText(t core.Task, reason, agent, substituted string) string {
 		return head
 	}
 	return head + "\n" + body
+}
+
+// maxSubstitutionWhy bounds the cause printed inside the swap note. The note
+// sits on the orchestration line, which is a caption — an adapter that failed
+// with a 400-character stack trace must not turn the line into a paragraph.
+// The full diagnosis stays where it belongs: the task's own event trace.
+const maxSubstitutionWhy = 80
+
+// clipSubstitutionWhy shortens a fallback reason for the caption, on runes so a
+// CJK diagnosis is not cut at a third of its length.
+func clipSubstitutionWhy(why string) string {
+	why = strings.TrimSpace(strings.ReplaceAll(why, "\n", " "))
+	if utf8.RuneCountInString(why) <= maxSubstitutionWhy {
+		return why
+	}
+	return strings.TrimSpace(string([]rune(why)[:maxSubstitutionWhy])) + "…"
 }
 
 // maxConclusionRunes bounds one employee's closing paragraph. A conclusion is

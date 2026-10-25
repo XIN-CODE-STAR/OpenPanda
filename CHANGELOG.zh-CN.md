@@ -49,6 +49,7 @@ OpenPanda（**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **
 
 ### 修复
 
+- **又有三个 agent 能真正用上 panda 的模型** —— hermes、openclaw、zcode 过去会记下一次注入事件，然后死在各自的凭据契约上。hermes 0.19 不读 `OPENAI_*`，只认 `$HERMES_HOME/config.yaml` 里的 `providers.*`；openclaw 卡在 `~/.openclaw` 下的 auth-profile 旧存储，`--state-dir` 挪不动它，本机又无法迁移（`doctor --fix` 过不了 ACL 检查）；zcode 在"没有选中模型"前拒绝发送任何请求，而选中结果存在一个它没有命令行开关的文件里，`ZCODE_*` 则完全不读。现在每个适配器只为注入运行准备该 CLI 真正会读的东西：hermes 拿到一个一次性 `HERMES_HOME`，其 provider 通过 `key_env` 指向 `${OPENPANDA_INJECT_BASE_URL}`；openclaw 拿到 `--config`/`--state-dir`，并把 `HOME` 重定向（auth-profile 存储没有路径开关），密钥只以环境变量引用的形式存在；zcode 拿到个人 provider 配置（`defaultModelSelection` 写在 `config` 里面——CLI 就在那里找）并通过 `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` 生效。三者都不碰用户自己的状态；只有 zcode 的配置会带上密钥，且随本次运行一起删除。zcode 同时离开 `generic.py`——通用入口根本无法兑现其清单声称的注入——注册表也不再把它写成只支持 Anthropic，而是多方言。顺带修了两处 harness：形如 `"node.exe" "cli.cjs" %*` 的手写 `.cmd` 包装此前只解析出解释器，导致 CLI 的参数落到 node 身上（`bad option: --prompt`）；注入被拒时现在会说明是方言不匹配、适配器没有 env 契约，还是 agent 未知，而不是一律说"不支持注入"。
 - `panda update` 不再因资产主机抖动而整轮失败：拉取发布元数据时对传输层错误最多重试三次，连接 GitHub 资产 CDN 的 TLS 握手预算从默认 10 秒提到 30 秒；同时从错误信息里隐去资产 URL 上带签名的查询串——它此前把真正的原因挤到了屏幕外。
 - `scripts/install.ps1` 不再因 Windows 的 `CRYPT_E_NO_REVOCATION_CHECK`（`0x80092012`）中断：当本机 curl 为 Schannel 构建时自动加上 `--ssl-no-revoke`，"查不到证书吊销状态"不再阻断安装。证书链、主机名与有效期仍照常校验，压缩包仍以 `checksums.txt` 的 SHA-256 校验。
 - **任务点名的 agent 不在团队里时会被拒绝，而不是换人** —— 三个分别点名 `agent:claude_code`、`agent:codex`、`agent:deepseek_harness` 的任务跑在 `[deepseek_harness, opencode]` 名单上，三个都在 deepseek_harness 上执行，各自打印了 `<name> 调用成功`——三次绿色通过，两次是虚构的。现在这种矛盾在路由前就被拒绝，理由写明两侧；名单里的 agent 本机一个都没装时也会直说，而不是降级到不受限的能力卡。
@@ -56,6 +57,12 @@ OpenPanda（**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **
 - **一轮的结论统计整批，而不是最后一份汇报** —— 两个完成、一个失败的轮次会被整条标红成「本轮工作已结束（已失败）」，而小结里的任务名把共同的派发模板按任务重复打印。现在小结统计每一份汇报并写明分布（「2 个完成、1 个失败」），混合结果用琥珀色，只有无人完成才用红色；共同的任务名前缀（以冒号结尾）只打印一次。
 - **替补者不再冒充被点名的 agent** —— 点名 `agent:claude_code` 的任务中途失败后由回退链跑完，转写里「DeepSeek Harness」出现在标题为 `连通性测试：agent:claude_code` 的任务上方，却没有任何解释。这次替换被记录了两处（`agent_fallback` 事件、结果载荷开头的说明），但会话两处都不打印——它只留一段收尾。现在汇报行会把两侧都写出来。
 - **注入提示缩成一行，并写明是哪种策略** —— 任务输出前的那行脚注原先中英各说一遍同一句话，把 agent 自己的回答压到后面，而且失败后的补救读起来像策略注入。现在这行只写 agent、模型、端点主机和策略（`auto` / `always` / `rescue`）；`model_injection` 事件带上同样字段供日志查看，`injection.model: never` 也不再允许补救——「never」就是 agent 永远用自己的模型。
+
+- **一轮派发多个任务时，对话里每个任务各留一张卡** — 一次交给三个 agent 的对话只写了一条派发记录，于是对话里只有一张卡（等其余任务跑起来，是两行「执行中」），任务列表却是三张。回执现在带上本轮派发的每一个任务，面板按任务逐条写 turn，对话与任务列表因此一致，每张卡也都指向自己的任务。对话画的是「这一轮」，不是「存了几条」：这些 turn 会合成一条回复——一个头像、一个时间，卡片用细线隔开往下排——而不是五个各装一张卡的熊猫气泡。
+
+- **替换会说清原因** — 替换提示只点了两个 agent 的名字，没说是为什么；而且那个「为什么」本来就是空的：一次撞上 30 轮上限的 `claude_code` 运行只回了 `is_error`、没有正文，于是回退链记下的是「exec failed: 」后面什么都没有，读的人分不清是崩溃还是上限。适配器现在会用错误信封里的字段拼出诊断（`claude stopped at its turn cap after 31 turns without a final answer`），回退把它带在 `agent_fallback` 事件上，报告行把它印进替换提示——长度有上限，因为那一行是说明文字，不是日志。
+
+- **grok_build 现在真的能跑** —— 点名它的任务被别的 agent 答了，背后是三个独立的毛病。`grok` 从来没登录过，而它的措辞（"Not signed in. To authenticate without a browser…"）不匹配任何一条凭据失败特征，于是补救注入没有触发，回退链接走了任务；注入的端点走的是 `GROK_BASE_URL`，这个 CLI 根本不读（它读 `GROK_MODELS_BASE_URL`），所以就算补救也会把它指向 api.x.ai 却递上别家的 key；而 `--single` 打完答案**不退出进程**，登录好了也会一路挂到 600s 看门狗。适配器现在读事件流、在收尾的 `usage` 行结束这一轮，会话 id 每轮用新的 UUID（这个版本直接拒绝旧的 `panda-<hex>` 名字，而且 `-r --single` 什么都不返回，所以每轮冷启动而不是续会话），注册表也改成了 grok 真正认的端点变量。
 
 ## [0.1.0] - 2026-10-23 — "Constellation"
 

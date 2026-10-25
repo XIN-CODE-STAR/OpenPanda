@@ -896,3 +896,81 @@ func hasEnvPrefix(env []string, prefix string) bool {
 	}
 	return false
 }
+
+// The injected endpoint variable has to be the one the CLI reads. grok takes a
+// custom OpenAI-compatible endpoint from GROK_MODELS_BASE_URL (it fetches
+// {base}/models and sends completions there); GROK_BASE_URL is not a variable
+// this CLI knows, so injecting it left the run pointed at api.x.ai while
+// handing it another provider's key — a 401 that read as "the model failed".
+func TestGrokInjectionNamesTheEndpointVariableGrokReads(t *testing.T) {
+	model := config.ModelConfig{
+		APIType:  "openai",
+		BaseURL:  "https://open.bigmodel.cn/api/paas/v4",
+		APIKey:   "sk-zhipu-test",
+		Model:    "glm-5.3-flash",
+		Provider: "zhipu",
+	}
+	env := modelEnvForAdapter(model, "grok_build", "grok_build.py")
+	assertEnv(t, env, map[string]string{
+		"GROK_MODELS_BASE_URL": "https://open.bigmodel.cn/api/paas/v4",
+		"XAI_API_KEY":          "sk-zhipu-test",
+		"GROK_MODEL":           "glm-5.3-flash",
+	})
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "GROK_BASE_URL=") {
+			t.Fatalf("GROK_BASE_URL is not read by the CLI: %v", env)
+		}
+	}
+}
+
+// TestGrokConfigFileNeedsAProviderToCountAsCredentials: grok writes
+// ~/.grok/config.toml on first launch, before any login — the file is a shell
+// with a [marketplace] section and nothing else. Treating its mere existence
+// as "the agent has its own credentials" made `injection.model: auto` skip the
+// first attempt, which then died in one second with "Error: Not signed in",
+// and the round that finally answered belonged to the fallback agent rather
+// than to grok. Only a provider key / endpoint / auth helper inside the file
+// counts; ~/.grok/auth.json needs no field check because `grok login` is the
+// only thing that writes it.
+func TestGrokConfigFileNeedsAProviderToCountAsCredentials(t *testing.T) {
+	home := cleanCredentialEnv(t)
+	dir := filepath.Join(home, ".grok")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	cfg := filepath.Join(dir, "config.toml")
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(cfg, []byte(body), 0o644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+	}
+
+	write("[marketplace]\ndefault_skills_installs_purged = true\n")
+	if found, src := probeAgentCredentials("grok_build", "grok_build.py"); found {
+		t.Fatalf("a config.toml with no provider counted as credentials (%s)", src)
+	}
+
+	write("[model.glm]\napi_key = \"\"\n")
+	if found, src := probeAgentCredentials("grok_build", "grok_build.py"); found {
+		t.Fatalf("an empty api_key counted as credentials (%s)", src)
+	}
+
+	write("[model.glm]\napi_key = \"xai-real-key\"\n")
+	if found, src := probeAgentCredentials("grok_build", "grok_build.py"); !found {
+		t.Fatal("a provider key in config.toml must count as credentials")
+	} else if !strings.Contains(src, ".grok/config.toml") {
+		t.Fatalf("source = %q, want the config file named", src)
+	}
+
+	write("[marketplace]\ndefault_skills_installs_purged = true\n")
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"),
+		[]byte(`{"https://accounts.x.ai/sign-in":{"key":"session-token"}}`), 0o644); err != nil {
+		t.Fatalf("write auth.json: %v", err)
+	}
+	if found, src := probeAgentCredentials("grok_build", "grok_build.py"); !found {
+		t.Fatal("auth.json from `grok login` must count as credentials")
+	} else if !strings.Contains(src, ".grok/auth.json") {
+		t.Fatalf("source = %q, want auth.json named", src)
+	}
+}

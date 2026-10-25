@@ -48,6 +48,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 
 DEFAULT_TIMEOUT = 600
 
@@ -256,6 +257,19 @@ def _shim_exe(shim_path):
         if not node:
             node = _win_which("node") or "node"
         return [node, script]
+    # A hand-written wrapper names the interpreter first and the script
+    # second: `"C:\...\node.exe" "C:\...\zcode.cjs" %*`. The bare-.exe scan
+    # below would return the interpreter ALONE and drop the script, so the
+    # resolved command line starts `node --prompt …` and dies in node's own
+    # option parser ("bad option: --prompt") — which reads like an adapter
+    # bug rather than a shim the harness failed to unwrap. Same bypass and
+    # same fidelity win as the npm form: cmd.exe never sees the prompt.
+    for match in re.finditer(r'"([^"]+\.exe)"[ \t]+"([^"]+)"', body, re.I):
+        interp = resolve(match.group(1))
+        script = resolve(match.group(2))
+        if (os.path.isfile(interp) and os.path.isfile(script)
+                and not script.lower().endswith(".exe")):
+            return [interp, script]
     for match in re.finditer(r'"([^"]+\.exe)"', body):
         cand = resolve(match.group(1))
         if os.path.isfile(cand):
@@ -583,12 +597,37 @@ def kill_tree(proc):
     proc.kill()
 
 
-def run_stream(cmd, cwd=None, timeout=DEFAULT_TIMEOUT, on_line=None, on_stderr=None):
+def run_stream(cmd, cwd=None, timeout=DEFAULT_TIMEOUT, on_line=None, on_stderr=None,
+               stop_when=None, idle_after=None, idle_timeout=6.0):
     """Stream-mode runtime shared by the JSONL / stream-json adapters.
 
     Spawns cmd with pipes, forwards every stdout line to on_line(line), drains
     stderr on a background thread (forwarding to on_stderr if provided), and enforces
     the timeout over the WHOLE run with a watchdog that kills the process tree.
+
+    stop_when is the escape hatch for a CLI that prints its answer and then
+    never exits: the line it returns True for ends the run, and the tree is
+    killed there instead of waiting out the deadline. grok 1.0.67 does exactly
+    that under `-p` — the turn's `end` event is the last thing it writes, and
+    the process stays alive afterwards — so without this every grok task sat
+    until the 600s watchdog and was then reported as a timeout even though it
+    had answered. A stopped run is a completed run: it returns normally, not
+    as timed_out. Pick the CLI's true terminator: grok also emits a `usage`
+    event per assistant message, and that one arrives before the message's
+    tool calls, so stopping there cuts a tool-using turn at its first
+    sentence.
+
+    idle_after / idle_timeout cover the CLIs whose terminator is not
+    guaranteed. grok writes `end` on most turns and then sometimes just
+    doesn't: the answer, its `usage` line and the text are all out, the
+    process sits at 0% CPU, and `end` never comes — measured repeatedly at
+    00:00 on a text-only prompt that the same command finished in four
+    seconds a few minutes earlier. Waiting for `end` there is a hang. So a
+    line matching idle_after arms a silence timer: any further line disarms
+    it (and re-arms if it matches too), and idle_timeout seconds of quiet end
+    the run the same way stop_when does — killed tree, normal return. `usage`
+    is the right arm: it is written after every assistant message, so a
+    tool-using turn re-arms only after its tool calls have been read.
 
     Returns (returncode, stderr_text, timed_out). Raises FileNotFoundError
     when the CLI binary is missing; a timeout is reported via timed_out=True
@@ -629,13 +668,45 @@ def run_stream(cmd, cwd=None, timeout=DEFAULT_TIMEOUT, on_line=None, on_stderr=N
 
     threading.Thread(target=watchdog, daemon=True).start()
 
+    # Silence timer (see idle_after in the docstring). State is shared with
+    # the reader loop under a lock; the watcher only ever kills the tree, so
+    # the loop below finishes on stdout EOF and the run returns normally.
+    idle_lock = threading.Lock()
+    idle_state = {"armed": False, "last": time.monotonic(), "fired": False}
+
+    def idle_watch():
+        while not finished.is_set():
+            if finished.wait(0.5):
+                return
+            with idle_lock:
+                armed, quiet = idle_state["armed"], time.monotonic() - idle_state["last"]
+            if armed and quiet >= idle_timeout:
+                with idle_lock:
+                    idle_state["fired"] = True
+                kill_tree(proc)
+                return
+
+    if idle_after is not None:
+        threading.Thread(target=idle_watch, daemon=True).start()
+
     timed_out = False
     try:
         for raw_line in proc.stdout:
             if drain_exc:
                 raise drain_exc[0]
+            line = decode_cli(raw_line)
             if on_line is not None:
-                on_line(decode_cli(raw_line))
+                on_line(line)
+            if stop_when is not None and stop_when(line):
+                # The answer is in hand; the CLI simply does not exit (see the
+                # docstring). Kill the tree and stop reading, so the caller
+                # gets the run back now instead of at the watchdog.
+                kill_tree(proc)
+                break
+            if idle_after is not None:
+                with idle_lock:
+                    idle_state["armed"] = bool(idle_after(line))
+                    idle_state["last"] = time.monotonic()
         if drain_exc:
             raise drain_exc[0]
         proc.wait(timeout=timeout)

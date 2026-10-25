@@ -1048,6 +1048,22 @@
 .msg-bubble.is-wide {
   width: min(100%, 620px);
 }
+/* One reply that handed out several jobs: the cards share the panda's face and
+   clock, so they are told apart by rhythm — a hairline between blocks — rather
+   than by repeating the avatar five times down the column. The block keeps the
+   bubble's own stacking (line, cast row, card) so a single-dispatch reply looks
+   exactly as it did before the wrapper existed. */
+.msg-batch-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.msg-batch-item + .msg-batch-item {
+  margin-top: 2px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
+}
 /* The panda's closing roll-up wears the panda's colour: it is the one message
    whose authority comes from being the panda's. */
 .msg-bubble.is-summary {

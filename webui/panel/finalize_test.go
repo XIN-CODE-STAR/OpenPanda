@@ -123,12 +123,12 @@ func TestTaskSummaryLeadsWithWhoRanIt(t *testing.T) {
 		ResultJSON: `{"ok":true,"stdout":"完成。新建 pelican-bike.html。\n\n动画为纯 SMIL，无 JS。"}`,
 	}
 	want := "[done] @claude_code · 2D SVG 鹈鹕骑车网页\n动画为纯 SMIL，无 JS。"
-	if got := summaryText(done, "", "claude_code", ""); got != want {
+	if got := summaryText(done, "", "claude_code", "", ""); got != want {
 		t.Fatalf("summary = %q, want %q", got, want)
 	}
 
 	// A run with no attribution still names the work, just without a person.
-	if got := summaryText(done, "", "", ""); !strings.HasPrefix(got, "[done] 2D SVG 鹈鹕骑车网页\n") {
+	if got := summaryText(done, "", "", "", ""); !strings.HasPrefix(got, "[done] 2D SVG 鹈鹕骑车网页\n") {
 		t.Fatalf("unattributed summary = %q", got)
 	}
 }
@@ -144,19 +144,29 @@ func TestTaskSummarySaysWhoWasReplaced(t *testing.T) {
 		SpecJSON:   `{"user_locale":"zh-CN"}`,
 		ResultJSON: `{"ok":true,"stdout":"通过。"}`,
 	}
-	got := summaryText(task, "", "deepseek_harness", "claude_code")
+	got := summaryText(task, "", "deepseek_harness", "claude_code", "")
 	want := "[done] @deepseek_harness · 连通性测试：agent:claude_code（claude_code 未执行，由 deepseek_harness 替代）\n通过。"
 	if got != want {
 		t.Fatalf("summary = %q, want %q", got, want)
 	}
 
 	// The agent that answered is the one the plan picked: nothing to add.
-	if got := summaryText(task, "", "claude_code", "claude_code"); !strings.HasPrefix(got, "[done] @claude_code · 连通性测试：agent:claude_code\n") {
+	if got := summaryText(task, "", "claude_code", "claude_code", ""); !strings.HasPrefix(got, "[done] @claude_code · 连通性测试：agent:claude_code\n") {
 		t.Fatalf("pinned summary = %q", got)
 	}
 
+	// A substitution that recorded a cause says the cause. "claude_code 未执行"
+	// alone tells the reader the reply is not the one they asked for but not
+	// whether to retry, reinstall or raise a turn cap.
+	why := "claude stopped at its turn cap after 30 turns without a final answer"
+	gotWhy := summaryText(task, "", "deepseek_harness", "claude_code", why)
+	wantWhy := "[done] @deepseek_harness · 连通性测试：agent:claude_code（claude_code 未执行：" + why + "；由 deepseek_harness 替代）\n通过。"
+	if gotWhy != wantWhy {
+		t.Fatalf("summary with cause = %q, want %q", gotWhy, wantWhy)
+	}
+
 	// An unattributed run has no speaker to contradict, so no note either.
-	if got := summaryText(task, "", "", "claude_code"); !strings.HasPrefix(got, "[done] 连通性测试：agent:claude_code\n") {
+	if got := summaryText(task, "", "", "claude_code", ""); !strings.HasPrefix(got, "[done] 连通性测试：agent:claude_code\n") {
 		t.Fatalf("unattributed summary = %q", got)
 	}
 }
@@ -166,17 +176,17 @@ func TestTaskSummarySaysWhoWasReplaced(t *testing.T) {
 func TestTaskSummaryCarriesTheFailureReason(t *testing.T) {
 	failed := core.Task{State: core.StateFailed, Risk: "low", Title: "总结仓库"}
 	want := "[failed] @claude_code · 总结仓库\nlease expired"
-	if got := summaryText(failed, "lease expired", "claude_code", ""); got != want {
+	if got := summaryText(failed, "lease expired", "claude_code", "", ""); got != want {
 		t.Fatalf("summary = %q, want %q", got, want)
 	}
 
 	// Nothing anywhere: the orchestration line alone is still honest.
-	if got := summaryText(core.Task{State: core.StateFailed, Title: "总结仓库"}, "", "", ""); got != "[failed] 总结仓库" {
+	if got := summaryText(core.Task{State: core.StateFailed, Title: "总结仓库"}, "", "", "", ""); got != "[failed] 总结仓库" {
 		t.Fatalf("bare summary = %q", got)
 	}
 
 	// A finished task never shows a stale reason from an earlier attempt.
-	if got := summaryText(core.Task{State: core.StateDone, Title: "写个网页"}, "reason ignored", "", ""); got != "[done] 写个网页" {
+	if got := summaryText(core.Task{State: core.StateDone, Title: "写个网页"}, "reason ignored", "", "", ""); got != "[done] 写个网页" {
 		t.Fatalf("done summary = %q", got)
 	}
 }

@@ -415,6 +415,14 @@ def _result_out(final, returncode):
     if is_err and (final.get("subtype") == "error_max_turns" or final.get("terminal_reason") == "max_turns"):
         if len(res_text.strip()) > 50:
             is_err = False
+    # A failed run must say why. The CLI's error envelope is not obliged to
+    # carry prose: a run that stops on the turn cap reports
+    # subtype=error_max_turns with an empty `result`, and the orchestrator's
+    # failover then records "exec failed: " with nothing after the colon — the
+    # reader cannot tell a crash from a cap, and neither can the next debugger.
+    # Name the cause from what the envelope does carry.
+    if is_err and not res_text.strip():
+        res_text = _failure_text(final, returncode)
     extra = {}
     if structured is not None:
         extra["structured"] = structured
@@ -431,6 +439,25 @@ def _result_out(final, returncode):
         "session_id": final.get("session_id") or "",
         "extra": extra or None,
     }
+
+
+def _failure_text(final, returncode):
+    """One line naming why a failed run produced no answer.
+
+    The result envelope of an error carries a `subtype` and little else, and
+    `result` is routinely empty for the ones that matter — the turn cap above
+    all. Returning "" here is what made a capped claude_code run read as an
+    unexplained substitution in the thread ("exec failed: " with no reason),
+    so the shape of the failure becomes the sentence.
+    """
+    subtype = final.get("subtype") or final.get("terminal_reason") or ""
+    if subtype in ("error_max_turns", "max_turns"):
+        turns = final.get("num_turns") or final.get("max_turns") or ""
+        where = " after %s turns" % turns if turns else ""
+        return "claude stopped at its turn cap%s without a final answer" % where
+    if subtype:
+        return "claude failed: %s (exit %s)" % (subtype, returncode)
+    return "claude failed without a result message (exit %s)" % returncode
 
 
 def _usage(raw):
@@ -548,9 +575,14 @@ def _run_plain(base, model, cwd, timeout):
     extra = {}
     if isinstance(parsed.get("structured_output"), dict):
         extra["structured"] = parsed["structured_output"]
+    text = parsed.get("result") or ""
+    # Same rule as the stream path: an error envelope with no prose still owes
+    # the caller a reason, or the failover reports an empty diagnosis.
+    if not text.strip() and (parsed.get("is_error") or returncode != 0):
+        text = _failure_text(parsed, returncode)
     return {
         "ok": returncode == 0 and not parsed.get("is_error"),
-        "result": parsed.get("result") or "",
+        "result": text,
         "exit_code": returncode,
         "tokens": tokens or None,
         "cost": parsed.get("total_cost_usd"),

@@ -318,6 +318,19 @@ interface ChatMsg extends SessionTurn {
   files?: string[]
 }
 
+/** Whether a turn is nothing but a dispatch receipt.
+ *
+ *  A round that fans out several `task_submit` calls is filed as one turn per
+ *  task (webui/panel/sessions.go), because the transcript doubles as the
+ *  model's history and it should see every job it handed out. On screen those
+ *  turns are one statement — "I gave this to five agents" — so the view draws
+ *  them as one reply, with the first turn's face and clock. A turn that is
+ *  still streaming, or one carrying a live result payload, is not bare: that
+ *  one is the round itself, mid-flight. */
+function isBareDispatch(m: ChatMsg): boolean {
+  return m.role === 'assistant' && m.kind === 'task' && Boolean(m.ref) && !m.streaming && !m.result
+}
+
 /** One file waiting in the composer's attachment tray.
  *
  *  The File is kept rather than uploaded on arrival: the preview then needs no
@@ -1662,7 +1675,12 @@ export function SessionsView({
             // while the ask was in flight (it must not paint over a live
             // stream) and its fingerprint is already spent, so this refetch
             // is the only chance to pick up a turn the wire under-reported.
-            setMsgs((ms) => mergeTailTurn(ms, s.turns ?? []))
+            // A fanned-out round is under-reported by design — one result
+            // frame, one turn per task — so the surplus rows are adopted here
+            // rather than waiting for a reload.
+            setMsgs((ms) =>
+              mergeTailTurn(ms, s.turns ?? [], (turn) => ({ ...turn, k: localMsgId() }) as ChatMsg),
+            )
           }
         }).catch(() => {})
       }
@@ -2027,6 +2045,27 @@ export function SessionsView({
   // dispatched it (see `liveTaskIds`).
   const liveIds = sessionTasks ? liveTaskIds(sessionTasks) : []
 
+  // — one round, one bubble. The turns a fan-out files are consecutive and
+  // carry the round's clock, so the first one wears the panda's face and holds
+  // the rest: a five-agent test reads as one reply with five cards, not five
+  // replies with one each. Nothing is lost — every card keeps its own line,
+  // cast row and link, and the transcript on disk is untouched (the model's
+  // history still lists every dispatch).
+  const batchOf = new Map<string, ChatMsg[]>()
+  const absorbed = new Set<string>()
+  for (let i = 0; i < msgs.length; i++) {
+    if (!isBareDispatch(msgs[i]!)) continue
+    const rest: ChatMsg[] = []
+    let j = i + 1
+    while (j < msgs.length && isBareDispatch(msgs[j]!)) {
+      rest.push(msgs[j]!)
+      absorbed.add(msgs[j]!.k)
+      j++
+    }
+    if (rest.length > 0) batchOf.set(msgs[i]!.k, rest)
+    i = j - 1
+  }
+
   return (
     <section class="chat">
 
@@ -2228,19 +2267,22 @@ export function SessionsView({
               hasDraft={input.trim() !== '' || pending.length > 0}
             />
           )}
-          {msgs.map((m, i) => (
-            <ChatTurn
-              key={m.k}
-              msg={m}
-              /* The local measurement wins while it is there (it is the only
-                 one that exists between the reply landing and the transcript
-                 being re-fetched); the panel's `duration_ms` is what survives
-                 a reload. */
-              elapsedMs={turnMs[i] ?? m.duration_ms}
-              liveFrom={liveFrom}
-              onOpenTask={openTaskInPlace}
-            />
-          ))}
+          {msgs.map((m, i) =>
+            absorbed.has(m.k) ? null : (
+              <ChatTurn
+                key={m.k}
+                msg={m}
+                batch={batchOf.get(m.k)}
+                /* The local measurement wins while it is there (it is the only
+                   one that exists between the reply landing and the transcript
+                   being re-fetched); the panel's `duration_ms` is what survives
+                   a reload. */
+                elapsedMs={turnMs[i] ?? m.duration_ms}
+                liveFrom={liveFrom}
+                onOpenTask={openTaskInPlace}
+              />
+            ),
+          )}
           {liveIds.map((id) => (
             <LiveProgressRow key={id} taskId={id} />
           ))}
@@ -3177,14 +3219,14 @@ function ChatBubble(props: {
    *  bubble is the streaming one, the timer runs here instead of printing a
    *  fixed number. */
   liveFrom?: number
-  /** The task a dispatch turn handed out, read from the task row itself — the
-   *  only place that names the employee and the stage. */
-  task?: Task | null
   /** The plan a plan turn started. */
   plan?: PlanDetail | null
+  /** The rest of a fanned-out round: the sibling dispatch turns this reply
+   *  absorbed (see `isBareDispatch`). Drawn under this one's card, in the same
+   *  bubble, so the round reads as one statement. */
+  batch?: ChatMsg[]
 }) {
-  const { msg, onOpenTask, elapsedMs, liveFrom = 0, task = null, plan = null } = props
-  const [chainOpen, setChainOpen] = useState(false)
+  const { msg, onOpenTask, elapsedMs, liveFrom = 0, plan = null, batch = [] } = props
 
   const report = msg.kind === 'error' ? null : splitReportHead(msg.text ?? '')
   const speaker = speakerOf(msg, report)
@@ -3282,50 +3324,26 @@ function ChatBubble(props: {
               {report.title && <p class="msg-subject">{report.title}</p>}
               {report.body && <Markdown text={report.body} class="msg-text" />}
             </>
+          ) : isTaskKind ? (
+            // The orchestration: who got the job, which stage, how it stands —
+            // and, for a fanned-out round, the same for every sibling in the
+            // bubble below it.
+            <>
+              <DispatchBlock msg={msg} onOpenTask={onOpenTask} />
+              {batch.map((b) => (
+                <DispatchBlock key={b.k} msg={b} onOpenTask={onOpenTask} />
+              ))}
+            </>
           ) : (
             <>
               {text && <Markdown text={text} class="msg-text" />}
-              {/* The orchestration: who got the job, which stage, how it stands.
-                  For a plan, the stages the panda cut it into. */}
-              {isTaskKind && task && <TaskCast task={task} />}
               {isPlanKind && plan && <PlanCast plan={plan} />}
             </>
           )}
 
-          {/* — the task card: consent, the chain, the jump into the task. The
-                state badge and the executor line that used to head it are the
-                cast line's job now, one row up. */}
-          {isTaskKind && msg.ref && (
-            <div class="task-card u-flex-1 u-min-w-0">
-              {/* A task that needs consent must be decidable where the user is
-                  looking. Without this the conversation only said "review" and
-                  the decision lived on another page — so it waited, or worse,
-                  was never seen. Nothing else may answer it on the user's
-                  behalf: this is the web twin of the TUI's approval card. */}
-              <TaskApproval taskId={msg.ref} />
-              {msg.result?.report && <Markdown text={msg.result.report} class="task-report" />}
-              {msg.result?.stdout && <TaskOutput text={msg.result.stdout} />}
-              {/* One quiet row of controls: open the chain, talk to the
-                  employee, jump into the task. As three stacked children of
-                  the card's column they read as a form — a chip-shaped toggle
-                  above a full-width centred button — instead of what they
-                  are, three links about the same job. */}
-              <div class="task-card-actions">
-                <button class="chain-toggle" onClick={() => setChainOpen((v) => !v)}>
-                  {chainOpen ? t('sessions.chainHide') : t('sessions.chainShow')}
-                </button>
-                <TaskQuickSend taskId={msg.ref} />
-                <a
-                  class="task-card-open"
-                  href={`#/task/${encodeURIComponent(msg.ref)}`}
-                  onClick={(e) => inPlaceTaskClick(e, msg.ref!, onOpenTask)}
-                >
-                  {t('sessions.viewTask')} →
-                </a>
-              </div>
-              {chainOpen && <TaskChain taskId={msg.ref} />}
-            </div>
-          )}
+          {/* The task card lives inside `DispatchBlock` — it is part of the
+                per-task block, so a round that handed out five jobs draws five
+                of them in this one bubble. */}
 
           {/* The live ask path carries its approval state on the result, not
               through a persisted turn ref — a parked tier-2 task must still
@@ -3406,6 +3424,58 @@ function ChatBubble(props: {
   )
 }
 
+/** One dispatched task inside a reply: its dispatch line, the cast row naming
+ *  the employee and the stage, and the card that opens it.
+ *
+ *  It is a block rather than part of `ChatBubble` because a single reply can
+ *  carry several: a round that fanned out is filed as one turn per task and
+ *  drawn as one bubble, so the bubble holds one of these per job. The task row
+ *  is read here, per block — the only place that knows who is actually running
+ *  it. */
+function DispatchBlock(props: { msg: ChatMsg; onOpenTask(id: string): void }) {
+  const { msg, onOpenTask } = props
+  const [chainOpen, setChainOpen] = useState(false)
+  const task = useTaskBrief(msg.kind === 'task' ? msg.ref : undefined)
+  const text = stripRefId(msg.text ?? '', msg.ref)
+  return (
+    <div class="msg-batch-item">
+      {text && <Markdown text={text} class="msg-text" />}
+      {task && <TaskCast task={task} />}
+      {msg.ref && (
+        <div class="task-card u-flex-1 u-min-w-0">
+          {/* A task that needs consent must be decidable where the user is
+              looking. Without this the conversation only said "review" and the
+              decision lived on another page — so it waited, or worse, was never
+              seen. Nothing else may answer it on the user's behalf: this is the
+              web twin of the TUI's approval card. */}
+          <TaskApproval taskId={msg.ref} />
+          {msg.result?.report && <Markdown text={msg.result.report} class="task-report" />}
+          {msg.result?.stdout && <TaskOutput text={msg.result.stdout} />}
+          {/* One quiet row of controls: open the chain, talk to the employee,
+              jump into the task. As three stacked children of the card's column
+              they read as a form — a chip-shaped toggle above a full-width
+              centred button — instead of what they are, three links about the
+              same job. */}
+          <div class="task-card-actions">
+            <button class="chain-toggle" onClick={() => setChainOpen((v) => !v)}>
+              {chainOpen ? t('sessions.chainHide') : t('sessions.chainShow')}
+            </button>
+            <TaskQuickSend taskId={msg.ref} />
+            <a
+              class="task-card-open"
+              href={`#/task/${encodeURIComponent(msg.ref)}`}
+              onClick={(e) => inPlaceTaskClick(e, msg.ref!, onOpenTask)}
+            >
+              {t('sessions.viewTask')} →
+            </a>
+          </div>
+          {chainOpen && <TaskChain taskId={msg.ref} />}
+        </div>
+      )}
+    </div>
+  )
+}
+
 /** A chat row. The employee's own progress row does *not* hang off it any
  *  more: a still-running job belongs at the foot of the thread, not under the
  *  bubble that dispatched it (see `liveTaskIds` / `LiveProgressRow`). */
@@ -3414,11 +3484,11 @@ function ChatTurn(props: {
   onOpenTask(id: string): void
   elapsedMs?: number
   liveFrom?: number
+  batch?: ChatMsg[]
 }) {
   const { msg } = props
-  const task = useTaskBrief(msg.kind === 'task' ? msg.ref : undefined)
   const plan = usePlanBrief(msg.kind === 'plan' ? msg.ref : undefined)
-  return <ChatBubble {...props} task={task} plan={plan} />
+  return <ChatBubble {...props} plan={plan} />
 }
 
 /** One employee's live row, at the tail of the thread while their job runs.

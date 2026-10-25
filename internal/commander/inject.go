@@ -112,8 +112,8 @@ func (r *Router) InjectionDecision(name, adapter string) InjectionDecision {
 		if !modelConfigured(m) {
 			return InjectionDecision{Inject: false, Reason: "no model configured"}
 		}
-		if !supportsModelInjection(name, adapter, m) {
-			return InjectionDecision{Inject: false, Reason: "model injection is not safely supported for " + adapter}
+		if blocker := injectionBlocker(name, adapter, m); blocker != "" {
+			return InjectionDecision{Inject: false, Reason: "model injection refused: " + blocker}
 		}
 		return InjectionDecision{
 			Inject:  true,
@@ -155,10 +155,10 @@ func (r *Router) InjectionDecision(name, adapter string) InjectionDecision {
 			Reason: "agent has no own credentials but panda has no model key configured",
 		}
 	}
-	if !supportsModelInjection(name, adapter, m) {
+	if blocker := injectionBlocker(name, adapter, m); blocker != "" {
 		return InjectionDecision{
 			Inject: false,
-			Reason: "model injection is not safely supported for " + adapter,
+			Reason: "model injection refused: " + blocker,
 		}
 	}
 	return InjectionDecision{
@@ -184,19 +184,35 @@ func modelConfigured(model config.ModelConfig) bool {
 // (agents.Lookup): a generic.py entry for an unknown CLI has no mapping and
 // is never injectable.
 func supportsModelInjection(name, adapter string, model config.ModelConfig) bool {
+	return injectionBlocker(name, adapter, model) == ""
+}
+
+// injectionBlocker explains why an agent cannot take panda's model, or ""
+// when it can. The distinction matters for diagnosis: "adapter does not
+// support injection" and "the endpoint speaks the wrong dialect" used to be
+// the same sentence, so a node whose model is OpenAI-dialect got told its
+// Anthropic-only agent was an unsupported adapter. The fix is usually a
+// per-agent pin (injection.agents.<name>), which the message names.
+func injectionBlocker(name, adapter string, model config.ModelConfig) string {
 	k, ok := agents.Lookup(name, adapter)
-	if !ok || k.ModelEnv == nil {
-		return false
+	if !ok {
+		return "no model-env mapping is registered for " + adapter
+	}
+	if k.ModelEnv == nil {
+		return adapter + " declares no model-env contract, so panda cannot point it at another endpoint"
 	}
 	apiType := model.NormalizedAPIType()
 	if k.ModelEnv.APIType != "" && k.ModelEnv.APIType != apiType {
-		return false
+		return "the configured model speaks " + apiType + " but " + adapter +
+			" only accepts " + k.ModelEnv.APIType +
+			"; set injection.agents." + name + ".api_type to match the endpoint"
 	}
-	if adapter == "claude_code.py" {
-		return isDeepSeekEndpoint(model.BaseURL)
+	if adapter == "claude_code.py" && !isDeepSeekEndpoint(model.BaseURL) {
+		return "claude_code injection targets DeepSeek endpoints only"
 	}
-	return true
+	return ""
 }
+
 
 // deepSeekAPIHost is the DeepSeek API host panda injects credentials for.
 const deepSeekAPIHost = "api.deepseek.com"
@@ -351,9 +367,12 @@ func probeAgentCredentials(name, adapter string) (found bool, source string) {
 			// file exists with an empty refs block.
 			if fields := k.CredentialFileFields[rel]; len(fields) > 0 {
 				ok := false
-				if isYAMLFile(rel) {
+				switch {
+				case isYAMLFile(rel):
 					ok = yamlFileHasAnyField(p, fields)
-				} else {
+				case isTOMLFile(rel):
+					ok = tomlFileHasAnyField(p, fields)
+				default:
 					ok = jsonFileHasAnyField(p, fields)
 				}
 				if !ok {
@@ -377,6 +396,11 @@ func isDotenvFile(rel string) bool {
 // isYAMLFile reports whether rel names a YAML file.
 func isYAMLFile(rel string) bool {
 	return strings.HasSuffix(rel, ".yaml") || strings.HasSuffix(rel, ".yml")
+}
+
+// isTOMLFile reports whether rel names a TOML file.
+func isTOMLFile(rel string) bool {
+	return strings.HasSuffix(rel, ".toml")
 }
 
 // dotenvFileHasAssignment reports whether a dotenv file carries at least one
@@ -540,6 +564,46 @@ func jsonFieldNonEmpty(obj map[string]json.RawMessage, path string) bool {
 		return s != ""
 	}
 	return true // non-string, non-empty value (object/array)
+}
+
+// tomlFileHasAnyField reports whether a TOML file sets at least one of fields
+// to a non-empty value. Fields are matched by leaf name, not by table path:
+// grok keeps its provider key in a [model.*] table and its endpoint in
+// [endpoints], and a state file that carries only [marketplace] or [cli]
+// sections is not a login. Values are compared as written — a `key = ""` or
+// `key = "   "` assignment does not count, and neither does a bare
+// `[section]` header or a commented-out line.
+func tomlFileHasAnyField(path string, fields []string) bool {
+	blob, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	want := make(map[string]bool, len(fields))
+	for _, f := range fields {
+		leaf := f
+		if i := strings.LastIndexByte(f, '.'); i >= 0 {
+			leaf = f[i+1:]
+		}
+		want[leaf] = true
+	}
+	for _, line := range strings.Split(string(blob), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "[") {
+			continue
+		}
+		key, val, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		if !want[key] {
+			continue
+		}
+		if v := strings.Trim(strings.TrimSpace(val), `"'`); v != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // InjectedModelEndpoint returns the model name and endpoint this node would

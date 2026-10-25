@@ -26,14 +26,50 @@ diagnostics live in _harness.py; this file is only the agy difference: the
 command line and the JSON envelope reduction.
 """
 import json
+import os
 import subprocess
 
 import _harness as harness
+
+# Where agy keeps its CLI settings. The Gemini-API-key branch is only taken
+# when this file says modelProvider=gemini — with an empty/missing file agy
+# goes straight to Google OAuth even when GEMINI_API_KEY is set, which reads
+# as "injection did nothing" from the outside.
+SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".gemini",
+                             "antigravity-cli", "settings.json")
+
+
+def _select_gemini_provider():
+    """Make agy use its API-key branch (env-supplied key + base URL).
+
+    Merge, never overwrite: the file also carries the operator's own CLI
+    preferences (theme, telemetry, …), and an injected run must not reset them.
+    Failure is non-fatal — agy then falls back to OAuth and reports
+    "authentication required", which is a truer diagnosis than a crash here.
+    """
+    try:
+        doc = {}
+        if os.path.exists(SETTINGS_PATH):
+            with open(SETTINGS_PATH, "r", encoding="utf-8") as fh:
+                doc = json.load(fh) or {}
+        if doc.get("modelProvider") == "gemini":
+            return
+        doc["modelProvider"] = "gemini"
+        os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
+        tmp = SETTINGS_PATH + ".panda-tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=2, ensure_ascii=False)
+        os.replace(tmp, SETTINGS_PATH)
+    except (OSError, ValueError):
+        pass
 
 
 def main():
     req = harness.read_request()
     prompt, timeout, cwd = req.prompt, req.timeout, req.cwd
+
+    if os.environ.get("OPENPANDA_INJECTED_MODEL") == "1":
+        _select_gemini_provider()
 
     cmd = ["agy", "-p", prompt,
            "--output-format", "json",

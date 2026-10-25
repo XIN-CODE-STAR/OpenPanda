@@ -692,6 +692,13 @@ type Result struct {
 	Stdout    string
 	Stderr    string
 	ExitCode  int
+	// Dispatched names every task this ask enqueued, in dispatch order, when a
+	// single round fanned out several `task_submit` calls. The task fields
+	// above still describe the last one — the receipt this Result has always
+	// carried — so a surface that draws one card keeps working unchanged. A
+	// round that dispatched exactly one task leaves this empty: the receipt
+	// already says everything there is to say.
+	Dispatched []DispatchedTask
 	// Deferred marks a parked-for-delivery outcome: the approval was
 	// accepted into an outbox because the executor's link is down, so the
 	// correct rendering is "queued for delivery" with exit 0 — not a
@@ -772,6 +779,38 @@ type Result struct {
 	// one did ("session" or "project"), so surfaces can show the task ran on
 	// a standing answer rather than a fresh prompt.
 	ConsentSource string
+}
+
+// DispatchedTask is one row of a fan-out: a task this ask enqueued, named the
+// way the transcript names it. It carries only what a surface needs to draw a
+// receipt — the row itself is read back through the task API, which is where
+// state, traces and the employee's face live.
+type DispatchedTask struct {
+	TaskID    string `json:"task_id"`
+	TaskTitle string `json:"title,omitempty"`
+	TaskState string `json:"state,omitempty"`
+}
+
+// dispatchedBriefs names every task a round handed out, in dispatch order.
+//
+// The receipt the Result carries is the last dispatch only, because that is
+// what a one-card surface can draw. A batch — the model emitting several
+// `task_submit` calls in one round — is invisible from that single receipt:
+// the conversation shows one card while the board shows every row. Rows
+// without an id (a submission that failed before a row existed) are skipped,
+// and a batch of one returns nil so callers keep their old single-card path.
+func dispatchedBriefs(ds []*Result) []DispatchedTask {
+	var out []DispatchedTask
+	for _, d := range ds {
+		if d == nil || d.TaskID == "" {
+			continue
+		}
+		out = append(out, DispatchedTask{TaskID: d.TaskID, TaskTitle: d.TaskTitle, TaskState: d.TaskState})
+	}
+	if len(out) < 2 {
+		return nil
+	}
+	return out
 }
 
 // ApprovalRequest describes a tier-2 (irreversible) action awaiting the user's
@@ -2164,6 +2203,7 @@ rounds:
 				}
 			}
 			if queuedReceipt != nil {
+				queuedReceipt.Dispatched = dispatchedBriefs(dispatched)
 				if refusedThisRound == 0 {
 					return budgetAdvisory(queuedReceipt), nil
 				}

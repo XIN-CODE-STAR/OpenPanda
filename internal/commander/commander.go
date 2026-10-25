@@ -644,6 +644,23 @@ func (r *Router) execNative(ctx context.Context, plan Plan, cwd string) Result {
 	}
 }
 
+// substitutionIdentityNote opens a fallback agent's prompt with the one fact
+// the plan's prompt cannot carry: who is running this round, and that it is
+// not the agent the prompt keeps naming. The reason rides along because it is
+// what the reader would ask next ("unavailable" alone does not say whether to
+// retry, log in or install).
+func substitutionIdentityNote(planned, running, reason string) string {
+	if len([]rune(reason)) > 160 {
+		reason = strings.TrimSpace(string([]rune(reason)[:160])) + "…"
+	}
+	return fmt.Sprintf(
+		"[panda] This round runs as %q, not %q. The task was planned for %q, which could not run here (%s). "+
+			"Report your own work as %q: do not answer as %q, and do not claim %q ran any command or produced any output.\n"+
+			"代理替换：本轮由 %q 代跑 %q 的任务（%s）。请以 %q 的身份汇报，不要冒充 %q，也不要声称 %q 执行过任何命令。",
+		running, planned, planned, reason, running, planned, planned,
+		running, planned, reason, running, planned, planned)
+}
+
 func (r *Router) execAgent(ctx context.Context, plan Plan, prompt string, cwd string) Result {
 	// Fallback chain: run the highest-scored agent whose CLI is actually
 	// available; an unavailable candidate (missing binary / failed probe) is
@@ -694,6 +711,7 @@ func (r *Router) execAgent(ctx context.Context, plan Plan, prompt string, cwd st
 		// exec_agent_start tracing the plan's primary must not keep naming
 		// an agent that never launched while the real runner works for
 		// minutes underneath it.
+		runPrompt := prompt
 		if name != plan.Agent {
 			reason := "primary failed or skipped"
 			if len(unavailable) > 0 {
@@ -702,6 +720,15 @@ func (r *Router) execAgent(ctx context.Context, plan Plan, prompt string, cwd st
 			if sink, ok := ctx.Value(progressKey{}).(ProgressFunc); ok {
 				sink(fmt.Sprintf("agent fallback — %s; %s is running this round", reason, name), "agent_switch")
 			}
+			// The substitute has to be told who it is. The prompt was written
+			// for the plan's agent and keeps naming it — a supervision
+			// followup like "report your identity as grok_build" arrives
+			// verbatim at the agent that stepped in, and an honest model
+			// answers it honestly: it reports itself as grok_build, claims the
+			// commands grok_build never ran, and the swap note on the result
+			// then contradicts the report underneath it. Naming the real
+			// runner at the top of its prompt is what keeps the two consistent.
+			runPrompt = substitutionIdentityNote(plan.Agent, name, reason) + "\n\n" + prompt
 		}
 		// The tools policy rides the context (the runAdapter seam's signature
 		// stays unchanged for tests); runAdapterProcess copies it into the
@@ -721,7 +748,7 @@ func (r *Router) execAgent(ctx context.Context, plan Plan, prompt string, cwd st
 		// the request (no .mcp.json in the work dir); project-discovery CLIs
 		// keep the materialize-and-remove file path.
 		runCtx, cleanupMCP := r.wireMCPPassthrough(runCtx, name, ag.Adapter, cwd)
-		ar := r.runAdapter(runCtx, ag.Adapter, prompt, cwd)
+		ar := r.runAdapter(runCtx, ag.Adapter, runPrompt, cwd)
 		// One bounded retry on provider-side turbulence (rate limit /
 		// overload / 5xx): these resolve in seconds, and the narrow
 		// transientAgentFailure patterns keep real task failures — and
@@ -739,7 +766,7 @@ func (r *Router) execAgent(ctx context.Context, plan Plan, prompt string, cwd st
 			case <-timer.C:
 			}
 			if ctx.Err() == nil {
-				retry := r.runAdapter(runCtx, ag.Adapter, prompt, cwd)
+				retry := r.runAdapter(runCtx, ag.Adapter, runPrompt, cwd)
 				if retry.OK {
 					retry.Result = "[retried once after transient provider error] " + retry.Result
 					ar = retry
@@ -772,6 +799,15 @@ func (r *Router) execAgent(ctx context.Context, plan Plan, prompt string, cwd st
 			SubagentStats: ar.SubagentStats,
 		}
 		lastExecRes = &res
+
+		// A substituted run carries the two facts a reader needs to tell a
+		// swap from a bait-and-switch: which agent the plan pinned, and why it
+		// never answered. Both come from the attempt that failed — the
+		// successful fallback's own Result knows neither.
+		if i > 0 && plan.Agent != "" && len(unavailable) > 0 {
+			res.FallbackFrom = plan.Agent
+			res.FallbackReason = substitutionReason(plan.Agent, unavailable[0])
+		}
 
 		// If execution succeeded, or if user explicitly cancelled, return immediately.
 		if ar.OK || ctx.Err() != nil {
@@ -806,6 +842,19 @@ func (r *Router) execAgent(ctx context.Context, plan Plan, prompt string, cwd st
 	}
 }
 
+// substitutionReason turns one `unavailable` entry ("claude_code (exec failed:
+// …)") back into the bare diagnosis ("…"). The name is already on the
+// substitution line and "exec failed:" is the wrapper's own phrasing; a note
+// that repeats them reads as a log line in the middle of a sentence.
+func substitutionReason(agent, entry string) string {
+	reason := strings.TrimSpace(entry)
+	if pre := agent + " ("; strings.HasPrefix(reason, pre) && strings.HasSuffix(reason, ")") {
+		reason = strings.TrimSuffix(strings.TrimPrefix(reason, pre), ")")
+	}
+	reason = strings.TrimPrefix(strings.TrimSpace(reason), "exec failed:")
+	return strings.TrimSpace(reason)
+}
+
 // Result is the normalized execution result (design doc P0-33).
 type Result struct {
 	OK         bool
@@ -819,6 +868,14 @@ type Result struct {
 	// primary when the fallback chain kicked in). Empty for non-agent plans
 	// and when no candidate was usable at all.
 	Agent string
+	// FallbackFrom names the agent the plan pinned when Agent is a substitute,
+	// and FallbackReason is why that agent never answered. Both are empty when
+	// the plan's own agent ran. They exist because the substitution is only
+	// honest if it can be explained: a thread that says "deepseek_harness
+	// answered" under a task titled "…claude_code" reads as the reply having
+	// been swapped out, unless the sentence also carries the cause.
+	FallbackFrom   string
+	FallbackReason string
 	// Adapter is the adapter file that ran ("opencode.py") — the owner of
 	// SessionID's wire shape. Persisted alongside the session handle so a
 	// later round offers resume only to the adapter that minted it.
@@ -978,7 +1035,15 @@ func isProviderFailureOrAuth(text string) bool {
 		"payment required", "payment_required", "budget pool", "exhausted",
 		"invalid api key", "invalid_api_key", "额度不足", "quota",
 		"insufficient_quota", "credit balance", "out of credit",
-		"not logged in", "failed to authenticate", "auth error",
+		// "not signed in" is grok's wording for a missing login ("Not signed
+		// in. To authenticate without a browser, run: grok login
+		// --device-code"). Without it a grok_build task that had simply never
+		// been logged in was not recognised as a credential failure, so the
+		// rescue injection never ran and the fallback chain answered the task
+		// as another agent instead.
+		"not signed in", "not logged in", "login required",
+		"unauthenticated", "invalid credentials", "please log in",
+		"failed to authenticate", "auth error",
 		"authentication failed", "no api key", "api key missing",
 		"server_error", "internal server error",
 		"service unavailable", "bad gateway", "overloaded", "rate limit",
@@ -1133,8 +1198,13 @@ func (r *Router) agentUsable(name string, ag ledger.Agent) (usable bool, reason 
 				return false, "no model configured (no own credentials; no panda model endpoint)"
 			case m.APIKey == "":
 				return false, "no model configured (no own credentials; no panda model key)"
-			case !supportsModelInjection(name, ag.Adapter, m):
-				return false, "no model configured (no own credentials; injection unsupported for " + ag.Adapter + ")"
+			case injectionBlocker(name, ag.Adapter, m) != "":
+				// Name the real cause (dialect mismatch, no env contract,
+				// adapter unknown) instead of "injection unsupported" — the
+				// old sentence read as "this adapter cannot be injected",
+				// which sent a dialect problem to the wrong fix.
+				return false, "no model configured (no own credentials; " +
+					injectionBlocker(name, ag.Adapter, m) + ")"
 			}
 		}
 	}

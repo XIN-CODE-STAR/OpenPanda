@@ -162,6 +162,7 @@ var messages = map[Locale]map[string]string{
 		"web.nobrowser":                "open the URL above in a browser; Ctrl-C stops the console.",
 		"web.stopped":                  "web console stopped",
 		"web.session.agentSubstituted": " ({from} could not run; {to} answered instead)",
+		"web.session.agentSubstitutedWhy": " ({from} could not run — {why}; {to} answered instead)",
 		"web.session.injectNoAbort":    "queued for the next round — an answer turn cannot abort its own model call; the text leads that round instead",
 
 		"install.copied":       "binary installed → {path}",
@@ -1283,6 +1284,7 @@ var messages = map[Locale]map[string]string{
 
 		"web.push.reviewTitle":         "任务需要你审批",
 		"web.session.agentSubstituted": "（{from} 未执行，由 {to} 替代）",
+		"web.session.agentSubstitutedWhy": "（{from} 未执行：{why}；由 {to} 替代）",
 		"web.session.injectNoAbort":    "已排队到下一轮——回答型 turn 无法中止自身的模型调用，文本将作为下一轮的首指令",
 		"web.started":                  "Web 控制台已监听 — {url}",
 		"web.lan.url":                  "局域网分享：{url}",
@@ -2478,6 +2480,7 @@ var messages = map[Locale]map[string]string{
 		"web.nobrowser":                "上記のURLをブラウザで開いてください。Ctrl-C で停止します。",
 		"web.stopped":                  "Web コンソールを停止しました",
 		"web.session.agentSubstituted": "（{from} は実行できず、{to} が代行しました）",
+		"web.session.agentSubstitutedWhy": "（{from} は実行できず：{why}；{to} が代行しました）",
 		"web.session.injectNoAbort":    "次のラウンドにキューしました — 回答ターンは自身のモデル呼び出しを中止できないため、テキストはそのラウンドの先頭指令になります",
 
 		"install.copied":       "バイナリをインストールしました → {path}",
@@ -3586,6 +3589,7 @@ var messages = map[Locale]map[string]string{
 		"web.nobrowser":                "abre la URL anterior en un navegador; Ctrl-C detiene la consola.",
 		"web.stopped":                  "consola web detenida",
 		"web.session.agentSubstituted": " ({from} no pudo ejecutarse; respondió {to})",
+		"web.session.agentSubstitutedWhy": " ({from} no pudo ejecutarse — {why}; respondió {to})",
 		"web.session.injectNoAbort":    "en cola para la próxima ronda — un turno de respuesta no puede abortar su propia llamada al modelo; el texto lidera esa ronda",
 
 		"install.copied":       "binario instalado → {path}",
@@ -4690,6 +4694,7 @@ var messages = map[Locale]map[string]string{
 		"web.nobrowser":                "die URL oben im Browser öffnen; Ctrl-C beendet die Konsole.",
 		"web.stopped":                  "Web-Konsole beendet",
 		"web.session.agentSubstituted": " ({from} konnte nicht laufen; {to} hat stattdessen geantwortet)",
+		"web.session.agentSubstitutedWhy": " ({from} konnte nicht laufen — {why}; {to} hat stattdessen geantwortet)",
 		"web.session.injectNoAbort":    "für die nächste Runde eingereiht — ein Antwort-Turn kann seinen eigenen Modellaufruf nicht abbrechen; der Text führt diese Runde an",
 
 		"install.copied":       "Binärdatei installiert → {path}",

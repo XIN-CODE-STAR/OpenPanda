@@ -839,6 +839,38 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 		_ = h.store.SetSessionID(context.WithoutCancel(r.Context()), out.TaskID, sess.ID)
 	}
 
+	// A round can dispatch a batch: the model emits several `task_submit`
+	// calls and the engine enqueues every one, but the Result only carries the
+	// last receipt. Filing one turn from that receipt left the thread showing
+	// a single card while the task board showed all three rows — "two agents
+	// running" above a board of three. One turn per dispatch puts the
+	// transcript back in step with the board, and gives each card its own
+	// link. The model's own answer, when it wrote one, keeps the single-turn
+	// path: prose plus a batch of receipts has no place in one bubble.
+	if out.Kind == "task" && len(out.Dispatched) > 1 && out.Answer == "" {
+		for i, d := range out.Dispatched {
+			batch := sessions.Turn{
+				Role: "assistant",
+				Kind: "task",
+				Text: "已派发任务：" + d.TaskTitle + "（" + d.TaskID + "）",
+				Ref:  d.TaskID,
+			}
+			// The clock belongs to the ask, not to each row: only the last
+			// receipt carries it, so the thread does not print the same
+			// duration three times.
+			if i == len(out.Dispatched)-1 {
+				batch.DurationMS = askDuration
+				batch.Model = out.EntryModel
+			}
+			if _, err := h.sessions.AppendTurn(sess.ID, batch); err != nil {
+				// The reply already streamed; a failed bookkeeping write is
+				// not worth killing the stream over.
+				_ = err
+			}
+		}
+		return
+	}
+
 	turn := sessions.Turn{
 		Role:       "assistant",
 		Kind:       out.Kind,

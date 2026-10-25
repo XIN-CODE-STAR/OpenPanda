@@ -1822,7 +1822,15 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 			if res.Agent != "" && res.Agent != plan.Agent {
 				breakerKey = "agent:" + res.Agent
 				c.audit(ctx, taskID, "agent:fallback", plan.Agent, "fallback", "primary unavailable, fell back to "+res.Agent)
-				if err := c.store.RecordEvent(ctx, taskID, EvAgentFallback, map[string]any{"from": plan.Agent, "to": res.Agent}); err != nil {
+				// The reason rides the event, not just the audit line: the
+				// thread prints one sentence for the swap, and "claude_code
+				// 未执行" without a cause is the same dead end as no sentence
+				// at all.
+				fallback := map[string]any{"from": plan.Agent, "to": res.Agent}
+				if res.FallbackReason != "" {
+					fallback["reason"] = res.FallbackReason
+				}
+				if err := c.store.RecordEvent(ctx, taskID, EvAgentFallback, fallback); err != nil {
 					c.logger.Warn("record agent fallback event", "task", taskID, "err", err)
 				}
 			}
