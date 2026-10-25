@@ -222,7 +222,6 @@ func injectionBlocker(name, adapter string, model config.ModelConfig) string {
 	return ""
 }
 
-
 // deepSeekAPIHost is the DeepSeek API host panda injects credentials for.
 const deepSeekAPIHost = "api.deepseek.com"
 

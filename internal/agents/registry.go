@@ -499,13 +499,13 @@ var known = []Known{
 		DefaultTier:         TierAutoApproved,
 	},
 	{
-		Name:              "hermes",
-		Adapter:           "hermes.py",
-		Endpoint:          "https://api.openai.com",
-		Binaries:          []string{"hermes", "hermes-agent"},
-		DisplayName:       "Hermes",
-		InstallHint:       "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
-		InstallURL:        "https://hermes-agent.nousresearch.com/docs/getting-started/installation",
+		Name:        "hermes",
+		Adapter:     "hermes.py",
+		Endpoint:    "https://api.openai.com",
+		Binaries:    []string{"hermes", "hermes-agent"},
+		DisplayName: "Hermes",
+		InstallHint: "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
+		InstallURL:  "https://hermes-agent.nousresearch.com/docs/getting-started/installation",
 		// OPENAI_API_KEY is deliberately absent: hermes 0.19 does not read it
 		// (or OPENAI_BASE_URL/OPENAI_MODEL) for its model — it resolves
 		// `providers.<name>` + `model.*` out of $HERMES_HOME/config.yaml. A
