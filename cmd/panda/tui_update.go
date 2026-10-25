@@ -711,13 +711,18 @@ func (m tuiModel) startFromSplash() (tea.Model, tea.Cmd) {
 			termsCurrent = c.UI.TermsCurrent()
 		})
 	}
-	if m.r != nil && m.r.cfg != nil && !onboarded {
-		return m.startOnboarding()
-	}
-	// Onboarded but under stale terms (e.g. accepted before the AGPL
-	// relicensing): re-show only the license step before anything else.
+	// Consent is the gate, not wizard completion. `onboarded` is written by
+	// the wizard's last step only, so anyone who left it halfway — Ctrl-C, a
+	// closed terminal — lost every answer they had already given and was
+	// walked through language → terms → approval again on the next launch,
+	// and every launch after that. A current consent leaves the wizard
+	// nothing to ask that the model guide cannot; a stale one re-opens the
+	// license step alone for someone who has signed before.
 	if m.r != nil && m.r.cfg != nil && !termsCurrent {
-		return m.startTermsReconsent()
+		if onboarded {
+			return m.startTermsReconsent()
+		}
+		return m.startOnboarding()
 	}
 
 	if m.r == nil || m.r.cfg == nil || !configured {

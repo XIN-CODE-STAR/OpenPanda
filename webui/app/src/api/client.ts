@@ -829,8 +829,11 @@ export interface OnboardingState {
   terms_accepted: boolean
   /** Revision of the accepted terms — MIT-era installs have
    *  terms_accepted without a version, so a license change re-shows the
-   *  terms step. Compare against TERMS_VERSION_CURRENT. */
+   *  terms step. Compare against terms_version_current. */
   terms_version: number
+  /** The revision this binary enforces. Comes from the server so the
+   *  comparison can never drift from config.TermsVersionCurrent. */
+  terms_version_current: number
   onboarded: boolean
   approval_mode: 'always' | 'on-request' | 'never'
   model_configured: boolean

@@ -71,6 +71,12 @@ func TestOnboardingRoundTrip(t *testing.T) {
 	if out["approval_mode"] != config.ApprovalModeOnRequest {
 		t.Fatalf("approval default wrong: %v", out["approval_mode"])
 	}
+	// The console must not carry its own copy of the terms revision — it
+	// compares against this field, so a backend bump cannot be silently
+	// outvoted by a stale hard-coded constant in the browser bundle.
+	if out["terms_version_current"] != float64(config.TermsVersionCurrent) {
+		t.Fatalf("terms_version_current = %v, want %d", out["terms_version_current"], config.TermsVersionCurrent)
+	}
 
 	body := `{"locale":"zh-CN","terms_accepted":true,"approval_mode":"never","onboarded":true}`
 	code, out = doJSON(t, h, jsonReq(http.MethodPost, "/api/onboarding", body))

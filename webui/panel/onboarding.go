@@ -32,6 +32,13 @@ type onboardingState struct {
 	// TermsVersion lets the wizard re-show the license step after a terms
 	// change — MIT-era installs hold terms_accepted without a version.
 	TermsVersion int `json:"terms_version"`
+	// TermsVersionCurrent is the revision the binary enforces. The console
+	// compares against this instead of its own copy of the number: a
+	// hard-coded constant in the frontend silently drifts the moment the
+	// backend bumps the revision, and the drift fails in the worst
+	// direction — a stale browser believes an old consent is current and
+	// never re-prompts.
+	TermsVersionCurrent int `json:"terms_version_current"`
 	// TermsAcceptedAt is the UTC RFC3339 timestamp of the current consent,
 	// mirrored into the signed audit chain as tamper-evident evidence.
 	TermsAcceptedAt string `json:"terms_accepted_at"`
@@ -55,6 +62,8 @@ func (h *handler) onboardingState() onboardingState {
 	st := onboardingState{
 		// OAuth (model.auth) counts as configured — api_key stays empty there.
 		ModelConfigured: strings.TrimSpace(mc.BaseURL) != "" && (mc.NoAuth || strings.TrimSpace(mc.APIKey) != "" || strings.TrimSpace(mc.Auth) != ""),
+		// Always the binary's revision, even when no config is readable.
+		TermsVersionCurrent: config.TermsVersionCurrent,
 	}
 	h.readCfg(func(c *config.Config) {
 		st.Locale = c.UI.Locale

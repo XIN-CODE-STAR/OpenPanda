@@ -32,18 +32,27 @@ export function notifyModelSaved(): void {
 type Step = 'language' | 'terms' | 'approval' | 'model'
 const STEPS: Step[] = ['language', 'terms', 'approval', 'model']
 
-/** Mirrors config.TermsVersionCurrent — bump alongside it on terms changes. */
-const TERMS_VERSION_CURRENT = 2
-
-/** Effective consent: accepted AND stamped at the current revision. */
+/** Effective consent: accepted AND stamped at the revision this binary
+ *  enforces. The revision comes from the server (`terms_version_current`)
+ *  rather than a local constant — a hard-coded copy drifts the moment
+ *  config.TermsVersionCurrent moves, and it drifts in the dangerous
+ *  direction: a stale browser would treat an old consent as current and
+ *  never re-prompt. */
 function termsCurrent(state: OnboardingState): boolean {
-  return state.terms_accepted && (state.terms_version ?? 0) >= TERMS_VERSION_CURRENT
+  const current = state.terms_version_current ?? 0
+  return state.terms_accepted && (state.terms_version ?? 0) >= current
 }
-
 /** First-run gate rendered at the top of the main pane. Fresh installs
- *  (`onboarded`/`terms_accepted` unset) get the full wizard immediately;
- *  an install that finished the wizard but has no usable model gets a
- *  persistent banner whose CTA reopens the wizard on the model step. */
+ *  (no consent yet) get the full wizard immediately; an install that has
+ *  accepted the current terms but still has no usable model gets a
+ *  persistent banner whose CTA reopens the wizard on the model step.
+ *
+ *  The gate keys off CONSENT, not wizard completion. `onboarded` is only
+ *  written by the wizard's last step, so anyone who closed it halfway —
+ *  Escape, a backdrop click, a closed tab — lost every answer they had
+ *  already given and was marched through language → terms → approval
+ *  again on the next visit, and the one after that. Consent is the only
+ *  answer that actually gates anything; the rest is a banner. */
 export function OnboardingBanner() {
   useLocaleRerender()
   const [state, setState] = useState<OnboardingState | null>(null)
@@ -61,7 +70,10 @@ export function OnboardingBanner() {
     return () => window.removeEventListener(MODEL_SAVED_EVENT, check)
   }, [])
 
-  const needsWizard = Boolean(state && (!state.onboarded || !termsCurrent(state)))
+  const needsWizard = Boolean(state && !termsCurrent(state))
+  // Re-consent for someone who has signed before: the license step is the
+  // whole errand. A first-time install still walks the four steps.
+  const termsOnly = needsWizard && Boolean(state?.onboarded || state?.terms_accepted)
   // Fresh installs get the wizard without a click — state setters belong in
   // an effect, not the render path.
   useEffect(() => {
@@ -85,7 +97,7 @@ export function OnboardingBanner() {
         <OnboardingWizard
           state={state}
           modelOnly={!needsWizard}
-          termsOnly={needsWizard && state.onboarded}
+          termsOnly={termsOnly}
           onClose={() => setOpen(false)}
           onDone={() => {
             setCompleted(true)
