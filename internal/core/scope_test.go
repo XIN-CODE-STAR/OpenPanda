@@ -76,6 +76,22 @@ func TestChildResourceKeys(t *testing.T) {
 	if slices.Contains(got, "scope:p/pkg") {
 		t.Fatalf("projectless paths must not mint scope keys: %v", got)
 	}
+	// A pinned work directory is a tree of its own and outranks the project
+	// key: holding project:p as well would make the child queue behind every
+	// sibling editing a tree it never touches — the exact serialization
+	// one-business-domain-per-directory exists to avoid.
+	wd := t.TempDir()
+	got = childResourceKeys("c-wd", TaskInput{Project: "p", WorkDir: wd})
+	if want := []string{"dir:" + queue.WorkDirKey(wd)}; !slices.Equal(got, want) {
+		t.Fatalf("pinned-workdir child keys = %v, want %v", got, want)
+	}
+	// A pin INSIDE the project's tree arrives as both (delegateChild fills the
+	// lanes): the directory decides where to run, the lane decides what the
+	// child excludes — a dir: key there would be invisible to the project root.
+	got = childResourceKeys("c-wd", TaskInput{Project: "p", WorkDir: wd, Paths: []string{"feat-a"}})
+	if want := []string{"scope:p/feat-a"}; !slices.Equal(got, want) {
+		t.Fatalf("in-project pinned child keys = %v, want %v", got, want)
+	}
 }
 
 // TestEnqueueAdoptsScopeAndIsolate locks the queue path's metadata honesty:

@@ -7,7 +7,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 
 	"github.com/Xustalis/OpenPanda/internal/askengine"
@@ -43,6 +45,12 @@ type createTaskRequest struct {
 	// that merges back on completion. Both need a project to mean anything.
 	ScopePaths []string `json:"scope_paths"`
 	Isolate    bool     `json:"isolate"`
+	// WorkDir pins the task to a directory of its own — one business domain
+	// per directory. The task then holds only that directory's lock (it never
+	// queues behind siblings in the project's tree) and runs on THIS node
+	// only, since a peer has no such tree to run in. Mutually exclusive with
+	// the two lane modes above, which describe the project's shared tree.
+	WorkDir string `json:"workdir"`
 }
 
 // createTask serves POST /api/tasks (queue redesign): enqueue a user task and
@@ -98,6 +106,23 @@ func (h *handler) createTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, errors.New("scope_paths and isolate are mutually exclusive"))
 		return
 	}
+	// A pinned work directory is a different tree, so the shared-tree lane modes
+	// contradict it: paths are project-relative (an absolute tree has no lanes)
+	// and isolate copies the project's tree (not the pinned one). Unlike them it
+	// does NOT require a project — an anonymous task may name its own directory.
+	req.WorkDir = strings.TrimSpace(req.WorkDir)
+	if req.WorkDir != "" {
+		if len(trimmedPaths) > 0 || req.Isolate {
+			writeErr(w, http.StatusBadRequest, errors.New("workdir cannot combine with scope_paths or isolate"))
+			return
+		}
+		abs, aerr := filepath.Abs(req.WorkDir)
+		if aerr != nil {
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("workdir: %w", aerr))
+			return
+		}
+		req.WorkDir = abs
+	}
 	// Hand the tail the trimmed lanes rather than the raw field: trimming
 	// reuses req.ScopePaths' backing array and only shortens the slice, so the
 	// field still carries the pre-trim tail. The core normalizes paths anyway,
@@ -148,10 +173,15 @@ func (h *handler) enqueueBoardTask(
 		PreferredNode: req.Node,
 		Paths:         req.ScopePaths,
 		Isolate:       req.Isolate,
+		WorkDir:       req.WorkDir,
 	}
 	q := core.DefaultQueueSpec()
 	q.Priority = priority
 	q.ResourceKeys = req.ResourceKeys
+	// Enqueue stamps work_dir from the QueueSpec (SetQueueMeta overwrites the
+	// column), so the pin has to ride both surfaces or the row and the lock set
+	// end up disagreeing.
+	q.WorkDir = req.WorkDir
 
 	task, warn, err := eng.EnqueueTask(ctx, in, q)
 	if err != nil {

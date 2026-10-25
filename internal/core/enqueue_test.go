@@ -4,6 +4,7 @@ package core
 
 import (
 	"context"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/Xustalis/OpenPanda/internal/config"
 	"github.com/Xustalis/OpenPanda/internal/ledger"
+	"github.com/Xustalis/OpenPanda/internal/scheduler/queue"
 )
 
 // queueTestCore builds a node with one tier-1 native ability so enqueued
@@ -542,5 +544,43 @@ func TestDrainFlagPausesQueueAndBeatsDraining(t *testing.T) {
 		if n.ID == c.nodeID && n.Status != "online" {
 			t.Fatalf("after --off self status = %s, want online", n.Status)
 		}
+	}
+}
+
+// TestResourceKeysForPinnedWorkDir covers the submission-time correction a
+// pinned work directory needs: a pin that names the project's OWN tree keeps
+// the project key (every other task finds that tree by project, so a dir: key
+// would hide the conflict and let two writers into one checkout), while a pin
+// anywhere else stands alone on its dir: key — which is what lets two business
+// domains run side by side instead of queueing behind one project lock.
+func TestResourceKeysForPinnedWorkDir(t *testing.T) {
+	c := queueTestCore(t)
+
+	own, err := c.projectWorkDir("p")
+	if err != nil {
+		t.Fatalf("project work dir: %v", err)
+	}
+	got := c.resourceKeysFor(TaskInput{Project: "p", WorkDir: own})
+	if !slices.Contains(got, "project:p") || !slices.Contains(got, "scope:p") {
+		t.Fatalf("pin on the project tree = %v, want project+scope keys", got)
+	}
+	// A subdirectory of the project's tree is still that tree: the lock must be
+	// a scope lane, because a dir: key would be invisible to the project root
+	// and a whole-project task could then write alongside it.
+	got = c.resourceKeysFor(TaskInput{Project: "p", WorkDir: filepath.Join(own, "feat-a")})
+	if want := []string{"scope:p/feat-a"}; !slices.Equal(got, want) {
+		t.Fatalf("pin inside the project tree = %v, want %v", got, want)
+	}
+
+	elsewhere := t.TempDir()
+	got = c.resourceKeysFor(TaskInput{Project: "p", WorkDir: elsewhere})
+	if want := []string{"dir:" + queue.WorkDirKey(elsewhere)}; !slices.Equal(got, want) {
+		t.Fatalf("pin outside the project tree = %v, want %v", got, want)
+	}
+	// A pinned directory with no project at all is still its own identity —
+	// nothing else names that tree, so nothing else can be serialized on it.
+	got = c.resourceKeysFor(TaskInput{WorkDir: elsewhere})
+	if want := []string{"dir:" + queue.WorkDirKey(elsewhere)}; !slices.Equal(got, want) {
+		t.Fatalf("projectless pin = %v, want %v", got, want)
 	}
 }

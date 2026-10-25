@@ -27,6 +27,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -163,6 +164,17 @@ func ValidateName(name string) error {
 // Create inserts a project. workDir is resolved to an absolute path so a project
 // created from one directory still points at the same tree when a task runs from
 // another — the daemon's cwd is not the cwd of whoever typed the command.
+//
+// A named workDir is CREATED when missing. `panda project new feat-a --dir
+// D:/proj/feat-a` reads as "make me a project rooted here", and a project whose
+// directory does not exist yet used to leave every task to discover that at run
+// time: prepareRunDir would mkdir it anyway, but `project show` claimed a path
+// that was not there and an isolate child silently degraded to a plain copy
+// (gitRepoRootOf needs a real repository root). Creating it here makes the row
+// and the filesystem agree the moment the command returns. An existing
+// directory is left untouched — pointing --dir at a live checkout must not
+// disturb it — and a failure to create is reported rather than stored as a
+// project that cannot run.
 func (s *Store) Create(name, workDir, description string) (Project, error) {
 	if err := ValidateName(name); err != nil {
 		return Project{}, err
@@ -173,6 +185,9 @@ func (s *Store) Create(name, workDir, description string) (Project, error) {
 			return Project{}, fmt.Errorf("projects: resolve work dir: %w", err)
 		}
 		workDir = abs
+		if err := os.MkdirAll(workDir, 0o755); err != nil {
+			return Project{}, fmt.Errorf("projects: create work dir %s: %w", workDir, err)
+		}
 	}
 	ts := s.now()
 	_, err := s.db.Exec(

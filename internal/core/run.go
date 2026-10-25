@@ -701,6 +701,14 @@ func (c *Core) prepareRunDir(execCtx, ctx context.Context, task Task, taskID str
 	workDir := c.workDir
 	if task.WorkDir != "" {
 		workDir = task.WorkDir
+		// A pinned directory is created when missing. Both `--workdir` and a
+		// delegate child's workdir mean "run in THIS tree", and every other
+		// branch below mkdirs its own derived dir — leaving the pinned case to
+		// fail on an absent directory would make the one mode that names a
+		// destination by hand the only one that cannot set it up.
+		if err := os.MkdirAll(workDir, 0o755); err != nil {
+			return runPrep{}, fmt.Errorf("create pinned work dir: %w", err)
+		}
 	}
 
 	// A stage of a plan executes in a directory of its own, derived here rather

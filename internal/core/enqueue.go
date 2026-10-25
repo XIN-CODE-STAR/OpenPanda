@@ -52,7 +52,7 @@ func (c *Core) Enqueue(ctx context.Context, in TaskInput, q QueueSpec) (Task, er
 	}
 	autoKeys := len(q.ResourceKeys) == 0
 	if autoKeys {
-		q.ResourceKeys = deriveResourceKeys(in)
+		q.ResourceKeys = c.resourceKeysFor(in)
 	} else {
 		q.ResourceKeys = mergeActuatorKeys(q.ResourceKeys, in.Requires, in.SpecJSON)
 	}
@@ -85,6 +85,38 @@ func (c *Core) Enqueue(ctx context.Context, in TaskInput, q QueueSpec) (Task, er
 	c.queueWake()
 	c.logger.Info("task enqueued", "task", t.TaskID, "priority", q.Priority)
 	return t, nil
+}
+
+// resourceKeysFor is the submission-time entry point: deriveResourceKeys plus
+// the correction a pinned work directory needs. Three cases, because a pin is
+// only "a separate tree" when it really is one:
+//
+//   - the project's OWN tree  → keep the project key; every other task names
+//     that tree by project, so a dir: key would make them invisible to each
+//     other and let two writers into one checkout;
+//   - a SUBDIRECTORY of it    → a scope leaf; a dir: key is invisible to the
+//     project's root scope, so a whole-project task could run alongside this
+//     one in the same tree (the child still RUNS in the subdirectory — the pin
+//     keeps deciding where, the lane decides what it excludes);
+//   - anywhere else           → the dir: key stands alone, which is what lets
+//     two business domains run side by side without sharing a lock.
+func (c *Core) resourceKeysFor(in TaskInput) []string {
+	wd := queue.WorkDirKey(in.WorkDir)
+	if wd == "" {
+		return deriveResourceKeys(in)
+	}
+	if in.Project != "" {
+		if pdir, err := c.projectWorkDir(in.Project); err == nil {
+			pw := queue.WorkDirKey(pdir)
+			if pw == wd {
+				return deriveResourceKeys(in)
+			}
+			if rel, ok := relUnderDir(pw, wd); ok {
+				return mergeActuatorKeys(scopeLeafKeys(in.Project, []string{rel}), in.Requires, in.SpecJSON)
+			}
+		}
+	}
+	return mergeActuatorKeys([]string{"dir:" + wd}, in.Requires, in.SpecJSON)
 }
 
 // deriveResourceKeys computes the queue resource locks a task holds from the

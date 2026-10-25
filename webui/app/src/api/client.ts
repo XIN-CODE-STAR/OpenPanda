@@ -940,6 +940,7 @@ export const api = {
     node?: string
     scope_paths?: string[]
     isolate?: boolean
+    workdir?: string
   }): Promise<CreateTaskResult> {
     return request('POST', '/api/tasks', body)
   },

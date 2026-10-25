@@ -1070,14 +1070,27 @@ func (c *Core) SpawnChildTask(ctx context.Context, parentID string, in TaskInput
 // which runs it here (or re-routes via forwardScheduled on the next pass).
 func (c *Core) DispatchChild(ctx context.Context, child Task, in TaskInput) error {
 	var decision scheduler.Decision
-	if strings.TrimSpace(in.TargetNode) != "" {
+	switch {
+	case strings.TrimSpace(in.WorkDir) != "":
+		// A child pinned to a directory of its own can only run HERE: the
+		// delegate payload carries no work dir (a peer has no such tree), so
+		// forwarding would run a blind copy in an empty directory and report
+		// success over nothing. Same judgement forwardScheduled makes for a
+		// pinned queue task, and it outranks a named node for the same reason:
+		// the directory is the harder constraint.
+		decision.Action = scheduler.ActionLocal
+		if strings.TrimSpace(in.TargetNode) != "" {
+			c.logger.Info("delegate workdir wins over node pin: running locally",
+				"task", child.TaskID, "node", in.TargetNode, "dir", in.WorkDir)
+		}
+	case strings.TrimSpace(in.TargetNode) != "":
 		// An agent-named destination is a hard pin like a user-named one:
 		// "delegate this to the GPU box" must land there or fail honestly.
 		decision = c.routePinned(ctx, in.TargetNode, child.Chain, in.Requires, resourceRequirement(in.ResourceJSON))
 		if decision.Action == scheduler.ActionForward {
 			in.TargetNode = c.stablePeerID(ctx, pinWireDest(decision))
 		}
-	} else {
+	default:
 		decision = scheduler.RouteP(c.nodeID, child.Chain,
 			c.eligibleForSend(ctx, needsForInput(in), c.onlineEmployees(ctx)),
 			c.localMatch(), in.Requires, resourceRequirement(in.ResourceJSON),
@@ -1168,6 +1181,16 @@ type delegateRequest struct {
 	// The right choice when the child will rewrite or build the tree at
 	// large; scope paths are the cheaper option for disjoint edits.
 	Isolate bool `json:"isolate,omitempty"`
+	// WorkDir points the child at a directory of its own instead of the
+	// parent's tree — one business domain per directory, which is how real
+	// orchestration partitions work. The child holds only that directory's
+	// lock, so it never queues behind siblings editing other trees, and its
+	// files stay out of the parent's tree entirely (nothing to merge). A pin
+	// that resolves to the parent's own work dir is ignored: it would just
+	// be the shared tree wearing another name. Needs a project like the other
+	// two, and outranks paths (an absolute tree makes project-relative lanes
+	// meaningless); isolate outranks it (a private copy already is one).
+	WorkDir string `json:"workdir,omitempty"`
 }
 
 // parseDelegateRequests extracts every well-formed PANDA_DELEGATE request
@@ -1317,7 +1340,8 @@ const agentResultSchema = `{
           "title": {"type": "string", "description": "Short title"},
           "node": {"type": "string", "description": "Optional specific node name"},
           "paths": {"type": "array", "items": {"type": "string"}, "maxItems": 8, "description": "Project-relative directories this sub-task owns and may write. Sibling sub-tasks whose paths do not overlap run in PARALLEL in the same worktree; overlapping or omitted paths serialize. Declare the narrowest real scope (e.g. [\"internal/api\", \"web/src/views\"]) and make sure two sub-tasks never name the same directory."},
-          "isolate": {"type": "boolean", "description": "true gives this sub-task a private copy of the project tree (git worktree when available): it runs fully parallel with everything, and its changes merge back into the project tree when it finishes (conflicts are reported, not guessed). Use for sub-tasks that rewrite or build the tree at large; use paths instead when the edits are disjoint and cheap."}
+          "isolate": {"type": "boolean", "description": "true gives this sub-task a private copy of the project tree (git worktree when available): it runs fully parallel with everything, and its changes merge back into the project tree when it finishes (conflicts are reported, not guessed). Use for sub-tasks that rewrite or build the tree at large; use paths instead when the edits are disjoint and cheap."},
+          "workdir": {"type": "string", "description": "Absolute path to a directory this sub-task owns, for work that belongs to a different tree than yours — one business domain per directory. The child writes there, holds only that directory's lock, and never queues behind siblings editing other trees; its files stay out of your tree, so there is nothing to merge. Omit it to work in the project tree (then use paths to claim a lane). Ignored when isolate is true, and ignored when it names your own work directory."}
         },
         "required": ["intent"]
       }
@@ -1588,6 +1612,42 @@ func (c *Core) delegateChild(ctx context.Context, parent Task, dr delegateReques
 		Transport:    parent.Transport,
 		DeadlineUnix: parent.DeadlineUnix,
 		UserLocale:   parent.GetUserLocale(),
+	}
+	// A child's own directory outranks its scope lanes — an absolute tree makes
+	// project-relative lanes meaningless — and isolate outranks both, since a
+	// private copy already is one. Three shapes, because only the last is really
+	// a separate tree:
+	//   - the PARENT's own tree     → drop the pin; it is the shared tree under
+	//     another spelling, and honoring it would hand the child a dir: lock the
+	//     parent's project: lock cannot see — two writers, one checkout;
+	//   - a SUBDIRECTORY of it      → keep the pin as the run directory and
+	//     express the lock as a scope lane, so a whole-project task still
+	//     excludes it (a dir: key would not);
+	//   - anywhere else             → a tree of its own: the pin is the lock.
+	switch {
+	case dr.Isolate:
+		in.Paths = nil
+	case strings.TrimSpace(dr.WorkDir) != "":
+		in.Paths = nil
+		wd := strings.TrimSpace(dr.WorkDir)
+		if abs, aerr := filepath.Abs(wd); aerr == nil {
+			wd = abs
+		}
+		if parentDir, perr := c.projectWorkDir(parent.Project); perr == nil {
+			pw, wdd := queue.WorkDirKey(parentDir), queue.WorkDirKey(wd)
+			if pw == wdd {
+				c.logger.Info("delegate workdir ignored: it is the parent's own tree",
+					"parent", parent.TaskID, "dir", wd)
+				break
+			}
+			in.WorkDir = wd
+			if rel, ok := relUnderDir(pw, wdd); ok {
+				in.Paths = []string{rel}
+			}
+		} else {
+			// No project tree to be relative to: the pin is the whole identity.
+			in.WorkDir = wd
+		}
 	}
 	if in.Isolate && in.Project != "" {
 		// The child must know it works on a private copy: files its siblings

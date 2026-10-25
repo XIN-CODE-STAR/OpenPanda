@@ -239,6 +239,12 @@ func TestAttachProjectRecordsContextDegraded(t *testing.T) {
 	if _, err := ps.Create("broken", badDir, "d"); err != nil {
 		t.Fatalf("create project: %v", err)
 	}
+	// Create provisions the work dir now, so remove it to reproduce the state
+	// this test is about: the row survives, the tree does not (a user deleted
+	// it, a mount went away). The degradation must still be recorded.
+	if err := os.RemoveAll(badDir); err != nil {
+		t.Fatalf("remove work dir: %v", err)
+	}
 
 	taskID := "task-degraded-test"
 	if _, err := c.store.CreateWithID(context.Background(), taskID, "", "broken", "title", c.nodeID, nil, false); err != nil {

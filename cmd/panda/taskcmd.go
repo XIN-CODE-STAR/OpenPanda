@@ -15,6 +15,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -757,6 +758,7 @@ func runTaskAdd(args []string) {
 	actionSpec := fs.String("action-spec", "", "actuator dispatch JSON: {\"target_actuator\":\"hardware:x\",\"action\":\"verb\",\"parameters\":{...}}")
 	scopePaths := fs.String("paths", "", "comma-separated project-relative dirs the task owns (needs --project): disjoint tasks run in parallel in the shared tree")
 	isolate := fs.Bool("isolate", false, "run in a private copy of the project tree (git worktree when available) and merge changes back on success — needs --project")
+	workDir := fs.String("workdir", "", "pin execution to this directory (created if missing); the task then runs on THIS node only")
 	wait := fs.Bool("wait", false, "block until the task settles (done/failed/cancelled/review) and print the result")
 	waitTimeout := fs.Duration("wait-timeout", 30*time.Minute, "with --wait: stop watching after this long (the task itself keeps running)")
 	fs.Parse(reorderFlags(fs, args))
@@ -917,6 +919,21 @@ func runTaskAdd(args []string) {
 	if len(pathList) > 0 && *isolate {
 		fail(2, i18n.T(loc, "cli.task.add.scopeIsolateConflict"))
 	}
+	// --workdir names the tree this task writes, which makes the project key
+	// redundant and the routing pins contradictory: a pinned directory exists on
+	// THIS node only (forwardScheduled refuses to ship a non-file task whose
+	// work dir cannot travel), so asking for a peer as well would promise a
+	// destination that cannot run the work. --paths is project-relative and a
+	// pinned directory is absolute — they describe different trees.
+	pinnedWorkDir := strings.TrimSpace(*workDir)
+	if pinnedWorkDir != "" {
+		if pref != "" || strings.TrimSpace(*nodes) != "" || strings.TrimSpace(*scopePaths) != "" || len(agentList) > 1 {
+			fail(2, i18n.T(loc, "cli.task.add.workdirConflict"))
+		}
+		if abs, aerr := filepath.Abs(pinnedWorkDir); aerr == nil {
+			pinnedWorkDir = abs
+		}
+	}
 	in := core.TaskInput{
 		Title:       *title,
 		ParentID:    pID,
@@ -927,16 +944,25 @@ func runTaskAdd(args []string) {
 		Requires:    requiresList,
 		Paths:       pathList,
 		Isolate:     *isolate,
+		WorkDir:     pinnedWorkDir,
 		TargetNode:  pref,
 		Authorized:  *authorize,
 	}
 	q := core.DefaultQueueSpec()
 	q.Priority = prio
-	// Deliberately no WorkDir: engine.WorkPath() is the node-wide default the
+	// A pinned work dir rides BOTH surfaces: Enqueue stamps work_dir from the
+	// QueueSpec (SetQueueMeta overwrites the column), and TaskInput.WorkDir is
+	// what the createTask path persists for the non-queue branches. Setting one
+	// alone leaves the row and the lock set disagreeing.
+	if pinnedWorkDir != "" {
+		q.WorkDir = pinnedWorkDir
+	}
+	// No WorkDir by default: engine.WorkPath() is the node-wide default the
 	// executor already falls back to, and pinning it re-classifies the task as
 	// local-only work — forwardScheduled skips any task with a WorkDir, so
 	// `--requires pi.uptime` on a node without that ability never reached the
-	// peer that has it (the same trap plan submission avoids).
+	// peer that has it (the same trap plan submission avoids). --workdir opts
+	// into exactly that trade: the caller names a directory only this node has.
 
 	nodeList := parseAgentList(*nodes)
 	if len(nodeList) > 0 {

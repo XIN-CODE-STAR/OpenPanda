@@ -57,6 +57,38 @@ func TestCreateGetList(t *testing.T) {
 	}
 }
 
+// TestCreateMakesWorkDir covers the promise `panda project new --dir` makes: the
+// directory exists by the time the command returns. prepareRunDir would create
+// it at first run anyway, but until then `project show` named a path that was
+// not there and an isolate child degraded to a plain copy (gitRepoRootOf needs
+// a real repository root) — a row and a filesystem that disagree.
+func TestCreateMakesWorkDir(t *testing.T) {
+	s := newTestStore(t)
+	dir := filepath.Join(t.TempDir(), "nested", "feat-a")
+	if _, err := os.Stat(dir); err == nil {
+		t.Fatal("fixture directory already exists")
+	}
+	if _, err := s.Create("feat-a", dir, ""); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	st, err := os.Stat(dir)
+	if err != nil || !st.IsDir() {
+		t.Fatalf("work dir not created: %v", err)
+	}
+	// An existing directory is adopted untouched: --dir routinely points at a
+	// live checkout, and creating a project must not disturb its contents.
+	keep := filepath.Join(dir, "keep.txt")
+	if err := os.WriteFile(keep, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Create("feat-b", dir, ""); err != nil {
+		t.Fatalf("create on existing dir: %v", err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("existing content disturbed: %v", err)
+	}
+}
+
 // TestActivePointer covers the reason this table exists: `panda ask` is one-shot,
 // so "which project am I in" has to survive between two processes.
 func TestActivePointer(t *testing.T) {

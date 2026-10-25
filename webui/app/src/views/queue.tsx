@@ -269,10 +269,14 @@ function NewTaskForm({ projects, onCreated }: { projects: string[]; onCreated():
   const [node, setNode] = useState('')
   // Same-tree parallelism: 'default' claims the whole project; 'paths' claims
   // the typed directories so disjoint siblings can run alongside; 'isolate'
-  // runs in a private copy that merges back. Hidden until a project is set —
-  // without one there is nothing to scope.
-  const [parallel, setParallel] = useState<'default' | 'paths' | 'isolate'>('default')
+  // runs in a private copy that merges back. 'workdir' is the other axis — a
+  // directory of its own, which is how business domains stay apart: it holds
+  // only that directory's lock and runs on this node. The first three are
+  // hidden until a project is set (nothing to scope without one); 'workdir'
+  // needs no project.
+  const [parallel, setParallel] = useState<'default' | 'paths' | 'isolate' | 'workdir'>('default')
   const [pathsText, setPathsText] = useState('')
+  const [workdirText, setWorkdirText] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   // The environment picker lists the live fleet; loaded lazily when the form
@@ -299,6 +303,7 @@ function NewTaskForm({ projects, onCreated }: { projects: string[]; onCreated():
         node: node || undefined,
         scope_paths: scopePaths,
         isolate: parallel === 'isolate' ? true : undefined,
+        workdir: parallel === 'workdir' ? workdirText.trim() || undefined : undefined,
       })
       // A queued task nobody can drain must not read as dispatched — surface
       // the engine's advisory before clearing the composer.
@@ -310,6 +315,7 @@ function NewTaskForm({ projects, onCreated }: { projects: string[]; onCreated():
       setNode('')
       setParallel('default')
       setPathsText('')
+      setWorkdirText('')
       setOpen(false)
       onCreated()
     } catch (err) {
@@ -361,7 +367,14 @@ function NewTaskForm({ projects, onCreated }: { projects: string[]; onCreated():
             id="nt-project"
             class="input"
             value={project}
-            onChange={(e) => setProject((e.target as HTMLSelectElement).value)}
+            onChange={(e) => {
+              const next = (e.target as HTMLSelectElement).value
+              setProject(next)
+              // The lane modes describe the project's own tree, so clearing the
+              // project must not leave one selected: the server rejects it and
+              // the option is no longer on screen to explain why.
+              if (!next && (parallel === 'paths' || parallel === 'isolate')) setParallel('default')
+            }}
           >
             <option value="">{t('queue.allProjects')}</option>
             {projects.map((p) => (
@@ -400,35 +413,52 @@ function NewTaskForm({ projects, onCreated }: { projects: string[]; onCreated():
           onInput={(e) => setPrompt((e.target as HTMLTextAreaElement).value)}
         />
       </div>
-      {project && (
-        <div class="field-row">
-          <div class="field-group">
-            <label for="nt-parallel">{t('queue.parallelMode')}</label>
-            <select
-              id="nt-parallel"
-              class="input"
-              value={parallel}
-              onChange={(e) => setParallel((e.target as HTMLSelectElement).value as typeof parallel)}
-            >
-              <option value="default">{t('queue.parallel.default')}</option>
-              <option value="paths">{t('queue.parallel.paths')}</option>
-              <option value="isolate">{t('queue.parallel.isolate')}</option>
-            </select>
-          </div>
-          {parallel === 'paths' && (
-            <div class="field-group">
-              <label for="nt-paths">{t('queue.parallel.pathsLabel')}</label>
-              <input
-                id="nt-paths"
-                class="input"
-                type="text"
-                placeholder={t('queue.parallel.pathsPlaceholder')}
-                value={pathsText}
-                onInput={(e) => setPathsText((e.target as HTMLInputElement).value)}
-              />
-            </div>
-          )}
+      {/* A pinned directory needs no project, so the row shows even without
+          one — the project-scoped modes are the only options that require it. */}
+      <div class="field-row">
+        <div class="field-group">
+          <label for="nt-parallel">{t('queue.parallelMode')}</label>
+          <select
+            id="nt-parallel"
+            class="input"
+            value={parallel}
+            onChange={(e) => setParallel((e.target as HTMLSelectElement).value as typeof parallel)}
+          >
+            <option value="default">{t('queue.parallel.default')}</option>
+            {project && <option value="paths">{t('queue.parallel.paths')}</option>}
+            {project && <option value="isolate">{t('queue.parallel.isolate')}</option>}
+            <option value="workdir">{t('queue.parallel.workdir')}</option>
+          </select>
         </div>
+        {parallel === 'paths' && project && (
+          <div class="field-group">
+            <label for="nt-paths">{t('queue.parallel.pathsLabel')}</label>
+            <input
+              id="nt-paths"
+              class="input"
+              type="text"
+              placeholder={t('queue.parallel.pathsPlaceholder')}
+              value={pathsText}
+              onInput={(e) => setPathsText((e.target as HTMLInputElement).value)}
+            />
+          </div>
+        )}
+        {parallel === 'workdir' && (
+          <div class="field-group">
+            <label for="nt-workdir">{t('queue.parallel.workdirLabel')}</label>
+            <input
+              id="nt-workdir"
+              class="input"
+              type="text"
+              placeholder={t('queue.parallel.workdirPlaceholder')}
+              value={workdirText}
+              onInput={(e) => setWorkdirText((e.target as HTMLInputElement).value)}
+            />
+          </div>
+        )}
+      </div>
+      {parallel === 'workdir' && (
+        <p class="hint">{t('queue.parallel.workdirHint')}</p>
       )}
       {error && <p class="gate-error">{error}</p>}
       <div class="settings-actions">
