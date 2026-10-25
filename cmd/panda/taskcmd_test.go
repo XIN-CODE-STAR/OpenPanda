@@ -4,8 +4,12 @@ package main
 
 import (
 	"errors"
+	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/Xustalis/OpenPanda/internal/config"
+	"github.com/Xustalis/OpenPanda/internal/sessions"
 )
 
 func TestParseAgentList(t *testing.T) {
@@ -114,5 +118,28 @@ func TestStageIDName(t *testing.T) {
 		if got := stageIDName(in); got != want {
 			t.Errorf("stageIDName(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestLinkTaskSessionInCarriesProject: a thread started for a project-owned
+// to-do belongs to that project, exactly as the console's board paths file it.
+// The old entry point passed no project, so terminal-started work landed
+// outside the project its row came from.
+func TestLinkTaskSessionInCarriesProject(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{Storage: config.StorageConfig{DBPath: filepath.Join(dir, "panda.db")}}
+	id := linkTaskSessionIn(cfg, "task-1", "write the report", "write the report", "alpha")
+	if id == "" {
+		t.Fatal("linkTaskSessionIn returned no session")
+	}
+	sess, err := sessions.NewStore(sessionStoreRoot(cfg)).Get(id)
+	if err != nil {
+		t.Fatalf("read session: %v", err)
+	}
+	if sess.Project != "alpha" {
+		t.Fatalf("session project = %q, want alpha", sess.Project)
+	}
+	if len(sess.Turns) != 1 || sess.Turns[0].Text != "write the report" {
+		t.Fatalf("session turns = %+v, want the prompt", sess.Turns)
 	}
 }

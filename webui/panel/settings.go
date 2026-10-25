@@ -268,8 +268,9 @@ func (h *handler) engineModel() config.ModelConfig {
 }
 
 func normalizeAPIType(v string) string {
-	if v == config.APITypeOpenAI {
-		return config.APITypeOpenAI
+	switch v {
+	case config.APITypeOpenAI, config.APITypeResponses, config.APITypeGoogle:
+		return v
 	}
 	return config.APITypeAnthropic
 }

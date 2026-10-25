@@ -53,6 +53,7 @@ const (
 	listProjects
 	listResume
 	listTasks
+	listTeam
 )
 
 type wizardStep int
@@ -109,6 +110,23 @@ type tuiModel struct {
 	execGen     uint64
 	started     time.Time
 	chatHistory *chatHistory
+
+	// team mirrors the active conversation's roster for the status row; the
+	// source of truth stays in the session (or the bare conversation's file)
+	// and teamForAsk re-reads before an ask, so a roster changed in the web
+	// console still binds the next turn.
+	team []string
+	// nextNode is the pending one-shot /node pin. It is cleared when the next
+	// ask consumes it.
+	nextNode string
+	// teamMarks is the working set of the open roster picker: toggling changes
+	// only this map until Enter applies it, so Esc is a true cancel.
+	teamMarks map[string]bool
+	// teamExtras is the picker's snapshot of roster entries the registry has
+	// never heard of (a capability card's agent). They are drawn as rows of
+	// their own so applying the picker cannot silently drop a name it also
+	// could not show.
+	teamExtras []string
 
 	// pendingInputs is the busy-mode submission queue: lines the user enters
 	// while a turn or an exec owns the foreground. They drain FIFO the moment
@@ -428,6 +446,8 @@ func newTUIModel(r *repl) tuiModel {
 		mouse:       resolveMouseMode(r.cfg),
 		started:     time.Now(),
 		chatHistory: cHist,
+		team:        r.teamNow(),
+		nextNode:    r.nextNodeNow(),
 		scrollLimit: newScrollLimit(),
 		frameGeom:   &tuiFrameGeom{liveTop: -1},
 		activity:    &activityCache{},

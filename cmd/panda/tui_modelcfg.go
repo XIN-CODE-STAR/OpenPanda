@@ -224,6 +224,8 @@ func (m *tuiModel) buildModelForm() {
 			options: []mfieldOption{
 				{id: config.APITypeOpenAI, label: "OpenAI"},
 				{id: config.APITypeAnthropic, label: "Anthropic"},
+				{id: config.APITypeResponses, label: "Responses"},
+				{id: config.APITypeGoogle, label: "Google"},
 			},
 		})
 	}

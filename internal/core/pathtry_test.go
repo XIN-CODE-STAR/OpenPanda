@@ -448,8 +448,7 @@ func TestRelayedPunchWantReachesTheRequester(t *testing.T) {
 			t.Fatalf("register: %v", err)
 		}
 	}
-	go func() { _ = relay.Listen(ctx, relayAddr) }()
-	time.Sleep(300 * time.Millisecond)
+	startListen(t, ctx, relay, relayAddr)
 	dial := func(c *Core) {
 		t.Helper()
 		deadline := time.Now().Add(10 * time.Second)

@@ -1348,6 +1348,22 @@ func (m tuiModel) submitSlash(name, arg, text string) (tea.Model, tea.Cmd) {
 			return m, m.printBlock(note)
 		}
 		return m.askTurn(arg, name)
+	case "team":
+		// Bare opens the roster picker; an argument is applied inline so the
+		// status badge and the persisted session/file move together.
+		if arg == "" {
+			return m.openTeamPicker()
+		}
+		return m.applyTeamCommand(arg)
+	case "node":
+		// One-shot pin for the next ask — the terminal twin of the console's
+		// node picker. Bare reports the current state.
+		msg, err := m.r.nodeCommand(arg)
+		if err != nil {
+			return m, m.printBlock(block{kind: blockError, body: err.Error()})
+		}
+		m.nextNode = m.r.nextNodeNow()
+		return m, m.printBlock(block{kind: blockNote, body: msg})
 	case "project":
 		if arg != "" {
 			return m.enterProject(arg)
@@ -1436,7 +1452,13 @@ func (m tuiModel) newChat() (tea.Model, tea.Cmd) {
 	if m.r != nil {
 		n = m.r.convoLen()
 		m.r.setConvo(nil)
+		// A new bare conversation starts with no roster and no pending pin —
+		// the same blank sheet the console's 新对话 opens.
+		_ = m.r.setTeam(nil)
+		m.r.setNextNode("")
+		m.nextNode = ""
 	}
+	m.team = nil
 	clearConvo()
 	if m.chatHistory != nil {
 		m.chatHistory.clear()
@@ -1457,6 +1479,8 @@ func (m tuiModel) resumeSession(arg string) (tea.Model, tea.Cmd) {
 	if arg == "-" {
 		if m.r != nil {
 			m.r.setSess("")
+			m.team = m.r.teamNow()
+			m.nextNode = m.r.nextNodeNow()
 		}
 		note := block{kind: blockNote, body: i18n.T(m.loc, "repl.resume.detached")}
 		return m, m.printBlock(note)
@@ -1522,6 +1546,9 @@ func (m tuiModel) attachSession(sess *sessions.Session) (tea.Model, tea.Cmd) {
 	}
 	if m.r != nil {
 		m.r.setSess(sess.ID)
+		// The roster is a property of the thread just opened.
+		m.team = m.r.teamNow()
+		m.nextNode = m.r.nextNodeNow()
 	}
 	m.mode = modeIdle
 	if m.chatHistory != nil {
@@ -1564,6 +1591,7 @@ func (m tuiModel) enterProject(name string) (tea.Model, tea.Cmd) {
 		r.setProject("")
 		r.bindProject()
 		r.setConvo(loadConvo())
+		m.team = r.teamNow()
 		m.refreshProject()
 		note := block{kind: blockNote, body: i18n.T(m.loc, "cli.project.noActive")}
 		return m, m.printBlock(note)
@@ -1594,6 +1622,7 @@ func (m tuiModel) enterProject(name string) (tea.Model, tea.Cmd) {
 	}
 	r.bindProject()
 	r.setConvo(loadConvo())
+	m.team = r.teamNow()
 	m.refreshProject()
 	body := ""
 	if created {
@@ -1735,7 +1764,11 @@ func (m tuiModel) askTurn(text, mode string) (tea.Model, tea.Cmd) {
 		sessID = m.r.sessID()
 	}
 
-	stream, pump := startAsk(m.engine, history, prompt, workDir, sessID, authorize, mode)
+	// A /node pin belongs to exactly this turn; the status row drops the badge
+	// as the turn starts.
+	node := m.r.takeNextNode()
+	m.nextNode = ""
+	stream, pump := startAsk(m.engine, history, prompt, workDir, sessID, m.r.teamForAsk(), node, authorize, mode)
 	m.stream = stream
 	return m, tea.Batch(append(cmds, m.sp.Tick, pump)...)
 }

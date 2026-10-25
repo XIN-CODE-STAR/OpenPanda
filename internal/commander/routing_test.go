@@ -403,6 +403,27 @@ func TestAgentBinaryFromInstallCheck(t *testing.T) {
 	}
 }
 
+// TestRankAgentsDemotesBlockedAgent pins the dispatch-health term: an agent
+// the node's breaker holds open is halved in ranking (so a healthy rival wins
+// the next dispatch) but stays ranked — it is a demotion, never an exclusion.
+func TestRankAgentsDemotesBlockedAgent(t *testing.T) {
+	r := NewRouter(scoreCard(), NewExecutor(), config.ModelConfig{}, config.InjectionConfig{}, config.RoutingConfig{})
+	if top := r.RankAgents([]string{"code:modify"}); top[0].Name != "cheap" {
+		t.Fatalf("top = %q, want cheap while nothing is blocked", top[0].Name)
+	}
+
+	r.SetAgentBlocked(func(name string) bool { return name == "cheap" })
+	cands := r.RankAgents([]string{"code:modify"})
+	if len(cands) != 2 || cands[0].Name != "expensive" {
+		t.Fatalf("candidates = %+v, want the blocked cheap agent demoted, not dropped", cands)
+	}
+
+	r.SetAgentBlocked(func(string) bool { return false })
+	if top := r.RankAgents([]string{"code:modify"}); top[0].Name != "cheap" {
+		t.Fatalf("top = %q, want cheap after the circuit closes", top[0].Name)
+	}
+}
+
 // TestRoutePinnedAgentCarriesAlternates verifies that when an agent is pinned
 // by name (e.g. "agent:cheap"), Route still populates Alternates with other
 // agents on the card so active failover can rescue a failed primary.

@@ -287,7 +287,18 @@ func (s *rpcServer) handleAsk(req *rpcRequest) {
 		OnReasoning: func(text string) { send("reasoning", map[string]string{"text": text}) },
 		OnStatus:    func(text string) { send("status", map[string]string{"text": text}) },
 	}
-	out, err := engine.AskTurnsSession(ctx, history, p.Prompt, workDir, "", sessID(sess), p.Authorize, cb)
+	// Carry the bound session's roster: a thread continued from an embedding
+	// client must be bound by the same team pick the console and REPL honor.
+	var agents []string
+	if sess != nil {
+		agents = sess.Team
+	}
+	out, err := engine.AskTurnsScoped(ctx, history, p.Prompt, askengine.AskScope{
+		WorkDir:        workDir,
+		SessionID:      sessID(sess),
+		Agents:         agents,
+		AmbientProject: true,
+	}, p.Authorize, cb)
 	if err != nil {
 		if sess != nil {
 			_, _ = s.store.AppendTurn(sess.ID, sessions.Turn{Role: "assistant", Text: "⚠ " + err.Error(), Kind: "error"})

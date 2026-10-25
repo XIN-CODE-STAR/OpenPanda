@@ -244,7 +244,7 @@ type Engine struct {
 	fallbacks   []*entry.Client
 
 	breakerMu sync.Mutex
-	breaker   map[string]time.Time // modelName -> cooldown until
+	breaker   map[string]modelBreaker // entry.Client.Key() -> cooldown state
 
 	// projStore reads the per-project approval policy (mode/scope/decision)
 	// the tier-2 gate resolves against; decisions holds the session-scoped
@@ -255,46 +255,70 @@ type Engine struct {
 	decisions   map[string]string
 }
 
-func (e *Engine) isModelHealthy(name string) bool {
-	if name == "" {
+// Model circuit-breaker timings. A fatal provider failure cools one client
+// down; repeated failures escalate (30s, 60s, 120s, 240s, then the 5-minute
+// ceiling) so a prolonged outage stops being retried every half minute, and
+// one success clears the record entirely.
+const (
+	breakerBaseCooldown = 30 * time.Second
+	breakerMaxCooldown  = 5 * time.Minute
+)
+
+// modelBreaker is one client's cooldown state: when it may be tried again and
+// how many consecutive fatal failures put it there (the escalation exponent).
+type modelBreaker struct {
+	until time.Time
+	fails int
+}
+
+func (e *Engine) isModelHealthy(key string) bool {
+	if key == "" {
 		return true
 	}
 	e.breakerMu.Lock()
 	defer e.breakerMu.Unlock()
-	if e.breaker == nil {
-		return true
-	}
-	until, ok := e.breaker[name]
+	st, ok := e.breaker[key]
 	if !ok {
 		return true
 	}
-	if time.Now().After(until) {
-		delete(e.breaker, name)
+	if time.Now().After(st.until) {
+		delete(e.breaker, key)
 		return true
 	}
 	return false
 }
 
-func (e *Engine) recordModelFailure(name string) {
-	if name == "" {
+func (e *Engine) recordModelFailure(key string) {
+	if key == "" {
 		return
 	}
 	e.breakerMu.Lock()
 	defer e.breakerMu.Unlock()
 	if e.breaker == nil {
-		e.breaker = make(map[string]time.Time)
+		e.breaker = make(map[string]modelBreaker)
 	}
-	e.breaker[name] = time.Now().Add(30 * time.Second)
+	st := e.breaker[key]
+	st.fails++
+	steps := st.fails - 1
+	if steps > 4 {
+		steps = 4
+	}
+	cooldown := breakerBaseCooldown << steps
+	if cooldown > breakerMaxCooldown {
+		cooldown = breakerMaxCooldown
+	}
+	st.until = time.Now().Add(cooldown)
+	e.breaker[key] = st
 }
 
-func (e *Engine) recordModelSuccess(name string) {
-	if name == "" {
+func (e *Engine) recordModelSuccess(key string) {
+	if key == "" {
 		return
 	}
 	e.breakerMu.Lock()
 	defer e.breakerMu.Unlock()
 	if e.breaker != nil {
-		delete(e.breaker, name)
+		delete(e.breaker, key)
 	}
 }
 
@@ -306,24 +330,75 @@ func (e *Engine) healthyClient() (*entry.Client, string) {
 	client := e.client.Load()
 	if client == nil {
 		for _, fb := range e.getFallbacks() {
-			if e.isModelHealthy(fb.ModelName()) {
+			if e.isModelHealthy(fb.Key()) {
 				return fb, fb.ModelName()
 			}
 		}
 		return nil, ""
 	}
-	if e.isModelHealthy(client.ModelName()) {
+	if e.isModelHealthy(client.Key()) {
 		return client, ""
 	}
 	for _, fb := range e.getFallbacks() {
-		if fb.ModelName() == client.ModelName() {
+		if fb.Key() == client.Key() {
 			continue
 		}
-		if e.isModelHealthy(fb.ModelName()) {
+		if e.isModelHealthy(fb.Key()) {
 			return fb, fb.ModelName()
 		}
 	}
 	return client, ""
+}
+
+// modelFallbacks returns the configured fallbacks minus the client that just
+// failed, deduplicated by endpoint identity and ordered healthy-first (stable
+// within each group). A cooling client is not dropped: the cooldown is a hint
+// about what is likely to fail, and with every candidate cooling the only way
+// forward is to try them anyway — the last one last.
+func (e *Engine) modelFallbacks(skipKey string) []*entry.Client {
+	all := e.getFallbacks()
+	healthy := make([]*entry.Client, 0, len(all))
+	cooling := make([]*entry.Client, 0, len(all))
+	seen := map[string]bool{skipKey: true}
+	for _, fb := range all {
+		key := fb.Key()
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if e.isModelHealthy(key) {
+			healthy = append(healthy, fb)
+		} else {
+			cooling = append(cooling, fb)
+		}
+	}
+	return append(healthy, cooling...)
+}
+
+// tryFallbackModels runs one model call on each remaining fallback until one
+// answers, recording breaker state per attempt. The client that failed stays
+// the caller's primary when nothing succeeds, so the caller reports the
+// original error rather than a chain of fallback errors. announce, when set,
+// receives each model name as it is tried (the progress line a fallback emits).
+func (e *Engine) tryFallbackModels(ctx context.Context, primary *entry.Client, run func(*entry.Client) (entry.Output, error), announce func(string)) (*entry.Client, entry.Output, bool) {
+	for _, fb := range e.modelFallbacks(primary.Key()) {
+		if e.logger != nil {
+			e.logger.Warn("askengine: fatal model error, attempting fallback",
+				"primary", primary.ModelName(), "fallback", fb.ModelName())
+		}
+		if announce != nil {
+			announce(fb.ModelName())
+		}
+		out, err := run(fb)
+		if err == nil {
+			e.recordModelSuccess(fb.Key())
+			return fb, out, true
+		}
+		if entry.IsFatalModelError(err) {
+			e.recordModelFailure(fb.Key())
+		}
+	}
+	return primary, entry.Output{}, false
 }
 
 // getFallbacks returns a snapshot of the configured fallback clients.
@@ -2001,43 +2076,29 @@ rounds:
 		}
 		if err != nil {
 			if entry.IsFatalModelError(err) {
-				e.recordModelFailure(client.ModelName())
-				fallbacks := e.getFallbacks()
-				fallbackSuccess := false
-				for _, fb := range fallbacks {
-					if fb.ModelName() == client.ModelName() {
-						continue
-					}
-					e.logger.Warn("askengine: primary model fatal error, attempting fallback", "primary", client.ModelName(), "fallback", fb.ModelName(), "err", err)
-					cb.progress(Progress{Kind: ProgressRoute, Name: fb.ModelName()})
-					var fbOut entry.Output
-					var fbErr error
+				e.recordModelFailure(client.Key())
+				run := func(c *entry.Client) (entry.Output, error) {
 					if cb.OnDelta != nil || cb.OnReasoning != nil {
-						fbOut, fbErr = entry.ClassifyStreamWithTools(ctx, fb, devices, conversationMemory, turns, reg, cb.OnDelta, trackReasoning, classifyOpts...)
-					} else {
-						fbOut, fbErr = entry.ClassifyTurnsWithTools(ctx, fb, devices, conversationMemory, turns, reg, classifyOpts...)
+						return entry.ClassifyStreamWithTools(ctx, c, devices, conversationMemory, turns, reg, cb.OnDelta, trackReasoning, classifyOpts...)
 					}
-					if fbErr == nil {
-						e.recordModelSuccess(fb.ModelName())
-						client = fb
-						usageBefore = fb.Usage()
-						fallbackUsed = fb.ModelName()
-						out = fbOut
-						err = nil
-						fallbackSuccess = true
-						break
-					} else if entry.IsFatalModelError(fbErr) {
-						e.recordModelFailure(fb.ModelName())
-					}
+					return entry.ClassifyTurnsWithTools(ctx, c, devices, conversationMemory, turns, reg, classifyOpts...)
 				}
-				if !fallbackSuccess {
+				fb, fbOut, ok := e.tryFallbackModels(ctx, client, run, func(name string) {
+					cb.progress(Progress{Kind: ProgressRoute, Name: name})
+				})
+				if !ok {
 					return digestOrErr(err)
 				}
+				client = fb
+				usageBefore = fb.Usage()
+				fallbackUsed = fb.ModelName()
+				out = fbOut
+				err = nil
 			} else {
 				return digestOrErr(err)
 			}
 		} else {
-			e.recordModelSuccess(client.ModelName())
+			e.recordModelSuccess(client.Key())
 		}
 
 		switch out.Kind {
@@ -2235,32 +2296,22 @@ rounds:
 	}
 	if ferr != nil {
 		if entry.IsFatalModelError(ferr) {
-			e.recordModelFailure(client.ModelName())
-			fallbacks := e.getFallbacks()
-			for _, fb := range fallbacks {
-				if fb.ModelName() == client.ModelName() {
-					continue
-				}
-				e.logger.Warn("askengine: final round fatal error, attempting fallback", "primary", client.ModelName(), "fallback", fb.ModelName(), "err", ferr)
-				cb.progress(Progress{Kind: ProgressRoute, Name: fb.ModelName()})
-				var fbFinal entry.Output
-				var fbErr error
+			e.recordModelFailure(client.Key())
+			run := func(c *entry.Client) (entry.Output, error) {
 				if cb.OnDelta != nil || cb.OnReasoning != nil {
-					fbFinal, fbErr = entry.ClassifyStreamWithTools(ctx, fb, devices, conversationMemory, turns, nil, cb.OnDelta, cb.OnReasoning, classifyOpts...)
-				} else {
-					fbFinal, fbErr = entry.ClassifyTurns(ctx, fb, devices, conversationMemory, turns, classifyOpts...)
+					return entry.ClassifyStreamWithTools(ctx, c, devices, conversationMemory, turns, nil, cb.OnDelta, cb.OnReasoning, classifyOpts...)
 				}
-				if fbErr == nil {
-					e.recordModelSuccess(fb.ModelName())
-					client = fb
-					usageBefore = fb.Usage()
-					fallbackUsed = fb.ModelName()
-					final = fbFinal
-					ferr = nil
-					break
-				} else if entry.IsFatalModelError(fbErr) {
-					e.recordModelFailure(fb.ModelName())
-				}
+				return entry.ClassifyTurns(ctx, c, devices, conversationMemory, turns, classifyOpts...)
+			}
+			fb, fbOut, ok := e.tryFallbackModels(ctx, client, run, func(name string) {
+				cb.progress(Progress{Kind: ProgressRoute, Name: name})
+			})
+			if ok {
+				client = fb
+				usageBefore = fb.Usage()
+				fallbackUsed = fb.ModelName()
+				final = fbOut
+				ferr = nil
 			}
 		}
 		if ferr != nil {
@@ -2270,7 +2321,7 @@ rounds:
 			return digestOrErr(fmt.Errorf("reached max tool rounds (%d): %w", maxRounds, ferr))
 		}
 	} else {
-		e.recordModelSuccess(client.ModelName())
+		e.recordModelSuccess(client.Key())
 	}
 	if final.Kind == entry.KindTask {
 		if e.sched.Load() == nil {

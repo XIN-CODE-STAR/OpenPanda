@@ -613,6 +613,14 @@ type Server struct {
 	activePerIP   map[string]int
 
 	helloTimeout time.Duration // per-server hello deadline; tests can shorten it
+
+	// Bind state. Listen binds the socket itself and blocks for the server's
+	// lifetime, so a caller that needs the chosen address (":0" in a test) or
+	// a "now accepting" signal has no other place to read them from.
+	boundAddr string
+	ready     chan struct{}
+	readyOnce sync.Once
+	onBound   func(string)
 }
 
 // NewServer creates a WebSocket server on addr. onConn is invoked once the
@@ -638,7 +646,46 @@ func NewServer(addr string, logger *slog.Logger, onConn func(*Conn)) *Server {
 		},
 		activePerIP:  make(map[string]int),
 		helloTimeout: defaultHelloTimeout,
+		ready:        make(chan struct{}),
 	}
+}
+
+// Addr returns the address the listener actually bound to, or the configured
+// address while no listener has bound yet.
+//
+// It exists for the port-0 case: a caller that asks the kernel for an
+// ephemeral port needs to learn which one it got, and Listen blocks serving,
+// so reading it back afterwards is not an option.
+func (s *Server) Addr() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.boundAddr != "" {
+		return s.boundAddr
+	}
+	return s.addr
+}
+
+// Ready is closed once the listener is bound and accepting connections.
+//
+// A caller that starts Listen in a goroutine must wait on this instead of
+// sleeping a guessed interval: the bind completes whenever the scheduler gets
+// to it, and a fixed sleep is a race on a loaded machine. Callers that also
+// need bind failures must select on this and on their own Listen-error
+// channel — a failed bind never closes Ready.
+func (s *Server) Ready() <-chan struct{} { return s.ready }
+
+// OnBound registers a callback invoked once the listener is bound, with the
+// address that was actually bound ("127.0.0.1:0" reports the chosen port).
+//
+// Unlike Ready, this carries the address to a caller that advertises itself
+// (the Core's listen address feeds hello payloads and discovery beacons).
+// The callback runs on Listen's goroutine before Ready closes and before the
+// accept loop starts, so it must not block — and anything it stores is
+// visible to a caller once Ready fires.
+func (s *Server) OnBound(fn func(addr string)) {
+	s.mu.Lock()
+	s.onBound = fn
+	s.mu.Unlock()
 }
 
 // SetLimits configures the global and per-IP concurrent connection limits.
@@ -672,11 +719,27 @@ func (s *Server) Listen(ctx context.Context) error {
 		return err
 	}
 
+	// Publish the bound address before the accept loop starts: the socket
+	// already accepts (the kernel queues the handshake), so a dialer that
+	// reacts to Ready/OnBound cannot race the listener.
+	//
+	// OnBound runs before Ready closes so Ready is a full barrier: a caller
+	// that waits for it and then reads whatever the callback stored (the
+	// Core's advertised address) can never observe the old value. Closing
+	// Ready first made that read a data race in practice.
+	bound := ln.Addr().String()
+	s.mu.Lock()
+	s.boundAddr = bound
+	onBound := s.onBound
+	s.mu.Unlock()
+	if onBound != nil {
+		onBound(bound)
+	}
+	s.readyOnce.Do(func() { close(s.ready) })
+
 	errCh := make(chan error, 1)
 	guard.Go(s.logger, "bus: accept loop", nil, func() {
-		// ln.Addr() rather than s.addr: with a port of 0 the operator needs the
-		// port that was actually chosen, not the one they asked for.
-		s.logger.Info("websocket listening", "addr", ln.Addr().String())
+		s.logger.Info("websocket listening", "addr", bound)
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}

@@ -94,8 +94,7 @@ func TestProbePeerEncrypted(t *testing.T) {
 	if err := server.Register(ctx); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	go func() { _ = server.Listen(ctx, "127.0.0.1:17997") }()
-	time.Sleep(150 * time.Millisecond)
+	startListen(t, ctx, server, "127.0.0.1:17997")
 
 	// The probe runs unsigned (nil keypair): reachability + session
 	// negotiation are what the check answers, not consent.

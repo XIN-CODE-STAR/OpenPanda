@@ -34,6 +34,7 @@ var completionVerbs = map[string][]string{
 	"memory":   {"list", "get", "set", "rm"},
 	"project":  {"list", "new", "show", "enter", "exit", "rename", "rm", "approval"},
 	"reminder": {"list", "add", "rm"},
+	"todo":     {"list", "add", "edit", "show", "done", "reopen", "pause", "running", "rm", "move", "start"},
 	"card":     {"show", "rescan", "edit", "set", "native", "agent", "manual", "invoke", "path"},
 	"agents":   {"test", "install"},
 	"auth":     {"login", "logout", "status"},
@@ -45,7 +46,13 @@ var completionVerbs = map[string][]string{
 // completion (config sections, aliases, ids) is deliberately absent: a wrong
 // suggestion is worse than none.
 var completionFlags = map[string][]string{
-	"ask":           {"--authorize", "--continue", "--project", "--output-format", "--config", "--card", "--mcp"},
+	"ask":           {"--authorize", "--continue", "--project", "--team", "--node", "--output-format", "--config", "--card", "--mcp"},
+	"todo":          {"--all", "--status", "--project", "--q", "--json"},
+	"todo list":     {"--all", "--status", "--project", "--q", "--json"},
+	"todo add":      {"--desc", "--status", "--priority", "--due", "--tags", "--project", "--json"},
+	"todo edit":     {"--title", "--desc", "--status", "--priority", "--due", "--tags", "--project", "--json"},
+	"todo start":    {"--json"},
+	"session ask":   {"--authorize", "--node", "--team", "--card", "--mcp", "--config"},
 	"daemon":        {"--config", "--card", "--debug-addr"},
 	"queue":         {"--state", "--project", "--watch", "--json"},
 	"task add":      {"--title", "--prompt", "--priority", "--project", "--authorize", "--requires", "--agents", "--mode", "--preferred", "--nodes", "--action-spec", "--wait", "--wait-timeout", "--json"},
@@ -166,7 +173,7 @@ _panda() {
     fi
     case "$sub" in
 `)
-	for _, cmd := range []string{"nodes", "join", "task", "plan", "session", "sessions", "skill", "model", "models", "config", "memory", "project", "reminder", "card", "agents", "auth", "completion"} {
+	for _, cmd := range []string{"nodes", "join", "task", "plan", "session", "sessions", "skill", "model", "models", "config", "memory", "project", "reminder", "todo", "card", "agents", "auth", "completion"} {
 		words := completionVerbsFor(cmd)
 		if cmd == "sessions" {
 			words = completionVerbsFor("session")
@@ -228,7 +235,7 @@ _panda() {
     local -a verbs
     case "${bare[1]}" in
 `)
-	for _, cmd := range []string{"nodes", "join", "task", "plan", "session", "sessions", "skill", "model", "models", "config", "memory", "project", "reminder", "card", "agents", "auth", "completion"} {
+	for _, cmd := range []string{"nodes", "join", "task", "plan", "session", "sessions", "skill", "model", "models", "config", "memory", "project", "reminder", "todo", "card", "agents", "auth", "completion"} {
 		words := completionVerbsFor(cmd)
 		switch cmd {
 		case "sessions":
@@ -268,7 +275,7 @@ end
 
 complete -c panda -f -n 'test (__fish_panda_bare_count) -eq 0' -a '` + completionTopWords() + `' -d 'panda command'
 `)
-	for _, cmd := range []string{"nodes", "join", "task", "plan", "session", "sessions", "skill", "model", "models", "config", "memory", "project", "reminder", "card", "agents", "auth", "completion"} {
+	for _, cmd := range []string{"nodes", "join", "task", "plan", "session", "sessions", "skill", "model", "models", "config", "memory", "project", "reminder", "todo", "card", "agents", "auth", "completion"} {
 		words := completionVerbsFor(cmd)
 		switch cmd {
 		case "sessions":
@@ -310,7 +317,7 @@ func powershellCompletion() string {
 
 $_pandaCommands = @(` + quote(subcommandNames()) + ")\n")
 	b.WriteString("$_pandaVerbs = @{\n")
-	for _, cmd := range []string{"nodes", "join", "task", "plan", "session", "skill", "model", "config", "memory", "project", "reminder", "card", "agents", "auth", "completion"} {
+	for _, cmd := range []string{"nodes", "join", "task", "plan", "session", "skill", "model", "config", "memory", "project", "reminder", "todo", "card", "agents", "auth", "completion"} {
 		words := completionVerbs[cmd]
 		if cmd == "completion" {
 			words = []string{"bash", "zsh", "fish", "powershell"}

@@ -196,9 +196,8 @@ func TestTaskOutboxFlushOnHello(t *testing.T) {
 	must(a.Register(ctx))
 	must(b.Register(ctx))
 
-	go func() { _ = a.Listen(ctx, "127.0.0.1:17961") }()
-	go func() { _ = b.Listen(ctx, "127.0.0.1:17962") }()
-	time.Sleep(100 * time.Millisecond)
+	startListen(t, ctx, a, "127.0.0.1:17961")
+	startListen(t, ctx, b, "127.0.0.1:17962")
 
 	// Park task in a's outbox for b BEFORE b connects
 	taskID := "task-parked-1"
@@ -245,9 +244,8 @@ func TestResultReconcileOnReconnect(t *testing.T) {
 	}
 	must(a.Register(ctx))
 	must(b.Register(ctx))
-	go func() { _ = a.Listen(ctx, "127.0.0.1:18031") }()
-	go func() { _ = b.Listen(ctx, "127.0.0.1:18032") }()
-	time.Sleep(100 * time.Millisecond)
+	startListen(t, ctx, a, "127.0.0.1:18031")
+	startListen(t, ctx, b, "127.0.0.1:18032")
 
 	taskID := "task-reconcile-1"
 	// a's delegator copy — stranded exactly as the silent-loss leaves it.
@@ -318,8 +316,7 @@ func TestOutboxFlushAfterPeerRestart(t *testing.T) {
 	}
 	must(a.Register(ctx))
 	must(b1.Register(ctx))
-	go func() { _ = a.Listen(ctx, "127.0.0.1:17971") }()
-	time.Sleep(100 * time.Millisecond)
+	startListen(t, ctx, a, "127.0.0.1:17971")
 
 	must(b1.DialPeer(ctx, "127.0.0.1:17971"))
 	waitPeer(t, a, "b-inst-1")

@@ -108,11 +108,11 @@ func (r *repl) findProviderKey(providerID string) string {
 }
 
 // looksLikeAPIKey heuristically checks if s appears to be an API secret rather
-// than a model name (e.g. prefix "sk-", token length).
+// than a model name (e.g. prefix "sk-" / OpenCode's "oc_sk_", token length).
 func looksLikeAPIKey(s string) bool {
 	s = strings.TrimSpace(s)
 	lower := strings.ToLower(s)
-	if strings.HasPrefix(lower, "sk-") {
+	if strings.HasPrefix(lower, "sk-") || strings.HasPrefix(lower, "oc_sk_") {
 		return true
 	}
 	if strings.Count(s, ".") == 1 && len(s) > 30 {
@@ -142,8 +142,11 @@ func effectiveBaseURL(m config.ModelConfig) string {
 	if m.BaseURL != "" {
 		return m.BaseURL
 	}
-	if p, ok := providers.Lookup(m.Provider); ok && p.BaseURL != "" {
-		return p.BaseURL
+	if p, ok := providers.Lookup(m.Provider); ok {
+		// An aggregator serves a routed family on its own surface.
+		if base, _ := p.EndpointFor(m.Model); base != "" {
+			return base
+		}
 	}
 	if p, ok := providers.Detect(m.BaseURL, m.Model); ok && p.BaseURL != "" {
 		return p.BaseURL
@@ -527,7 +530,9 @@ func (r *repl) modelAdd(args []string) {
 		mc.BaseURL = pa.baseURL
 	}
 	if pa.apiType != "" {
-		if pa.apiType != config.APITypeOpenAI && pa.apiType != config.APITypeAnthropic {
+		switch pa.apiType {
+		case config.APITypeOpenAI, config.APITypeAnthropic, config.APITypeResponses, config.APITypeGoogle:
+		default:
 			r.outln(i18n.Tf(r.loc, "repl.model.add.badtype", "type", pa.apiType))
 			return
 		}

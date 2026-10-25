@@ -40,9 +40,8 @@ func TestPeerReconnectReplacesStaleConn(t *testing.T) {
 			t.Fatalf("register: %v", err)
 		}
 	}
-	go func() { _ = a.Listen(ctx, "127.0.0.1:17951") }()
-	go func() { _ = b.Listen(ctx, "127.0.0.1:17952") }()
-	time.Sleep(200 * time.Millisecond)
+	startListen(t, ctx, a, "127.0.0.1:17951")
+	startListen(t, ctx, b, "127.0.0.1:17952")
 
 	// First connection.
 	if err := a.DialPeer(ctx, "127.0.0.1:17952"); err != nil {
@@ -121,9 +120,8 @@ func TestPeerLiveSiblingHoldsEdge(t *testing.T) {
 			t.Fatalf("register: %v", err)
 		}
 	}
-	go func() { _ = a.Listen(ctx, "127.0.0.1:17961") }()
-	go func() { _ = b.Listen(ctx, "127.0.0.1:17962") }()
-	time.Sleep(200 * time.Millisecond)
+	startListen(t, ctx, a, "127.0.0.1:17961")
+	startListen(t, ctx, b, "127.0.0.1:17962")
 
 	if err := a.DialPeer(ctx, "127.0.0.1:17962"); err != nil {
 		t.Fatalf("dial 1: %v", err)
@@ -172,9 +170,8 @@ func TestPeerAuthoritativeNewcomerTakesEdge(t *testing.T) {
 			t.Fatalf("register: %v", err)
 		}
 	}
-	go func() { _ = a.Listen(ctx, "127.0.0.1:17971") }()
-	go func() { _ = b.Listen(ctx, "127.0.0.1:17972") }()
-	time.Sleep(200 * time.Millisecond)
+	startListen(t, ctx, a, "127.0.0.1:17971")
+	startListen(t, ctx, b, "127.0.0.1:17972")
 
 	// The stray sibling connects first: no authority, edge held by liveness.
 	if err := a.DialPeer(ctx, "127.0.0.1:17972"); err != nil {

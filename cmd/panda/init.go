@@ -393,11 +393,12 @@ func interactiveModelSetup(in *bufio.Reader, def *config.Config, loc i18n.Locale
 
 	if sel.ID == "custom" {
 		// No catalogue values: ask for the wire dialect and endpoint.
-		fmt.Printf("API Type (openai/anthropic) [openai]: ")
+		fmt.Printf("API Type (openai/anthropic/responses/google) [openai]: ")
 		t, _ := in.ReadString('\n')
-		if strings.TrimSpace(t) == "anthropic" {
-			sel.APIType = config.APITypeAnthropic
-		} else {
+		switch strings.ToLower(strings.TrimSpace(t)) {
+		case config.APITypeAnthropic, config.APITypeResponses, config.APITypeGoogle:
+			sel.APIType = strings.ToLower(strings.TrimSpace(t))
+		default:
 			sel.APIType = config.APITypeOpenAI
 		}
 		fmt.Printf("Base URL: ")

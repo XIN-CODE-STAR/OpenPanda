@@ -332,8 +332,7 @@ func TestAutoDialConnects(t *testing.T) {
 			t.Fatalf("register: %v", err)
 		}
 	}
-	go func() { _ = b.Listen(ctx, "127.0.0.1:17972") }()
-	time.Sleep(200 * time.Millisecond)
+	startListen(t, ctx, b, "127.0.0.1:17972")
 
 	a.autoDialOn.Store(true)
 	src := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 50000}
@@ -416,8 +415,7 @@ func TestAutoDialStaleDirectoryRow(t *testing.T) {
 			t.Fatalf("register: %v", err)
 		}
 	}
-	go func() { _ = b.Listen(ctx, "127.0.0.1:17976") }()
-	time.Sleep(200 * time.Millisecond)
+	startListen(t, ctx, b, "127.0.0.1:17976")
 
 	// The stale row: node-b was fleet once (a directory entry exists) but no
 	// connection stands.
@@ -459,8 +457,7 @@ func TestAutoDialWrongSecret(t *testing.T) {
 	if err := b.Register(ctx); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	go func() { _ = b.Listen(ctx, "127.0.0.1:17974") }()
-	time.Sleep(200 * time.Millisecond)
+	startListen(t, ctx, b, "127.0.0.1:17974")
 
 	a.autoDialOn.Store(true)
 	src := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 50000}

@@ -652,11 +652,13 @@ func runSessionAsk(args []string) {
 	cardPath := fs.String("card", cardFlagDefault(), "path to capabilities.yaml (default: discovered; required to execute tasks)")
 	mcpCmd := fs.String("mcp", cliMCP, "MCP server command (space-separated)")
 	authorize := fs.Bool("authorize", false, "authorize tier-2 (irreversible) commands")
+	node := fs.String("node", "", "run this turn's task on a specific node id or name (default: scheduler)")
+	team := fs.String("team", "", "roster override for this turn (default: the session's own team)")
 	fs.Parse(reorderFlags(fs, args))
 	id := strings.TrimSpace(fs.Arg(0))
 	prompt := strings.TrimSpace(strings.Join(fs.Args()[1:], " "))
 	if id == "" || prompt == "" {
-		fail(2, "usage: panda session ask <id> <prompt> [--authorize] [--card PATH]")
+		fail(2, "usage: panda session ask <id> <prompt> [--authorize] [--node NODE] [--team a,b] [--card PATH]")
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -716,7 +718,13 @@ func runSessionAsk(args []string) {
 		engine.SetProject(sess.Project, workDir)
 	}
 
-	out, streamedText, err := askSessionTurns(engine, history, prompt, workDir, sess.ID, *authorize)
+	agents := sess.Team
+	if strings.TrimSpace(*team) != "" {
+		if agents, err = normalizeTeam(splitTeamNames(*team)); err != nil {
+			fail(2, "panda: "+err.Error())
+		}
+	}
+	out, streamedText, err := askSessionTurns(engine, history, prompt, workDir, sess.ID, agents, *node, *authorize)
 	if err != nil {
 		_, _ = store.AppendTurn(sess.ID, sessions.Turn{Role: "assistant", Text: "⚠ " + err.Error(), Kind: "error"})
 		fail(1, "panda: "+err.Error())
@@ -800,13 +808,22 @@ func runSessionAsk(args []string) {
 
 // askSessionTurns runs one full-history ask with live streaming on an
 // interactive terminal (same UX as askStreaming, but session-aware). sessionID
-// scopes any remembered approval this turn produces to this session. The
-// returned string is the raw text the stream delivered, for the caller's
-// end-of-turn reconcile against the parsed answer.
-func askSessionTurns(engine *askengine.Engine, history []entry.Turn, prompt, workDir, sessionID string, authorize bool) (*askengine.Result, string, error) {
+// scopes any remembered approval this turn produces to this session. agents is
+// the session's roster and node the composer's per-turn node pin — the same two
+// fields the console's POST /api/sessions/{id}/ask carries, so a thread behaves
+// identically whichever front end continues it. The returned string is the raw
+// text the stream delivered, for the caller's end-of-turn reconcile.
+func askSessionTurns(engine *askengine.Engine, history []entry.Turn, prompt, workDir, sessionID string, agents []string, node string, authorize bool) (*askengine.Result, string, error) {
+	scope := askengine.AskScope{
+		WorkDir:        workDir,
+		SessionID:      sessionID,
+		Agents:         agents,
+		Node:           node,
+		AmbientProject: true,
+	}
 	var streamedText strings.Builder
 	if !stdoutIsTTY() {
-		out, err := engine.AskTurnsSession(context.Background(), history, prompt, workDir, "", sessionID, authorize, askengine.StreamCallbacks{})
+		out, err := engine.AskTurnsScoped(context.Background(), history, prompt, scope, authorize, askengine.StreamCallbacks{})
 		return out, "", err
 	}
 	lr := newStreamLineRenderer()
@@ -821,7 +838,7 @@ func askSessionTurns(engine *askengine.Engine, history []entry.Turn, prompt, wor
 			}
 		},
 	}
-	out, err := engine.AskTurnsSession(context.Background(), history, prompt, workDir, "", sessionID, authorize, cb)
+	out, err := engine.AskTurnsScoped(context.Background(), history, prompt, scope, authorize, cb)
 	lr.flush()
 	return out, streamedText.String(), err
 }

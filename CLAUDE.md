@@ -80,7 +80,9 @@ prebuilt copy; only a placeholder `dist/index.html` is committed.
   `task` (incl. `priority`/`move`/`artifact`/`board`/`send`
   — queue vs `--inject` live notes to a task), `plan`
   (`run`/`show`/`example`), `cancel`, `approve`/`reject`, `logs`,
-  `skill` (`list`/`find`/`hub`/`add`/`reset`), `reminder`, `detect`,
+  `skill` (`list`/`find`/`hub`/`add`/`reset`), `reminder`, `todo`
+  (`list`/`add`/`edit`/`done`/`rm`/`move`/`start` — the human board;
+  `start` enqueues a task), `detect`,
   `card` (`show`/`rescan`/`edit`/`set` plus structured
   `native|agent|manual` edits), `init`, `metrics`, `heatmap`, `audit`
   (`verify`/`entries`), `session`/`sessions` (`list`/`show`/`rm` plus

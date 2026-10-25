@@ -15,6 +15,7 @@ import (
 	"context"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/i18n"
 	"github.com/Xustalis/OpenPanda/internal/ledger"
 	"github.com/Xustalis/OpenPanda/internal/providers"
+	"github.com/Xustalis/OpenPanda/internal/todos"
 )
 
 // argResolver returns the candidates for an argument position: cmd is the
@@ -213,6 +215,29 @@ func (r *repl) argCandidates(cmd string, args []string) []string {
 	case "resume":
 		if len(args) == 1 {
 			return append(r.sessionIDs(), "-")
+		}
+	case "team":
+		// A bare /team takes agents directly; the verb forms keep offering the
+		// roster, so the same completion serves "/team a…" and "/team add a…".
+		if len(args) == 1 {
+			return append(agentRosterNames(), "add", "rm", "clear", "set")
+		}
+		return agentRosterNames()
+	case "node":
+		if len(args) == 1 {
+			return append(r.nodeIDs(), "auto")
+		}
+	case "todo", "todos":
+		if len(args) == 1 {
+			return []string{"list", "add", "edit", "show", "done", "reopen", "pause", "running", "rm", "move", "start"}
+		}
+		if len(args) == 2 {
+			switch args[0] {
+			case "edit", "show", "get", "done", "complete", "tick", "reopen",
+				"pending", "undone", "pause", "running", "resume", "rm",
+				"remove", "delete", "del", "start", "work", "run":
+				return r.todoIDs()
+			}
 		}
 	case "lang":
 		if len(args) == 1 {
@@ -424,6 +449,27 @@ func (r *repl) taskIDs(state string) []string {
 		}
 	}
 	return r.taskIDCache.put(state, ids)
+}
+
+// todoIDs lists the board's rows for `/todo <verb> <id>` completion. Completed
+// rows are included on purpose: `reopen` needs them. The board is small (the
+// store caps it at 2000) and read on demand, not cached: a completion list that
+// outlives the row it names is worse than a miss.
+func (r *repl) todoIDs() []string {
+	if r.db == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	list, err := todos.NewStore(r.db).List(ctx, todos.Filter{})
+	if err != nil {
+		return nil
+	}
+	ids := make([]string, 0, len(list))
+	for _, t := range list {
+		ids = append(ids, strconv.FormatInt(t.ID, 10))
+	}
+	return ids
 }
 
 func (r *repl) sessionIDs() []string {

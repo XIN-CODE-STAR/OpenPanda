@@ -98,6 +98,8 @@ func renameConvo(oldName, newName string) {
 	if _, err := os.Stat(oldFile); err == nil {
 		_ = os.Rename(oldFile, newFile)
 	}
+	// The roster is scoped to this conversation file.
+	renameBareTeam(oldName, newName)
 }
 
 // deleteConvo removes a project's persisted conversation file.
@@ -108,6 +110,7 @@ func deleteConvo(name string) {
 	}
 	convFile := filepath.Join(d, "conversations", sanitizeProjectName(name)+".json")
 	_ = os.Remove(convFile)
+	deleteBareTeam(name)
 }
 
 // loadConvo reads the persisted conversation; missing file or a corrupt

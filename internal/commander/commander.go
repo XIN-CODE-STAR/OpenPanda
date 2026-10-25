@@ -71,6 +71,12 @@ type Router struct {
 	runAdapter func(ctx context.Context, adapter string, prompt string, cwd string) AgentResult
 	// runProcess runs the adapter process with injected environment.
 	runProcess func(ctx context.Context, adapter string, prompt string, cwd string, env []string) AgentResult
+	// agentBlocked reports whether the node's agent circuit breaker currently
+	// has this agent open (defense.CircuitBreaker.Blocked). Injected by the
+	// owner of the breaker — the core — so ranking demotes an agent the node
+	// already knows is failing without maintaining a second record. Nil means
+	// "no breaker here" and never demotes.
+	agentBlocked func(name string) bool
 }
 
 // NewRouter builds a router from this node's capability card. The model
@@ -145,6 +151,14 @@ func (r *Router) SetAdapterRunner(fn func(ctx context.Context, adapter, prompt, 
 // with a fake adapter runner normally pair it with an always-available probe.
 func (r *Router) SetAgentProber(fn func(name string, ag ledger.Agent) bool) {
 	r.probeAgent = fn
+}
+
+// SetAgentBlocked injects the agent circuit-breaker predicate: it reports
+// whether the node's breaker currently holds this agent open. Ranking demotes
+// such an agent (never excludes it). The core owns the breaker and wires this
+// at construction; a router without it ranks exactly as before.
+func (r *Router) SetAgentBlocked(fn func(name string) bool) {
+	r.agentBlocked = fn
 }
 
 // SetEndpointProber overrides the model-endpoint reachability probe. Test
@@ -263,6 +277,12 @@ func (r *Router) MatchActuator(required []string) (ledger.ActuatorProfile, bool)
 // routing.preferred_agents receives during ranking.
 const preferredBonus = 0.5
 
+// agentBlockedPenalty multiplies the rank score of an agent whose circuit the
+// node's breaker holds open. The cheapest healthy agent scores 1.0 and the
+// most expensive 0.6, so 0.5 lets any healthy candidate win the next dispatch
+// while a blocked agent still outranks no one when it is the only match.
+const agentBlockedPenalty = 0.5
+
 // allowedFloor is the capability score a roster member gets when it declares
 // none of a task's required abilities. Below every real match (0.9/1.0) so a
 // capable teammate still wins, above zero so the roster can always answer.
@@ -368,7 +388,8 @@ func (r *Router) resolveAgentName(req string) (string, ledger.Agent, bool) {
 // choice stays deterministic across map iteration orders).
 //
 // Score = capability match (1.0 exact / 0.9 token-subset) × cost_tier
-// discount + preferred-agents bonus. A requirement of the form
+// discount + preferred-agents bonus, halved while the agent sits in a
+// transient-failure cooldown (agenthealth.go). A requirement of the form
 // "agent:<name>" pins that exact agent — an explicit user choice never fans
 // out to substitutes.
 //
@@ -421,6 +442,14 @@ func (r *Router) RankAgents(required []string) []AgentCandidate {
 			best = allowedFloor
 		}
 		score := best*costMultiplier(ag.CostTier) + r.bonus(name)
+		// An agent the node's breaker holds open keeps its capability rank but
+		// loses to every healthy candidate: the next dispatch should not start
+		// on the agent the last three failures already ruled out. Still a
+		// demotion, never an exclusion — core/run.go's spawn gate makes the
+		// final call, and a lone capable agent must remain routable.
+		if r.agentBlocked != nil && r.agentBlocked(name) {
+			score *= agentBlockedPenalty
+		}
 		out = append(out, AgentCandidate{Name: name, Agent: ag, Score: score})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -1256,8 +1285,15 @@ func (r *Router) agentTarget(name string, ag ledger.Agent) ProbeSpec {
 		apiType = k.ModelEnv.APIType
 		if apiType == "" {
 			// Polyglot agent (pi): the probe speaks the configured
-			// model's own protocol — that is what the run uses.
-			apiType = injModel.NormalizedAPIType()
+			// model's own protocol — that is what the run uses. A dialect
+			// only panda's client speaks (Responses/Google) is not an agent
+			// protocol, so the probe falls back to Chat Completions.
+			switch mt := injModel.NormalizedAPIType(); mt {
+			case config.APITypeAnthropic, config.APITypeOpenAI:
+				apiType = mt
+			default:
+				apiType = config.APITypeOpenAI
+			}
 		}
 	}
 	if dec := r.InjectionDecision(name, ag.Adapter); dec.Inject {

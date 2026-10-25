@@ -35,10 +35,9 @@ func startChain(t *testing.T, ctx context.Context, rootAddr, midAddr, leafAddr s
 	must(mid.Register(ctx))
 	must(leaf.Register(ctx))
 
-	go func() { _ = root.Listen(ctx, rootAddr) }()
-	go func() { _ = mid.Listen(ctx, midAddr) }()
-	go func() { _ = leaf.Listen(ctx, leafAddr) }()
-	time.Sleep(200 * time.Millisecond)
+	startListen(t, ctx, root, rootAddr)
+	startListen(t, ctx, mid, midAddr)
+	startListen(t, ctx, leaf, leafAddr)
 
 	// root → mid and mid → leaf, so the chain is linear.
 	must(root.DialPeer(ctx, midAddr))

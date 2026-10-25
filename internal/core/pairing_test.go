@@ -114,8 +114,7 @@ func TestPairHandshakeDeliversSecret(t *testing.T) {
 	if err := srv.Register(ctx); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	go func() { _ = srv.Listen(ctx, "127.0.0.1:18010") }()
-	time.Sleep(200 * time.Millisecond)
+	startListen(t, ctx, srv, "127.0.0.1:18010")
 
 	cli := dialPair(t, "127.0.0.1:18010")
 	defer cli.ws.Close()
@@ -174,8 +173,7 @@ func TestPairRejectedByOperator(t *testing.T) {
 	if err := srv.Register(ctx); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	go func() { _ = srv.Listen(ctx, "127.0.0.1:18011") }()
-	time.Sleep(200 * time.Millisecond)
+	startListen(t, ctx, srv, "127.0.0.1:18011")
 
 	cli := dialPair(t, "127.0.0.1:18011")
 	defer cli.ws.Close()
@@ -214,9 +212,8 @@ func TestPairHelloOnBoundConnRefused(t *testing.T) {
 	if err := b.Register(ctx); err != nil {
 		t.Fatalf("register b: %v", err)
 	}
-	go func() { _ = a.Listen(ctx, "127.0.0.1:18012") }()
-	go func() { _ = b.Listen(ctx, "127.0.0.1:18013") }()
-	time.Sleep(200 * time.Millisecond)
+	startListen(t, ctx, a, "127.0.0.1:18012")
+	startListen(t, ctx, b, "127.0.0.1:18013")
 	if err := a.DialPeer(ctx, "127.0.0.1:18013"); err != nil {
 		t.Fatalf("dial: %v", err)
 	}

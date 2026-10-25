@@ -1963,7 +1963,7 @@ export interface ImportSkillRequest {
 export interface ModelSettings {
   provider?: string
   name?: string
-  api_type: 'anthropic' | 'openai'
+  api_type: 'anthropic' | 'openai' | 'responses' | 'google'
   base_url: string
   model: string
   max_tokens: number

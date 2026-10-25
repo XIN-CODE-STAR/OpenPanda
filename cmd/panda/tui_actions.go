@@ -165,10 +165,8 @@ func buildProviderItems(loc i18n.Locale) []SelectionItem {
 		badge := ""
 		if p.NoAuth {
 			badge = i18n.T(loc, "tui.wizard.noKeyBadge")
-		} else if p.APIType == config.APITypeAnthropic {
-			badge = "anthropic"
 		} else {
-			badge = "openai"
+			badge = p.APIType
 		}
 		items = append(items, SelectionItem{
 			Index:   i + 1,
@@ -607,9 +605,23 @@ func (m tuiModel) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.selectionList.MovePage(m.listPageRows(), m.listPageRows())
 		return m, nil
 	case tea.KeyEsc:
+		if m.listKind == listTeam {
+			m.teamMarks = nil
+			m.teamExtras = nil
+		}
 		m.mode = modeIdle
 		return m, nil
+	case tea.KeySpace:
+		if m.listKind == listTeam {
+			m.toggleTeamMark()
+			return m, nil
+		}
 	case tea.KeyRunes:
+		// Some terminals deliver space as a rune rather than KeySpace.
+		if m.listKind == listTeam && string(msg.Runes) == " " {
+			m.toggleTeamMark()
+			return m, nil
+		}
 		switch string(msg.Runes) {
 		case "k", "K":
 			m.selectionList.MoveUp()
@@ -618,10 +630,17 @@ func (m tuiModel) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.selectionList.MoveDown(m.listPageRows())
 			return m, nil
 		case "q", "Q":
+			if m.listKind == listTeam {
+				m.teamMarks = nil
+				m.teamExtras = nil
+			}
 			m.mode = modeIdle
 			return m, nil
 		}
 	case tea.KeyEnter:
+		if m.listKind == listTeam {
+			return m.applyTeamPicker()
+		}
 		item, ok := m.selectionList.Selected()
 		if !ok {
 			m.mode = modeIdle
@@ -937,9 +956,18 @@ func (m tuiModel) wizardConfig() config.ModelConfig {
 	} else {
 		mc, _ = providers.ModelConfig(m.wizardProvider, m.wizardModel, m.wizardKey)
 		// The base URL field is editable for builtins too: a relay standing
-		// in for the vendor's endpoint overrides the catalogue URL here.
+		// in for the vendor's endpoint overrides the catalogue URL here. A
+		// value that is still one of the provider's own endpoints — the
+		// prefilled row URL, say — is rebased onto the surface this model is
+		// served on (an aggregator routes Claude away from its chat row).
 		if m.wizardBaseURL != "" {
-			mc.BaseURL = m.wizardBaseURL
+			if p, ok := providers.Lookup(m.wizardProvider); ok && p.OwnsEndpoint(m.wizardBaseURL) {
+				if base, apiType := p.EndpointFor(mc.Model); base != "" {
+					mc.BaseURL, mc.APIType = base, apiType
+				}
+			} else {
+				mc.BaseURL = m.wizardBaseURL
+			}
 		}
 	}
 	if m.wizardThinking != "" && m.wizardThinking != "auto" {

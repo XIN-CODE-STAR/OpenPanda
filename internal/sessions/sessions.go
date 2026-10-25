@@ -567,6 +567,13 @@ func (s *Store) SetAgentSession(id, agent, agentSessionID string) error {
 // clears the restriction (the scheduler routes by capability again), which is
 // also what a thread that never picked a team carries.
 func (s *Store) SetTeam(id string, team []string) error {
+	// Validate here as well as at the HTTP/CLI edge: SetTeam is the one write
+	// path every surface funnels through, and a malformed name that slips past
+	// a caller would make every task in the thread unroutable.
+	clean, err := CleanTeam(team)
+	if err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess, err := s.load(id)
@@ -575,7 +582,7 @@ func (s *Store) SetTeam(id string, team []string) error {
 	}
 	// Copy: the caller keeps its slice (the panel reuses the decoded request
 	// body) and a later mutation must not rewrite a saved thread's roster.
-	sess.Team = append([]string(nil), team...)
+	sess.Team = clean
 	sess.UpdatedAt = time.Now()
 	return s.save(sess)
 }

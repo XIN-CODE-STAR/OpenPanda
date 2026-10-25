@@ -21,11 +21,13 @@ import { SkillsView } from './skills'
 import { SystemView } from './system'
 import { ModelsSection } from './models'
 
-type ApiType = 'anthropic' | 'openai'
+type ApiType = 'anthropic' | 'openai' | 'responses' | 'google'
 
 const EXAMPLES: Record<ApiType, { base: string; model: string }> = {
   anthropic: { base: 'https://api.anthropic.com', model: 'claude-sonnet-5-5' },
   openai: { base: 'https://api.openai.com/v1', model: 'gpt-6.1-sol' },
+  responses: { base: 'https://api.openai.com/v1', model: 'gpt-6.1-sol' },
+  google: { base: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-4-argon' },
 }
 
 export type Section =
@@ -306,7 +308,7 @@ function ModelSection() {
       <div class="field-group">
         <label>{t('settings.apiType')}</label>
         <div class="segmented" role="radiogroup">
-          {(['anthropic', 'openai'] as const).map((v) => (
+          {(['anthropic', 'openai', 'responses', 'google'] as const).map((v) => (
             <button
               key={v}
               type="button"
@@ -315,7 +317,13 @@ function ModelSection() {
               class={`seg${apiType === v ? ' on' : ''}`}
               onClick={() => patch({ api_type: v })}
             >
-              {v === 'anthropic' ? t('settings.anthropic') : t('settings.openai')}
+              {v === 'anthropic'
+                ? t('settings.anthropic')
+                : v === 'openai'
+                  ? t('settings.openai')
+                  : v === 'responses'
+                    ? t('settings.responses')
+                    : t('settings.google')}
             </button>
           ))}
         </div>

@@ -57,7 +57,7 @@ storage:
   # task_retention_days: 30
 
 model:
-  api_type: ""       # anthropic | openai（缺省 anthropic）
+  api_type: ""       # anthropic | openai | responses | google（缺省 anthropic）
   base_url: ""       # 如 provider 需要自定义 endpoint
   model: ""          # 如 claude-sonnet-5-5, gpt-6.1-sol, deepseek-flash ...
   api_key: ""        # 留空；优先经 OPENPANDA_MODEL_API_KEY 注入

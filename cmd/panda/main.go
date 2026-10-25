@@ -117,7 +117,7 @@ func subcommandNames() []string {
 		"daemon", "serve", "ask", "repl", "chat", "web", "voice",
 		"install", "uninstall", "update", "upgrade", "doctor", "status", "nodes", "pair", "join", "queue",
 		"task", "plan", "cancel", "approve", "reject", "logs", "skill", "mcp",
-		"reminder", "detect", "card", "init", "metrics", "heatmap", "audit", "session",
+		"reminder", "todo", "detect", "card", "init", "metrics", "heatmap", "audit", "session",
 		"sessions", "memory", "config", "model", "models", "agents", "project",
 		"auth", "rpc",
 		"read", "view", "cat", "md", "markdown", "version", "help", "completion", "self",
@@ -966,6 +966,7 @@ func printUsage(w *os.File) {
 	h("", "cli.help.d.config", wide)
 	h("  agents [test <name>]", "cli.help.d.agents", wide)
 	h("  reminder list|add|rm", "cli.help.d.reminder", wide)
+	h("  todo <list|add|edit|done|rm|move|start>", "cli.help.d.todo", wide)
 	h("  skill list|find|hub|add|reset", "cli.help.d.skill", wide)
 	h("  mcp", "cli.help.d.mcp", wide)
 	h("  rpc", "cli.help.d.rpc", wide)

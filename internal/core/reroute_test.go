@@ -69,10 +69,9 @@ func TestDeclineReroutesToAlternateNode(t *testing.T) {
 	must(root.Register(ctx))
 	must(leafA.Register(ctx))
 	must(leafB.Register(ctx))
-	go func() { _ = root.Listen(ctx, "127.0.0.1:17931") }()
-	go func() { _ = leafA.Listen(ctx, "127.0.0.1:17932") }()
-	go func() { _ = leafB.Listen(ctx, "127.0.0.1:17933") }()
-	time.Sleep(200 * time.Millisecond)
+	startListen(t, ctx, root, "127.0.0.1:17931")
+	startListen(t, ctx, leafA, "127.0.0.1:17932")
+	startListen(t, ctx, leafB, "127.0.0.1:17933")
 	must(root.DialPeer(ctx, "127.0.0.1:17932"))
 	must(root.DialPeer(ctx, "127.0.0.1:17933"))
 	time.Sleep(300 * time.Millisecond)
@@ -160,9 +159,8 @@ func TestDeclineRerouteExhaustedPropagates(t *testing.T) {
 	if err := leaf.Register(ctx); err != nil {
 		t.Fatalf("register leaf: %v", err)
 	}
-	go func() { _ = root.Listen(ctx, "127.0.0.1:17941") }()
-	go func() { _ = leaf.Listen(ctx, "127.0.0.1:17942") }()
-	time.Sleep(200 * time.Millisecond)
+	startListen(t, ctx, root, "127.0.0.1:17941")
+	startListen(t, ctx, leaf, "127.0.0.1:17942")
 	if err := root.DialPeer(ctx, "127.0.0.1:17942"); err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -230,9 +228,8 @@ func TestDeclineReroutesToLocalNode(t *testing.T) {
 			t.Fatalf("register %s: %v", c.nodeID, err)
 		}
 	}
-	go func() { _ = root.Listen(ctx, "127.0.0.1:17951") }()
-	go func() { _ = leaf.Listen(ctx, "127.0.0.1:17952") }()
-	time.Sleep(200 * time.Millisecond)
+	startListen(t, ctx, root, "127.0.0.1:17951")
+	startListen(t, ctx, leaf, "127.0.0.1:17952")
 	if err := root.DialPeer(ctx, "127.0.0.1:17952"); err != nil {
 		t.Fatalf("dial: %v", err)
 	}

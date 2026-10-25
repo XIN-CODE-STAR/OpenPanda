@@ -34,9 +34,8 @@ func TestCancelPropagatesDownstream(t *testing.T) {
 	}
 	must(root.Register(ctx))
 	must(leaf.Register(ctx))
-	go func() { _ = root.Listen(ctx, "127.0.0.1:17871") }()
-	go func() { _ = leaf.Listen(ctx, "127.0.0.1:17872") }()
-	time.Sleep(200 * time.Millisecond)
+	startListen(t, ctx, root, "127.0.0.1:17871")
+	startListen(t, ctx, leaf, "127.0.0.1:17872")
 	must(root.DialPeer(ctx, "127.0.0.1:17872"))
 	waitPeer(t, root, "leaf")
 	waitPeer(t, leaf, "root")

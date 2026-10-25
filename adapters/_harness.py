@@ -40,6 +40,7 @@ envelope per turn on stdout instead of exiting after the first.
 This module never prints secrets.
 """
 import atexit
+import hashlib
 import json
 import os
 import re
@@ -47,10 +48,118 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
 DEFAULT_TIMEOUT = 600
+
+
+# ---- cross-process probe cache -------------------------------------------
+#
+# Adapters are one process per task, so a roster/flags probe memoized in a
+# module global still pays its subprocess on every dispatch. This cache lets a
+# probe's *successful* answer survive between tasks (keyed by the CLI's own
+# fingerprint, so an upgrade invalidates it) without ever being required for
+# correctness: every read and write failure is a miss. Secrets are never
+# stored — callers cache public catalogue/flag data only.
+
+_CACHE_OFF_VALUES = ("0", "false", "no", "off")
+
+
+def cache_enabled():
+    """Whether cross-process caching is on (OPENPANDA_ADAPTER_CACHE=0 disables)."""
+    value = os.environ.get("OPENPANDA_ADAPTER_CACHE", "").strip().lower()
+    return value not in _CACHE_OFF_VALUES
+
+
+def cache_dir():
+    """The adapter cache directory, created lazily by cache_put."""
+    explicit = os.environ.get("OPENPANDA_CACHE_DIR", "").strip()
+    if explicit:
+        return explicit
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA", "").strip()
+        if base:
+            return os.path.join(base, "openpanda", "cache")
+    else:
+        base = os.environ.get("XDG_CACHE_HOME", "").strip()
+        if not base:
+            home = os.path.expanduser("~")
+            if home and home != "~":
+                base = os.path.join(home, ".cache")
+        if base:
+            return os.path.join(base, "openpanda")
+    # No home to write to (service accounts, containers): a per-user temp dir
+    # still shares across the tasks of one session.
+    if hasattr(os, "getuid"):
+        suffix = str(os.getuid())
+    else:
+        suffix = re.sub(r"[^A-Za-z0-9_.-]", "_", os.environ.get("USERNAME") or "user")
+    return os.path.join(tempfile.gettempdir(), "openpanda-cache-" + suffix)
+
+
+def _cache_file(name, key):
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:40]
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", name) or "cache"
+    return os.path.join(cache_dir(), "adapter-%s-%s.json" % (safe, digest))
+
+
+def cache_get(name, key, ttl_s):
+    """Return a cached value for (name, key), or None on miss/expiry/failure."""
+    if not cache_enabled() or not key:
+        return None
+    try:
+        with open(_cache_file(name, key), "r", encoding="utf-8") as fh:
+            doc = json.load(fh)
+        if not isinstance(doc, dict):
+            return None
+        if time.time() - float(doc.get("ts", 0)) > ttl_s:
+            return None
+        return doc.get("value")
+    except Exception:
+        return None
+
+
+def cache_put(name, key, value):
+    """Best-effort write of one cached value; failures only cost a future miss."""
+    if not cache_enabled() or not key:
+        return
+    try:
+        directory = cache_dir()
+        os.makedirs(directory, exist_ok=True)
+        path = _cache_file(name, key)
+        tmp = "%s.%d.tmp" % (path, os.getpid())
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"ts": time.time(), "value": value}, fh)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def file_fingerprint(path):
+    """Identity of one file: absolute path, size and nanosecond mtime.
+
+    An upgrade rewrites the binary, so the fingerprint changes and every
+    cached probe keyed by it misses — no TTL guesswork about releases.
+    Unreadable paths fingerprint as "" (callers then skip the cache).
+    """
+    if not path:
+        return ""
+    try:
+        st = os.stat(path)
+        return "%s|%d|%d" % (os.path.abspath(path), st.st_size, st.st_mtime_ns)
+    except Exception:
+        return ""
+
+
+def which_fingerprint(name):
+    """Fingerprint the CLI that name resolves to on PATH ("" when absent)."""
+    try:
+        resolved = shutil.which(name) or ""
+    except Exception:
+        resolved = ""
+    return file_fingerprint(resolved)
 
 
 # Live child procs, tracked so a cancellation that reaches the adapter as
@@ -257,19 +366,24 @@ def _shim_exe(shim_path):
         if not node:
             node = _win_which("node") or "node"
         return [node, script]
-    # A hand-written wrapper names the interpreter first and the script
-    # second: `"C:\...\node.exe" "C:\...\zcode.cjs" %*`. The bare-.exe scan
-    # below would return the interpreter ALONE and drop the script, so the
+    # A launcher shim — "<interpreter.exe>" "<script>" %* — the shape a
+    # hand-written wrapper or a venv's console script uses (and the shape the
+    # adapter contract tests generate on Windows). Both halves are quoted
+    # paths, so the pair resolves to [interpreter, script] and the spawn skips
+    # cmd.exe and its %* requoting. Without this branch the single-.exe scan
+    # below would return the interpreter alone and drop the script, so the
     # resolved command line starts `node --prompt …` and dies in node's own
     # option parser ("bad option: --prompt") — which reads like an adapter
-    # bug rather than a shim the harness failed to unwrap. Same bypass and
-    # same fidelity win as the npm form: cmd.exe never sees the prompt.
-    for match in re.finditer(r'"([^"]+\.exe)"[ \t]+"([^"]+)"', body, re.I):
-        interp = resolve(match.group(1))
-        script = resolve(match.group(2))
-        if (os.path.isfile(interp) and os.path.isfile(script)
-                and not script.lower().endswith(".exe")):
-            return [interp, script]
+    # bug rather than a shim the harness failed to unwrap. Pairing is by kind
+    # rather than by adjacency, so a flag between the two still resolves.
+    quoted = [resolve(m.group(1)) for m in re.finditer(r'"([^"]+)"', body)]
+    exes = [p for p in quoted
+            if p.lower().endswith(".exe") and os.path.isfile(p)]
+    scripts = [p for p in quoted
+               if not p.lower().endswith((".exe", ".cmd", ".bat"))
+               and os.path.isfile(p)]
+    if exes and scripts:
+        return [exes[0], scripts[0]]
     for match in re.finditer(r'"([^"]+\.exe)"', body):
         cand = resolve(match.group(1))
         if os.path.isfile(cand):

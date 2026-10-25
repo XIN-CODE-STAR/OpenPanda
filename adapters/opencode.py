@@ -28,7 +28,10 @@ capable entry itself: `opencode api model.list` (v2 builds) exposes each
 model's real metadata — context/output limits, tool support, modalities,
 reasoning variants, cost — which drives a capability score; on builds whose
 catalog probe fails the score falls back to slug heuristics (family, size and
-stability markers). A paid entry only wins when it clearly outscores the free
+stability markers). Both probes are cached across adapter processes (keyed by
+the CLI's and config's fingerprints, with a short TTL), so a burst of tasks
+pays the roster once; a rejected model forces a fresh probe instead of
+trusting the cache. A paid entry only wins when it clearly outscores the free
 ones — opencode is the low-cost tier in the mesh — and a simple task (the
 request's low complexity score, or a light effort level) drops paid entries
 to last resort: any qualified free model beats every paid one there. Set
@@ -71,6 +74,38 @@ _FLAG_PROBE = None
 _MODEL_LIST = None
 _MODEL_CATALOG = None
 
+# Cross-process probe cache lifetimes. The roster and its metadata live on the
+# service side and can change without any local signal, so they stay short; the
+# flag set only moves with the installed build, whose fingerprint (path, size,
+# mtime) is part of every cache key, so it can live much longer.
+_MODELS_CACHE_TTL = 300
+_CATALOG_CACHE_TTL = 600
+_FLAGS_CACHE_TTL = 3600
+_CACHE_IDENTITY = None
+
+
+def _cache_identity():
+    """Everything that makes this install's roster answer unique.
+
+    The CLI binary fingerprint catches an upgrade; the config files (the
+    ambient one plus any OPENCODE_CONFIG override) catch a provider the user
+    just added. Any empty fingerprint contributes nothing, and an all-empty
+    identity disables the cache rather than sharing one global answer. Memoized
+    per process: three probes in one run must all key on the same identity.
+    """
+    global _CACHE_IDENTITY
+    if _CACHE_IDENTITY is not None:
+        return _CACHE_IDENTITY
+    parts = [harness.which_fingerprint("opencode")]
+    cfg = os.environ.get("OPENCODE_CONFIG", "").strip()
+    if cfg:
+        parts.append(harness.file_fingerprint(cfg))
+    home = os.path.expanduser("~")
+    for rel in (".config/opencode/opencode.json", ".config/opencode/opencode.jsonc"):
+        parts.append(harness.file_fingerprint(os.path.join(home, rel)))
+    _CACHE_IDENTITY = "|".join(parts)
+    return _CACHE_IDENTITY
+
 
 def _cli_flags():
     """Probe `opencode run --help` once per process for the flags this build
@@ -87,6 +122,14 @@ def _cli_flags():
     global _FLAG_PROBE
     if _FLAG_PROBE is not None:
         return _FLAG_PROBE
+    identity = _cache_identity()
+    cached = harness.cache_get("opencode-flags", identity, _FLAGS_CACHE_TTL)
+    if isinstance(cached, dict):
+        auto = cached.get("auto") if cached.get("auto") in (
+            "--auto", "--dangerously-skip-permissions") else ""
+        _FLAG_PROBE = {"format": bool(cached.get("format")),
+                       "auto": auto, "agent": bool(cached.get("agent"))}
+        return _FLAG_PROBE
     text = ""
     try:
         argv = harness.resolve_argv(["opencode", "run", "--help"])
@@ -101,6 +144,10 @@ def _cli_flags():
         auto = "--dangerously-skip-permissions"
     _FLAG_PROBE = {"format": bool(re.search(r"--format\b", text)), "auto": auto,
                    "agent": bool(re.search(r"--agent\b", text))}
+    # A failed probe produced no text: caching "no flags" would downgrade an
+    # hour of runs after one transient hang, so only a real answer is stored.
+    if text.strip():
+        harness.cache_put("opencode-flags", identity, _FLAG_PROBE)
     return _FLAG_PROBE
 
 
@@ -115,19 +162,31 @@ class Unsupported(Exception):
 _MODEL_LINE_RE = re.compile(r"^[\w.@+-]+/[\w.@+-]+$")
 
 
-def _available_models():
+def _available_models(force=False):
     """The models this opencode install actually serves (`opencode models`),
-    probed once per process.
+    probed once per process and cached across processes.
 
     The CLI's free-tier roster drifts between builds — a hard-coded default
     like opencode/deepseek-v4-flash-free stops resolving the day the tier is
     renamed (deepseek-v4.1-…), and the run then dies in seconds with a yargs
     "model not found" that reads like a task failure. An empty list means the
     probe failed (old build without the subcommand, service down): callers
-    keep their pre-probe behaviour rather than guessing."""
+    keep their pre-probe behaviour rather than guessing.
+
+    force skips both the in-process memo and the disk cache — the
+    rotate-and-retry path needs what the service serves *now*."""
     global _MODEL_LIST
-    if _MODEL_LIST is not None:
+    if not force and _MODEL_LIST is not None:
         return _MODEL_LIST
+    identity = _cache_identity()
+    if not force:
+        cached = harness.cache_get("opencode-models", identity, _MODELS_CACHE_TTL)
+        if isinstance(cached, list):
+            models = [m for m in cached
+                      if isinstance(m, str) and _MODEL_LINE_RE.match(m)]
+            if models:
+                _MODEL_LIST = models
+                return _MODEL_LIST
     models = []
     try:
         argv = harness.resolve_argv(["opencode", "models"])
@@ -140,22 +199,36 @@ def _available_models():
     except Exception:
         models = []
     _MODEL_LIST = models
+    # Only a real roster is worth keeping: caching an empty probe would hide a
+    # service that came back, or a config the user just fixed, for its TTL.
+    if models:
+        harness.cache_put("opencode-models", identity, models)
     return models
 
 
-def _model_catalog():
+def _model_catalog(force=False):
     """Model metadata map from `opencode api model.list` (v2 builds), probed
-    once per process.
+    once per process and cached across processes.
 
     The catalog carries what the bare roster cannot: each served model's
     context/output limits, tool support, input modalities, reasoning
     variants, release time and cost — the fields the capability pick in
     _pick_model scores. An empty dict means the probe failed (pre-v2 build
     without the api subcommand, server unreachable, foreign output): callers
-    then score on slug heuristics alone."""
+    then score on slug heuristics alone. force bypasses both caches for the
+    same reason as _available_models."""
     global _MODEL_CATALOG
-    if _MODEL_CATALOG is not None:
+    if not force and _MODEL_CATALOG is not None:
         return _MODEL_CATALOG
+    identity = _cache_identity()
+    if not force:
+        cached = harness.cache_get("opencode-catalog", identity, _CATALOG_CACHE_TTL)
+        if isinstance(cached, dict):
+            catalog = {k: v for k, v in cached.items()
+                       if isinstance(v, dict) and "/" in k.strip("/")}
+            if catalog:
+                _MODEL_CATALOG = catalog
+                return _MODEL_CATALOG
     catalog = {}
     try:
         argv = harness.resolve_argv(["opencode", "api", "model.list"])
@@ -172,6 +245,8 @@ def _model_catalog():
     except Exception:
         catalog = {}
     _MODEL_CATALOG = catalog
+    if catalog:
+        harness.cache_put("opencode-catalog", identity, catalog)
     return catalog
 
 
@@ -324,11 +399,15 @@ def _looks_like_model_failure(text):
 
 def _fresh_pick(excluded, prefer_free):
     """Drop the probe caches, re-identify the served models and pick the
-    best entry not in `excluded`. Returns _pick_model's (model, variants)."""
+    best entry not in `excluded`. Returns _pick_model's (model, variants).
+
+    force=True on both probes: a rejected --model means the service rotated
+    since this run's answer (or a config changed under it), so neither the
+    in-process memo nor the cross-process cache may be trusted."""
     global _MODEL_LIST, _MODEL_CATALOG
     _MODEL_LIST = None
     _MODEL_CATALOG = None
-    available = [m for m in (_available_models() or sorted(_model_catalog()))
+    available = [m for m in (_available_models(force=True) or sorted(_model_catalog(force=True)))
                  if m not in excluded]
     return _pick_model(available, prefer_free)
 

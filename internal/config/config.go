@@ -1098,12 +1098,21 @@ const (
 	// Authorization: Bearer). OpenAI, DeepSeek's OpenAI endpoint, and most
 	// third-party gateways (Ollama, vLLM, OneAPI…) use it.
 	APITypeOpenAI = "openai"
+	// APITypeResponses is the OpenAI Responses API (/v1/responses,
+	// Authorization: Bearer). OpenAI's GPT-5/6 family and the Grok/Muse models
+	// on OpenCode's gateway are served there instead of Chat Completions.
+	APITypeResponses = "responses"
+	// APITypeGoogle is the Google Generative AI API
+	// (…/v1beta/models/<model>:generateContent, x-goog-api-key). Gemini models
+	// on OpenCode's gateway and Google's own endpoint use it.
+	APITypeGoogle = "google"
 )
 
 // ModelConfig selects the LLM provider for the entry model and the agent
 // adapters. api_type picks the wire format — "anthropic" (Messages API,
-// default) or "openai" (Chat Completions) — so any provider works with a
-// custom base_url + model; the user is never locked to a fixed vendor.
+// default), "openai" (Chat Completions), "responses" (OpenAI Responses) or
+// "google" (Gemini generateContent) — so any provider works with a custom
+// base_url + model; the user is never locked to a fixed vendor.
 //
 // Name and Provider power the multi-model registry: Name is the alias
 // `/model <name>` switches to (empty means "the model id is the alias"),
@@ -1114,7 +1123,7 @@ const (
 type ModelConfig struct {
 	Name     string `yaml:"name,omitempty"`     // alias for /model switch; empty = model id
 	Provider string `yaml:"provider,omitempty"` // built-in provider id (internal/providers)
-	APIType  string `yaml:"api_type"`           // "anthropic" | "openai" (default anthropic)
+	APIType  string `yaml:"api_type"`           // "anthropic" | "openai" | "responses" | "google" (default anthropic)
 	BaseURL  string `yaml:"base_url"`           // e.g. https://api.deepseek.com/anthropic
 	APIKey   string `yaml:"api_key"`            // secret; prefer env OPENPANDA_MODEL_API_KEY
 	// Auth names an OAuth provider from internal/auth ("anthropic"): the
@@ -1162,8 +1171,9 @@ type ModelConfig struct {
 
 // NormalizedAPIType returns the validated api type, defaulting to Anthropic.
 func (m ModelConfig) NormalizedAPIType() string {
-	if m.APIType == APITypeOpenAI {
-		return APITypeOpenAI
+	switch m.APIType {
+	case APITypeOpenAI, APITypeResponses, APITypeGoogle:
+		return m.APIType
 	}
 	return APITypeAnthropic
 }

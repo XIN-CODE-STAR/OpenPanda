@@ -28,8 +28,7 @@ func TestPairHelloTargetingSelfAnswersLocally(t *testing.T) {
 	if err := intro.Register(ctx); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	go func() { _ = intro.Listen(ctx, "127.0.0.1:17983") }()
-	time.Sleep(200 * time.Millisecond)
+	startListen(t, ctx, intro, "127.0.0.1:17983")
 
 	introPub, _, ok := intro.nodeKeyPair()
 	if !ok {
@@ -109,9 +108,8 @@ func TestPairOverTransitThroughContactPoint(t *testing.T) {
 	if err := contact.Register(ctx); err != nil {
 		t.Fatalf("register contact: %v", err)
 	}
-	go func() { _ = intro.Listen(ctx, "127.0.0.1:17981") }()
-	go func() { _ = contact.Listen(ctx, "127.0.0.1:17982") }()
-	time.Sleep(200 * time.Millisecond)
+	startListen(t, ctx, intro, "127.0.0.1:17981")
+	startListen(t, ctx, contact, "127.0.0.1:17982")
 
 	// The contact point must be a real member of the introducer's mesh —
 	// that authenticated edge is what carries the proxied handshake.

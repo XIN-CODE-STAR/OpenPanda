@@ -34,9 +34,8 @@ func TestDaemonStyleMutualDialNoStorm(t *testing.T) {
 			t.Fatalf("register: %v", err)
 		}
 	}
-	go func() { _ = a.Listen(ctx, "127.0.0.1:17961") }()
-	go func() { _ = b.Listen(ctx, "127.0.0.1:17962") }()
-	time.Sleep(200 * time.Millisecond)
+	startListen(t, ctx, a, "127.0.0.1:17961")
+	startListen(t, ctx, b, "127.0.0.1:17962")
 
 	// Mac role: one MaintainPeer — its outbound conn is the dedup winner and
 	// the loop just blocks serving it.

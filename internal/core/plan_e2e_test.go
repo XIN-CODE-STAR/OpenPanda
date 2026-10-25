@@ -71,10 +71,9 @@ func TestPlanThreeStagesThreeNodes(t *testing.T) {
 	must(pi.Register(ctx))
 	must(mac.Register(ctx))
 	must(win.Register(ctx))
-	go func() { _ = pi.Listen(ctx, "127.0.0.1:17991") }()
-	go func() { _ = mac.Listen(ctx, "127.0.0.1:17992") }()
-	go func() { _ = win.Listen(ctx, "127.0.0.1:17993") }()
-	time.Sleep(200 * time.Millisecond)
+	startListen(t, ctx, pi, "127.0.0.1:17991")
+	startListen(t, ctx, mac, "127.0.0.1:17992")
+	startListen(t, ctx, win, "127.0.0.1:17993")
 	must(pi.DialPeer(ctx, "127.0.0.1:17992"))
 	must(pi.DialPeer(ctx, "127.0.0.1:17993"))
 	waitPeer(t, pi, "mac")
@@ -342,10 +341,8 @@ func TestPlanStageNodePin(t *testing.T) {
 	if err := mac.Register(ctx); err != nil {
 		t.Fatalf("register mac: %v", err)
 	}
-	go func() { _ = pi.Listen(ctx, "127.0.0.1:17995") }()
-	go func() { _ = mac.Listen(ctx, "127.0.0.1:17996") }()
-	waitListening(t, "127.0.0.1:17995")
-	waitListening(t, "127.0.0.1:17996")
+	startListen(t, ctx, pi, "127.0.0.1:17995")
+	startListen(t, ctx, mac, "127.0.0.1:17996")
 	if err := pi.DialPeer(ctx, "127.0.0.1:17996"); err != nil {
 		t.Fatalf("dial mac: %v", err)
 	}
@@ -442,9 +439,8 @@ func TestPlanPinnedStageWithSweepRunning(t *testing.T) {
 	if err := mac.Register(ctx); err != nil {
 		t.Fatalf("register mac: %v", err)
 	}
-	go func() { _ = pi.Listen(ctx, "127.0.0.1:17994") }()
-	go func() { _ = mac.Listen(ctx, "127.0.0.1:17995") }()
-	time.Sleep(200 * time.Millisecond)
+	startListen(t, ctx, pi, "127.0.0.1:17994")
+	startListen(t, ctx, mac, "127.0.0.1:17995")
 	if err := pi.DialPeer(ctx, "127.0.0.1:17995"); err != nil {
 		t.Fatalf("dial mac: %v", err)
 	}

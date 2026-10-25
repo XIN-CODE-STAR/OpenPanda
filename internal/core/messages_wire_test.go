@@ -29,10 +29,9 @@ func TestTaskMessageTravelsTheWire(t *testing.T) {
 			t.Fatalf("register %s: %v", c.nodeID, err)
 		}
 	}
-	go func() { _ = origin.Listen(ctx, "127.0.0.1:18230") }()
-	go func() { _ = leafA.Listen(ctx, "127.0.0.1:18231") }()
-	go func() { _ = leafB.Listen(ctx, "127.0.0.1:18232") }()
-	time.Sleep(150 * time.Millisecond)
+	startListen(t, ctx, origin, "127.0.0.1:18230")
+	startListen(t, ctx, leafA, "127.0.0.1:18231")
+	startListen(t, ctx, leafB, "127.0.0.1:18232")
 	if err := origin.DialPeer(ctx, "127.0.0.1:18231"); err != nil {
 		t.Fatalf("dial leaf a: %v", err)
 	}
@@ -185,11 +184,10 @@ func TestTaskMessageTravelsMultiHop(t *testing.T) {
 			t.Fatalf("register %s: %v", c.nodeID, err)
 		}
 	}
-	go func() { _ = origin.Listen(ctx, "127.0.0.1:18330") }()
-	go func() { _ = relay.Listen(ctx, "127.0.0.1:18331") }()
-	go func() { _ = leafA.Listen(ctx, "127.0.0.1:18332") }()
-	go func() { _ = leafB.Listen(ctx, "127.0.0.1:18333") }()
-	time.Sleep(150 * time.Millisecond)
+	startListen(t, ctx, origin, "127.0.0.1:18330")
+	startListen(t, ctx, relay, "127.0.0.1:18331")
+	startListen(t, ctx, leafA, "127.0.0.1:18332")
+	startListen(t, ctx, leafB, "127.0.0.1:18333")
 	// Chain topology: origin ↔ relay ↔ leafA, with leafB a direct leaf of
 	// origin. leafA and origin are NOT peers — every board post crossing
 	// between them must be relayed.

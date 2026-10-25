@@ -313,9 +313,8 @@ func TestEnqueueRoutesToPeer(t *testing.T) {
 	if err := leaf.Register(ctx); err != nil {
 		t.Fatalf("leaf register: %v", err)
 	}
-	go func() { _ = root.Listen(ctx, "127.0.0.1:17881") }()
-	go func() { _ = leaf.Listen(ctx, "127.0.0.1:17882") }()
-	time.Sleep(200 * time.Millisecond)
+	startListen(t, ctx, root, "127.0.0.1:17881")
+	startListen(t, ctx, leaf, "127.0.0.1:17882")
 	if err := root.DialPeer(ctx, "127.0.0.1:17882"); err != nil {
 		t.Fatalf("dial: %v", err)
 	}

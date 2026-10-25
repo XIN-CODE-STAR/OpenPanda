@@ -289,11 +289,13 @@ function ApprovalStep(props: {
 
 // ---- Step 4: model ----
 
-type ApiType = 'anthropic' | 'openai'
+type ApiType = 'anthropic' | 'openai' | 'responses' | 'google'
 
 const EXAMPLES: Record<ApiType, { base: string; model: string }> = {
   anthropic: { base: 'https://api.anthropic.com', model: 'claude-sonnet-5-5' },
   openai: { base: 'https://api.openai.com/v1', model: 'gpt-6.1-sol' },
+  responses: { base: 'https://api.openai.com/v1', model: 'gpt-6.1-sol' },
+  google: { base: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-4-argon' },
 }
 
 /** The model step mirrors the models page's add wizard: a catalogue card
@@ -339,7 +341,14 @@ function ModelStep(props: { onSaved(): void }) {
     setProvider(p)
     setModel(p.default_model)
     setBaseUrl(p.id === 'custom' ? '' : p.base_url)
-    if (p.api_type === 'anthropic' || p.api_type === 'openai') setApiType(p.api_type)
+    if (
+      p.api_type === 'anthropic' ||
+      p.api_type === 'openai' ||
+      p.api_type === 'responses' ||
+      p.api_type === 'google'
+    ) {
+      setApiType(p.api_type)
+    }
     setRemoteModels(null)
     setTestResult(null)
     setError('')
@@ -477,7 +486,7 @@ function ModelStep(props: { onSaved(): void }) {
           <div class="field-group">
             <label>{t('settings.apiType')}</label>
             <div class="segmented" role="radiogroup">
-              {(['openai', 'anthropic'] as const).map((v) => (
+              {(['openai', 'anthropic', 'responses', 'google'] as const).map((v) => (
                 <button
                   key={v}
                   type="button"
@@ -489,7 +498,13 @@ function ModelStep(props: { onSaved(): void }) {
                     setTestResult(null)
                   }}
                 >
-                  {v === 'anthropic' ? t('settings.anthropic') : t('settings.openai')}
+                  {v === 'anthropic'
+                    ? t('settings.anthropic')
+                    : v === 'openai'
+                      ? t('settings.openai')
+                      : v === 'responses'
+                        ? t('settings.responses')
+                        : t('settings.google')}
                 </button>
               ))}
             </div>

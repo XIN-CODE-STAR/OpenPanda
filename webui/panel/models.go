@@ -87,7 +87,8 @@ func modelEntryOf(mc config.ModelConfig, active config.ModelConfig) modelEntryJS
 	if known {
 		e.ProviderLabel = p.Label
 		if e.BaseURL == "" {
-			e.BaseURL = p.BaseURL
+			// An aggregator serves a routed family on its own surface.
+			e.BaseURL, _ = p.EndpointFor(e.Model)
 		}
 		if e.Model == "" {
 			e.Model = p.DefaultModel

@@ -67,7 +67,7 @@ var endpointClient = &http.Client{
 
 // apiTypeResponses is the OpenAI Responses API wire shape — codex's
 // wire_api="responses" providers speak it instead of chat/completions.
-const apiTypeResponses = "responses"
+const apiTypeResponses = config.APITypeResponses
 
 // ProbeSpec describes the model call a run would actually make: which
 // endpoint, which wire protocol, and — when panda can see it — the

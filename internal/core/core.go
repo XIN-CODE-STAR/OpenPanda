@@ -695,6 +695,12 @@ func NewCore(db *sql.DB, nodeID string, card ledger.Card, tier int, logger *slog
 	// config once the caller has it.
 	if len(card.Native) > 0 || len(card.Agents) > 0 || len(card.Manual) > 0 || len(card.Actuators) > 0 {
 		c.router = commander.NewRouter(card, commander.NewExecutor(), model, config.InjectionConfig{}, config.RoutingConfig{})
+		// Local ranking consults the same breaker whose open circuits are
+		// published to peers as blocked_agents: an agent this node already
+		// ruled out must not keep winning its own dispatch plan. The predicate
+		// is non-mutating (Blocked, not Allow), so ranking never spends a
+		// half-open trial slot on an agent that may not run.
+		c.router.SetAgentBlocked(func(name string) bool { return c.breaker.Blocked("agent:" + name) })
 	}
 	// P2-9: hand the task store and the audit log this node's identity so
 	// every event and high-risk record they write carries the Ed25519
@@ -842,6 +848,7 @@ func (c *Core) ReloadCard(ctx context.Context, path string) error {
 	c.card = card
 	if len(card.Native) > 0 || len(card.Agents) > 0 || len(card.Manual) > 0 || len(card.Actuators) > 0 {
 		c.router = commander.NewRouter(card, commander.NewExecutor(), c.model, c.routerInjection, c.routerRouting)
+		c.router.SetAgentBlocked(func(name string) bool { return c.breaker.Blocked("agent:" + name) })
 		c.router.SetMCPPassthrough(c.mcpPassthrough)
 		c.router.SetSelfConfigPath(c.selfConfigPath)
 	} else {
@@ -2033,8 +2040,22 @@ func (c *Core) Listen(ctx context.Context, addr string) error {
 			c.handleInbound(ctx, conn)
 		})
 	})
+	// The bind may choose a different address than the one asked for — a
+	// ":0" listener gets an ephemeral port — and hello payloads plus
+	// discovery beacons must advertise what peers can actually dial. The
+	// configured address stays as the pre-bind value so a node that is still
+	// starting describes itself instead of advertising an empty string.
+	srv.OnBound(func(bound string) { c.listenAddr.Store(bound) })
 	srv.SetLimits(c.maxConns, c.maxConnsPerIP)
 	return srv.Listen(ctx)
+}
+
+// ListenAddr reports the address this node's WebSocket listener is bound to,
+// or the configured address before the bind has happened. It is what the
+// capability summary and discovery beacons advertise.
+func (c *Core) ListenAddr() string {
+	addr, _ := c.listenAddr.Load().(string)
+	return addr
 }
 
 // handleInbound runs the read loop for a connection (server- or client-

@@ -42,10 +42,12 @@ OpenPanda（**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **
 
 ### 新增
 
+- **OpenCode Go / Console 成为内置模型供应商** —— `panda model add opencode-go oc_sk_…` 可注册这个网关：按量付费的 Console 目录与 Go/Go Plus 订阅共用同一把 key。每个模型都会路由到承载它的线面：开放模型走 OpenAI Chat，Claude 与 Anthropic 方言的 Qwen 走 Anthropic Messages，GPT/Grok/Muse 走 OpenAI Responses API，Gemini 走 Google Generative AI API——后两种方言是入口客户端新增的，含流式、工具调用与用量统计。只有 SystemOne（Jev）仍不支持，并在配置阶段直接说明，而不是每次调用才失败；定价按模型计价。
 - `OPENPANDA_UPDATE_BASE` 可把自更新的下载指向发布资产镜像——这是给"能连 `api.github.com`、连不上 `release-assets.githubusercontent.com`"的网络留的出口。安装脚本已支持的 `OPENPANDA_RELEASE_BASE` 作为别名一并接受，一个变量同时管安装与升级。
 - **同意卡片展示条款本身，而不是它的摘要** —— 引导向导与设置里的弹窗原先渲染十条压缩过的条款，那是同一份法律文本的第二份副本，随时可能与它所概括的文件脱节。现在两处都直接渲染 `TERMS.md` 本身——全部十七节，按控制台语言——走的是转写页同一个 Markdown 渲染器。正文完全不再复制进控制台：每份译本在构建时从仓库自己的文件内联进来，需要修改时只有一处。
 - **你选的团队就是派发预算** —— 每轮子代理上限原先是写死的 `3`，所以团队为 claude_code、codex、deepseek_harness 和 opencode 的会话只派出了三个任务，第四个在提交之前就被丢掉：没有卡片、没有报错、回执上什么都没有。上限现在由名单推导（每选一个 agent 一个任务），`task_budget` 让模型为没人枚举过的并行工作申报更大额度（上限 8），会话团队也进入入口提示词，模型会点名你选的 agent，而不是自己编。
 - **任务卡是一个面板加五个按钮** —— 聊天卡原先把任务页的五个分区竖着堆叠，且默认全部折叠：360px 的浮层里只有五个标题和一条滚动条。现在一行按钮打开一个 420px 的共享面板，没内容的分区不出现按钮；执行链路回答的是哪个模型、哪个适配器、哪台机器、以什么权限运行，每一步还带时刻。
+- **终端现在能做控制台能做的事** —— 会话花名册原先是 Web 专属字段。现在 REPL/TUI 用 `/team` 设置（直接输入会打开空格切换的多选卡片），`/node` 把下一轮固定到某台机器，`panda ask --team/--node`、`panda session ask --node` 与 RPC 接口都通过 `AskScope` 传递这两个范围——补上了"控制台选的花名册管不住终端提问"这个缺口。待办板可用 `panda todo …` / `/todo`（list、add、edit、done、reopen、rm，以及 start 交给熊猫执行），`/task artifact <id>` 也终于能在会话内直接读取产物池，而不是在任务 ID 上报错。
 
 ### 修复
 
@@ -63,6 +65,10 @@ OpenPanda（**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **
 - **替换会说清原因** — 替换提示只点了两个 agent 的名字，没说是为什么；而且那个「为什么」本来就是空的：一次撞上 30 轮上限的 `claude_code` 运行只回了 `is_error`、没有正文，于是回退链记下的是「exec failed: 」后面什么都没有，读的人分不清是崩溃还是上限。适配器现在会用错误信封里的字段拼出诊断（`claude stopped at its turn cap after 31 turns without a final answer`），回退把它带在 `agent_fallback` 事件上，报告行把它印进替换提示——长度有上限，因为那一行是说明文字，不是日志。
 
 - **grok_build 现在真的能跑** —— 点名它的任务被别的 agent 答了，背后是三个独立的毛病。`grok` 从来没登录过，而它的措辞（"Not signed in. To authenticate without a browser…"）不匹配任何一条凭据失败特征，于是补救注入没有触发，回退链接走了任务；注入的端点走的是 `GROK_BASE_URL`，这个 CLI 根本不读（它读 `GROK_MODELS_BASE_URL`），所以就算补救也会把它指向 api.x.ai 却递上别家的 key；而 `--single` 打完答案**不退出进程**，登录好了也会一路挂到 600s 看门狗。适配器现在读事件流、在收尾的 `usage` 行结束这一轮，会话 id 每轮用新的 UUID（这个版本直接拒绝旧的 `panda-<hex>` 名字，而且 `-r --single` 什么都不返回，所以每轮冷启动而不是续会话），注册表也改成了 grok 真正认的端点变量。
+
+### 变更
+
+- **派发会吸取失败教训，探测不再重复** —— 适配器探测（`opencode models`、`api model.list`、`run --help`）现在按 CLI 与配置指纹缓存在进程之间，一批任务只需付一次探测开销；模型被拒时仍会强制重读。本机 agent 排序会把节点熔断器已判开的 agent 降权（仍保留为备选，绝不剔除），下一个任务不再从刚被判失败的 agent 上起步。模型熔断对连续失败逐级拉长（30 秒 → 5 分钟），并优先尝试健康备用模型；熔断键改为 provider/端点/模型，一个服务商故障不会连带冷却另一端点上的同名模型。
 
 ## [0.1.0] - 2026-10-23 — "Constellation"
 

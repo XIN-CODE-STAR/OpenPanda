@@ -250,7 +250,7 @@ function AddModelWizard(props: {
   const [apiKey, setApiKey] = useState('')
   const [alias, setAlias] = useState('')
   const [baseURL, setBaseURL] = useState('')
-  const [apiType, setAPIType] = useState<'anthropic' | 'openai'>('openai')
+  const [apiType, setAPIType] = useState<'anthropic' | 'openai' | 'responses' | 'google'>('openai')
   const [maxTokens, setMaxTokens] = useState(0)
   const [ctxWindow, setCtxWindow] = useState(0)
   const [thinking, setThinking] = useState<'auto' | 'on' | 'off'>('auto')
@@ -410,7 +410,7 @@ function AddModelWizard(props: {
                 <div class="field-group">
                   <label>{t('settings.apiType')}</label>
                   <div class="segmented">
-                    {(['openai', 'anthropic'] as const).map((v) => (
+                    {(['openai', 'anthropic', 'responses', 'google'] as const).map((v) => (
                       <button
                         key={v}
                         type="button"

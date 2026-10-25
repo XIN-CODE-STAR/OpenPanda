@@ -120,8 +120,11 @@ func (s *askStream) send(ctx context.Context, m tea.Msg) {
 // goroutine on a send into a channel the model has stopped draining.
 // mode carries the slash-prefix interaction mode (/goal, /plan, /spec) — ""
 // lets the classifier decide on its own. sessionID binds any session-scoped
-// remembered approval this turn produces to the attached session.
-func startAsk(engine *askengine.Engine, history []entry.Turn, prompt, workDir, sessionID string, authorize bool, mode string) (*askStream, tea.Cmd) {
+// remembered approval this turn produces to the attached session. agents is
+// the conversation's roster (the console's team pick): it bounds this round's
+// dispatch budget and rides every task's spec, exactly as the panel's ask does.
+// node is the one-shot /node pin for this turn ("" lets the scheduler choose).
+func startAsk(engine *askengine.Engine, history []entry.Turn, prompt, workDir, sessionID string, agents []string, node string, authorize bool, mode string) (*askStream, tea.Cmd) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &askStream{
 		events:  make(chan tea.Msg, 256),
@@ -157,9 +160,17 @@ func startAsk(engine *askengine.Engine, history []entry.Turn, prompt, workDir, s
 		s.send(context.Background(), doneMsg{stream: s, err: errors.New("ask worker panicked (see log)")})
 	}, func() {
 		defer cancel()
-		// Ambient fallback keeps parity with the classic AskTurns path — a
-		// session-less ask may still bind the daemon's working dir.
-		out, err := engine.AskTurnsSession(ctx, history, prompt, workDir, mode, sessionID, authorize, cb)
+		// Ambient fallback keeps parity with the classic REPL path — a
+		// session-less ask may still bind the daemon's working dir — and the
+		// scoped form carries the thread's roster and node pin.
+		out, err := engine.AskTurnsScoped(ctx, history, prompt, askengine.AskScope{
+			WorkDir:        workDir,
+			Mode:           mode,
+			SessionID:      sessionID,
+			Agents:         agents,
+			Node:           node,
+			AmbientProject: true,
+		}, authorize, cb)
 		// The outcome must reach the model whenever it is still listening, and
 		// must not park this goroutine forever when it is not. send covers
 		// both: ctx is cancelled only (a) by drop(), which means the user

@@ -63,6 +63,18 @@ type Provider struct {
 	// (MiniMax-M3 does 1M/512K, the M2.x line 200K/200K), so a matching
 	// spec wins over the provider-level values. See SpecFor.
 	Models []ModelSpec
+	// Routes list model families this provider serves on a different wire
+	// surface than the row's own BaseURL/APIType. An aggregator such as
+	// OpenCode's gateway answers open models on its OpenAI-chat endpoint and
+	// Claude/Qwen on its Anthropic Messages endpoint under one key; a route
+	// carries the alternate endpoint and dialect for its model prefixes, and
+	// EndpointFor resolves a model through it.
+	Routes []Route
+	// Unsupported names model families this provider serves on a wire
+	// surface the entry client does not implement (OpenAI Responses, Google
+	// Generative AI). A config naming one fails at client construction with
+	// the reason, instead of an opaque gateway 400 on every call.
+	Unsupported []UnsupportedModel
 	// ModelAliases are extra model-name prefixes Detect should resolve to
 	// this provider — the provider id alone misses families like gpt-*
 	// (openai), glm-* (zhipu) or doubao-* (volcengine).
@@ -106,6 +118,24 @@ func (p Provider) IsGlobalModel() bool {
 	return p.GeographicOrigin == RegionGlobal
 }
 
+// Route is one alternate wire surface an aggregator serves a model family on.
+type Route struct {
+	// Prefixes match the model id case-insensitively as a prefix. The
+	// longest match wins, so a specific family can override a broader one.
+	Prefixes []string
+	// BaseURL is the endpoint base for this family (scheme included).
+	BaseURL string
+	// APIType is the wire dialect for this family (config.APIType*).
+	APIType string
+}
+
+// UnsupportedModel names a model family a provider serves on a wire surface
+// the entry client cannot speak, and the reason a caller gets instead.
+type UnsupportedModel struct {
+	Prefix string
+	Reason string
+}
+
 // ModelSpec is one model's limits inside a Provider row. Zero fields fall
 // through to the provider-level value, so a spec only needs the numbers
 // that differ.
@@ -116,6 +146,11 @@ type ModelSpec struct {
 	ContextWindow    int
 	MaxTokensCap     int
 	DefaultMaxTokens int
+	// Pricing overrides the provider row's price for this model. Aggregators
+	// resell vendors at prices that differ by an order of magnitude
+	// (GLM-5.3-Flash vs Kimi K3), so one row price would misbill every other
+	// model; zero falls through to the provider row.
+	Pricing Pricing
 }
 
 // Pricing defines token prices in USD per 1M (1,000,000) tokens.
@@ -361,6 +396,77 @@ var builtins = []Provider{
 		GeographicOrigin: RegionGlobal,
 	},
 	{
+		// OpenCode's own gateway: the pay-as-you-go Console catalogue and the
+		// Go/Go Plus subscription share one oc_sk_ key and one endpoint.
+		// Models are served on four wire surfaces and this client speaks all
+		// of them: open models on the OpenAI-chat surface below, Claude and
+		// the Anthropic-dialect Qwen ids on Anthropic Messages, GPT/Grok/Muse
+		// on the OpenAI Responses API, and Gemini on Google Generative AI —
+		// under the same key, resolved per model through Routes. SystemOne
+		// (Jev) remains refused with the reason. Console's free-tier ids are
+		// OpenCode-only (403 from other clients), which is why no free model
+		// is the default.
+		ID:            "opencode-go",
+		Label:         "OpenCode Go / Console",
+		APIType:       config.APITypeOpenAI,
+		BaseURL:       "https://opencode.ai/inference/openai/v1",
+		ModelsPath:    "https://opencode.ai/inference/v1/models",
+		DefaultModel:  "kimi-k3",
+		ThinkingStyle: "object",
+		PromptCache:   true,
+		Routes: []Route{
+			{
+				Prefixes: []string{"claude-", "qwen3.5-plus", "qwen3.6-plus", "qwen3.7-plus", "qwen3.8-flash"},
+				BaseURL:  "https://opencode.ai/inference/anthropic",
+				APIType:  config.APITypeAnthropic,
+			},
+			{
+				Prefixes: []string{"gpt-", "grok-", "muse-"},
+				BaseURL:  "https://opencode.ai/inference/openai/v1",
+				APIType:  config.APITypeResponses,
+			},
+			{
+				Prefixes: []string{"gemini-"},
+				BaseURL:  "https://opencode.ai/inference/google/v1beta",
+				APIType:  config.APITypeGoogle,
+			},
+		},
+		Unsupported: []UnsupportedModel{
+			{Prefix: "jev-", Reason: "served on the System One API, which this client does not speak"},
+		},
+		// Token prices in USD per 1M as published for Go/Go Plus (2026-10);
+		// DeepSeek rows use the off-peak rate and tiered long-context rates
+		// their base tier. Console does not publish per model context windows
+		// here, so the rows carry pricing only and the client's flat
+		// completion floor applies unless --ctx/--max-tokens is set.
+		Models: []ModelSpec{
+			{ID: "glm-5.3-flash", Pricing: Pricing{InputPerMillion: 0.15, OutputPerMillion: 0.50}},
+			{ID: "glm-5.3", Pricing: Pricing{InputPerMillion: 1.40, OutputPerMillion: 4.40}},
+			{ID: "glm-5.2", Pricing: Pricing{InputPerMillion: 1.40, OutputPerMillion: 4.40}},
+			{ID: "kimi-k3.1-pro", Pricing: Pricing{InputPerMillion: 2.00, OutputPerMillion: 10.00}},
+			{ID: "kimi-k3", Pricing: Pricing{InputPerMillion: 3.00, OutputPerMillion: 15.00}},
+			{ID: "kimi-k2.7-code", Pricing: Pricing{InputPerMillion: 0.95, OutputPerMillion: 4.00}},
+			{ID: "longcat-2.0", Pricing: Pricing{InputPerMillion: 0.30, OutputPerMillion: 1.20}},
+			{ID: "mimo-v2.6-flash", Pricing: Pricing{InputPerMillion: 0.14, OutputPerMillion: 0.28}},
+			{ID: "mimo-v2.6-pro", Pricing: Pricing{InputPerMillion: 0.435, OutputPerMillion: 0.87}},
+			{ID: "mimo-v2.5", Pricing: Pricing{InputPerMillion: 0.14, OutputPerMillion: 0.28}},
+			{ID: "minimax-m3.1-flash", Pricing: Pricing{InputPerMillion: 0.15, OutputPerMillion: 0.60}},
+			{ID: "minimax-m3", Pricing: Pricing{InputPerMillion: 0.30, OutputPerMillion: 1.20}},
+			{ID: "muse-spark-1.3", Pricing: Pricing{InputPerMillion: 0.10, OutputPerMillion: 0.20}},
+			{ID: "muse-spark-1.2", Pricing: Pricing{InputPerMillion: 0.10, OutputPerMillion: 0.20}},
+			{ID: "qwen3.8-max", Pricing: Pricing{InputPerMillion: 2.00, OutputPerMillion: 6.00}},
+			{ID: "qwen3.8-flash", Pricing: Pricing{InputPerMillion: 0.15, OutputPerMillion: 0.47}},
+			{ID: "qwen3.7-plus", Pricing: Pricing{InputPerMillion: 0.40, OutputPerMillion: 1.60}},
+			{ID: "deepseek-v4.1-flash", Pricing: Pricing{InputPerMillion: 0.15, OutputPerMillion: 0.60}},
+			{ID: "deepseek-v4-pro", Pricing: Pricing{InputPerMillion: 0.66, OutputPerMillion: 1.98}},
+			{ID: "hy4-preview", Pricing: Pricing{InputPerMillion: 0.834, OutputPerMillion: 2.501}},
+			{ID: "hy3", Pricing: Pricing{InputPerMillion: 0.14, OutputPerMillion: 0.58}},
+			{ID: "grok-4.7", Pricing: Pricing{InputPerMillion: 2.00, OutputPerMillion: 6.00}},
+			{ID: "claude-haiku-5-5", Pricing: Pricing{InputPerMillion: 0.10, OutputPerMillion: 0.50}},
+		},
+		GeographicOrigin: RegionGlobal,
+	},
+	{
 		ID:               "ollama",
 		Label:            "Ollama (本地)",
 		APIType:          config.APITypeOpenAI,
@@ -395,11 +501,38 @@ var builtins = []Provider{
 // falls back to the dialect default (anthropic → "anthropic" object, openai →
 // "object"). The entry client consults this at request-build time.
 func ThinkingStyleFor(mc config.ModelConfig) string {
-	if mc.NormalizedAPIType() == config.APITypeAnthropic {
-		return "anthropic"
+	apiType := strings.ToLower(strings.TrimSpace(mc.APIType))
+	if p, ok := Lookup(mc.Provider); ok {
+		provType := strings.ToLower(strings.TrimSpace(p.APIType))
+		// A config that names no dialect — or merely restates the provider
+		// row's — takes the dialect of the route serving this model: an
+		// aggregator answers Claude and Qwen on a different wire surface than
+		// its default one.
+		if apiType == "" || apiType == provType {
+			if _, routed := p.EndpointFor(mc.Model); routed != "" {
+				apiType = routed
+			}
+		}
+		if apiType == "" {
+			apiType = provType
+		}
+		if apiType == config.APITypeOpenAI && p.ThinkingStyle != "" {
+			return p.ThinkingStyle
+		}
 	}
-	if p, ok := Lookup(mc.Provider); ok && p.ThinkingStyle != "" {
-		return p.ThinkingStyle
+	// The aggregator dialects carry the thinking request themselves: the
+	// Responses API takes reasoning.effort, Google a thinkingConfig object.
+	switch apiType {
+	case config.APITypeResponses:
+		return "responses"
+	case config.APITypeGoogle:
+		return "google"
+	}
+	if apiType == "" {
+		apiType = config.APITypeAnthropic
+	}
+	if apiType == config.APITypeAnthropic {
+		return "anthropic"
 	}
 	// A custom endpoint behind a known vendor speaks that vendor's dialect —
 	// the relay's URL or the served model name resolves it the same way the
@@ -410,7 +543,9 @@ func ThinkingStyleFor(mc config.ModelConfig) string {
 	return "object"
 }
 
-// LookupPricing returns the Pricing for a given provider and model name.
+// LookupPricing returns the Pricing for a given provider and model name: a
+// per-model spec row wins (aggregators resell each model at its own price),
+// then the vendor-level specials, then the provider row.
 func LookupPricing(providerID, model string) Pricing {
 	p, ok := Lookup(providerID)
 	if !ok {
@@ -439,6 +574,9 @@ func LookupPricing(providerID, model string) Pricing {
 		}
 		return Pricing{}
 	}
+	if s, ok := p.SpecFor(model); ok && s.Pricing != (Pricing{}) {
+		return s.Pricing
+	}
 	lower := strings.ToLower(model)
 	if providerID == "openai" && (strings.Contains(lower, "gpt-4o") && !strings.Contains(lower, "mini")) {
 		return Pricing{InputPerMillion: 2.50, OutputPerMillion: 10.00}
@@ -464,6 +602,71 @@ func (p Provider) SpecFor(model string) (ModelSpec, bool) {
 		}
 	}
 	return best, best.ID != ""
+}
+
+// RouteFor returns the route serving a model id, longest prefix winning. A
+// provider with no routes (every single-vendor row) never matches.
+func (p Provider) RouteFor(model string) (Route, bool) {
+	m := strings.ToLower(strings.TrimSpace(model))
+	var best Route
+	bestLen := 0
+	for _, r := range p.Routes {
+		for _, prefix := range r.Prefixes {
+			prefix = strings.ToLower(strings.TrimSpace(prefix))
+			if prefix != "" && strings.HasPrefix(m, prefix) && len(prefix) > bestLen {
+				best, bestLen = r, len(prefix)
+			}
+		}
+	}
+	return best, bestLen > 0
+}
+
+// EndpointFor resolves the base URL and wire dialect a model uses on this
+// provider: the matching route's surface when one applies, else the row's own.
+func (p Provider) EndpointFor(model string) (baseURL, apiType string) {
+	if r, ok := p.RouteFor(model); ok {
+		return r.BaseURL, r.APIType
+	}
+	return p.BaseURL, p.APIType
+}
+
+// OwnsEndpoint reports whether base is one of the provider's own catalogue
+// endpoints — its row's or a route's — after normalising case and the
+// trailing slash. Callers use it to tell a config that merely restated the
+// catalogue (which a route may rebase) from one the user pointed elsewhere.
+func (p Provider) OwnsEndpoint(base string) bool {
+	b := strings.TrimRight(strings.ToLower(strings.TrimSpace(base)), "/")
+	if b == "" {
+		return false
+	}
+	own := func(u string) bool {
+		return u != "" && b == strings.TrimRight(strings.ToLower(u), "/")
+	}
+	if own(p.BaseURL) {
+		return true
+	}
+	for _, r := range p.Routes {
+		if own(r.BaseURL) {
+			return true
+		}
+	}
+	return false
+}
+
+// UnsupportedReason returns why the entry client cannot drive a model on this
+// provider (its family rides a wire surface with no implementation here), or
+// "" when the model is servable. Longest prefix wins.
+func (p Provider) UnsupportedReason(model string) string {
+	m := strings.ToLower(strings.TrimSpace(model))
+	reason := ""
+	bestLen := 0
+	for _, u := range p.Unsupported {
+		prefix := strings.ToLower(strings.TrimSpace(u.Prefix))
+		if prefix != "" && strings.HasPrefix(m, prefix) && len(prefix) > bestLen {
+			reason, bestLen = u.Reason, len(prefix)
+		}
+	}
+	return reason
 }
 
 // ContextFor resolves the advertised context window for a model id: the
@@ -525,11 +728,32 @@ func Lookup(id string) (Provider, bool) {
 func Detect(baseURL, model string) (Provider, bool) {
 	b := strings.TrimRight(strings.ToLower(baseURL), "/")
 	m := strings.ToLower(model)
+	// Exact endpoint hits win over substring hits: an aggregator's URL can
+	// embed a vendor id ("…/inference/openai/v1") without being that vendor,
+	// so a row whose whole base matches must be found before the loose pass.
+	same := func(u string) bool {
+		return u != "" && b == strings.TrimRight(strings.ToLower(u), "/")
+	}
 	for _, p := range builtins {
 		if p.ID == "custom" {
 			continue
 		}
-		if p.BaseURL != "" && (b == strings.TrimRight(strings.ToLower(p.BaseURL), "/") || strings.Contains(b, p.ID)) {
+		if same(p.BaseURL) {
+			return p, true
+		}
+		// A routed surface (the Anthropic half of a gateway) names the same
+		// provider as its row: one key, one catalogue.
+		for _, r := range p.Routes {
+			if same(r.BaseURL) {
+				return p, true
+			}
+		}
+	}
+	for _, p := range builtins {
+		if p.ID == "custom" {
+			continue
+		}
+		if p.BaseURL != "" && strings.Contains(b, p.ID) {
 			return p, true
 		}
 	}
@@ -564,12 +788,15 @@ func ModelConfig(id, model, key string) (config.ModelConfig, bool) {
 	if m == "" {
 		m = p.DefaultModel
 	}
+	// The model decides the surface on an aggregator: a routed family takes
+	// the route's endpoint and dialect rather than the row's default ones.
+	baseURL, apiType := p.EndpointFor(m)
 	// Bake the resolved token policy into the written config — the same
 	// value the entry client would auto-load for this model.
 	mc := config.ModelConfig{
 		Provider:      p.ID,
-		APIType:       p.APIType,
-		BaseURL:       p.BaseURL,
+		APIType:       apiType,
+		BaseURL:       baseURL,
 		APIKey:        key,
 		Model:         m,
 		MaxTokens:     p.AutoMaxTokens(m),

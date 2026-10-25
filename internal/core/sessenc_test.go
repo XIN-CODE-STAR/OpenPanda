@@ -27,9 +27,8 @@ func TestSessionEncryptionNegotiated(t *testing.T) {
 	if err := b.Register(ctx); err != nil {
 		t.Fatalf("register b: %v", err)
 	}
-	go func() { _ = a.Listen(ctx, "127.0.0.1:17990") }()
-	go func() { _ = b.Listen(ctx, "127.0.0.1:17991") }()
-	time.Sleep(150 * time.Millisecond)
+	startListen(t, ctx, a, "127.0.0.1:17990")
+	startListen(t, ctx, b, "127.0.0.1:17991")
 
 	if err := a.DialPeer(ctx, "127.0.0.1:17991"); err != nil {
 		t.Fatalf("dial: %v", err)
@@ -74,8 +73,7 @@ func TestLegacyPeerFallsBackPlaintext(t *testing.T) {
 	if err := c.Register(ctx); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	go func() { _ = c.Listen(ctx, "127.0.0.1:17994") }()
-	time.Sleep(150 * time.Millisecond)
+	startListen(t, ctx, c, "127.0.0.1:17994")
 
 	ws, _, err := websocket.DefaultDialer.Dial("ws://127.0.0.1:17994/ws", nil)
 	if err != nil {
@@ -127,8 +125,7 @@ func TestCleartextPolicyRefusesLAN(t *testing.T) {
 	if err := b.Register(ctx); err != nil {
 		t.Fatalf("register b: %v", err)
 	}
-	go func() { _ = b.Listen(ctx, "127.0.0.1:17996") }()
-	time.Sleep(150 * time.Millisecond)
+	startListen(t, ctx, b, "127.0.0.1:17996")
 
 	if err := a.DialPeer(ctx, "127.0.0.1:17996"); err != nil {
 		t.Fatalf("dial: %v", err)

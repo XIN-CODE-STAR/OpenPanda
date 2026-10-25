@@ -76,6 +76,8 @@ func dispatchSub(sub string, args []string) {
 		runRPC(args)
 	case "reminder":
 		runReminder(args)
+	case "todo", "todos":
+		runTodo(args)
 	case "detect":
 		runDetect(args)
 	case "card":

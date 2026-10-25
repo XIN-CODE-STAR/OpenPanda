@@ -88,7 +88,7 @@ func TestSealedConnRoundTrip(t *testing.T) {
 
 	// Server: read plaintext hello, arm, then keep reading sealed frames
 	// and echo one envelope back.
-	cancel, _ := startTestServer(t, "127.0.0.1:17890", func(conn *Conn) {
+	cancel, url := startTestServer(t, func(conn *Conn) {
 		var hello Envelope
 		if err := conn.ReadJSON(&hello); err != nil {
 			return
@@ -110,7 +110,7 @@ func TestSealedConnRoundTrip(t *testing.T) {
 	})
 	defer cancel()
 
-	client, err := NewClient("ws://127.0.0.1:17890/ws", testLogger()).Dial(context.Background())
+	client, err := NewClient(url, testLogger()).Dial(context.Background())
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestSealedConnRoundTrip(t *testing.T) {
 // parse it.
 func TestEncryptedConnRejectsPlaintext(t *testing.T) {
 	readErr := make(chan error, 1)
-	cancel, _ := startTestServer(t, "127.0.0.1:17891", func(conn *Conn) {
+	cancel, url := startTestServer(t, func(conn *Conn) {
 		aead, err := SessionAEAD("s", "a", "b", "n1", "n2")
 		if err != nil {
 			readErr <- err
@@ -194,7 +194,7 @@ func TestEncryptedConnRejectsPlaintext(t *testing.T) {
 	})
 	defer cancel()
 
-	ws, _, err := websocket.DefaultDialer.Dial("ws://127.0.0.1:17891/ws", nil)
+	ws, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}

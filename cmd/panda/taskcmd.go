@@ -1068,8 +1068,17 @@ func waitForTaskAdd(loc i18n.Locale, cfg *config.Config, taskID string, timeout 
 // session_id back-link. Returns "" on any failure — a task must never fail
 // to enqueue because its optional session could not be created.
 func linkTaskSession(cfg *config.Config, taskID, title, prompt string) string {
+	return linkTaskSessionIn(cfg, taskID, title, prompt, "")
+}
+
+// linkTaskSessionIn is linkTaskSession with the project the thread belongs to.
+// The console files every board-created thread under its project
+// (sessions.Create takes one); a surface that starts work for a project-owned
+// row has to do the same, or the thread lands outside the project it came
+// from and never shows up there.
+func linkTaskSessionIn(cfg *config.Config, taskID, title, prompt, project string) string {
 	sessStore := sessions.NewStore(sessionStoreRoot(cfg))
-	sess, err := sessStore.Create(title)
+	sess, err := sessStore.Create(title, project)
 	if err != nil {
 		return ""
 	}

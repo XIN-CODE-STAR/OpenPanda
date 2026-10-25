@@ -6,7 +6,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,25 +18,73 @@ import (
 
 func testLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
-// startTestServer boots a Server on addr, returning a cancel func and a done
-// channel for Listen. Connections are handed to handler.
-func startTestServer(t *testing.T, addr string, handler func(*Conn)) (context.CancelFunc, <-chan error) {
+// startTestServer boots a Server on an OS-chosen loopback port and waits
+// until it is accepting. It returns a cancel func, the ws:// URL carrying the
+// port the kernel actually chose, and Listen's done channel.
+//
+// Tests must not pin a port: packages run in parallel, and several worktrees
+// of this repository can share one machine, so a fixed port is a collision
+// waiting for a busy day. Readiness is signalled by Ready(), never a guessed
+// sleep — a 150ms sleep was the reason TestPingLoopSendsPings failed about
+// once in ten runs under load.
+func startTestServer(t *testing.T, handler func(*Conn)) (context.CancelFunc, string) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	srv := NewServer(addr, testLogger(), func(conn *Conn) {
-		handler(conn)
-	})
+	srv := NewServer("127.0.0.1:0", testLogger(), handler)
 	done := make(chan error, 1)
 	go func() { done <- srv.Listen(ctx) }()
-	time.Sleep(150 * time.Millisecond)
-	return cancel, done
+	waitServerReady(t, srv, done)
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Errorf("server on %s did not stop", srv.Addr())
+		}
+	})
+	return cancel, "ws://" + srv.Addr() + "/ws"
+}
+
+// waitServerReady blocks until srv is accepting, Listen returned an error, or
+// the deadline expires. A failed bind never closes Ready, so the error channel
+// is part of the wait rather than an afterthought.
+func waitServerReady(t *testing.T, srv *Server, done <-chan error) {
+	t.Helper()
+	select {
+	case <-srv.Ready():
+	case err := <-done:
+		t.Fatalf("server failed to start: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatalf("server on %s never became ready", srv.Addr())
+	}
+}
+
+// waitActiveConns polls until the server's live-connection count settles on
+// want. The handler decrements asynchronously when it returns, so a fixed
+// sleep after releasing a handler is the same race as a fixed sleep before
+// dialing.
+func waitActiveConns(t *testing.T, srv *Server, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		srv.mu.Lock()
+		got := srv.active
+		srv.mu.Unlock()
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("active connections = %d, want %d", got, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // TestServerAcceptsAndEchoes verifies an envelope sent by a raw client is
 // received by the server and echoed back.
 func TestServerAcceptsAndEchoes(t *testing.T) {
 	got := make(chan Envelope, 1)
-	cancel, _ := startTestServer(t, "127.0.0.1:17876", func(conn *Conn) {
+	cancel, url := startTestServer(t, func(conn *Conn) {
 		var env Envelope
 		if err := conn.ReadJSON(&env); err != nil {
 			return
@@ -44,7 +94,7 @@ func TestServerAcceptsAndEchoes(t *testing.T) {
 	})
 	defer cancel()
 
-	ws, _, err := websocket.DefaultDialer.Dial("ws://127.0.0.1:17876/ws", nil)
+	ws, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -74,11 +124,46 @@ func TestServerAcceptsAndEchoes(t *testing.T) {
 	}
 }
 
+// TestServerEphemeralPortContract pins the API tests rely on: Addr() reports
+// the configured address before the bind, the bound one afterwards, Ready()
+// closes exactly then, and OnBound carries the chosen port to a caller that
+// advertises itself (the Core's hello/discovery address).
+func TestServerEphemeralPortContract(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv := NewServer("127.0.0.1:0", testLogger(), func(*Conn) {})
+	if got := srv.Addr(); got != "127.0.0.1:0" {
+		t.Fatalf("Addr before bind = %q, want the configured address", got)
+	}
+	var onBound string
+	srv.OnBound(func(addr string) { onBound = addr })
+
+	done := make(chan error, 1)
+	go func() { done <- srv.Listen(ctx) }()
+	waitServerReady(t, srv, done)
+
+	// Ready closed after the address was published and, because the kernel
+	// already accepts on the bound socket, the dial below cannot race it.
+	bound := srv.Addr()
+	if bound == "127.0.0.1:0" || !strings.HasPrefix(bound, "127.0.0.1:") {
+		t.Fatalf("Addr after bind = %q, want the chosen loopback port", bound)
+	}
+	if onBound != bound {
+		t.Fatalf("OnBound saw %q, Addr reports %q", onBound, bound)
+	}
+	conn, err := net.DialTimeout("tcp", bound, time.Second)
+	if err != nil {
+		t.Fatalf("bound address is not accepting: %v", err)
+	}
+	_ = conn.Close()
+}
+
 // TestClientDialConnects verifies the Client dials a server and survives a
 // hello round trip.
 func TestClientDialConnects(t *testing.T) {
 	got := make(chan Envelope, 1)
-	cancel, _ := startTestServer(t, "127.0.0.1:17878", func(conn *Conn) {
+	cancel, url := startTestServer(t, func(conn *Conn) {
 		var env Envelope
 		if err := conn.ReadJSON(&env); err != nil {
 			return
@@ -87,7 +172,7 @@ func TestClientDialConnects(t *testing.T) {
 	})
 	defer cancel()
 
-	client := NewClient("ws://127.0.0.1:17878/ws", testLogger())
+	client := NewClient(url, testLogger())
 	conn, err := client.Dial(context.Background())
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -116,7 +201,7 @@ func TestPingLoopSendsPings(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	srv := NewServer("127.0.0.1:17877", testLogger(), func(conn *Conn) {
+	srv := NewServer("127.0.0.1:0", testLogger(), func(conn *Conn) {
 		go conn.StartPingLoop(ctx, 20*time.Millisecond)
 		var env Envelope
 		for {
@@ -127,9 +212,9 @@ func TestPingLoopSendsPings(t *testing.T) {
 	})
 	srvDone := make(chan error, 1)
 	go func() { srvDone <- srv.Listen(ctx) }()
-	time.Sleep(150 * time.Millisecond)
+	waitServerReady(t, srv, srvDone)
 
-	ws, _, err := websocket.DefaultDialer.Dial("ws://127.0.0.1:17877/ws", nil)
+	ws, _, err := websocket.DefaultDialer.Dial("ws://"+srv.Addr()+"/ws", nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -164,7 +249,7 @@ func TestServerDropsSlowHello(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	srv := NewServer("127.0.0.1:17879", testLogger(), func(conn *Conn) {
+	srv := NewServer("127.0.0.1:0", testLogger(), func(conn *Conn) {
 		var env Envelope
 		for {
 			if err := conn.ReadJSON(&env); err != nil {
@@ -175,9 +260,9 @@ func TestServerDropsSlowHello(t *testing.T) {
 	srv.helloTimeout = 500 * time.Millisecond
 	done := make(chan error, 1)
 	go func() { done <- srv.Listen(ctx) }()
-	time.Sleep(100 * time.Millisecond)
+	waitServerReady(t, srv, done)
 
-	ws, _, err := websocket.DefaultDialer.Dial("ws://127.0.0.1:17879/ws", nil)
+	ws, _, err := websocket.DefaultDialer.Dial("ws://"+srv.Addr()+"/ws", nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -211,7 +296,7 @@ func TestServerEnforcesConnectionLimits(t *testing.T) {
 	block2 := make(chan struct{})
 	var block atomic.Value
 	block.Store(block1)
-	srv := NewServer("127.0.0.1:17880", testLogger(), func(conn *Conn) {
+	srv := NewServer("127.0.0.1:0", testLogger(), func(conn *Conn) {
 		conns <- conn
 		// Block until the test releases so connections count as active.
 		<-block.Load().(chan struct{})
@@ -219,7 +304,8 @@ func TestServerEnforcesConnectionLimits(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() { done <- srv.Listen(ctx) }()
-	time.Sleep(100 * time.Millisecond)
+	waitServerReady(t, srv, done)
+	url := "ws://" + srv.Addr() + "/ws"
 
 	dialer := *websocket.DefaultDialer
 	dialer.HandshakeTimeout = 2 * time.Second
@@ -227,13 +313,13 @@ func TestServerEnforcesConnectionLimits(t *testing.T) {
 	// Per-IP limit: allow only one connection from the same IP.
 	srv.SetLimits(10, 1)
 
-	ws1, resp, err := dialer.Dial("ws://127.0.0.1:17880/ws", nil)
+	ws1, resp, err := dialer.Dial(url, nil)
 	if err != nil {
 		t.Fatalf("first dial: %v (status %d)", err, statusOf(resp))
 	}
 	defer ws1.Close()
 
-	_, resp, err = dialer.Dial("ws://127.0.0.1:17880/ws", nil)
+	_, resp, err = dialer.Dial(url, nil)
 	if err == nil {
 		t.Fatalf("second same-IP dial should have been rejected")
 	}
@@ -246,24 +332,24 @@ func TestServerEnforcesConnectionLimits(t *testing.T) {
 	// global limit on the third.
 	close(block1)
 	// Wait for the handler goroutine to unblock and decrement counters.
-	time.Sleep(100 * time.Millisecond)
+	waitActiveConns(t, srv, 0)
 
 	block.Store(block2)
 	srv.SetLimits(2, 10)
 
-	ws2, resp, err := dialer.Dial("ws://127.0.0.1:17880/ws", nil)
+	ws2, resp, err := dialer.Dial(url, nil)
 	if err != nil {
 		t.Fatalf("global-limit first dial: %v (status %d)", err, statusOf(resp))
 	}
 	defer ws2.Close()
 
-	ws3, resp, err := dialer.Dial("ws://127.0.0.1:17880/ws", nil)
+	ws3, resp, err := dialer.Dial(url, nil)
 	if err != nil {
 		t.Fatalf("global-limit second dial: %v (status %d)", err, statusOf(resp))
 	}
 	defer ws3.Close()
 
-	_, resp, err = dialer.Dial("ws://127.0.0.1:17880/ws", nil)
+	_, resp, err = dialer.Dial(url, nil)
 	if err == nil {
 		t.Fatalf("third dial should have been rejected by global limit")
 	}
@@ -285,7 +371,7 @@ func statusOf(resp *http.Response) int {
 // its body in Envelope.BinaryPayload, at byte-exact size (no base64).
 func TestDataFrameRoundTrip(t *testing.T) {
 	got := make(chan Envelope, 1)
-	cancel, _ := startTestServer(t, "127.0.0.1:17877", func(conn *Conn) {
+	cancel, url := startTestServer(t, func(conn *Conn) {
 		var env Envelope
 		if err := conn.ReadJSON(&env); err != nil {
 			return
@@ -294,7 +380,7 @@ func TestDataFrameRoundTrip(t *testing.T) {
 	})
 	defer cancel()
 
-	client, err := NewClient("ws://127.0.0.1:17877/ws", testLogger()).Dial(context.Background())
+	client, err := NewClient(url, testLogger()).Dial(context.Background())
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}

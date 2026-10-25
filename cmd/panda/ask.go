@@ -28,7 +28,7 @@ import (
 // a flag, or the heuristic misjudges an unquoted one-liner.
 var askValueFlags = map[string]bool{
 	"config": true, "card": true, "mcp": true, "output-format": true,
-	"project": true,
+	"project": true, "team": true, "node": true,
 }
 
 // askJSON is the headless wire form of one ask result (shared by
@@ -99,6 +99,8 @@ func runAsk(args []string) {
 	mcpCmd := fs.String("mcp", cliMCP, "MCP server command (space-separated), e.g. \"npx -y @modelcontextprotocol/server-filesystem /tmp\"")
 	outputFormat := fs.String("output-format", "", "headless output: json (one object) or stream-json (NDJSON events)")
 	project := fs.String("project", "", "run this ask inside a project (default: the one you entered)")
+	team := fs.String("team", "", "comma-separated agents this ask may dispatch to (default: any; --continue inherits the conversation's roster)")
+	node := fs.String("node", "", "run this turn's task on a specific node id or name (default: scheduler)")
 	fs.Parse(reorderFlags(fs, args))
 
 	prompt := strings.TrimSpace(strings.Join(fs.Args(), " "))
@@ -161,6 +163,19 @@ func runAsk(args []string) {
 	if *continueConvo {
 		history = loadConvo()
 	}
+	// The roster: an explicit --team wins; --continue inherits the bare
+	// conversation's persisted pick, so a team chosen in the TUI keeps binding
+	// the same thread from scripts. A one-shot ask with neither stays
+	// unrestricted (the scheduler chooses).
+	agents, err := resolveAskTeam(*team, *continueConvo)
+	if err != nil {
+		fail(2, "panda: "+err.Error())
+	}
+	if len(agents) > 0 {
+		if unknown := unknownAgentNames(agents, *cardPath); len(unknown) > 0 {
+			fmt.Fprintln(os.Stderr, "⚠ "+i18n.Tf(loc, "repl.team.unknown", "names", strings.Join(unknown, ", ")))
+		}
+	}
 	recordConvo := func(out *askengine.Result) {
 		if *continueConvo {
 			appendConvo(history, loc, prompt, out, engine)
@@ -170,7 +185,9 @@ func runAsk(args []string) {
 	cwd, _ := os.Getwd()
 	switch *outputFormat {
 	case "json":
-		out, err := engine.AskTurns(context.Background(), history, prompt, cwd, *authorize, askengine.StreamCallbacks{})
+		out, err := engine.AskTurnsScoped(context.Background(), history, prompt, askengine.AskScope{
+			WorkDir: cwd, Agents: agents, Node: strings.TrimSpace(*node), AmbientProject: true,
+		}, *authorize, askengine.StreamCallbacks{})
 		if err != nil {
 			emitJSON(map[string]string{"error": err.Error()})
 			os.Exit(1)
@@ -182,11 +199,11 @@ func runAsk(args []string) {
 		}
 		return
 	case "stream-json":
-		runAskStreamJSON(engine, history, prompt, cwd, *authorize, recordConvo)
+		runAskStreamJSON(engine, history, prompt, cwd, agents, strings.TrimSpace(*node), *authorize, recordConvo)
 		return
 	}
 
-	out, streamedText, st, err := askStreaming(engine, history, prompt, cwd, *authorize, loc)
+	out, streamedText, st, err := askStreaming(engine, history, prompt, cwd, agents, strings.TrimSpace(*node), *authorize, loc)
 	if err != nil {
 		fail(1, "panda: "+err.Error())
 	}
@@ -411,7 +428,7 @@ func answerTail(streamed, answer string) string {
 
 // runAskStreamJSON is the headless streaming mode: one NDJSON event per line
 // (status / delta / result / error), consumable by scripts and other tools.
-func runAskStreamJSON(engine *askengine.Engine, history []entry.Turn, prompt, workDir string, authorize bool, record func(*askengine.Result)) {
+func runAskStreamJSON(engine *askengine.Engine, history []entry.Turn, prompt, workDir string, agents []string, node string, authorize bool, record func(*askengine.Result)) {
 	write := func(v map[string]any) {
 		line, err := json.Marshal(v)
 		if err != nil {
@@ -424,7 +441,9 @@ func runAskStreamJSON(engine *askengine.Engine, history []entry.Turn, prompt, wo
 		OnReasoning: func(text string) { write(map[string]any{"type": "reasoning", "text": text}) },
 		OnStatus:    func(text string) { write(map[string]any{"type": "status", "text": text}) },
 	}
-	out, err := engine.AskTurns(context.Background(), history, prompt, workDir, authorize, cb)
+	out, err := engine.AskTurnsScoped(context.Background(), history, prompt, askengine.AskScope{
+		WorkDir: workDir, Agents: agents, Node: node, AmbientProject: true,
+	}, authorize, cb)
 	if err != nil {
 		write(map[string]any{"type": "error", "message": err.Error()})
 		os.Exit(1)
@@ -450,10 +469,11 @@ func runAskStreamJSON(engine *askengine.Engine, history []entry.Turn, prompt, wo
 // attached, nothing is animated, and the full answer prints once at the end.
 // The streamed marker tells the caller to skip the duplicate final print; the
 // returned status line carries the run's numbers for a closing cost line.
-func askStreaming(engine *askengine.Engine, history []entry.Turn, prompt, workDir string, authorize bool, loc i18n.Locale) (*askengine.Result, string, *cliui.Status, error) {
+func askStreaming(engine *askengine.Engine, history []entry.Turn, prompt, workDir string, agents []string, node string, authorize bool, loc i18n.Locale) (*askengine.Result, string, *cliui.Status, error) {
+	scope := askengine.AskScope{WorkDir: workDir, Agents: agents, Node: node, AmbientProject: true}
 	st := newStatusLine(loc)
 	if !stdoutIsTTY() {
-		out, err := engine.AskTurns(context.Background(), history, prompt, workDir, authorize, askengine.StreamCallbacks{})
+		out, err := engine.AskTurnsScoped(context.Background(), history, prompt, scope, authorize, askengine.StreamCallbacks{})
 		return out, "", st, err
 	}
 	lr := newStreamLineRenderer()
@@ -512,7 +532,7 @@ func askStreaming(engine *askengine.Engine, history []entry.Turn, prompt, workDi
 	}
 	st.Start(statusVerb(loc))
 	st.Phase("classify", "classifying")
-	out, err := engine.AskTurns(context.Background(), history, prompt, workDir, authorize, cb)
+	out, err := engine.AskTurnsScoped(context.Background(), history, prompt, scope, authorize, cb)
 	if err == nil {
 		// A tool-less answer emits no progress events, so nudge it into exec for
 		// the closing chain. A task/plan already advanced through route/exec/judge

@@ -597,13 +597,8 @@ func TestTwoNodeProtocol(t *testing.T) {
 		t.Fatalf("register worker: %v", err)
 	}
 
-	entryDone := make(chan error, 1)
-	workerDone := make(chan error, 1)
-	go func() { entryDone <- entry.Listen(ctx, "127.0.0.1:17836") }()
-	go func() { workerDone <- worker.Listen(ctx, "127.0.0.1:17837") }()
-
-	// Wait for both servers to accept.
-	time.Sleep(200 * time.Millisecond)
+	startListen(t, ctx, entry, "127.0.0.1:17836")
+	startListen(t, ctx, worker, "127.0.0.1:17837")
 
 	if err := entry.DialPeer(ctx, "127.0.0.1:17837"); err != nil {
 		t.Fatalf("dial worker: %v", err)

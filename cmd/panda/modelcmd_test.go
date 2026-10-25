@@ -69,6 +69,9 @@ func TestLooksLikeAPIKey(t *testing.T) {
 	if !looksLikeAPIKey("sk-ant-api03-abcdef12345678901234567890") {
 		t.Error("expected sk- to be recognized as API key")
 	}
+	if !looksLikeAPIKey("oc_sk_1a2b3c4d5e6f_0123456789abcdef") {
+		t.Error("expected oc_sk_ to be recognized as API key")
+	}
 	if looksLikeAPIKey("deepseek-reasoner") {
 		t.Error("model name should not be recognized as API key")
 	}

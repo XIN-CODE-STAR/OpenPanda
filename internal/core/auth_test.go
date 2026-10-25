@@ -45,7 +45,16 @@ func startListener(t *testing.T, c *Core, addr string) {
 		case <-time.After(5 * time.Second):
 		}
 	})
-	time.Sleep(200 * time.Millisecond)
+	// Wait for the socket, never a guessed interval: the callers dial
+	// immediately, and a fixed 200ms sleep is a race on a loaded runner. A
+	// Listen that already failed is reported as itself instead of as a dial
+	// timeout ten seconds later.
+	select {
+	case err := <-done:
+		t.Fatalf("listen on %s: %v", addr, err)
+	default:
+	}
+	waitListening(t, addr)
 }
 
 // isTimeout reports whether err is a read-deadline (no frame) error rather than

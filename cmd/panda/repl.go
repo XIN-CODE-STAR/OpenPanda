@@ -102,6 +102,18 @@ type repl struct {
 	// /resume writes activeSess while an exec /session listing reads it.
 	sessMu     sync.Mutex
 	activeSess string
+	// teamCache is the display copy of the active scope's agent roster
+	// (sessions.Session.Team, or the bare conversation's file). Guarded by
+	// sessMu; invalidated on every session/project switch. Asks never read it
+	// — teamForAsk re-reads, so a roster changed in the web console still
+	// binds the next turn.
+	teamCache    []string
+	teamCacheSet bool
+	// nextNode is the one-shot node pin for the next ask — the terminal twin
+	// of the console composer's node picker. It is consumed by the turn that
+	// reads it, so "run this one on the GPU box" does not silently become a
+	// standing preference. Guarded by sessMu.
+	nextNode string
 
 	// activeProj is the in-memory active-project pointer, guarded by projMu:
 	// the task watcher reads it on its own goroutine every poll while the
@@ -192,6 +204,8 @@ func init() {
 		{"resume", "chat", "cmd.resume", (*repl).cmdResume},
 		{"fork", "chat", "cmd.fork", (*repl).cmdFork},
 		{"clear", "chat", "cmd.clear", (*repl).cmdClear},
+		{"team", "chat", "cmd.team", (*repl).cmdTeam},
+		{"node", "system", "cmd.node", (*repl).cmdNode},
 		{"tasks", "tasks", "cmd.tasks", (*repl).cmdTasks},
 		{"task", "tasks", "cmd.task", (*repl).cmdTask},
 		// The two send modes under their own names — the vocabulary the TUI,
@@ -209,6 +223,8 @@ func init() {
 		{"audit", "tasks", "cmd.audit", (*repl).cmdAudit},
 		{"reminder", "tasks", "cmd.reminder", (*repl).cmdReminder},
 		{"reminders", "tasks", "cmd.reminder", (*repl).cmdReminder},
+		{"todo", "tasks", "cmd.todo", (*repl).cmdTodo},
+		{"todos", "tasks", "cmd.todo", (*repl).cmdTodo},
 		{"memory", "memory", "cmd.memory", (*repl).cmdMemory},
 		{"projects", "memory", "cmd.projects", (*repl).cmdProjects},
 		{"project", "memory", "cmd.project", (*repl).cmdProjectEnter},
@@ -503,10 +519,13 @@ func (r *repl) sessID() string {
 	return r.activeSess
 }
 
-// setSess binds/detaches a session under sessMu.
+// setSess binds/detaches a session under sessMu. The roster cache is scoped to
+// the session, so binding invalidates it.
 func (r *repl) setSess(id string) {
 	r.sessMu.Lock()
 	r.activeSess = id
+	r.teamCacheSet = false
+	r.teamCache = nil
 	r.sessMu.Unlock()
 }
 
@@ -870,6 +889,9 @@ func (r *repl) setProject(name string) {
 	r.projMu.Lock()
 	r.activeProj = name
 	r.projMu.Unlock()
+	// A bare conversation's roster is sharded by project, so a project switch
+	// changes which roster the next ask reads.
+	r.invalidateTeam()
 }
 
 // mutateConfig applies fn to the shared *config.Config. r.cfg is the same
@@ -1051,6 +1073,9 @@ func (r *repl) askMode(text, mode string) {
 	r.setAsking(true)
 	defer r.setAsking(false)
 
+	// A /node pin belongs to exactly this turn.
+	nextNode := r.takeNextNode()
+
 	type outcome struct {
 		out *askengine.Result
 		err error
@@ -1061,7 +1086,17 @@ func (r *repl) askMode(text, mode string) {
 		// on <-got forever; ch is buffered so this send never blocks.
 		ch <- outcome{err: errors.New("ask worker panicked (see log)")}
 	}, func() {
-		out, err := r.engine.Load().AskTurnsSession(ctx, history, text, workDir, mode, r.sessID(), r.authorized(), cb)
+		// The thread's roster is the console's team pick, carried into the
+		// same ask scope the panel builds: it bounds the dispatch budget and
+		// is copied onto every task's spec for routing-time enforcement.
+		out, err := r.engine.Load().AskTurnsScoped(ctx, history, text, askengine.AskScope{
+			WorkDir:        workDir,
+			Mode:           mode,
+			SessionID:      r.sessID(),
+			Agents:         r.teamForAsk(),
+			Node:           nextNode,
+			AmbientProject: true,
+		}, r.authorized(), cb)
 		ch <- outcome{out, err}
 	})
 	got := make(chan struct{})
@@ -1268,6 +1303,10 @@ func (r *repl) cmdNew(arg string) {
 	n := r.convoLen()
 	r.setConvo(nil)
 	clearConvo()
+	// The roster belongs to the conversation, so a wiped conversation starts
+	// with the scheduler choosing — the same blank sheet the console opens.
+	_ = r.setTeam(nil)
+	r.setNextNode("")
 	r.outln(i18n.Tf(r.loc, "repl.new.cleared", "n", fmt.Sprint(n/2)))
 }
 
@@ -1579,6 +1618,9 @@ func (r *repl) cmdTask(arg string) {
 	case "board":
 		r.cmdTaskBoard(strings.Join(fields[1:], " "))
 		return
+	case "artifact":
+		r.cmdTaskArtifact(fields[1:])
+		return
 	}
 	id, ok := r.resolveRef(arg)
 	if !ok {
@@ -1620,6 +1662,87 @@ func (r *repl) cmdTask(arg string) {
 	ref := refOr(taskRefsFor(r.commandContext(), r.store, []core.Task{t}), t.TaskID)
 	if hint := taskNextStepHint(r.loc, r.cfg, t, ref); hint != "" {
 		r.outln(pal().Muted(hint))
+	}
+}
+
+// cmdTaskArtifact implements `/task artifact <id> [--list|--file P|--out D]`:
+// the artifact pool's terminal view, matching `panda task artifact` without
+// leaving the session (and without the exec pump's empty stdin, so --file can
+// stream bytes into the transcript's command writer).
+func (r *repl) cmdTaskArtifact(args []string) {
+	fs := flag.NewFlagSet("task artifact", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	list := fs.Bool("list", false, "list archive entries without extracting")
+	file := fs.String("file", "", "print one archive entry")
+	outDir := fs.String("out", "", "extract here")
+	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
+		r.outln(i18n.T(r.loc, "cli.task.artifact.usage"))
+		return
+	}
+	ref := strings.TrimSpace(strings.Join(fs.Args(), " "))
+	if ref == "" {
+		r.outln(i18n.T(r.loc, "cli.task.artifact.usage"))
+		return
+	}
+	id, ok := r.resolveRef(ref)
+	if !ok {
+		return
+	}
+	t, err := r.store.Get(r.commandContext(), id)
+	if err != nil {
+		r.storeErr(err)
+		return
+	}
+	hash := t.OutputArtifact
+	if hash == "" {
+		r.outln(i18n.T(r.loc, "cli.task.artifact.none"))
+		return
+	}
+	var artPath string
+	var extra []string
+	r.readConfig(func(c *config.Config) {
+		if c != nil {
+			artPath, extra = c.Storage.ArtifactPath, c.Storage.ArtifactExtraPaths
+		}
+	})
+	pool := artifact.NewStore(artPath, extra...)
+	if _, held := pool.Has(hash); !held {
+		r.outln(i18n.Tf(r.loc, "cli.task.artifact.not_held",
+			"hash", hash, "executor", orDash(taskExecutor(r.store, t))))
+		return
+	}
+	switch {
+	case *list:
+		entries, err := pool.Entries(hash)
+		if err != nil {
+			r.outln(err.Error())
+			return
+		}
+		r.outln(pal().Heading("artifact:") + " " + pal().Muted(hash))
+		for _, e := range entries {
+			r.outf("  %10d  %s\n", e.Size, e.Path)
+		}
+	case *file != "":
+		rc, _, err := pool.OpenEntry(hash, *file)
+		if err != nil {
+			r.outln(err.Error())
+			return
+		}
+		defer rc.Close()
+		if _, err := io.Copy(r.commandOutput(), rc); err != nil {
+			r.outln(err.Error())
+		}
+	default:
+		dst := *outDir
+		if dst == "" {
+			dst = "./" + id + "-artifact"
+		}
+		m, err := pool.Extract(hash, dst)
+		if err != nil {
+			r.outln(err.Error())
+			return
+		}
+		r.outln(i18n.Tf(r.loc, "cli.task.artifact.wrote", "path", dst, "n", fmt.Sprint(len(m.Entries))))
 	}
 }
 

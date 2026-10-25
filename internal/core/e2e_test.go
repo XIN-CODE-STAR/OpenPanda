@@ -1223,7 +1223,7 @@ func TestHelloRejectAuthSurfaces(t *testing.T) {
 	if err := dialer.Register(ctx); err != nil {
 		t.Fatalf("register dialer: %v", err)
 	}
-	go func() { _ = server.Listen(ctx, "127.0.0.1:17986") }()
+	startListen(t, ctx, server, "127.0.0.1:17986")
 
 	// The listener binds asynchronously; the first dial attempts may hit a
 	// not-yet-bound socket — real errors until the reject verdict arrives.
@@ -1260,7 +1260,12 @@ func registerAndListen(t *testing.T, ctx context.Context, c *Core, addr string) 
 		t.Fatalf("startup: %v", err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- c.Listen(ctx, addr) }()
+	// Derive a cancellable child: several wire tests pass context.Background(),
+	// and a listener whose ctx is never cancelled stays bound for the rest of
+	// the process — the next test on that port (or the next -count iteration)
+	// then dies with EADDRINUSE. See startListen.
+	lctx, cancel := context.WithCancel(ctx)
+	go func() { done <- c.Listen(lctx, addr) }()
 
 	// The test's own defer cancel() stops the listener, but ctx→Shutdown is
 	// not synchronous — the socket can still be accepting (and answering
@@ -1268,9 +1273,11 @@ func registerAndListen(t *testing.T, ctx context.Context, c *Core, addr string) 
 	// next test starts reusing the same port. Wait, bounded, for Listen to
 	// return so a following test never dials a draining listener.
 	t.Cleanup(func() {
+		cancel()
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
+			t.Errorf("listener on %s did not stop", addr)
 		}
 	})
 	return done
@@ -1367,6 +1374,87 @@ func waitListening(t *testing.T, addr string) {
 			t.Fatalf("nothing listening on %s after 10s: %v", addr, err)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// startListen runs c.Listen in the background, waits until the socket accepts,
+// and guarantees the listener is stopped when the test ends — even when the
+// caller passed context.Background().
+//
+// That guarantee is the point. Tests used to write
+//
+//	go func() { _ = c.Listen(ctx, addr) }()
+//
+// against a never-cancelled context: the goroutine outlived the test, the port
+// stayed bound for the rest of the process, and a later test — or the second
+// iteration of `go test -count=2` — failed with "bind: address already in
+// use". The listener is derived from the caller's ctx, so a test that does
+// cancel still shuts down early; the cleanup is the safety net for the ones
+// that do not.
+//
+// It returns the address that was actually bound, so a caller may pass
+// "127.0.0.1:0" and dial the result — the path that lets the remaining
+// fixed-port tests migrate one at a time.
+func startListen(t *testing.T, ctx context.Context, c *Core, addr string) string {
+	t.Helper()
+	lctx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- c.Listen(lctx, addr) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Errorf("listener on %s did not stop", addr)
+		}
+	})
+	// A bind that already failed must be reported as itself, not as a
+	// ten-second dial timeout in waitListening.
+	select {
+	case err := <-done:
+		t.Fatalf("listen on %s: %v", addr, err)
+	default:
+	}
+	// ":0" is the kernel's choice: the core publishes the port it actually
+	// bound (bus.Server.OnBound → ListenAddr), so a test can ask for an
+	// ephemeral listener and still know where to dial.
+	if strings.HasSuffix(addr, ":0") {
+		deadline := time.Now().Add(10 * time.Second)
+		for c.ListenAddr() == addr || c.ListenAddr() == "" {
+			if time.Now().After(deadline) {
+				t.Fatalf("core never published the port chosen for %s", addr)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		addr = c.ListenAddr()
+	}
+	waitListening(t, addr)
+	return addr
+}
+
+// TestListenPublishesEphemeralPort pins the contract startListen relies on
+// for ":0": the node advertises the port the kernel chose, not the literal it
+// was configured with. Without that, an ephemeral test listener would bind on
+// one port while hello payloads and discovery beacons named port 0 — and a
+// peer could never dial back.
+func TestListenPublishesEphemeralPort(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	c := newCore(t, "ephemeral-node", "127.0.0.1:0")
+	if err := c.Register(ctx); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	bound := startListen(t, ctx, c, "127.0.0.1:0")
+	if bound == "" || strings.HasSuffix(bound, ":0") || !strings.HasPrefix(bound, "127.0.0.1:") {
+		t.Fatalf("startListen returned %q, want the chosen loopback port", bound)
+	}
+	if got := c.ListenAddr(); got != bound {
+		t.Fatalf("ListenAddr = %q, startListen returned %q", got, bound)
+	}
+	addrs := c.selfAddrs()
+	if len(addrs) != 1 || addrs[0] != bound {
+		t.Fatalf("advertised addrs = %v, bound = %s", addrs, bound)
 	}
 }
 

@@ -1069,6 +1069,14 @@ func (m tuiModel) contextLine() string {
 	if m.projName != "" {
 		parts = append(parts, m.th.glyph("▪", "#")+" "+m.projName)
 	}
+	// The roster and the pending node pin are state: they change who may take
+	// the next turn's work and where it runs. Quiet when neither is set.
+	if len(m.team) > 0 {
+		parts = append(parts, i18n.Tf(m.loc, "tui.ctx.team", "names", teamNamesShort(m.team)))
+	}
+	if m.nextNode != "" {
+		parts = append(parts, i18n.Tf(m.loc, "tui.ctx.node", "node", m.nextNode))
+	}
 	if m.r.authorized() {
 		parts = append(parts, i18n.T(m.loc, "repl.footer.authz")+":"+i18n.T(m.loc, "repl.footer.authz.on"))
 	}

@@ -44,9 +44,8 @@ func wireTwo(t *testing.T, ctx context.Context, a, b *Core, aAddr, bAddr string)
 	if err := b.Register(ctx); err != nil {
 		t.Fatalf("register %s: %v", b.nodeID, err)
 	}
-	go func() { _ = a.Listen(ctx, aAddr) }()
-	go func() { _ = b.Listen(ctx, bAddr) }()
-	time.Sleep(150 * time.Millisecond)
+	startListen(t, ctx, a, aAddr)
+	startListen(t, ctx, b, bAddr)
 	if err := a.DialPeer(ctx, bAddr); err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -322,8 +321,7 @@ func TestPinOfflineTargetWaitsForLink(t *testing.T) {
 	if err := root.Register(ctx); err != nil {
 		t.Fatalf("register root: %v", err)
 	}
-	go func() { _ = root.Listen(ctx, "127.0.0.1:18311") }()
-	time.Sleep(150 * time.Millisecond)
+	startListen(t, ctx, root, "127.0.0.1:18311")
 
 	// A stale directory row for the leaf: known to the mesh, currently gone.
 	leafCard := ledger.Card{
@@ -361,8 +359,7 @@ func TestPinOfflineTargetWaitsForLink(t *testing.T) {
 	if err := leaf.Register(ctx); err != nil {
 		t.Fatalf("register leaf: %v", err)
 	}
-	go func() { _ = leaf.Listen(ctx, "127.0.0.1:18312") }()
-	time.Sleep(150 * time.Millisecond)
+	startListen(t, ctx, leaf, "127.0.0.1:18312")
 	if err := leaf.DialPeer(ctx, "127.0.0.1:18311"); err != nil {
 		t.Fatalf("leaf dial: %v", err)
 	}
@@ -404,8 +401,7 @@ func TestPinWorkDirCommandTaskForwards(t *testing.T) {
 	if err := root.Register(ctx); err != nil {
 		t.Fatalf("register root: %v", err)
 	}
-	go func() { _ = root.Listen(ctx, "127.0.0.1:18331") }()
-	time.Sleep(150 * time.Millisecond)
+	startListen(t, ctx, root, "127.0.0.1:18331")
 
 	leafCard := ledger.Card{
 		Device: "pin-leaf", ResourceClass: "Standard",
@@ -436,8 +432,7 @@ func TestPinWorkDirCommandTaskForwards(t *testing.T) {
 	if err := leaf.Register(ctx); err != nil {
 		t.Fatalf("register leaf: %v", err)
 	}
-	go func() { _ = leaf.Listen(ctx, "127.0.0.1:18332") }()
-	time.Sleep(150 * time.Millisecond)
+	startListen(t, ctx, leaf, "127.0.0.1:18332")
 	if err := leaf.DialPeer(ctx, "127.0.0.1:18331"); err != nil {
 		t.Fatalf("leaf dial: %v", err)
 	}
@@ -514,8 +509,7 @@ func TestAuthorizedQueueForwardCarriesVerifiableGrant(t *testing.T) {
 	if err := root.Register(ctx); err != nil {
 		t.Fatalf("register root: %v", err)
 	}
-	go func() { _ = root.Listen(ctx, "127.0.0.1:18341") }()
-	time.Sleep(150 * time.Millisecond)
+	startListen(t, ctx, root, "127.0.0.1:18341")
 
 	leafCard := ledger.Card{
 		Device: "pin-leaf", ResourceClass: "Standard",
@@ -543,8 +537,7 @@ func TestAuthorizedQueueForwardCarriesVerifiableGrant(t *testing.T) {
 	if err := leaf.Register(ctx); err != nil {
 		t.Fatalf("register leaf: %v", err)
 	}
-	go func() { _ = leaf.Listen(ctx, "127.0.0.1:18342") }()
-	time.Sleep(150 * time.Millisecond)
+	startListen(t, ctx, leaf, "127.0.0.1:18342")
 	if err := leaf.DialPeer(ctx, "127.0.0.1:18341"); err != nil {
 		t.Fatalf("leaf dial: %v", err)
 	}
@@ -602,10 +595,9 @@ func TestPinDeclineIsTerminal(t *testing.T) {
 			t.Fatalf("register %s: %v", c.nodeID, err)
 		}
 	}
-	go func() { _ = root.Listen(ctx, "127.0.0.1:18321") }()
-	go func() { _ = leafA.Listen(ctx, "127.0.0.1:18322") }()
-	go func() { _ = leafB.Listen(ctx, "127.0.0.1:18323") }()
-	time.Sleep(150 * time.Millisecond)
+	startListen(t, ctx, root, "127.0.0.1:18321")
+	startListen(t, ctx, leafA, "127.0.0.1:18322")
+	startListen(t, ctx, leafB, "127.0.0.1:18323")
 	if err := root.DialPeer(ctx, "127.0.0.1:18322"); err != nil {
 		t.Fatalf("dial A: %v", err)
 	}
@@ -1104,10 +1096,9 @@ func TestPinMultiHopE2E(t *testing.T) {
 			t.Fatalf("register %s: %v", c.nodeID, err)
 		}
 	}
-	go func() { _ = root.Listen(ctx, "127.0.0.1:18351") }()
-	go func() { _ = relay.Listen(ctx, "127.0.0.1:18352") }()
-	go func() { _ = dest.Listen(ctx, "127.0.0.1:18353") }()
-	time.Sleep(150 * time.Millisecond)
+	startListen(t, ctx, root, "127.0.0.1:18351")
+	startListen(t, ctx, relay, "127.0.0.1:18352")
+	startListen(t, ctx, dest, "127.0.0.1:18353")
 	// Partial mesh: root talks to relay, relay talks to dest, root and dest
 	// never meet.
 	if err := root.DialPeer(ctx, "127.0.0.1:18352"); err != nil {

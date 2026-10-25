@@ -27,37 +27,12 @@ import (
 
 // ---- Session CRUD ----
 
-// maxTeam bounds a thread's agent roster. Same ceiling as
-// routing.preferred_agents (16): a roster longer than that is not a team
-// anyone picks by hand, and the list rides every task's spec_json.
-const maxTeam = 16
-
-// cleanTeam trims, dedupes and validates a roster off the wire. Invalid names
-// are rejected instead of dropped: a roster that quietly loses an entry
-// becomes a *smaller* team, and one that loses every entry becomes "no
-// restriction" — either way the thread's work could go to an agent the user
-// never picked.
+// cleanTeam trims, dedupes and validates a roster off the wire. The rule
+// (including the 16-agent ceiling) lives in sessions.CleanTeam so the console,
+// the REPL/TUI /team command and the bare conversation's roster file all
+// validate identically.
 func cleanTeam(in []string) ([]string, error) {
-	var out []string
-	seen := make(map[string]bool, len(in))
-	for _, raw := range in {
-		name := strings.TrimSpace(raw)
-		if name == "" {
-			continue
-		}
-		if strings.ContainsAny(name, " \t\r\n/\\:") || name == "." || name == ".." {
-			return nil, fmt.Errorf("invalid agent name %q", raw)
-		}
-		if seen[name] {
-			continue
-		}
-		seen[name] = true
-		out = append(out, name)
-	}
-	if len(out) > maxTeam {
-		return nil, fmt.Errorf("team holds at most %d agents", maxTeam)
-	}
-	return out, nil
+	return sessions.CleanTeam(in)
 }
 
 // listSessions serves GET /api/sessions — chat sessions, optionally filtered by ?project=.

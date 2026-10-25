@@ -140,8 +140,22 @@ jobs:
   # and copy) and whether the alternate-scroll flag follows a ctrl+t round trip
   # (miss the re-arm and the wheel is dead after the switch back). Drives the
   # real binary in a pty. Needs both Go and python3, so it is its own leg.
-  tui-pty:
-    runs-on: ubuntu-latest
+  #
+  # Two contracts, not one: `tui-pty-exit-test` (the "chat saved / resume" note
+  # on the restored screen, and a failed turn persisted to the convo file) is
+  # part of `make gate-all` and was in no CI job at all — a check that only
+  # ever ran on a developer's laptop. Both run here now.
+  #
+  # macOS is in the matrix because `cmd/panda/term_darwin.go` takes the other
+  # branch of the terminal setup (term_unix.go is what Linux exercises), and
+  # the two scripts were written for macOS/Linux from the start. Windows has no
+  # pty, so it stays out.
+  tui-pty-run:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -154,6 +168,21 @@ jobs:
           python-version: '3.x'
       - name: TUI mouse ownership (pty)
         run: make tui-pty-test
+      - name: TUI exit visibility (pty)
+        run: make tui-pty-exit-test
+
+  # The review ruleset requires the bare `tui-pty` context, but a matrix job's
+  # check names carry their axis value ("tui-pty (macos-14)"), so the required
+  # context would sit "Expected" forever and no PR could merge. This summary
+  # carries the required name and passes only when every platform run passed —
+  # a failed (or skipped) matrix leg skips it, which the ruleset counts as not
+  # green.
+  tui-pty:
+    needs: tui-pty-run
+    runs-on: ubuntu-latest
+    steps:
+      - name: Both platform contracts passed
+        run: echo "TUI pty contracts passed on ubuntu-latest and macos-14"
 
   race:
     runs-on: ubuntu-latest
@@ -259,7 +288,7 @@ jobs:
       - name: Build
         run: go build ./...
       # The internal/core e2e tests poll real loopback websockets on fixed
-      # deadlines, and shared-CPU macOS/Windows runners stall them often enough
+      # ports, and shared-CPU macOS/Windows runners stall them often enough
       # to flake dependabot PRs twice in a row (TestPlanThreeStagesThreeNodes,
       # TestDeclineTerminalizesLocalRow — both green on retry and locally).
       # `--rerun-fails` re-runs only the tests that failed, so a consistent
@@ -267,3 +296,21 @@ jobs:
       # the gate hostage. A data-race failure is never retried.
       - name: Test (rerun only failures — these runners stall the loopback e2e tests)
         run: go run gotest.tools/gotestsum@v1.13.0 --rerun-fails=3 --rerun-fails-abort-on-data-race --packages="./..."
+      # The adapters are Python and run on Windows/macOS nodes, but their
+      # black-box contract suite only ran on the Linux `adapters` job — the
+      # win32 branches in adapters/_harness.py (`.cmd` shim resolution, UTF-8
+      # stdio, taskkill /T) were exercised only through a patched
+      # sys.platform, never on a real Windows host. The suite lays down
+      # platform-appropriate fake CLIs and pins UTF-8 on both sides, so it can
+      # run as-is here.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+      # Separate steps rather than one command: setup-python installs `python3`
+      # on Unix and `python` on Windows, and one spelling cannot cover both.
+      - name: Adapter contracts (POSIX)
+        if: runner.os != 'Windows'
+        run: python3 tests/adapter_contract_test.py
+      - name: Adapter contracts (Windows)
+        if: runner.os == 'Windows'
+        run: python tests/adapter_contract_test.py

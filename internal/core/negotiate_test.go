@@ -27,9 +27,8 @@ func TestAgentNegotiationSignaling(t *testing.T) {
 	must(a.Register(ctx))
 	must(b.Register(ctx))
 
-	go func() { _ = a.Listen(ctx, "127.0.0.1:17971") }()
-	go func() { _ = b.Listen(ctx, "127.0.0.1:17972") }()
-	time.Sleep(100 * time.Millisecond)
+	startListen(t, ctx, a, "127.0.0.1:17971")
+	startListen(t, ctx, b, "127.0.0.1:17972")
 
 	must(a.DialPeer(ctx, "127.0.0.1:17972"))
 	waitPeer(t, a, "node-b")

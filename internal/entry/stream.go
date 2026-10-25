@@ -21,9 +21,18 @@ import (
 // accumulated and returned at the end. It is the streaming counterpart of
 // CompleteTurnsWithTools and dispatches on the configured api type.
 func (c *Client) StreamTurnsWithTools(ctx context.Context, system string, turns []Turn, tools []ToolSpec, onDelta func(string), onReasoning func(string)) (Response, error) {
-	if c.apiType == config.APITypeOpenAI {
+	switch c.apiType {
+	case config.APITypeOpenAI:
 		return c.streamWithRetry(ctx, func(on, onR func(string)) (Response, error) {
 			return c.streamOpenAI(ctx, system, turns, tools, on, onR)
+		}, onDelta, onReasoning)
+	case config.APITypeResponses:
+		return c.streamWithRetry(ctx, func(on, onR func(string)) (Response, error) {
+			return c.streamResponses(ctx, system, turns, tools, on, onR)
+		}, onDelta, onReasoning)
+	case config.APITypeGoogle:
+		return c.streamWithRetry(ctx, func(on, onR func(string)) (Response, error) {
+			return c.streamGoogle(ctx, system, turns, tools, on, onR)
 		}, onDelta, onReasoning)
 	}
 	return c.streamWithRetry(ctx, func(on, onR func(string)) (Response, error) {
