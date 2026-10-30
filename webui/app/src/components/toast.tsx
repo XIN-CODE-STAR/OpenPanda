@@ -32,7 +32,7 @@ export function toastError(e: unknown): void {
 }
 
 /** Mount once in the app shell. */
-export function ToastHost() {
+export function ToastHost({ placement = 'bottom-right' }: { placement?: 'bottom-right' | 'top-center' }) {
   const [items, setItems] = useState<ToastItem[]>([])
 
   useEffect(() => {
@@ -50,7 +50,7 @@ export function ToastHost() {
   }, [])
 
   return (
-    <div class="toast-host" role="status" aria-live="polite">
+    <div class={`toast-host toast-host-${placement}`} role="status" aria-live="polite">
       {items.map((item) => (
         <div key={item.id} class={`toast toast-${item.kind}`}>
           <span class="toast-msg">{item.message}</span>
