@@ -44,6 +44,13 @@ OpenPanda（**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **
 
 ### 修复
 
+- **首次向导记住了你留下的语言** —— 语言 chip 在点击时就写入了 locale，但"下一步"才是显而易见的按钮，它什么都不写，于是每个接受了预选语言的安装里 `ui.locale` 都是空的。这个空字符串正是闸门判断「全新安装」的四个信号之一，所以下一次重新引导——控制台重写了配置、条款版本过期——又开在语言这一步，而那一步用户早就答过了。现在点「下一步」会把当前生效的 locale 写下去。
+- **写配置会先留下它要替换的那一份** —— 每个 updater 都整份往返文档，于是「看到的内容比文件实际内容少」的写入方（为缺失文件物化的默认骨架、抢同一路径的第二个 `panda web`、编辑中途落地的还原）会静默删掉差额。第一个症状不是报错而是行为：控制台再也看不到同意记录，重新打开向导，而磁盘上没有任何东西可供比对。现在每次写入先把上一代复制成 `config.yaml.snap-<stamp>`，只保留最新的二十份，且从不碰手工留下的 `config.yaml.bak-*`；卸载备份会跳过它们，因为它们是配置的派生，不是独立状态。
+- **又有三个 agent 能真正用上 panda 的模型** —— hermes、openclaw、zcode 过去会记下一次注入事件，然后死在各自的凭据契约上。hermes 0.19 不读 `OPENAI_*`，只认 `$HERMES_HOME/config.yaml` 里的 `providers.*`；openclaw 卡在 `~/.openclaw` 下的 auth-profile 旧存储，`--state-dir` 挪不动它，本机又无法迁移（`doctor --fix` 过不了 ACL 检查）；zcode 在"没有选中模型"前拒绝发送任何请求，而选中结果存在一个它没有命令行开关的文件里，`ZCODE_*` 则完全不读。现在每个适配器只为注入运行准备该 CLI 真正会读的东西：hermes 拿到一个一次性 `HERMES_HOME`，其 provider 通过 `key_env` 指向 `${OPENPANDA_INJECT_BASE_URL}`；openclaw 拿到 `--config`/`--state-dir`，并把 `HOME` 重定向（auth-profile 存储没有路径开关），密钥只以环境变量引用的形式存在；zcode 拿到个人 provider 配置（`defaultModelSelection` 写在 `config` 里面——CLI 就在那里找）并通过 `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` 生效。三者都不碰用户自己的状态；只有 zcode 的配置会带上密钥，且随本次运行一起删除。zcode 同时离开 `generic.py`——通用入口根本无法兑现其清单声称的注入——注册表也不再把它写成只支持 Anthropic，而是多方言。顺带修了两处 harness：形如 `"node.exe" "cli.cjs" %*` 的手写 `.cmd` 包装此前只解析出解释器，导致 CLI 的参数落到 node 身上（`bad option: --prompt`）；注入被拒时现在会说明是方言不匹配、适配器没有 env 契约，还是 agent 未知，而不是一律说"不支持注入"。
+- **一轮派发多个任务时，对话里每个任务各留一张卡** — 一次交给三个 agent 的对话只写了一条派发记录，于是对话里只有一张卡（等其余任务跑起来，是两行「执行中」），任务列表却是三张。回执现在带上本轮派发的每一个任务，面板按任务逐条写 turn，对话与任务列表因此一致，每张卡也都指向自己的任务。对话画的是「这一轮」，不是「存了几条」：这些 turn 会合成一条回复——一个头像、一个时间，卡片用细线隔开往下排——而不是五个各装一张卡的熊猫气泡。
+- **替换会说清原因** — 替换提示只点了两个 agent 的名字，没说是为什么；而且那个「为什么」本来就是空的：一次撞上 30 轮上限的 `claude_code` 运行只回了 `is_error`、没有正文，于是回退链记下的是「exec failed: 」后面什么都没有，读的人分不清是崩溃还是上限。适配器现在会用错误信封里的字段拼出诊断（`claude stopped at its turn cap after 31 turns without a final answer`），回退把它带在 `agent_fallback` 事件上，报告行把它印进替换提示——长度有上限，因为那一行是说明文字，不是日志。
+- **grok_build 现在真的能跑** —— 点名它的任务被别的 agent 答了，背后是三个独立的毛病。`grok` 从来没登录过，而它的措辞（"Not signed in. To authenticate without a browser…"）不匹配任何一条凭据失败特征，于是补救注入没有触发，回退链接走了任务；注入的端点走的是 `GROK_BASE_URL`，这个 CLI 根本不读（它读 `GROK_MODELS_BASE_URL`），所以就算补救也会把它指向 api.x.ai 却递上别家的 key；而 `--single` 打完答案**不退出进程**，登录好了也会一路挂到 600s 看门狗。适配器现在读事件流、在收尾的 `usage` 行结束这一轮，会话 id 每轮用新的 UUID（这个版本直接拒绝旧的 `panda-<hex>` 名字，而且 `-r --single` 什么都不返回，所以每轮冷启动而不是续会话），注册表也改成了 grok 真正认的端点变量。
+
 ## [0.1.3] - 2026-10-30 — "Constellation"
 
 **让控制台保持连接、让长任务不再被误杀的补丁** —— 代号 **Constellation**：无论是跨过休眠的笔记本、穿过反向代理，还是盯着一个忙节点，控制台都不再冻住，看一轮运行也不再比它看的工作更贵。长时间不输出、只是在思考的 agent 运行不会再被当成卡死杀掉，首次输出前的宽限窗口也终于真正生效。配置与存储兼容，schema 只多一条纯索引迁移（v65），自动执行。
