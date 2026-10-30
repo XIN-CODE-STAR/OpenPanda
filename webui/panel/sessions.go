@@ -155,6 +155,10 @@ func (h *handler) getSession(w http.ResponseWriter, r *http.Request) {
 // its branch) plus the stored thread.
 func (h *handler) deleteSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	// The thread is going away: its waiting notes and any parked carry have no
+	// turn left to open, so release them with it instead of leaking a map entry
+	// per deleted thread.
+	h.dropSteer(id)
 	if h.worktrees != nil {
 		_ = h.worktrees.Remove(r.Context(), id)
 	}
@@ -515,6 +519,11 @@ type sessionAskRequest struct {
 	// normally PATCHes the session when the user flips the switch, so a
 	// resumed thread on another device keeps the same answer.
 	PermissionMode string `json:"permission_mode"`
+	// ResumeQueued marks the console's automatic continuation of notes a
+	// finished turn never read. The prompt may repeat their text for display,
+	// but the parked notes are the authority: the server drains them as this
+	// turn's input so the words reach the model exactly once.
+	ResumeQueued bool `json:"resume_queued"`
 }
 
 // statusEventOf is the JSON one progress event becomes on the SSE stream.
@@ -579,7 +588,21 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, errors.New("invalid JSON body"))
 		return
 	}
+	sessID := r.PathValue("id")
 	req.Prompt = strings.TrimSpace(req.Prompt)
+	// Notes a finished turn never read open this one. The console's
+	// continuation request carries no prompt of its own (ResumeQueued), and a
+	// user who types before it lands absorbs the parked notes into their own
+	// message — either way the text reaches the model exactly once, which is
+	// what the queue could not promise when it dropped them at the turn's end.
+	if carried := h.takeCarry(sessID); len(carried) > 0 {
+		switch {
+		case req.ResumeQueued, req.Prompt == "":
+			req.Prompt = carryText(carried)
+		default:
+			req.Prompt = carryText(carried) + "\n\n" + req.Prompt
+		}
+	}
 	if req.Prompt == "" {
 		writeErr(w, http.StatusBadRequest, errors.New("prompt must not be empty"))
 		return
@@ -589,7 +612,7 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, errors.New("ask engine not configured (configure the model in Settings)"))
 		return
 	}
-	sess, err := h.sessions.Get(r.PathValue("id"))
+	sess, err := h.sessions.Get(sessID)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, errors.New("no such session"))
 		return
@@ -783,9 +806,15 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	defer h.unregisterSessionAsk(sess.ID, op)
 	// The steer queue lives exactly as long as the turn that drains it. Notes
-	// still in it are dropped with it — the turn is over, and the text is
-	// already on record as part of the user's side of the conversation.
-	defer h.dropSteer(sess.ID)
+	// still in it when the turn ends are not dropped: a note typed into the
+	// last round has no later boundary to land on, and throwing it away made
+	// the composer's "queued" a promise nothing kept. They are parked in the
+	// carry and announced on the stream, so the console opens the next turn
+	// with them — and a console that never hears the frame (tab closed
+	// mid-answer) leaves them for whatever prompt comes next.
+	defer h.parkLeftovers(sess.ID, func(text string, count int) {
+		send("queued_turn", map[string]any{"text": text, "count": count})
+	})
 	if !send("operation", map[string]string{"operation_id": op.operationID}) {
 		// The operation remains detached from the failed response writer and
 		// continues to persist its final task/session result.
@@ -889,6 +918,38 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 	if out.Kind == "task" && out.TaskID != "" {
 		// Bookkeeping only; the result already streamed to the client.
 		_ = h.store.SetSessionID(context.WithoutCancel(r.Context()), out.TaskID, sess.ID)
+	}
+
+	// A round can dispatch a batch: the model emits several `task_submit`
+	// calls and the engine enqueues every one, but the Result only carries the
+	// last receipt. Filing one turn from that receipt left the thread showing
+	// a single card while the task board showed all three rows — "two agents
+	// running" above a board of three. One turn per dispatch puts the
+	// transcript back in step with the board, and gives each card its own
+	// link. The model's own answer, when it wrote one, keeps the single-turn
+	// path: prose plus a batch of receipts has no place in one bubble.
+	if out.Kind == "task" && len(out.Dispatched) > 1 && out.Answer == "" {
+		for i, d := range out.Dispatched {
+			batch := sessions.Turn{
+				Role: "assistant",
+				Kind: "task",
+				Text: "已派发任务：" + d.TaskTitle + "（" + d.TaskID + "）",
+				Ref:  d.TaskID,
+			}
+			// The clock belongs to the ask, not to each row: only the last
+			// receipt carries it, so the thread does not print the same
+			// duration three times.
+			if i == len(out.Dispatched)-1 {
+				batch.DurationMS = askDuration
+				batch.Model = out.EntryModel
+			}
+			if _, err := h.sessions.AppendTurn(sess.ID, batch); err != nil {
+				// The reply already streamed; a failed bookkeeping write is
+				// not worth killing the stream over.
+				_ = err
+			}
+		}
+		return
 	}
 
 	turn := sessions.Turn{
