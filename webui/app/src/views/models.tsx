@@ -222,6 +222,19 @@ export function ModelsSection() {
       <div class="card settings-card">
         <h2 class="block-title">{t('models.title')}</h2>
         <p class="gate-error">{error}</p>
+        {/* The Agents page offers a retry here; a console that lost its first
+            read (a panel restarting under it) otherwise stays empty until the
+            user reloads the whole page. */}
+        <button
+          class="btn small"
+          type="button"
+          onClick={() => {
+            setError('')
+            void reload()
+          }}
+        >
+          {t('common.retry')}
+        </button>
       </div>
     )
   }
