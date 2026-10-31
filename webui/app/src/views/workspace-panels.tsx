@@ -390,9 +390,13 @@ export function WorkspacePanels(props: WorkspacePanelsProps) {
   const measureLinks = () => {
     const grid = gridRef.current
     const next: LinkLayout = { rects: new Map(), width: 0, height: 0 }
-    if (grid && visibleEdges.length > 0) {
+    if (grid) {
       const gr = grid.getBoundingClientRect()
-      const ids = new Set<string>()
+      // Every pane, not just the endpoints of the visible edges: a line can
+      // pass behind a pane the current selection does not connect, and
+      // occlusion is exactly that question. Measuring only the endpoints made
+      // an unconnected pane unable to block anything.
+      const ids = new Set<string>(els.current.keys())
       for (const e of visibleEdges) {
         ids.add(e.a)
         ids.add(e.b)
