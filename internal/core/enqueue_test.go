@@ -641,4 +641,14 @@ func TestResourceKeysSessionLane(t *testing.T) {
 	if queue.ScopeKeysConflict(scoped[0], b[1]) {
 		t.Fatalf("a scoped child must not conflict with another conversation: %q vs %q", scoped[0], b[1])
 	}
+
+	// A conversation-less scoped child keeps the bare leaf: it is a sibling of
+	// every lane, so it can write the same path a conversation is writing. The
+	// alternative — claiming the project root — would restore that exclusion at
+	// the cost of serializing every conversation-less scoped task against every
+	// other one, which TestScopedProjectChildrenRunInParallel refuses.
+	loose := childResourceKeys("t2", TaskInput{Project: "p", Paths: []string{"src"}})
+	if want := queue.ScopeLeafKey("p", "src"); len(loose) != 1 || loose[0] != want {
+		t.Fatalf("conversation-less scoped keys = %v, want [%q]", loose, want)
+	}
 }

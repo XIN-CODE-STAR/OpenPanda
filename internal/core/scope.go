@@ -68,6 +68,15 @@ func normalizeScopePaths(paths []string) []string {
 // "scope:<p>/@session/<sid>/<path>", so its siblings in that same conversation
 // keep the overlap rules while another conversation's identical path stays a
 // separate lane.
+//
+// A submitter with no conversation (CLI `task add --paths`, an inbound
+// delegate frame) stays on the bare leaf "scope:<p>/<path>". That leaf is a
+// sibling of every conversation's lane, so it does not conflict with a
+// conversation writing the same path — the same allowance two conversations
+// already have. Claiming the project root here would restore the exclusion but
+// serialize every conversation-less scoped task against every other one, which
+// TestScopedProjectChildrenRunInParallel pins as a regression. The trade-off is
+// deliberate and documented in docs/status.md.
 func scopeLeafKeys(project, sessionID string, paths []string) []string {
 	keys := make([]string, 0, len(paths))
 	for _, p := range paths {
