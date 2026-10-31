@@ -22,6 +22,7 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/defense"
 	"github.com/Xustalis/OpenPanda/internal/entry"
 	"github.com/Xustalis/OpenPanda/internal/guard"
+	"github.com/Xustalis/OpenPanda/internal/i18n"
 	"github.com/Xustalis/OpenPanda/internal/sessions"
 	"github.com/Xustalis/OpenPanda/internal/util"
 )
@@ -590,23 +591,6 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	sessID := r.PathValue("id")
 	req.Prompt = strings.TrimSpace(req.Prompt)
-	// Notes a finished turn never read open this one. The console's
-	// continuation request carries no prompt of its own (ResumeQueued), and a
-	// user who types before it lands absorbs the parked notes into their own
-	// message — either way the text reaches the model exactly once, which is
-	// what the queue could not promise when it dropped them at the turn's end.
-	if carried := h.takeCarry(sessID); len(carried) > 0 {
-		switch {
-		case req.ResumeQueued, req.Prompt == "":
-			req.Prompt = carryText(carried)
-		default:
-			req.Prompt = carryText(carried) + "\n\n" + req.Prompt
-		}
-	}
-	if req.Prompt == "" {
-		writeErr(w, http.StatusBadRequest, errors.New("prompt must not be empty"))
-		return
-	}
 	eng := h.currentEngine()
 	if eng == nil {
 		writeErr(w, http.StatusServiceUnavailable, errors.New("ask engine not configured (configure the model in Settings)"))
@@ -641,6 +625,30 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		permission = req.PermissionMode
+	}
+
+	// Only now take the notes a finished turn parked: every check above can
+	// still refuse the request, and a refusal must not swallow text the user
+	// typed. An empty carry cannot lose anything here — it only leaves the
+	// prompt empty, which the check below rejects.
+	if carried := h.takeCarry(sessID); len(carried) > 0 {
+		switch {
+		case req.ResumeQueued, req.Prompt == "":
+			req.Prompt = carryText(carried)
+		default:
+			req.Prompt = carryText(carried) + "\n\n" + req.Prompt
+		}
+	}
+	if req.Prompt == "" {
+		// A continuation request with nothing parked has nothing to resume;
+		// falling through to the display prompt would execute it as a new
+		// message.
+		if req.ResumeQueued {
+			writeErr(w, http.StatusConflict, errors.New("nothing queued to resume"))
+			return
+		}
+		writeErr(w, http.StatusBadRequest, errors.New("prompt must not be empty"))
+		return
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -933,7 +941,7 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 			batch := sessions.Turn{
 				Role: "assistant",
 				Kind: "task",
-				Text: "已派发任务：" + d.TaskTitle + "（" + d.TaskID + "）",
+				Text: i18n.Tf(h.locale(), "web.session.dispatched", "title", d.TaskTitle, "id", d.TaskID),
 				Ref:  d.TaskID,
 			}
 			// The clock belongs to the ask, not to each row: only the last
