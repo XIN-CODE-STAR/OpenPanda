@@ -2053,6 +2053,7 @@ sys.exit(1)
         # HOME/USERPROFILE point at a throwaway dir so the adapter's
         # settings.json write cannot touch the developer's real ~/.gemini.
         home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home, True)
         settings = pathlib.Path(home) / ".gemini" / "antigravity-cli" / "settings.json"
         settings.parent.mkdir(parents=True)
         settings.write_text(json.dumps({"theme": "dark"}))
@@ -2080,6 +2081,7 @@ print(json.dumps({"conversation_id": "c1", "status": "SUCCESS",
         # A run that is NOT injected leaves the file alone — an account login
         # the operator configured by hand must not be switched underneath them.
         other = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, other, True)
         keep = pathlib.Path(other) / ".gemini" / "antigravity-cli" / "settings.json"
         keep.parent.mkdir(parents=True)
         keep.write_text(json.dumps({"modelProvider": "oauth-personal"}))
