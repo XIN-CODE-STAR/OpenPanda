@@ -1502,41 +1502,6 @@ export const api = {
     return request('DELETE', `/api/reminders/${id}`)
   },
 
-  // ---- 待办 (the user's own board) ----
-
-  /** The whole board in one read; the page paints every lane from it. */
-  todos(params?: { status?: string; project?: string; q?: string }): Promise<Todo[]> {
-    const q = new URLSearchParams()
-    if (params?.status) q.set('status', params.status)
-    if (params?.project) q.set('project', params.project)
-    if (params?.q) q.set('q', params.q)
-    const suffix = q.size > 0 ? `?${q}` : ''
-    return request('GET', `/api/todos${suffix}`)
-  },
-
-  createTodo(body: TodoInput): Promise<Todo> {
-    return request('POST', '/api/todos', body)
-  },
-
-  /** Partial update: only the fields present are touched. `due_at` takes
-   *  "" (clear), "YYYY-MM-DD", or an RFC3339 stamp. */
-  patchTodo(id: number, body: TodoPatch): Promise<Todo> {
-    return request('PATCH', `/api/todos/${id}`, body)
-  },
-
-  deleteTodo(id: number): Promise<{ deleted: number }> {
-    return request('DELETE', `/api/todos/${id}`)
-  },
-
-  reorderTodos(ids: number[]): Promise<{ reordered: number }> {
-    return request('POST', '/api/todos/reorder', { ids })
-  },
-
-  /** 交给熊猫: enqueue a task from this todo and link the two rows. */
-  startTodo(id: number): Promise<TodoStartResult> {
-    return request('POST', `/api/todos/${id}/start`, {})
-  },
-
   // ---- Memory (USER.md / MEMORY.md / DREAMS.md) ----
 
   memory(): Promise<MemoryFiles> {
@@ -2128,58 +2093,6 @@ export interface Reminder {
   fired_at: number // 0 = never fired; for recurring rows it is the LAST fire time
   source: string // "tool" | "cli" | "web"
   repeat_seconds: number // >0 = recurring; the row stays pending between fires
-}
-
-/** 待办 lanes. `paused` is a todo the owner parked; `cancelled` is one they
- *  gave up on — both stay on the board rather than being deleted, so the
- *  history of "I decided not to" survives. */
-export type TodoStatus = 'pending' | 'running' | 'paused' | 'done' | 'cancelled'
-
-/** One row of the to-do board. Times are Unix seconds, 0 = unset. */
-export interface Todo {
-  id: number
-  title: string
-  description: string
-  status: TodoStatus
-  priority: 'high' | 'normal' | 'low'
-  due_at: number
-  started_at: number
-  done_at: number
-  tags: string[] | null
-  project: string
-  task_id: string // the task started from this todo; "" until 开始
-  seq: number // manual lane order; 0 = never dragged
-  created_at: number
-  updated_at: number
-}
-
-export interface TodoInput {
-  title: string
-  description?: string
-  status?: TodoStatus
-  priority?: 'high' | 'normal' | 'low'
-  due_at?: string
-  tags?: string[]
-  project?: string
-}
-
-export interface TodoPatch {
-  title?: string
-  description?: string
-  status?: TodoStatus
-  priority?: 'high' | 'normal' | 'low'
-  due_at?: string
-  tags?: string[]
-  project?: string
-  seq?: number
-}
-
-export interface TodoStartResult {
-  todo?: Todo
-  task_id: string
-  session_id: string
-  state: string
-  warning?: string
 }
 
 export interface MemoryFiles {
