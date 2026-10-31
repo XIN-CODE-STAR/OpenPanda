@@ -12,6 +12,7 @@ import {
 import { useLocaleRerender } from '../hooks'
 import { t } from '../i18n'
 import { ModelPicker } from '../components/model-picker'
+import { Select } from '../components/select'
 import { useModalFocus } from '../components/modal-focus'
 import { Icon } from '../components/icons'
 import { toast, toastError } from '../components/toast'
@@ -1609,19 +1610,16 @@ function DraftRow(props: {
             </div>
             <div class="field-group narrow">
               <label>{t('models.col.thinking')}</label>
-              <select
+              <Select
                 class="input"
                 value={d.thinking}
-                onChange={(e) =>
-                  props.onPatch({ thinking: (e.target as HTMLSelectElement).value as Draft['thinking'] })
-                }
-              >
-                {(['auto', 'on', 'off'] as const).map((v) => (
-                  <option key={v} value={v}>
-                    {t(`models.thinking.${v}`)}
-                  </option>
-                ))}
-              </select>
+                options={(['auto', 'on', 'off'] as const).map((v) => ({
+                  value: v,
+                  label: t(`models.thinking.${v}`),
+                }))}
+                onChange={(v) => props.onPatch({ thinking: v as Draft['thinking'] })}
+                ariaLabel={t('models.col.thinking')}
+              />
             </div>
             <button
               type="button"
