@@ -55,6 +55,10 @@ interface Conn {
   keyHint: string
   keySet: boolean
   noAuth: boolean
+  /** The endpoint's plaintext opt-in travels with the row: extending a
+   *  plaintext relay must not silently submit allow_plaintext: false, which
+   *  the guard reads as a refusal. */
+  allowPlaintext: boolean
   members: Member[]
 }
 
@@ -158,6 +162,7 @@ function groupConnections(data: ModelsResponse): Conn[] {
         keyHint: m.entry.key_hint ?? '',
         keySet: m.entry.key_set,
         noAuth: m.entry.no_auth ?? false,
+        allowPlaintext: m.entry.allow_plaintext ?? false,
         members: [],
       }
       byId.set(id, conn)
@@ -667,11 +672,11 @@ function ModelSheet(props: {
     return baseURL.trim() || provider?.base_url || ''
   }
 
-  /** A typed base is shown only when it is not the catalogue's — a relay under
-   *  a known vendor keeps its URL visible instead of being silently rebased. */
-  const showBase =
-    provider !== null &&
-    (provider.id === 'custom' || (baseURL.trim() !== '' && baseURL.trim() !== provider.base_url))
+  /** Always shown once a vendor is picked. Hiding it unless the typed value
+   *  already differed made "a known vendor behind a company relay" reachable
+   *  only by choosing custom, which loses the catalogue defaults and the key
+   *  reuse that comes with the vendor row. */
+  const showBase = provider !== null
 
   function pick(p: ProviderInfo) {
     // The rail keeps the current vendor selected; re-clicking it is not a
