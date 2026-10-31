@@ -135,9 +135,21 @@ export function parseHash(): Route {
   return { view: 'sessions', id: null, project: projectParam }
 }
 
-export function navigate(route: Route): void {
+export function navigate(route: Route, replace = false): void {
+  // Closing a modal must not leave a history entry behind: Back would reopen
+  // the dialog the user just dismissed. replaceState does not fire
+  // hashchange, so the route listener is nudged by hand.
+  const commit = (hash: string) => {
+    if (!replace) {
+      location.hash = hash
+      return
+    }
+    if (location.hash === hash) return
+    history.replaceState(history.state, '', hash)
+    window.dispatchEvent(new HashChangeEvent('hashchange'))
+  }
   if (route.view === 'detail') {
-    location.hash = `#/task/${encodeURIComponent(route.id)}`
+    commit(`#/task/${encodeURIComponent(route.id)}`)
   } else if (route.view === 'sessions') {
     let base = route.id ? `#/chat/${encodeURIComponent(route.id)}` : '#/chat'
     const params: string[] = []
@@ -146,7 +158,7 @@ export function navigate(route: Route): void {
     // open thread answers for itself, from its own project row.
     if (!route.id && route.ws) params.push(`ws=${encodeURIComponent(route.ws)}`)
     if (params.length) base += `?${params.join('&')}`
-    location.hash = base
+    commit(base)
   } else if (route.view === 'control') {
     // The queue tab is the page's default, so it stays out of the URL — a
     // plain `#/control` is the board, and only 计划 / 项目 need saying.
@@ -154,11 +166,11 @@ export function navigate(route: Route): void {
     if (route.tab && route.tab !== 'queue') params.push(`tab=${route.tab}`)
     if (route.project) params.push(`project=${encodeURIComponent(route.project)}`)
     if (route.review) params.push('review=1')
-    location.hash = params.length ? `#/control?${params.join('&')}` : '#/control'
+    commit(params.length ? `#/control?${params.join('&')}` : '#/control')
   } else if (route.view === 'settings') {
-    location.hash = route.tab ? `#/settings?tab=${encodeURIComponent(route.tab)}` : '#/settings'
+    commit(route.tab ? `#/settings?tab=${encodeURIComponent(route.tab)}` : '#/settings')
   } else {
-    location.hash = `#/${route.view}`
+    commit(`#/${route.view}`)
   }
 }
 

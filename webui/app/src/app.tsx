@@ -358,7 +358,7 @@ export function App() {
           <SettingsView
             initialSection={route.tab ?? undefined}
             onSelectTab={(tab) => navigate({ view: 'settings', tab })}
-            onClose={() => navigate(lastView.current)}
+            onClose={() => navigate(lastView.current, true)}
             onLogout={logout}
           />
         )}

@@ -92,6 +92,12 @@ export function QueueView({
   useEffect(() => {
     if (project != null) setProjectFilter(project)
   }, [project])
+  // The sidebar badge jumps here in focus-review mode. A device filter left
+  // over from an earlier visit would hide every row while the badge still
+  // counts > 0, so the board would open empty.
+  useEffect(() => {
+    if (focusReview) setDeviceFilter('')
+  }, [focusReview])
   const bump = () => setRefresh((v) => v + 1)
   // A stalled task emits no SSE event — nothing changes — so the badge can
   // only appear on a local clock tick.

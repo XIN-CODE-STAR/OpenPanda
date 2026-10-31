@@ -253,6 +253,7 @@ export function ModelsSection() {
    *  把这些带过去，前端填表只会得到一条没有凭据的副本。 */
   async function copy(m: Member) {
     const e = m.entry
+    const alias = copyAlias(registry.map((x) => x.alias), e.alias)
     setBusy(`copy:${keyOf(e)}`)
     try {
       await api.addModel({
@@ -260,10 +261,12 @@ export function ModelsSection() {
         model: e.model,
         base_url: e.base_url,
         api_type: e.api_type,
-        alias: copyAlias(registry.map((x) => x.alias), e.alias),
+        alias,
         copy_from: e.alias,
       })
-      toast(t('models.copied', { alias: e.alias }), 'success')
+      // Report the row that was created, not the source: the toast is how the
+      // user learns which alias to look for.
+      toast(t('models.copied', { alias }), 'success')
       afterWrite()
     } catch (err) {
       toastError(err)
@@ -380,7 +383,9 @@ function ModelTile(props: {
   // The corner dot is down to one job: a config that cannot dial at all. A test
   // result is said in the strip instead — two marks for one fact read as two
   // facts, and a 7px dot was never going to carry "and here is what broke".
-  const dot = verdict || testing ? '' : keyOk ? '' : 'warn'
+  // An endpoint-owner warning counts even when the key is present: the row
+  // would dial another vendor's roster, which is exactly what the dot is for.
+  const dot = verdict || testing ? '' : entry.warning_code || !keyOk ? 'warn' : ''
   const dotTitle = entry.warning_code
     ? t('models.warn.endpointOwnerShort', {
         owner: labelOf(props.providers, entry.warning_arg),
