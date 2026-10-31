@@ -125,6 +125,7 @@ def _stream_turn(cmd, cwd, timeout, stop_on_tool=None):
     run was cut short at that request (see stop_on_tool).
     """
     parts = []
+    errors = []
     saw_event = [False]
     called = []
 
@@ -141,6 +142,16 @@ def _stream_turn(cmd, cwd, timeout, stop_on_tool=None):
             data = ev.get("data")
             if isinstance(data, str):
                 parts.append(data)
+        elif ev.get("type") == "error":
+            # grok reports a dropped connection, a bad key or an unreachable
+            # endpoint as a terminal `error` event. Collecting only `text` made
+            # such a run look successful whenever a preamble had arrived, and
+            # the orchestrator never failed over.
+            msg = ev.get("message") or ev.get("error") or ev.get("data") or ""
+            if isinstance(msg, dict):
+                msg = msg.get("message") or msg.get("detail") or ""
+            if msg:
+                errors.append(str(msg))
 
     def stop_when(line):
         if _is_turn_end(line):
@@ -168,7 +179,7 @@ def _stream_turn(cmd, cwd, timeout, stop_on_tool=None):
         or "unknown flag" in low or "invalid option" in low
         or "invalid value" in low))
     return ("".join(parts).strip(), returncode, err, timed_out, rejected,
-            called[0] if called else "")
+            called[0] if called else "", errors[0] if errors else "")
 
 
 def main():
@@ -214,7 +225,7 @@ def main():
     harness.emit_event("session", id=session)
 
     try:
-        text, returncode, err, timed_out, rejected, tool = _stream_turn(
+        text, returncode, err, timed_out, rejected, tool, stream_error = _stream_turn(
             argv("streaming-json", session), cwd, timeout,
             stop_on_tool=_injected_model())
     except FileNotFoundError:
@@ -271,11 +282,18 @@ def main():
         harness.emit(False, "grok timed out", 124, session_id=session)
         return
 
-    result = text or err.strip()
+    # An `error` event ends the turn as a failure even when a preamble arrived:
+    # text alone would report ok, the orchestrator would not fail over, and the
+    # operator would see "exec failed: " with the real reason discarded. The
+    # message is the diagnosis, kept after whatever the model had said.
+    if stream_error:
+        result = (text + "\n\n" + stream_error) if text else stream_error
+    else:
+        result = text or err.strip()
     # A turn that reached its own terminal event is a completed turn whatever
     # the exit code says: the tree was killed on purpose once the answer was in
     # hand, so the status reflects the kill rather than the work.
-    ok = bool(text)
+    ok = bool(text) and not stream_error
     harness.emit_event("tool_result", tool_use_id="grok",
                        is_error=not ok, content=result)
     harness.emit(ok, result, 0 if ok else (returncode or 1), session_id=session)
