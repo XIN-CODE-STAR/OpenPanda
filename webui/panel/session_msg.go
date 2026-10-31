@@ -213,6 +213,15 @@ func (h *handler) carryNotes(id string, notes []pendingNote) {
 
 // takeCarry drains the parked notes: the resumed turn opens with them, and a
 // prompt the user sends first absorbs them.
+// hasCarry reports whether a session has notes parked for its next turn,
+// without taking them. sessionAsk refuses an empty prompt before any of the
+// checks that can also fail — a refusal must not drain the carry.
+func (h *handler) hasCarry(id string) bool {
+	h.steerMu.Lock()
+	defer h.steerMu.Unlock()
+	return len(h.carry[id]) > 0
+}
+
 func (h *handler) takeCarry(id string) []pendingNote {
 	h.steerMu.Lock()
 	defer h.steerMu.Unlock()

@@ -591,6 +591,14 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	sessID := r.PathValue("id")
 	req.Prompt = strings.TrimSpace(req.Prompt)
+	// An empty prompt is a client bug unless a parked note is about to become
+	// one. Checking it here keeps the 400 ahead of the engine/session checks
+	// (the same order the endpoint always had) while still leaving the carry
+	// untouched until everything else has passed.
+	if req.Prompt == "" && !req.ResumeQueued && !h.hasCarry(sessID) {
+		writeErr(w, http.StatusBadRequest, errors.New("prompt must not be empty"))
+		return
+	}
 	eng := h.currentEngine()
 	if eng == nil {
 		writeErr(w, http.StatusServiceUnavailable, errors.New("ask engine not configured (configure the model in Settings)"))
