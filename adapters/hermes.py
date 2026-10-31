@@ -32,7 +32,6 @@ diagnostics live in _harness.py; this file is only the hermes difference: the
 command line, the heartbeat cadence of its silent --cli mode, and that config
 shim.
 """
-import atexit
 import os
 import re
 import shutil
@@ -64,7 +63,7 @@ providers:
 # refused rather than quoted-and-hoped (a stray colon would turn the value
 # into a mapping, and hermes would then report a config error instead of a
 # model error).
-_SAFE_SCALAR = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]*$")
+_SAFE_SCALAR = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+@-]*$")
 
 
 def _injected_home(model):
@@ -85,7 +84,10 @@ def _injected_home(model):
     # references them, so an injected run leaves no credential behind.
     os.environ["OPENPANDA_INJECT_BASE_URL"] = base_url
     os.environ["OPENPANDA_INJECT_API_KEY"] = os.environ.get("OPENAI_API_KEY", "")
-    home = tempfile.mkdtemp(prefix="panda-hermes-home-")
+    try:
+        home = tempfile.mkdtemp(prefix="panda-hermes-home-")
+    except OSError:
+        return ""
     try:
         with open(os.path.join(home, "config.yaml"), "w", encoding="utf-8") as fh:
             fh.write(CONFIG_TEMPLATE.format(provider=PROVIDER_ID, model=model))
@@ -93,7 +95,7 @@ def _injected_home(model):
         shutil.rmtree(home, ignore_errors=True)
         return ""
     os.environ["HERMES_HOME"] = home
-    atexit.register(shutil.rmtree, home, True)
+    harness.at_cleanup(shutil.rmtree, home, True)
     return home
 
 

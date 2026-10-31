@@ -28,6 +28,7 @@ command line and the JSON envelope reduction.
 import json
 import os
 import subprocess
+import tempfile
 
 import _harness as harness
 
@@ -39,27 +40,67 @@ SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".gemini",
                              "antigravity-cli", "settings.json")
 
 
+def _restore_settings(original):
+    """Put the operator's settings.json back exactly as it was.
+
+    `original` is the file's bytes before the injected run, or None when there
+    was no file. Leaving the rewrite in place would pin the operator's own
+    interactive agy to the API-key branch: it then answers "authentication
+    required" instead of using its OAuth session, with no way back except
+    hand-editing the file.
+    """
+    try:
+        if original is None:
+            os.unlink(SETTINGS_PATH)
+        else:
+            with open(SETTINGS_PATH, "wb") as fh:
+                fh.write(original)
+    except OSError:
+        pass
+
+
 def _select_gemini_provider():
     """Make agy use its API-key branch (env-supplied key + base URL).
 
     Merge, never overwrite: the file also carries the operator's own CLI
     preferences (theme, telemetry, …), and an injected run must not reset them.
+    The original bytes are registered for restoration on both exit paths — the
+    atexit handler and the signal handler that calls os._exit — so a cancelled
+    run does not leave the rewrite behind.
+
     Failure is non-fatal — agy then falls back to OAuth and reports
     "authentication required", which is a truer diagnosis than a crash here.
+
+    Two injected runs still race on this one file (each restores its own copy;
+    the later exit wins). agy has no env override for the settings path, so the
+    alternative is refusing the second run outright, which is worse than a
+    narrow window that only affects concurrent injected agy runs.
     """
     try:
-        doc = {}
+        original = None
         if os.path.exists(SETTINGS_PATH):
-            with open(SETTINGS_PATH, "r", encoding="utf-8") as fh:
-                doc = json.load(fh) or {}
+            with open(SETTINGS_PATH, "rb") as fh:
+                original = fh.read()
+        doc = {}
+        if original:
+            doc = json.loads(original.decode("utf-8")) or {}
         if doc.get("modelProvider") == "gemini":
             return
         doc["modelProvider"] = "gemini"
         os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
-        tmp = SETTINGS_PATH + ".panda-tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(doc, fh, indent=2, ensure_ascii=False)
-        os.replace(tmp, SETTINGS_PATH)
+        fd, tmp = tempfile.mkstemp(prefix=".panda-agy-",
+                                   dir=os.path.dirname(SETTINGS_PATH))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(doc, fh, indent=2, ensure_ascii=False)
+            os.replace(tmp, SETTINGS_PATH)
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        harness.at_cleanup(_restore_settings, original)
     except (OSError, ValueError):
         pass
 

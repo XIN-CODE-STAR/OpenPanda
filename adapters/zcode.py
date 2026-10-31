@@ -44,7 +44,6 @@ The wire contract, watchdog timeout, process-tree cleanup and stderr
 diagnostics live in _harness.py; this file is only the zcode difference: the
 command line plus that config shim.
 """
-import atexit
 import json
 import os
 import re
@@ -115,16 +114,22 @@ def _injected_config_path(model, base_url, api_type, api_key):
     base_url = (base_url or "").strip()
     if not model or not base_url or not _SAFE_ID.match(model):
         return ""
-    root = tempfile.mkdtemp(prefix="panda-zcode-")
+    try:
+        root = tempfile.mkdtemp(prefix="panda-zcode-")
+    except OSError:
+        return ""
     path = os.path.join(root, "provider_config.json")
     try:
-        with open(path, "w", encoding="utf-8") as fh:
+        # 0600 on POSIX: the file carries the API key in cleartext. Windows has
+        # no mode bits; the directory is user-private by default.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(_personal_config(model, base_url, api_type, api_key), fh,
                       ensure_ascii=False)
     except OSError:
         shutil.rmtree(root, ignore_errors=True)
         return ""
-    atexit.register(shutil.rmtree, root, True)
+    harness.at_cleanup(shutil.rmtree, root, True)
     return path
 
 

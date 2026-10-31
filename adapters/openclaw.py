@@ -42,7 +42,6 @@ The wire contract, watchdog timeout, process-tree cleanup and stderr
 diagnostics live in _harness.py; this file is only the openclaw difference:
 the command line, the heartbeat cadence of its silent run, and that sandbox.
 """
-import atexit
 import json
 import os
 import re
@@ -99,7 +98,10 @@ def _sandbox(model, base_url, api_type):
     base_url = (base_url or "").strip()
     if not model or not base_url or not _SAFE_ID.match(model):
         return ""
-    root = tempfile.mkdtemp(prefix="panda-openclaw-")
+    try:
+        root = tempfile.mkdtemp(prefix="panda-openclaw-")
+    except OSError:
+        return ""
     try:
         state = os.path.join(root, "state")
         home = os.path.join(root, "home")
@@ -115,7 +117,7 @@ def _sandbox(model, base_url, api_type):
     # operator's real home.
     os.environ["HOME"] = home
     os.environ["USERPROFILE"] = home
-    atexit.register(shutil.rmtree, root, True)
+    harness.at_cleanup(shutil.rmtree, root, True)
     return root
 
 

@@ -90,6 +90,18 @@ def run_adapter(name, cli_name, cli_body, env=None, timeout=10, extra_request=No
             "OPENPANDA_MODEL_BASE_URL", "OPENPANDA_MODEL_API_KEY",
             "OPENPANDA_MODEL_NAME", "OPENPANDA_MODEL_API_TYPE",
             "OPENPANDA_AGENT_MODELS",
+            # Ambient homes and provider settings the new injected-run cases
+            # read. A developer shell that exports any of these would make
+            # "a plain run leaves the operator's config alone" fail spuriously.
+            "HERMES_HOME",
+            "ZCODE_API_KEY", "ZCODE_BASE_URL", "ZCODE_MODEL",
+            "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE",
+            "PI_API_KEY", "PI_MODEL", "PI_PROVIDER", "PI_CODING_AGENT_DIR",
+            "GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GEMINI_BASE_URL",
+            "GROK_MODEL", "GROK_MODELS_BASE_URL", "GROK_BASE_URL",
+            "GROK_API_KEY",
+            "OPENCLAW_API_KEY", "OPENCLAW_MODEL", "OPENCLAW_CONFIG",
+            "OPENCLAW_STATE_DIR",
             # Windows locations for opencode's state files must not leak a
             # developer machine's config into the fixture.
             "APPDATA", "LOCALAPPDATA",
@@ -2044,17 +2056,26 @@ sys.exit(1)
         settings = pathlib.Path(home) / ".gemini" / "antigravity-cli" / "settings.json"
         settings.parent.mkdir(parents=True)
         settings.write_text(json.dumps({"theme": "dark"}))
-        run_adapter(
+        payload, _, _ = run_adapter(
             "antigravity.py", "agy", r'''
-import json, sys
-print(json.dumps({"conversation_id":"c1","status":"SUCCESS","response":"injected"}))
+import json, os, sys
+p = os.path.join(os.environ.get("HOME") or os.environ.get("USERPROFILE"),
+                 ".gemini", "antigravity-cli", "settings.json")
+doc = json.load(open(p, encoding="utf-8"))
+print(json.dumps({"conversation_id": "c1", "status": "SUCCESS",
+                  "response": "provider=%s theme=%s" % (doc.get("modelProvider"), doc.get("theme"))}))
 ''',
             env={"OPENPANDA_INJECTED_MODEL": "1", "HOME": home, "USERPROFILE": home},
         )
-        doc = json.loads(settings.read_text())
-        self.assertEqual(doc.get("modelProvider"), "gemini")
-        # Merge, not overwrite: the operator's own CLI preferences survive.
-        self.assertEqual(doc.get("theme"), "dark")
+        # The CLI sees the switch while it runs — and the operator's own
+        # preferences are merged in, not overwritten.
+        self.assertIn("provider=gemini", payload.get("result", ""))
+        self.assertIn("theme=dark", payload.get("result", ""))
+        # … and the file is put back when the run ends. Leaving it rewritten
+        # would pin the operator's interactive agy to the API-key branch, where
+        # it answers "authentication required" instead of using its OAuth
+        # session, with no way back except hand-editing.
+        self.assertEqual(json.loads(settings.read_text()), {"theme": "dark"})
 
         # A run that is NOT injected leaves the file alone — an account login
         # the operator configured by hand must not be switched underneath them.

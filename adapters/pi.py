@@ -122,6 +122,9 @@ def _injected_model():
     except OSError:
         shutil.rmtree(agent_dir, ignore_errors=True)
         return "", ""
+    # The finally in main() covers a normal exit; a signal path calls os._exit
+    # and skips it, so the directory also rides the harness cleanup list.
+    harness.at_cleanup(shutil.rmtree, agent_dir, True)
     os.environ["PI_CODING_AGENT_DIR"] = agent_dir
     return "panda/" + model, agent_dir
 

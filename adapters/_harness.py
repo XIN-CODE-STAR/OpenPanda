@@ -238,11 +238,38 @@ def _reap_children():
             pass
 
 
+# Cleanup registered by adapters that materialise state on disk (a throwaway
+# HOME, a provider config carrying the API key, a rewritten CLI settings file).
+# atexit alone is not enough: _terminate_children exits with os._exit, which
+# skips atexit handlers, so a cancelled run — `panda cancel`, a daemon
+# shutdown, a watchdog timeout — would leave that state behind, and on Windows
+# %TEMP% survives reboots. One list serves both exit paths.
+_CLEANUP = []
+
+
+def at_cleanup(fn, *args, **kwargs):
+    """Register work that must run before the process exits, including signals."""
+    _CLEANUP.append((fn, args, kwargs))
+
+
+def _run_cleanup():
+    # LIFO, like atexit: a restore registered after a mkdtemp must run before
+    # the directory it reads from disappears.
+    while _CLEANUP:
+        fn, args, kwargs = _CLEANUP.pop()
+        try:
+            fn(*args, **kwargs)
+        except Exception:
+            pass
+
+
 def _terminate_children(signum, _frame):
     _reap_children()
+    _run_cleanup()
     os._exit(128 + (signum or 15))
 
 
+atexit.register(_run_cleanup)
 atexit.register(_reap_children)
 if sys.platform != "win32":
     signal.signal(signal.SIGTERM, _terminate_children)
