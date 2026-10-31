@@ -1748,6 +1748,7 @@ const en: Messages = {
   'nodes.addDevice.saved': 'Saved. The peer will be dialed on the next start.',
   'nodes.addDevice.listTitle': 'Configured devices',
   'nodes.addDevice.listEmpty': 'No devices added by address yet.',
+  'nodes.apiMissing': 'This panel is older than the console — device management needs a newer panda build.',
   'nodes.addDevice.listError': 'Could not read the dial list.',
   'nodes.addDevice.edit': 'Edit',
   'nodes.addDevice.remove': 'Remove',

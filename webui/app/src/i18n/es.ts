@@ -1743,6 +1743,7 @@ const es: Messages = {
   'nodes.addDevice.saved': 'Guardado. Se marcará en el próximo arranque.',
   'nodes.addDevice.listTitle': 'Dispositivos configurados',
   'nodes.addDevice.listEmpty': 'Aún no hay dispositivos añadidos por dirección.',
+  'nodes.apiMissing': 'Este panel es más antiguo que la consola: la gestión de dispositivos necesita un panda más nuevo.',
   'nodes.addDevice.listError': 'No se pudo leer la lista de marcado.',
   'nodes.addDevice.edit': 'Editar',
   'nodes.addDevice.remove': 'Quitar',

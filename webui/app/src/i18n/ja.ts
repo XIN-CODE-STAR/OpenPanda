@@ -1728,6 +1728,7 @@ const ja: Messages = {
   'nodes.addDevice.saved': '保存しました。次回起動時にダイヤルします。',
   'nodes.addDevice.listTitle': '追加済みのデバイス',
   'nodes.addDevice.listEmpty': 'アドレスで追加したデバイスはまだありません。',
+  'nodes.apiMissing': 'このパネルはコンソールより古いため、デバイス管理には新しい panda が必要です。',
   'nodes.addDevice.listError': 'ダイヤルリストを読み取れません。',
   'nodes.addDevice.edit': '編集',
   'nodes.addDevice.remove': '削除',

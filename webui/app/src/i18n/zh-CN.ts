@@ -1727,6 +1727,7 @@ const zhCN: Messages = {
   'nodes.addDevice.saved': '配置已保存，下次启动会继续拨号。',
   'nodes.addDevice.listTitle': '已添加的设备',
   'nodes.addDevice.listEmpty': '还没有通过地址添加的设备。',
+  'nodes.apiMissing': '面板版本低于控制台——设备管理需要更新 panda。',
   'nodes.addDevice.listError': '无法读取拨号列表。',
   'nodes.addDevice.edit': '编辑',
   'nodes.addDevice.remove': '移除',

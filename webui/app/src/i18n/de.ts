@@ -1742,6 +1742,7 @@ const de: Messages = {
   'nodes.addDevice.saved': 'Gespeichert. Der Peer wird beim nächsten Start gewählt.',
   'nodes.addDevice.listTitle': 'Konfigurierte Geräte',
   'nodes.addDevice.listEmpty': 'Noch keine Geräte per Adresse hinzugefügt.',
+  'nodes.apiMissing': 'Dieses Panel ist älter als die Konsole — Geräteverwaltung braucht einen neueren panda-Build.',
   'nodes.addDevice.listError': 'Wählliste konnte nicht gelesen werden.',
   'nodes.addDevice.edit': 'Bearbeiten',
   'nodes.addDevice.remove': 'Entfernen',

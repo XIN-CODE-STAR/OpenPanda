@@ -6,6 +6,7 @@ import { useAsync } from '../hooks'
 import { t } from '../i18n'
 import { isPeerAddr } from '../utils/peer-address'
 import { Icon } from './icons'
+import { CardEditor } from './card-editor'
 import { confirmDialog } from './confirm'
 import { toast, toastError } from './toast'
 
@@ -15,9 +16,18 @@ import { toast, toastError } from './toast'
  *  list afterwards meant editing config.yaml by hand. */
 export function DeviceSection({ onChanged }: { onChanged(): void }) {
   const [tick, setTick] = useState(0)
-  const { data, error } = useAsync<PeersView>(() => api.peers(), [], tick)
+  const { data, error, errorStatus } = useAsync<PeersView>(() => api.peers(), [], tick)
+  // A panel older than this bundle has no /api/peers at all. Saying "failed to
+  // load" invites a retry loop that cannot succeed; the honest answer is that
+  // the console and the daemon are different versions, and the add form must
+  // not be offered either (it posts to the same missing surface).
+  const apiMissing = errorStatus === 404
   const [editing, setEditing] = useState<string | null>(null)
   const [removing, setRemoving] = useState('')
+  // The raw capability card used to live on the nodes page, which this
+  // console replaced. Without a mount point there was no web path left to
+  // add an agent/native/manual ability or edit a hand-written card.
+  const [showCard, setShowCard] = useState(false)
   const [result, setResult] = useState<NodesAddResult | null>(null)
 
   const peers = data?.peers ?? []
@@ -51,6 +61,7 @@ export function DeviceSection({ onChanged }: { onChanged(): void }) {
 
   return (
     <div class="connect-pane device-pane">
+      {!apiMissing && (
       <AddDeviceForm
         hasSecret={data?.has_secret ?? true}
         onAdded={(res) => {
@@ -58,8 +69,16 @@ export function DeviceSection({ onChanged }: { onChanged(): void }) {
           reload()
         }}
       />
+      )}
 
       {result && <AddResult result={result} onClose={() => setResult(null)} />}
+
+      <div class="device-card-toggle">
+        <button class="btn small ghost" type="button" onClick={() => setShowCard((v) => !v)}>
+          {t('card.title')}
+        </button>
+      </div>
+      {showCard && <CardEditor onChanged={onChanged} />}
 
       <section class="device-list" aria-labelledby="device-list-title">
         <div class="device-list-head">
@@ -69,7 +88,9 @@ export function DeviceSection({ onChanged }: { onChanged(): void }) {
           <span class="block-count">{peers.length}</span>
         </div>
 
-        {error ? (
+        {apiMissing ? (
+          <p class="dim device-list-state">{t('nodes.apiMissing')}</p>
+        ) : error ? (
           <div class="device-list-state">
             <p class="node-remove-error">{t('nodes.addDevice.listError')}</p>
             <button class="btn small ghost" type="button" onClick={() => setTick((v) => v + 1)}>
