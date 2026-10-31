@@ -1273,6 +1273,38 @@ func TestGrokConfigFileNeedsAProviderToCountAsCredentials(t *testing.T) {
 // injection.agents.<agent>.api_type — and following that advice used to land
 // on a second, unrelated failure ("model has no endpoint: base_url is empty"),
 // because the pin did not inherit base_url. One fact, one line of config.
+// TestInjectionPerAgentModelInheritsThePlaintextWaiver pins the other half of
+// the endpoint inheritance: a pin that only changes the dialect must keep the
+// node's plaintext consent, or the documented fix ("set
+// injection.agents.<name>.api_type") lands on a guard refusal that reads as a
+// different problem entirely.
+func TestInjectionPerAgentModelInheritsThePlaintextWaiver(t *testing.T) {
+	cleanCredentialEnv(t)
+
+	node := config.ModelConfig{
+		APIType:        config.APITypeOpenAI,
+		Provider:       "custom",
+		BaseURL:        "http://10.0.0.5:8080/v1",
+		APIKey:         "sk-node-test",
+		Model:          "relay-model",
+		AllowPlaintext: true,
+	}
+	r := NewRouter(testCard(), NewExecutor(), node, config.InjectionConfig{
+		Model: config.InjectionModelAuto,
+		Agents: map[string]config.ModelConfig{
+			"deepseek_harness": {APIType: config.APITypeAnthropic},
+		},
+	}, config.RoutingConfig{})
+
+	got := r.injectionModelFor("deepseek_harness", "deepseek_harness.py")
+	if !got.AllowPlaintext {
+		t.Fatal("a dialect-only pin dropped the node's plaintext waiver")
+	}
+	if got.BaseURL != "http://10.0.0.5:8080/v1" {
+		t.Fatalf("base url = %q, want the node model's", got.BaseURL)
+	}
+}
+
 func TestInjectionPerAgentModelInheritsTheEndpoint(t *testing.T) {
 	cleanCredentialEnv(t)
 

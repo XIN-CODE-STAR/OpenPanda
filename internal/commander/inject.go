@@ -97,6 +97,14 @@ func (r *Router) injectionModelFor(name, adapter string) config.ModelConfig {
 	if out.ContextWindow == 0 {
 		out.ContextWindow = base.ContextWindow
 	}
+	// The plaintext waiver belongs to the endpoint, not to the pin. A node
+	// model that points at a plaintext relay keeps its waiver when a pin only
+	// overrides the dialect; dropping it made the documented fix ("set
+	// injection.agents.<name>.api_type") land on a guard refusal, which reads
+	// as a different problem entirely.
+	if !out.AllowPlaintext {
+		out.AllowPlaintext = base.AllowPlaintext
+	}
 	return out
 }
 
@@ -224,10 +232,18 @@ func injectionBlocker(name, adapter string, model config.ModelConfig) string {
 	if base == "" {
 		return injectionRefusal(adapter, model)
 	}
-	// The agent CLIs speak Messages or Chat Completions. A model on a surface
-	// only panda's own client drives (Responses, Google) is never injected:
-	// the CLI would send the wrong request shape to a valid endpoint.
-	if apiType != config.APITypeAnthropic && apiType != config.APITypeOpenAI {
+	// The agent CLIs speak Messages or Chat Completions, with one exception:
+	// agy always sends Gemini generateContent, so it is the one adapter that
+	// needs a google-dialect endpoint and must refuse everything else. A model
+	// on a surface only panda's own client drives (Responses) is never
+	// injected: the CLI would send the wrong request shape to a valid
+	// endpoint.
+	if adapter == "antigravity.py" {
+		if apiType != config.APITypeGoogle {
+			return "antigravity (agy) always sends Gemini generateContent, but the configured model speaks " +
+				apiType + "; set injection.agents." + name + " to a google-dialect endpoint"
+		}
+	} else if apiType != config.APITypeAnthropic && apiType != config.APITypeOpenAI {
 		return "the configured model speaks " + apiType +
 			", a surface only panda's own client drives; an agent CLI needs a " +
 			config.APITypeAnthropic + " or " + config.APITypeOpenAI +
