@@ -471,42 +471,6 @@ var known = []Known{
 		DefaultTier:         TierAutoApproved,
 	},
 	{
-		Name:    "zcode",
-		Adapter: "zcode.py",
-		// zcode's headless contract is `zcode --prompt "…"`; the prompt rides
-		// as one literal argv element. It moved off generic.py because
-		// injection needs more than env: 0.17 reads its model from the
-		// personal provider config, not from ZCODE_*, so the adapter writes
-		// that config for an injected run (see adapters/zcode.py).
-		Endpoint:    "https://api.z.ai/api/anthropic",
-		Binaries:    []string{"zcode"},
-		DisplayName: "ZCode (Z.AI)",
-		InstallURL:  "https://github.com/zai-org/ZCode",
-		// `zcode login` OAuth is buggy upstream: the reliable auth paths are
-		// the TUI setup wizard's ~/.zcode/cli/config.json (credential-free
-		// until configured — so its mere existence is NOT a credential
-		// signal and stays out of CredentialFiles) or the ZCODE_* env trio.
-		InitHint:          "zcode  # run once for the setup wizard, or set ZCODE_API_KEY/ZCODE_MODEL/ZCODE_BASE_URL",
-		CredentialEnvVars: []string{"ZCODE_API_KEY"},
-		// APIType is "" on purpose: zcode speaks both wires (its own catalog
-		// ships openai-chat-completions and anthropic-messages templates) and
-		// the adapter writes the dialect PANDA's model speaks into the
-		// provider entry. Pinning "anthropic" here made an OpenAI-dialect node
-		// refuse to inject at all, and the refusal was reported as
-		// "injection unsupported for generic.py" — a dialect mismatch dressed
-		// up as an unsupported adapter.
-		ModelEnv: &ModelEnvMapping{
-			APIType: "",
-			BaseURL: "ZCODE_BASE_URL",
-			APIKey:  "ZCODE_API_KEY",
-			Model:   "ZCODE_MODEL",
-		},
-		DefaultCapabilities: []string{"coding", "shell", "file_edit"},
-		DefaultBestAt:       []string{"multi_file_edits", "code_search"},
-		DefaultCostTier:     "low",
-		DefaultTier:         TierAutoApproved,
-	},
-	{
 		Name:        "hermes",
 		Adapter:     "hermes.py",
 		Endpoint:    "https://api.openai.com",
