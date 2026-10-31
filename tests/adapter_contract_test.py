@@ -2561,6 +2561,12 @@ class ResolveArgvTest(unittest.TestCase):
 
     def test_posix_passthrough(self):
         # sys.platform untouched → the argv comes back byte-identical.
+        # Only a POSIX host passes a bare command through: on Windows the
+        # _shim_exe branch resolves it to the real executable, because
+        # CreateProcess does not search PATH for a bare name the way a POSIX
+        # shell does. The resolved shape is covered by the win32 cases below.
+        if sys.platform == "win32":
+            self.skipTest("Windows resolves a bare command to its real exe")
         payload, proc = run_harness(
             "import json; print(json.dumps(_harness.resolve_argv("
             "['opencode', 'run', 'hi'])))")
