@@ -12,6 +12,8 @@ package panel
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,6 +48,12 @@ type modelEntryJSON struct {
 	Active         bool   `json:"active"`
 	KeySet         bool   `json:"key_set"`
 	KeyHint        string `json:"key_hint,omitempty"`
+	// KeyFingerprint is a short digest of the stored key. key_hint is the
+	// last four characters, which two accounts of one vendor can share; the
+	// console groups models into connections by this instead, so "extend"
+	// cannot borrow the other account's key. Not the secret, and not
+	// reversible.
+	KeyFingerprint string `json:"key_fingerprint,omitempty"`
 	// AllowPlaintext is the stored waiver for a plain-http endpoint. It is
 	// reported so the edit form can show the box already ticked instead of
 	// asking again (or, worse, revoking it by submitting an unticked box).
@@ -103,6 +111,7 @@ func modelEntryOf(mc config.ModelConfig, active config.ModelConfig) modelEntryJS
 		NoAuth:         mc.NoAuth || (known && p.NoAuth),
 		KeySet:         mc.APIKey != "",
 		KeyHint:        maskKey(mc.APIKey),
+		KeyFingerprint: keyFingerprint(mc.APIKey),
 		AllowPlaintext: mc.AllowPlaintext,
 		ContextAuto:    mc.ContextWindow == 0,
 		MaxTokensAuto:  mc.MaxTokens == 0,
@@ -1291,4 +1300,16 @@ func (h *handler) applyModelConfig(mc config.ModelConfig) error {
 		return h.engines.Reload()
 	}
 	return nil
+}
+
+// keyFingerprint is a stable, non-reversible digest of a stored key. It exists
+// so the console can tell two accounts of one vendor apart: key_hint (the last
+// four characters) collides, and a merged connection makes "extend this
+// connection" hand the new row the other account's key.
+func keyFingerprint(key string) string {
+	if key == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:4])
 }
