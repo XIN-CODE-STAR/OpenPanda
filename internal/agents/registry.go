@@ -471,6 +471,36 @@ var known = []Known{
 		DefaultTier:         TierAutoApproved,
 	},
 	{
+		Name:    "zcode",
+		Adapter: "generic.py",
+		// zcode's headless contract is `zcode --prompt "…"` — community-
+		// verified (Z.AI documents no non-interactive mode yet). The prompt
+		// rides as one literal argv element; there is no session/resume flag,
+		// which is exactly the plain-argv surface generic.py exists for.
+		Command:     "zcode --prompt {prompt}",
+		Endpoint:    "https://api.z.ai/api/anthropic",
+		Binaries:    []string{"zcode"},
+		DisplayName: "ZCode (Z.AI)",
+		InstallURL:  "https://github.com/zai-org/ZCode",
+		// `zcode login` OAuth is buggy upstream: the reliable auth paths are
+		// the TUI setup wizard's ~/.zcode/cli/config.json (credential-free
+		// until configured — so its mere existence is NOT a credential
+		// signal and stays out of CredentialFiles) or the ZCODE_* env trio,
+		// which doubles as the injection surface below.
+		InitHint:          "zcode  # run once for the setup wizard, or set ZCODE_API_KEY/ZCODE_MODEL/ZCODE_BASE_URL",
+		CredentialEnvVars: []string{"ZCODE_API_KEY"},
+		ModelEnv: &ModelEnvMapping{
+			APIType: "anthropic",
+			BaseURL: "ZCODE_BASE_URL",
+			APIKey:  "ZCODE_API_KEY",
+			Model:   "ZCODE_MODEL",
+		},
+		DefaultCapabilities: []string{"coding", "shell", "file_edit"},
+		DefaultBestAt:       []string{"multi_file_edits", "code_search"},
+		DefaultCostTier:     "low",
+		DefaultTier:         TierAutoApproved,
+	},
+	{
 		Name:        "hermes",
 		Adapter:     "hermes.py",
 		Endpoint:    "https://api.openai.com",
