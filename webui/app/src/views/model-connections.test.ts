@@ -45,8 +45,8 @@ test('grouping keeps the aliases of one connection together', () => {
     ]),
   )
   assert.equal(conns.length, 1)
-  assert.equal(conns[0].members.length, 2)
-  assert.equal(conns[0].baseURL, 'http://127.0.0.1:3065/v1')
+  assert.equal(conns[0]!.members.length, 2)
+  assert.equal(conns[0]!.baseURL, 'http://127.0.0.1:3065/v1')
 })
 
 test('the live model configured outside the registry gets its own row', () => {
@@ -60,14 +60,14 @@ test('a registry entry that is also the live model is not duplicated', () => {
   const live = entry({ alias: 'relay', active: true })
   const conns = groupConnections(response([entry({ alias: 'relay', active: true })], live))
   assert.equal(conns.length, 1)
-  assert.equal(conns[0].members.length, 1)
+  assert.equal(conns[0]!.members.length, 1)
 })
 
 test('the active connection sorts first', () => {
   const idle = entry({ alias: 'zzz', base_url: 'https://b.example/v1' })
   const active = entry({ alias: 'aaa', base_url: 'https://a.example/v1', active: true })
   const conns = groupConnections(response([idle, active], active))
-  assert.equal(conns[0].members[0].entry.alias, 'aaa')
+  assert.equal(conns[0]!.members[0]!.entry.alias, 'aaa')
 })
 
 test('copyAlias walks past the suffixes already taken', () => {
