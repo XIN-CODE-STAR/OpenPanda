@@ -174,6 +174,40 @@ func TestResolveModelRefCopyFromSuppliesTheKey(t *testing.T) {
 	}
 }
 
+// Extending a saved custom relay must keep its key. The Add tile prefills the
+// row and submits without a key, and the client sends reuse_from; the custom
+// branch used to ignore it, persist NoAuth: true and toast "saved" — the user
+// ended up with a keyless duplicate of a working entry.
+func TestAddModelExtendsCustomRelayKeepsItsKey(t *testing.T) {
+	h, path := newModelPanel(t, func(c *config.Config) {
+		c.Models = []config.ModelConfig{{
+			Name: "relay", Provider: "custom", APIType: config.APITypeOpenAI,
+			BaseURL: "http://127.0.0.1:3065/v1", Model: "m-1", APIKey: "sk-source",
+		}}
+	})
+
+	body := `{"provider":"custom","api_type":"openai","base_url":"http://127.0.0.1:3065/v1",` +
+		`"model":"m-2","alias":"relay-2","reuse_from":"relay"}`
+	if code, out := doJSON(t, h, jsonReq(http.MethodPost, "/api/models", body)); code != http.StatusOK {
+		t.Fatalf("extend: status = %d, want 200 (out %v)", code, out)
+	}
+
+	cfg := readConfig(t, path)
+	for _, m := range cfg.Models {
+		if m.Alias() != "relay-2" {
+			continue
+		}
+		if m.APIKey != "sk-source" {
+			t.Fatalf("key = %q, want the source relay's key", m.APIKey)
+		}
+		if m.NoAuth {
+			t.Fatal("extended relay was persisted as no-auth")
+		}
+		return
+	}
+	t.Fatal("relay-2 was not persisted")
+}
+
 // "Duplicate" is one click in the console, and the row it lands must be a
 // working entry: the secret, the raw params/headers and the plaintext waiver
 // are exactly what the page can never re-send, so copy_from carries them.

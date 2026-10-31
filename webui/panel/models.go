@@ -311,6 +311,13 @@ func (h *handler) modelFromRequest(req addModelRequest, existingKey string) (con
 		if err := checkCustomBaseURL(base); err != nil {
 			return config.ModelConfig{}, err
 		}
+		// "Extend this connection" applies to custom relays too: the form
+		// prefills the saved row and submits without a key, so without this the
+		// entry persisted keyless (NoAuth: true) and the user lost the key that
+		// was already on file.
+		if key == "" && req.ReuseFrom != "" {
+			key = h.keyForAlias(req.ReuseFrom)
+		}
 		mc = config.ModelConfig{
 			Provider:  "custom",
 			APIType:   normalizeAPIType(req.APIType),
