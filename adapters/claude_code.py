@@ -372,6 +372,18 @@ def _run_stream(base, req, model, cwd, timeout, disable_settings=False, v2=True,
     if _prompt_to_stdin(cmd):
         cmd = _stream_argv(_base_args(req, max_turns, v2, prompt=False),
                            req, model, disable_settings, v2)
+        # Re-measure after shedding the prompt: --append-system-prompt,
+        # --json-schema and --mcp-config stay on the line, and a system prompt
+        # plus a pretty-printed schema can still exceed the limit. Spawning
+        # anyway is exactly the "The command line is too long" failure this
+        # branch exists to fix, so it fails with a diagnosis instead.
+        rebuilt = len(subprocess.list2cmdline(cmd))
+        if rebuilt > WIN_CMDLINE_SAFE:
+            raise ProviderFailure(
+                "claude_code: the command line is still %d characters after "
+                "moving the prompt to stdin (limit %d) — shorten "
+                "--append-system-prompt, --json-schema or --mcp-config"
+                % (rebuilt, WIN_CMDLINE_SAFE))
         prompt_input = req.prompt
 
     state = {"final": None, "saw_event": False, "session_id": ""}
