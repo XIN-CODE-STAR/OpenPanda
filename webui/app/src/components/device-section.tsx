@@ -112,9 +112,13 @@ export function DeviceSection({ onChanged }: { onChanged(): void }) {
                   key={peer.addr}
                   peer={peer}
                   onCancel={() => setEditing(null)}
-                  onSaved={(addr) => {
+                  onSaved={(addr, res) => {
                     setEditing(null)
-                    toast(t('nodes.addDevice.updated', { addr }), 'success')
+                    // Report what the server actually did. `updated` is false
+                    // when the edit changed nothing, and a refused one (404 on
+                    // a stale row, 409 on a rename onto another peer) throws
+                    // before this runs — neither is "updated".
+                    if (res.updated) toast(t('nodes.addDevice.updated', { addr }), 'success')
                     reload()
                   }}
                 />
@@ -348,7 +352,7 @@ function EditPeerForm({
 }: {
   peer: PeerEntry
   onCancel(): void
-  onSaved(addr: string): void
+  onSaved(addr: string, res: NodesAddResult): void
 }) {
   const [addr, setAddr] = useState(peer.addr)
   const [trust, setTrust] = useState(peer.trust || 'mesh')
@@ -366,8 +370,8 @@ function EditPeerForm({
     setFieldErr('')
     setBusy(true)
     try {
-      await api.addNode(a, trust, peer.addr)
-      onSaved(a)
+      const res = await api.addNode(a, trust, peer.addr)
+      onSaved(a, res)
     } catch (err) {
       setFieldErr(err instanceof Error ? err.message : String(err))
     } finally {

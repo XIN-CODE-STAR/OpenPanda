@@ -1812,6 +1812,11 @@ export interface ModelEntry {
   active: boolean
   key_set: boolean
   key_hint?: string
+  /** A short digest of the stored key. key_hint is the last four
+   *  characters, which two accounts of one vendor can share; the console
+   *  groups connections by this instead, so "extend" cannot borrow the
+   *  other account's key. Empty when no key is set. */
+  key_fingerprint?: string
   /** The stored consent to dial this endpoint over plain http. */
   allow_plaintext?: boolean
   /** True when the stored limit is the catalogue's own answer, i.e. the user

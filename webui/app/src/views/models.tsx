@@ -84,7 +84,11 @@ function keyOf(e: ModelEntry): string {
 }
 
 function connIdOf(e: ModelEntry): string {
-  return [e.provider ?? '', e.base_url, e.api_type, e.key_hint ?? ''].join('\u0000')
+  // Group by the key digest, not its last four characters: two accounts of
+  // one vendor can share a suffix, and merging them makes "extend this
+  // connection" borrow the other account's key. Older panels do not send
+  // the digest, so key_hint stays as the fallback.
+  return [e.provider ?? '', e.base_url, e.api_type, e.key_fingerprint ?? e.key_hint ?? ''].join('\u0000')
 }
 
 function labelOf(providers: ProviderInfo[], id?: string): string {
@@ -783,6 +787,10 @@ function ModelSheet(props: {
         provider: provider.id,
         model: drafts[0]?.model || provider.default_model,
         api_key: apiKey.trim() || undefined,
+        // Name the row being edited. Two accounts of one vendor share the
+        // provider id, and without the alias the server borrows whichever key
+        // it finds first — probing the wrong account and reporting its health.
+        alias: editing?.alias,
         ...(base !== provider.base_url || provider.id === 'custom'
           ? { base_url: base, api_type: apiType }
           : {}),
