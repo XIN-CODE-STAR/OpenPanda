@@ -63,6 +63,15 @@ func writeConfigFile(path string, data []byte) error {
 	return util.WriteFileAtomic(path, data, 0o600)
 }
 
+// writeConfigFileAllowingClear is writeConfigFile without the downgrade guard,
+// for the one deliberate clear (ClearModelSection). Everything else keeps the
+// guard: an empty model arriving at a file that had one is a stale-document
+// write, not an edit.
+func writeConfigFileAllowingClear(path string, data []byte) error {
+	snapshotConfig(path)
+	return util.WriteFileAtomic(path, data, 0o600)
+}
+
 // modelIdentity is the minimum a config has to say to count as "a model is
 // configured here" — the pair the console keys the whole chat surface off.
 type modelIdentity struct {

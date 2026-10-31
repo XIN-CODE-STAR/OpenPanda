@@ -2215,6 +2215,20 @@ func (c *Config) applyEnv() {
 // edit byte-for-byte; only the model mapping's values are replaced. Fields mc
 // leaves empty-string are dropped from the file so defaults apply again.
 func UpdateModelSection(path string, mc ModelConfig) error {
+	return updateModelSection(path, mc, false)
+}
+
+// ClearModelSection writes an empty `model:` section on purpose. It is the
+// delete-the-last-model path: the caller has removed every entry from the
+// registry and asked the active model to go with them. guardModelDowngrade
+// exists to refuse the *accidental* clear (a writer working from a stale
+// document); this is the deliberate one, so it skips that guard and nothing
+// else.
+func ClearModelSection(path string) error {
+	return updateModelSection(path, ModelConfig{}, true)
+}
+
+func updateModelSection(path string, mc ModelConfig, allowClear bool) error {
 	var root yaml.Node
 	data, err := os.ReadFile(path)
 	switch {
@@ -2282,7 +2296,12 @@ func UpdateModelSection(path string, mc ModelConfig) error {
 	if err != nil {
 		return err
 	}
-	if err := writeConfigFile(path, out); err != nil {
+	if allowClear {
+		err = writeConfigFileAllowingClear(path, out)
+	} else {
+		err = writeConfigFile(path, out)
+	}
+	if err != nil {
 		return err
 	}
 	hardenSecretPerms(path, out)

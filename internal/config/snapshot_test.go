@@ -225,10 +225,49 @@ func TestWriteAllowsModelChange(t *testing.T) {
 	}
 
 	fresh := filepath.Join(dir, "fresh.yaml")
-	if err := os.WriteFile(fresh, []byte("ui:/n  locale: en\n"), 0o600); err != nil {
+	// Valid YAML with no `model:` section: the case this name is about. (A
+	// malformed document takes the unparseable branch instead, which proves
+	// nothing about a config that simply had no model yet.)
+	if err := os.WriteFile(fresh, []byte("ui:\n  locale: en\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeConfigFile(fresh, []byte(next)); err != nil {
 		t.Fatalf("first model on a config that had none was refused: %v", err)
+	}
+}
+
+// TestClearModelSectionIsDeliberate pins the one write the downgrade guard
+// lets through: deleting the last model. Without it the registry entry is
+// removed while `model:` still points at it, and the TUI discards the refusal.
+func TestClearModelSectionIsDeliberate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	configured := []byte("model:\n  base_url: https://a.example.com\n  model: a\n")
+	if err := os.WriteFile(path, configured, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClearModelSection(path); err != nil {
+		t.Fatalf("clearing the last model was refused: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var id modelIdentity
+	if err := yaml.Unmarshal(raw, &id); err != nil {
+		t.Fatal(err)
+	}
+	if id.configured() {
+		t.Fatalf("model section still configured after a deliberate clear:\n%s", raw)
+	}
+
+	// The ordinary path keeps refusing the same write: an empty model arriving
+	// at a document that had one is still treated as a stale-document write.
+	guarded := filepath.Join(dir, "guarded.yaml")
+	if err := os.WriteFile(guarded, configured, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateModelSection(guarded, ModelConfig{}); err == nil {
+		t.Fatal("UpdateModelSection must still refuse to clear a configured model")
 	}
 }
