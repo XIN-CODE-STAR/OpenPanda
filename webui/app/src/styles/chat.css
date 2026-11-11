@@ -5158,7 +5158,7 @@
    It borrows the header cards' lane (`--panel-lane`) rather than inventing a
    second mechanism: the log, the composer and the jump arrow already reserve
    that lane, so no line of the transcript ever runs underneath the card.
-   Width comes from `--rail-w` (tokens.css, 244) plus 10 of edge and 8 of
+   Width comes from `--rail-w` (tokens.css, 208) plus 10 of edge and 8 of
    breathing room.
 
    Two surfaces own this corner when they are up and the card steps aside for

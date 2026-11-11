@@ -1931,6 +1931,7 @@ const de: Messages = {
   'team.blank': 'Hier ist noch nichts.',
   'models.copy': 'Duplizieren',
   'models.copied': '{alias} dupliziert.',
+
   // ---- Sitzungsleiste ----
   'sessionRail.label': 'Überblick',
   'sessionRail.changes': 'Änderungen',
@@ -1952,7 +1953,6 @@ const de: Messages = {
   'sessionRail.thisMachine': 'diesem Rechner',
   'sessionRail.kids': '{n} Unteraufgaben',
   'sessionRail.openQueue': 'Warteschlange öffnen',
-
   // ---- Seitenleiste ----
   'dock.label': 'Seitenleiste',
   'dock.start': 'Hier anfangen',

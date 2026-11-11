@@ -1914,6 +1914,7 @@ const ja: Messages = {
   'team.blank': 'まだ何もありません。',
   'models.copy': '複製',
   'models.copied': '{alias} を複製しました。',
+
   // ---- セッションレール ----
   'sessionRail.label': '概要',
   'sessionRail.changes': '変更',
@@ -1935,7 +1936,6 @@ const ja: Messages = {
   'sessionRail.thisMachine': 'このマシン',
   'sessionRail.kids': 'サブタスク {n} 件',
   'sessionRail.openQueue': 'キューを開く',
-
   // ---- サイドパネル ----
   'dock.label': 'サイドパネル',
   'dock.start': 'ここから始める',

@@ -1928,6 +1928,7 @@ const es: Messages = {
   'team.blank': 'Aquí todavía no hay nada.',
   'models.copy': 'Duplicar',
   'models.copied': '{alias} duplicado.',
+
   // ---- Panel de sesión ----
   'sessionRail.label': 'Resumen',
   'sessionRail.changes': 'Cambios',
@@ -1949,7 +1950,6 @@ const es: Messages = {
   'sessionRail.thisMachine': 'este equipo',
   'sessionRail.kids': '{n} subtareas',
   'sessionRail.openQueue': 'Abrir la cola',
-
   // ---- Panel lateral ----
   'dock.label': 'Panel lateral',
   'dock.start': 'Empieza aquí',
