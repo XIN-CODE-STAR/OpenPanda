@@ -142,8 +142,11 @@ func New(d Deps) http.Handler {
 	}
 	// Session summary finalizer (queue redesign §5): finished tasks fold
 	// their result into the linked chat as an assistant turn. Runs for the
-	// process lifetime; no-op without the sessions store.
-	h.startSessionFinalizer(context.Background())
+	// process lifetime; no-op without the sessions store. It runs on the
+	// handler's service context — the same one detached asks use — so the
+	// sweeps and the work they summarize share a lifetime, and it retires
+	// itself once the store is gone instead of logging every tick.
+	h.startSessionFinalizer(h.serviceCtx)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /api/healthz", h.healthz)
@@ -1572,6 +1575,17 @@ func (h *handler) approveTask(w http.ResponseWriter, r *http.Request) {
 	if disposition == core.ApprovalNeedsChangedInput {
 		writeErr(w, http.StatusConflict, core.ErrApprovalNeedsChangedInput)
 		return
+	}
+	if disposition == core.ApprovalAcceptWork {
+		cur, err := h.store.Get(r.Context(), id)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, errors.New("approve failed"))
+			return
+		}
+		if cur.NeedsFollowup() {
+			writeErr(w, http.StatusConflict, core.ErrApprovalNeedsFollowup)
+			return
+		}
 	}
 	// A self-merge approval runs the merge pipeline, whose final step swaps
 	// os.Executable(). In the sidecar that file is panda-webui, not the panda
