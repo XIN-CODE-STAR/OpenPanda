@@ -89,3 +89,14 @@ export function mergeTailTurn<T extends TurnLike>(
   const inserted = turns.slice(turns.length - 1 - extra, turns.length - 1).map(adopt)
   return [...msgs.slice(0, i), ...inserted, tail]
 }
+
+/** A reload drops the browser's local streaming flag, but the server keeps the
+ *  running operation on the session. Count it as busy so the composer keeps
+ *  showing Stop while the model is still answering. */
+export function runningOperation(
+  activeId: string | null,
+  session: { id: string; operation?: { id: string; status: string } | null } | null,
+): string | null {
+  return session?.id === activeId && session.operation?.status === 'running'
+    ? session.operation.id : null
+}

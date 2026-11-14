@@ -235,6 +235,11 @@ export function TaskProgress({ task }: { task: Task }) {
   )
 }
 
+/** How many paths the process fold's file list names before it counts the
+ *  rest. Six short paths fit two lines at 320px; the task page has the full
+ *  set, with the line counts. */
+const FOLD_FILE_CAP = 6
+
 /** The detailed process folded under a finished task's report.
  *
  *  A running task narrates itself in `TaskProgress`; once it settles that row
@@ -247,7 +252,7 @@ export function TaskProcess({ taskId }: { taskId: string }) {
   const task = useTaskBrief(taskId)
   const [open, setOpen] = useState(false)
   if (!task) return null
-  const files = resultFiles(task)
+  const files = taskFiles(task)
   const created = Date.parse(task.created_at)
   const updated = Date.parse(task.updated_at)
   const duration = Number.isFinite(created) && Number.isFinite(updated) ? Math.max(0, updated - created) : 0
@@ -261,8 +266,8 @@ export function TaskProcess({ taskId }: { taskId: string }) {
         <span class="task-run-title">{t('sessions.processTitle')}</span>
         <span class="task-run-meta">
           {duration > 0 ? formatDuration(duration) : ''}
-          {duration > 0 && files > 0 ? ' · ' : ''}
-          {files > 0 ? t('sessions.processFiles', { n: String(files) }) : ''}
+          {duration > 0 && files.length > 0 ? ' · ' : ''}
+          {files.length > 0 ? t('sessions.processFiles', { n: String(files.length) }) : ''}
         </span>
         <span class="task-run-caret" aria-hidden="true">▾</span>
       </summary>
@@ -273,7 +278,7 @@ export function TaskProcess({ taskId }: { taskId: string }) {
 
 /** The process body is a component of its own so a closed fold costs one
  *  small task read, not a 200-event timeline per report in the thread. */
-function TaskProcessBody({ taskId, task, files }: { taskId: string; task: Task; files: number }) {
+function TaskProcessBody({ taskId, task, files }: { taskId: string; task: Task; files: string[] }) {
   const change = useChangeSignal()
   const { events } = useTaskEvents(taskId, change, 200)
   const steps: LiveStep[] = []
@@ -287,13 +292,33 @@ function TaskProcessBody({ taskId, task, files }: { taskId: string; task: Task; 
   const shown = steps.slice(-120)
   return (
     <div class="task-run-body">
-      {(task.verification || files > 0) && (
+      {(task.verification || files.length > 0) && (
         <div class="task-run-facts">
           {task.verification && (
             <span>{t('sessions.processVerification', { status: task.verification })}</span>
           )}
-          {files > 0 && <span>{t('sessions.processFiles', { n: String(files) })}</span>}
+          {files.length > 0 && (
+            <span>{t('sessions.processFiles', { n: String(files.length) })}</span>
+          )}
         </div>
+      )}
+      {/* Which files, not just how many: "改动 2 个文件" is a count nobody can
+          act on, and the paths are the one thing a reader opening the process
+          wants to check before trusting the report. The full set — with the
+          line counts and the rest — stays on the task page. */}
+      {files.length > 0 && (
+        <ul class="task-run-files">
+          {files.slice(0, FOLD_FILE_CAP).map((file) => (
+            <li key={file} title={file}>
+              {file}
+            </li>
+          ))}
+          {files.length > FOLD_FILE_CAP && (
+            <li class="is-more">
+              {t('sessions.processFilesMore', { n: String(files.length - FOLD_FILE_CAP) })}
+            </li>
+          )}
+        </ul>
       )}
       {shown.length === 0 ? (
         <p class="task-run-empty">{t('sessions.processEmpty')}</p>
@@ -317,15 +342,18 @@ function TaskProcessBody({ taskId, task, files }: { taskId: string; task: Task; 
   )
 }
 
-/** How many files the task's own result says it changed. A result without the
- *  field (a native command, a failed route) counts as zero, not as unknown. */
-function resultFiles(task: Task): number {
-  if (!task.result) return 0
+/** The paths the task's own result says it changed. The brief carries them on
+ *  the row (lifted out of the result server-side); a row written before that
+ *  lift only has them inside the blob, so both are read. */
+function taskFiles(task: Task): string[] {
+  const clean = (list: unknown): string[] =>
+    Array.isArray(list) ? list.filter((f): f is string => typeof f === 'string' && f !== '') : []
+  if (Array.isArray(task.files_changed)) return clean(task.files_changed)
+  if (!task.result) return []
   try {
-    const parsed = JSON.parse(task.result) as { files_changed?: unknown }
-    return Array.isArray(parsed.files_changed) ? parsed.files_changed.length : 0
+    return clean((JSON.parse(task.result) as { files_changed?: unknown }).files_changed)
   } catch {
-    return 0
+    return []
   }
 }
 

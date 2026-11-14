@@ -392,6 +392,12 @@ export interface Task {
    *  resume_execution (parked before running, approve re-runs it), or
    *  needs_changed_input (approve alone cannot help). */
   approval_disposition?: 'accept_work' | 'resume_execution' | 'needs_changed_input'
+  /** Review rows only: the server's classification of why the task parked.
+   *  `model_config` means the endpoint refused the agent's own model id (or
+   *  login) — a re-run and a reworded prompt both fail the same way, so the
+   *  card names that agent's configuration instead of asking for new input.
+   *  Empty for every other park; callers fall back to the disposition. */
+  review_cause?: 'model_config' | ''
   /** Review rows only: the clarification the agent parked on, and the
    *  bounded option set as a ClarifySpec JSON string when it offered one.
    *  Computed server-side so the client never parses the whole result JSON
@@ -1983,9 +1989,15 @@ export const api = {
     return request('POST', `/api/tasks/${encodeURIComponent(id)}/artifact/fetch`, {}, { timeoutMs: 30 * 60_000 })
   },
 
-  fsFiles(path?: string): Promise<FsFilesResult> {
-    const q = path ? `?path=${encodeURIComponent(path)}` : ''
-    return request('GET', `/api/fs/files${q}`)
+  /** One directory of the thread's workspace. `session` is what makes an empty
+   *  path mean "where this thread works" — its worktree, or its project's work
+   *  dir — instead of the node's own data tree. */
+  fsFiles(path?: string, session?: string): Promise<FsFilesResult> {
+    const q = new URLSearchParams()
+    if (path) q.set('path', path)
+    if (session) q.set('session', session)
+    const qs = q.toString()
+    return request('GET', `/api/fs/files${qs ? `?${qs}` : ''}`)
   },
 
   /** Ask the node to open `path` in the desktop's file manager. The panel

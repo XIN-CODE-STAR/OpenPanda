@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mergeTailTurn, patchStreaming, slashQuery } from './chatstate.ts'
+import { mergeTailTurn, runningOperation, patchStreaming, slashQuery } from './chatstate.ts'
 
 interface Msg {
   role: 'user' | 'assistant'
@@ -164,4 +164,13 @@ test('mergeTailTurn reconciles only the tail when no adopter is given', () => {
   const got = mergeTailTurn(msgs, turns)
   assert.equal(got.length, 2)
   assert.equal(got[1]!.ref, 't2')
+})
+
+test('runningOperation recovers a server ask after a reload', () => {
+  const running = { id: 's1', operation: { id: 'op1', status: 'running' } }
+  assert.equal(runningOperation('s1', running), 'op1')
+  assert.equal(runningOperation('s1', { id: 's1', operation: { id: 'op1', status: 'done' } }), null)
+  assert.equal(runningOperation('s2', running), null)
+  assert.equal(runningOperation('s1', null), null)
+  assert.equal(runningOperation('s1', { id: 's1' }), null)
 })

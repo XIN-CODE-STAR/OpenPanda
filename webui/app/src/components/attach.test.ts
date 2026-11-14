@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 import {
   atQuery,
   fenceLang,
+  fileLabel,
   expandFileRefs,
   exportMarkdown,
   exportFilename,
@@ -189,4 +190,17 @@ test('splitFileRef keeps the line anchor on the label, not on the @path', () => 
     path: 'C:\\work\\main.go',
     label: 'main.go:7',
   })
+})
+
+test('fileLabel drops the upload stamp and the directory', () => {
+  // What the panel stamps on disk: <unix-millis>-<original name>.
+  assert.equal(
+    fileLabel('.openpanda/uploads/01a1d335/1794544881290-shot.png'),
+    'shot.png',
+  )
+  assert.equal(fileLabel('C:\\data\\uploads\\1794544881290-notes.md'), 'notes.md')
+  // A path that was never stamped, and a name that only looks stamped.
+  assert.equal(fileLabel('src/main.go'), 'main.go')
+  assert.equal(fileLabel('1234-keep.png'), '1234-keep.png')
+  assert.equal(fileLabel(''), '')
 })

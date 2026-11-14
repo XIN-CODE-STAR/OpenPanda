@@ -28,6 +28,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -206,7 +207,7 @@ func runCardRescan(args []string) {
 	old, err := ledger.LoadCard(path)
 	created := false
 	if err != nil {
-		if !os.IsNotExist(underlyingErr(err)) {
+		if !errors.Is(err, os.ErrNotExist) {
 			// A card that exists but does not parse must not be silently
 			// replaced by a scan — that is the one case where "fix it for you"
 			// would destroy hand-written content.
@@ -253,18 +254,6 @@ func runCardRescan(args []string) {
 		fmt.Printf("%s updated (%d change(s))\n", path, len(diffs))
 		notifyDaemonReload(cliConfigPath)
 	}
-}
-
-// underlyingErr unwraps one level of fmt.Errorf %w so os.IsNotExist can see the
-// syscall error LoadCard wrapped.
-func underlyingErr(err error) error {
-	type unwrapper interface{ Unwrap() error }
-	if u, ok := err.(unwrapper); ok {
-		if inner := u.Unwrap(); inner != nil {
-			return inner
-		}
-	}
-	return err
 }
 
 // runCardEdit opens the card in the user's editor and installs it only if it
@@ -643,12 +632,18 @@ func runCardInvoke(args []string) {
 		action = pos[1]
 	}
 	params := map[string]any{}
-	for _, kv := range pos[2:] {
-		k, v, ok := strings.Cut(kv, "=")
-		if !ok || k == "" {
-			failf(2, "panda: bad parameter %q (want name=value)\n", kv)
+	// pos[2:] needs at least two positionals before it means anything: the
+	// bare form (`card invoke hardware:screen_capture`) is the normal way to
+	// fire an actuator whose command takes no verb and no parameters, and
+	// slicing at 2 used to panic before it could resolve the argv.
+	if len(pos) > 2 {
+		for _, kv := range pos[2:] {
+			k, v, ok := strings.Cut(kv, "=")
+			if !ok || k == "" {
+				failf(2, "panda: bad parameter %q (want name=value)\n", kv)
+			}
+			params[k] = parseInvokeScalar(v)
 		}
-		params[k] = parseInvokeScalar(v)
 	}
 	spec := &ledger.ActionSpec{TargetActuator: act.ID, Action: action, Parameters: params}
 	tier := defense.TierFromCommand(act.Command, act.Args...)

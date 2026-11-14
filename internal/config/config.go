@@ -5,9 +5,6 @@ package config
 
 import (
 	"bytes"
-	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net"
@@ -17,9 +14,9 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
-	"github.com/Xustalis/OpenPanda/internal/executil"
 	"github.com/Xustalis/OpenPanda/internal/trust"
 	"gopkg.in/yaml.v3"
 )
@@ -1503,108 +1500,6 @@ func ValidNodeKind(kind string) bool {
 	return kind == "" || kind == NodeKindPhysical || kind == NodeKindVM
 }
 
-// MachineIdentity returns a stable, non-secret identity for the current host.
-// OPENPANDA_NODE_IDENTITY is accepted for compatibility when generating a
-// default config; physical runtime locking still uses PhysicalIdentity.
-func MachineIdentity() string {
-	if v := os.Getenv("OPENPANDA_NODE_IDENTITY"); v != "" {
-		return v
-	}
-	return PhysicalIdentity()
-}
-
-// PhysicalIdentity ignores user-provided overrides and identifies the host
-// itself. It is used for the physical-node singleton lock.
-//
-// The order is "most stable first": a machine-id file survives a rename, the
-// platform UUID survives a reinstall, and the hostname fallback survives
-// nothing but is better than a constant. The last resort matters — two nodes
-// that both fall back to the same fingerprint would fight over one lock, so the
-// fallback is at least per-hostname.
-func PhysicalIdentity() string {
-	for _, p := range []string{"/etc/machine-id", "/var/lib/dbus/machine-id", "/var/db/SystemConfiguration/.com.apple.uuid"} {
-		if b, err := os.ReadFile(p); err == nil {
-			if s := strings.TrimSpace(string(b)); s != "" {
-				return "machine-" + shortHash(s)
-			}
-		}
-	}
-	if s := platformMachineID(); s != "" {
-		return "machine-" + shortHash(s)
-	}
-	host, _ := os.Hostname()
-	if host == "" {
-		host = runtime.GOOS + "-" + runtime.GOARCH
-	}
-	return "host-" + shortHash(host)
-}
-
-// platformMachineID reads the OS's own hardware UUID where no machine-id file
-// exists. macOS has none of the paths above on a stock install (that
-// .com.apple.uuid file is not always present), and Windows has none of them at
-// all — without this both platforms would fall back to the hostname, so
-// renaming the machine would look like a different node and the physical
-// singleton lock would stop recognising its own host.
-func platformMachineID() string {
-	switch runtime.GOOS {
-	case "darwin":
-		out := probeIdentity("ioreg", "-rd1", "-c", "IOPlatformExpertDevice")
-		for _, line := range strings.Split(out, "\n") {
-			if !strings.Contains(line, "IOPlatformUUID") {
-				continue
-			}
-			if _, v, ok := strings.Cut(line, "="); ok {
-				return strings.Trim(strings.TrimSpace(v), `"`)
-			}
-		}
-	case "windows":
-		// MachineGuid is written once at install and is the conventional
-		// Windows host fingerprint.
-		out := probeIdentity("reg", "query",
-			`HKLM\SOFTWARE\Microsoft\Cryptography`, "/v", "MachineGuid")
-		for _, line := range strings.Split(out, "\n") {
-			fields := strings.Fields(strings.TrimSpace(line))
-			for i, f := range fields {
-				if strings.HasPrefix(f, "REG_") && i+1 < len(fields) {
-					return fields[i+1]
-				}
-			}
-		}
-	}
-	return ""
-}
-
-// probeIdentity runs a short identity probe. executil keeps the console window
-// hidden on Windows — the daemon is headless there and must not flash a
-// terminal at startup.
-func probeIdentity(name string, args ...string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	out, err := executil.CommandContext(ctx, name, args...).Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
-}
-
-// EffectiveIdentity is the identity used for runtime ownership. Physical
-// nodes always use the host fingerprint; VM nodes may supply a separate stable
-// identity so a host and its guest can coexist.
-func (n NodeConfig) EffectiveIdentity() string {
-	if n.Kind == NodeKindPhysical {
-		return PhysicalIdentity()
-	}
-	if strings.TrimSpace(n.Identity) != "" {
-		return strings.TrimSpace(n.Identity)
-	}
-	return PhysicalIdentity()
-}
-
-func shortHash(s string) string {
-	sum := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(sum[:8])
-}
-
 // hasEphemeralSuffix reports whether s ends with -<8 hex digits>, which is
 // reserved for runtime ephemeral node instance identifiers.
 func hasEphemeralSuffix(s string) bool {
@@ -2991,6 +2886,21 @@ func hardenSecretPerms(path string, data []byte) {
 		return
 	}
 
+	// Windows has no POSIX mode bits: Perm() reports 0666 for every writable
+	// file whatever ACL actually protects it, so the check below could never
+	// short-circuit and every load re-warned and re-chmod'ed the same file.
+	// The config watcher loads once a second, which is how this warning grew
+	// a 120 MB log on a Windows node. Chmod there only toggles the read-only
+	// attribute and protects nothing, so the advice is worth saying once and
+	// the chmod is not worth doing at all — the profile ACL is the guard.
+	if runtime.GOOS == "windows" {
+		if secretPermsWarned.CompareAndSwap(false, true) {
+			slog.Warn("config file contains secrets; prefer env vars "+
+				"(OPENPANDA_SHARED_SECRET / OPENPANDA_PANEL_TOKEN / OPENPANDA_MODEL_API_KEY)", "path", path)
+		}
+		return
+	}
+
 	st, err := os.Stat(path)
 	if err != nil {
 		return
@@ -3009,6 +2919,11 @@ func hardenSecretPerms(path string, data []byte) {
 	}
 	slog.Warn("tightened config file permissions to 0600 (contains secrets)", "path", path)
 }
+
+// secretPermsWarned keeps the Windows advice to one line per process — the
+// config is loaded from several places, and a warning repeated on a hot path
+// is noise, not a reminder.
+var secretPermsWarned atomic.Bool
 
 // marshalYAML emits YAML at the 2-space indent every hand-written config
 // in this repo uses — yaml.Marshal's 4-space default used to reformat the

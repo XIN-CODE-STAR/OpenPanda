@@ -2054,7 +2054,12 @@ print("hermes hooks answer")
         payload, _, _ = run_adapter(
             "openclaw.py", "openclaw", r'''
 import sys
-assert sys.argv[1:] == ["agent", "exec", "contract prompt"]
+args = sys.argv[1:]
+assert args[:2] == ["agent", "--local"], args
+assert "--json" in args, args
+assert args[args.index("--message") + 1] == "contract prompt", args
+assert "--model" not in args, args
+assert len(args[args.index("--session-id") + 1]) == 36, args
 print("openclaw answer")
 ''',
         )
@@ -2534,19 +2539,22 @@ print("own model")
 
     def test_openclaw_injected_run_pins_config_state_and_home(self):
         # An injected openclaw turn must not touch three things: the ambient
-        # config (--config), the gateway state (--state-dir) and the
-        # auth-profile store under ~/.openclaw — the last one has no flag, so
-        # HOME/USERPROFILE are redirected instead. The key rides a secret
-        # reference (source: env), never the config file.
+        # config, the gateway state and the auth-profile store under
+        # ~/.openclaw. 2026.6.x exposes no flags for any of them —
+        # OPENCLAW_CONFIG_PATH / OPENCLAW_STATE_DIR carry the first two, and
+        # HOME/USERPROFILE are redirected for the third. The key rides a
+        # secret reference (source: env), never the config file.
         payload, _, _ = run_adapter(
             "openclaw.py", "openclaw", r'''
 import json, os, sys
 args = sys.argv[1:]
-assert args[:2] == ["agent", "exec"], args
-cfg = args[args.index("--config") + 1]
-state = args[args.index("--state-dir") + 1]
-assert args[args.index("--model") + 1] == "panda/injected-model", args
+assert args[:2] == ["agent", "--local"], args
+assert "--config" not in args and "--state-dir" not in args, args
 assert "--json" in args, args
+assert args[args.index("--message") + 1] == "contract prompt", args
+assert args[args.index("--model") + 1] == "panda/injected-model", args
+cfg = os.environ["OPENCLAW_CONFIG_PATH"]
+state = os.environ["OPENCLAW_STATE_DIR"]
 with open(cfg, encoding="utf-8") as f:
     doc = json.load(f)
 prov = doc["models"]["providers"]["panda"]
@@ -2583,6 +2591,39 @@ print(json.dumps({"ok": True, "status": "ok", "final": "openclaw answer",
             "input_tokens": 7, "output_tokens": 3,
             "cache_read_tokens": 2, "cache_write_tokens": 0,
         })
+
+    def test_openclaw_2026_envelope_without_ok_key(self):
+        # 2026.6.x drops the top-level `ok`: the answer rides payloads[] and
+        # the accounting rides meta.agentMeta. A missing `ok` must not read as
+        # a malformed envelope — that path dumped the raw JSON (trace lines and
+        # all) into the task result instead of the answer.
+        payload, _, _ = run_adapter(
+            "openclaw.py", "openclaw", r'''
+import json
+print(json.dumps({
+    "payloads": [{"text": "openclaw answer", "mediaUrl": None}],
+    "meta": {"durationMs": 40698,
+             "agentMeta": {"sessionId": "sess-2026", "provider": "panda",
+                           "model": "injected-model",
+                           "usage": {"input": 11, "output": 4, "total": 15}},
+             "aborted": False,
+             "finalAssistantVisibleText": "openclaw answer",
+             "stopReason": "end_turn"},
+}))
+''',
+            env={
+                "OPENPANDA_INJECTED_MODEL": "1",
+                "OPENAI_BASE_URL": "https://api.example/v1",
+                "OPENCLAW_API_KEY": "k",
+                "OPENCLAW_MODEL": "injected-model",
+            },
+        )
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["result"], "openclaw answer")
+        self.assertEqual(payload["session_id"], "sess-2026")
+        self.assertEqual(payload["tokens"], 15)
+        self.assertEqual(payload["usage"],
+                         {"input_tokens": 11, "output_tokens": 4})
 
     def test_openclaw_envelope_failure_is_not_a_pass(self):
         # ok:false in the envelope is a failed turn even when the process
