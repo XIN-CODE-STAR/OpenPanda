@@ -192,6 +192,16 @@ test('splitFileRef keeps the line anchor on the label, not on the @path', () => 
   })
 })
 
+test('exportMarkdown keeps the delivery report rather than only its replay digest', async () => {
+  await setLocale('en')
+  const delivery = '## Changes\nFixed it.\n\n## Verification\nTests passed.\n\n## Remaining\nDeploy manually.'
+  const md = exportMarkdown([{ role: 'assistant', text: '[done] @codex · Repair\nDeploy manually.', delivery }], {})
+  assert.match(md, /## Changes/)
+  assert.match(md, /Tests passed/)
+  assert.equal(md.split('Deploy manually.').length - 1, 1)
+  assert.ok(!md.includes('[done]'))
+})
+
 test('fileLabel drops the upload stamp and the directory', () => {
   // What the panel stamps on disk: <unix-millis>-<original name>.
   assert.equal(

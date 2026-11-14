@@ -47,6 +47,46 @@ func TestRepositoryInvestigationRoutingIsNarrow(t *testing.T) {
 	}
 }
 
+func TestLiteralReplyInWorkspaceDoesNotRequireSourceEvidence(t *testing.T) {
+	for _, prompt := range []string{
+		"Reply with exactly PANDA_V016_ENTRY_OK. Do not use tools or create tasks.",
+		"Please respond only with HELLO_WORLD",
+		"Say helloWorld",
+		"Return exactly `HELLO_WORLD`",
+		"只回复：\"HELLO_WORLD\"",
+		"只回复 PANDA_V016_ENTRY_OK，不要调用工具或创建任务。",
+	} {
+		t.Run(prompt, func(t *testing.T) {
+			var calls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				writeAnswer(w, "PANDA_V016_ENTRY_OK")
+			}))
+			defer srv.Close()
+			e := newGuardTestEngine(t, srv, entry.NewRegistry(), 200000)
+			res, err := e.AskTurnsScoped(context.Background(), nil, prompt, AskScope{WorkDir: t.TempDir()}, true, StreamCallbacks{})
+			if err != nil || res == nil || res.Answer != "PANDA_V016_ENTRY_OK" || calls.Load() != 1 {
+				t.Fatalf("literal reply became an investigation: result=%+v err=%v calls=%d", res, err, calls.Load())
+			}
+		})
+	}
+}
+
+func TestLiteralReplyExceptionKeepsRepositoryEvidenceGuard(t *testing.T) {
+	for _, prompt := range []string{
+		"Explain parse_config in this repository",
+		"Reply with exactly the implementation of parse_config",
+		"只回复 parse_config 的实现",
+		"Reply with exactly HELLO_WORLD. Then review this repository.",
+		"Echo internal/config.go",
+	} {
+		question, _ := repositoryRequest(prompt, nil, true)
+		if !question {
+			t.Errorf("repository request bypassed evidence: %q", prompt)
+		}
+	}
+}
+
 // Four batches of directory listing cannot support a completed code review.
 // The first bogus answer gets one dispatch correction; another is surfaced as
 // incomplete rather than passed to the user as a deep investigation.
@@ -179,13 +219,29 @@ func TestTypedInvestigationDispatchWithoutRepositoryKeywords(t *testing.T) {
 }
 
 func TestDeepRepositoryRejectedAnswerNeverStreams(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { writeAnswer(w, "unsupported finding") }))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"checking evidence\"}}]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"unsupported finding\"}}]}\n\ndata: [DONE]\n\n")
+	}))
 	defer srv.Close()
 	e := newGuardTestEngine(t, srv, entry.NewRegistry(), 200000)
-	var deltas strings.Builder
-	res, err := e.AskTurnsScoped(context.Background(), nil, "深入分析这个代码库", AskScope{WorkDir: t.TempDir()}, true, StreamCallbacks{OnDelta: func(s string) { deltas.WriteString(s) }})
+	var deltas, reasoning strings.Builder
+	var modelProgress int
+	res, err := e.AskTurnsScoped(context.Background(), nil, "深入分析这个代码库", AskScope{WorkDir: t.TempDir()}, true, StreamCallbacks{
+		OnDelta:     func(s string) { deltas.WriteString(s) },
+		OnReasoning: func(s string) { reasoning.WriteString(s) },
+		OnProgress: func(p Progress) {
+			if p.Kind == ProgressModel {
+				modelProgress++
+			}
+		},
+	})
 	if err != nil || res == nil || !strings.Contains(res.Answer, "尚未完成") {
 		t.Fatalf("result: %+v %v", res, err)
+	}
+	if !strings.Contains(reasoning.String(), "checking evidence") || modelProgress == 0 {
+		t.Fatal("guard hid model activity")
 	}
 	if strings.Contains(deltas.String(), "unsupported finding") {
 		t.Fatalf("unaccepted conclusion streamed: %q", deltas.String())

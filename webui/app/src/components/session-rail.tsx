@@ -130,6 +130,8 @@ export interface SessionRailProps {
   modelName: string
   /** Where this thread is pinned to run, already resolved for display. */
   machine: string
+  /** Entry-model work exists before a dispatched task row does. */
+  working?: boolean
   onOpenDiff(): void
   onOpenTask(id: string): void
   onOpenQueue(): void
@@ -209,7 +211,9 @@ export function SessionRail(props: SessionRailProps) {
     : ''
   const taskLine = running
     ? [taskTitle, where, live.length > 1 ? `+${live.length - 1}` : ''].filter(Boolean).join(SEP)
-    : t('sessionRail.idleWhere', { machine: props.machine })
+    : props.working
+      ? t('sessionRail.modelRunning')
+      : t('sessionRail.idleWhere', { machine: props.machine })
 
   // Percentage first, then the raw numbers. A model with no catalogue window
   // still gets its token count: "unknown" is a reason to omit the share, not
@@ -270,7 +274,7 @@ export function SessionRail(props: SessionRailProps) {
         role="group"
         aria-label={t('sessionRail.label')}
       >
-        <Icon name="activity" size={16} class={`rail-bar-icon${running ? ' is-live' : ''}`} />
+        <Icon name="activity" size={16} class={`rail-bar-icon${running || props.working ? ' is-live' : ''}`} />
         <button
           type="button"
           class={`rail-bar-task${running ? ' is-live' : ''}`}

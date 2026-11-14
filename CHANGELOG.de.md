@@ -40,7 +40,7 @@ OpenPanda (**Open** **P**ersonal **A**daptive **N**ode-based **D**istributed **A
 
 ## [Unreleased]
 
-## [0.1.6] - 2026-11-12 — "Constellation"
+## [0.1.6] - 2026-11-14 — "Constellation"
 
 Das Patch, das eine Ausführung ehrlich darüber macht, was sie abgeschlossen hat — Codename **Constellation**: Abschluss, Wiederherstellung und Stufenverträge richten sich nach der Arbeit, die die Maschine tatsächlich geleistet hat; Read-only-Läufe nennen ihre Grenze und Antworten zum Repository belegen sich mit Quellcode; die Konsole führt Seitenunterhaltungen, Übersicht und Benachrichtigungen auf einer Fläche zusammen; und ein harter Geräte-Pin bleibt ein Pin, statt zu einer Präferenz zu werden. Konfiguration, gespeicherte Daten und Wire-Format bleiben unverändert, das Schema bleibt bei v67 — keine Migration und kein neues Frame.
 
@@ -61,6 +61,16 @@ Das Patch, das eine Ausführung ehrlich darüber macht, was sie abgeschlossen ha
 - **Korrektur unter Windows und in der Konsole** — Die Windows-Binary enthält ein Per-Monitor-DPI-Manifest; `index.html` wird jedes Mal revalidiert, während Assets mit Hash dauerhaft gecacht werden; ein neu geladener Turn zeigt, was der Autor getippt hat, statt der eingebetteten Dateien; die Modellkarte des Composers folgt Schreibvorgängen der Registry; eine Runde schließt mit dem Batch statt mit einem Zähler; ein fremdes Tool-Call-Envelope wird als JSON gerendert; Verzeichnis-Zeitstempel bleiben aus dem Graph-ETag heraus; der Erststart-Banner führt zu Einstellungen → Modelle; und Häkchen in der Liste werden nur noch bewusst gesetzt.
 - **Kanten in Queue und CLI** — Ein `--wait`-Aufruf verbrennt sein Timeout nicht mehr auf einen bereits entschiedenen Fehlschlag, ein NULL-`work_dir` macht die Ready-Queue nicht mehr blind, und der Summary-Finalizer zieht sich zurück, wenn sein Store verschwunden ist.
 - **Adapter und Proben** — Die Codex-Sandbox wird für eine erweiterte Werkzeugoberfläche nicht mehr aufgeweitet, Spawn-Pipes sind für den Typprüfer sichtbar, die alte HMAC-Form nutzt ihren nicht veralteten Alias, und eine von einem Relay abgelehnte Probe disqualifiziert ein Harness nicht mehr, wenn die Zugangsdaten das Harness selbst mitbringt — Transportfehler und 5xx tun das weiterhin.
+- **Sichtbare Ergebnisübergabe** — Abschlussberichte werden getrennt von der kurzen Modellhistorie gespeichert. Ausführungsschritte, geänderte Pfade, Prüflücken und offene Punkte sind direkt im Gespräch sichtbar; TUI-Hintergrundaufgaben liefern einen Ergebnisblock statt nur einer Meldung. Neue Versuche überschreiben frühere Berichte nicht.
+- **Zuverlässige Gespräche** — Modellaufrufe zeigen ihren Fortschritt; geschützte Codeanalysen übertragen Anbieter-Zusammenfassungen und Verbrauch, ohne ungeprüfte Aussagen auszugeben. Zusammenfassungen, Teilantworten und die identische Stoppsteuerung bleiben nach dem Neuladen erhalten.
+- **Vollständiger Verlauf** — Verspätete Ereignisse überschreiben keine Benutzertexte oder fremden Antworten. Die Komprimierung begrenzt nur den Modellkontext und bewahrt den Originalverlauf; Aufgabenberichte erhalten eigene Einträge.
+- **Agent-Ausführung** — Die Codex-Injektion setzt das Responses-Protokoll ausdrücklich, ohne native Einstellungen zu ändern. Guthabenfehler stoppen nach erlaubten Rettungsversuchen, statt die Warteschlange wiederholt zu belegen.
+- **Quellinstallation und Release-Prüfung** — Die lokale Installation baut zuerst die Webkonsole, erstellt das PATH-Verzeichnis und ersetzt Binärdatei, Adapter, Sprachhelfer und Treiber atomar. Paketierung und Prüfung verwenden standardmäßig die Quellversion und verlangen neben sechs Vollversionen alle drei Linux-lite-Archive. Ein Build in Vorbereitung zeigt kein Veröffentlichungsdatum mehr an.
+- **Wörtliche Antworten bleiben Gespräch** — Die ausdrückliche Bitte, ein Token wie HELLO_WORLD zu wiederholen, löst im Arbeitsverzeichnis allein durch Unterstriche oder camelCase keine Quellprüfung mehr aus. Implementierungsfragen und kombinierte Repository-Prüfungen benötigen weiterhin Belege.
+- **Installertests ersetzen keinen Benutzer-Daemon** — Ein temporäres HOME isoliert launchctl und systemctl nicht. Die Tests protokollieren Dienstaufrufe über isolierte PATH-Kommandos und prüfen weiterhin die erzeugten Dienstdateien, ohne echte Benutzerdienste zu steuern.
+
+- **Dispatch und Knotenerkennung** — Die Agentenmodellkonfiguration wird beim Dispatch aufgelöst, native Relay-Endpunkte bleiben erhalten. Eine Konsole mit Mesh durchsucht das Knotenverzeichnis und unterscheidet gleichnamige virtuelle Maschinen anhand ihrer Identität. Aktuatoraufrufe ohne Argumente liefern einen Validierungsfehler statt eines Panic.
+- **Ein Ort für Änderungen des Threads** — Das Dock zeigt Dateien, Änderungen, Diffs und Bildvorschauen des aktuellen Threads; auch die Übersicht zählt dessen Daten. Eine entschiedene Prüfung einer Bereichsabweichung fragt nicht erneut, und die Windows-Konfigurationswarnung erscheint nur einmal.
 
 ## [0.1.5] - 2026-11-09 — "Constellation"
 
