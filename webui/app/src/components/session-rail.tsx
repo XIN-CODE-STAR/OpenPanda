@@ -4,18 +4,22 @@
  *  (and on which machine), how full the last request's context window was,
  *  and what the worktree holds.
  *
- *  There is no panel behind this line any more. The overview used to be a card
- *  that opened on click — three sections, a change list, a meter, a note. It
- *  covered the right edge of the transcript, which is exactly where a short
- *  thread's right-aligned question ends, and most threads never opened it, so
- *  the three answers it held were in practice never read. The head has room
- *  for one line, so the answers live in the line: idle or the running task's
- *  title with its machine, the context share, and the change description.
+ *  One line, one click target. The segments used to be their own controls —
+ *  the task words jumped to the queue, the change words opened the diff pane —
+ *  so a sentence that reads as one fact had three destinations, and the only
+ *  one anybody found was the first: clicking the line went to the task page
+ *  and nothing else, however much the line was carrying. The line now opens
+ *  the thread's overview, where each of the three answers has room to be read
+ *  and still keeps a link to its own page.
  *
- *  The change description is the only part that can be arbitrarily long (a
- *  path list, or the sentence explaining why there is no worktree). It scrolls
- *  inside a fixed viewport instead of being cut with an ellipsis or pushing
- *  the rest of the head off the row.
+ *  The overview is a popover under the head, not a card on the transcript: it
+ *  opens deliberately, covers only the top-right corner while it is up, and
+ *  folds away on the next click outside.
+ *
+ *  The change description is the only part of the line that can be arbitrarily
+ *  long (a path list, or the sentence explaining why there is no worktree). It
+ *  scrolls inside a fixed viewport instead of being cut with an ellipsis or
+ *  pushing the rest of the head off the row.
  *
  *  Deliberately NOT here: a per-category context breakdown. The line reports
  *  a turn's billed tokens, not what composed the prompt, so a breakdown would
@@ -26,14 +30,32 @@ import type { NodeInfo, SessionDiff, Task } from '../api/client'
 import { t } from '../i18n'
 import { Icon } from './icons'
 import { compactNumber } from '../format/number'
+import { formatDuration } from '../format/time'
+import { prettyAgent } from './chat-speaker'
+import { layerAboveOwnsEscape } from './card-dismiss'
 import { isActiveState } from './task-activity'
-import { contextShare } from './session-rail-stats'
+import { contextShare, patchFileStats } from './session-rail-stats'
 
 /** Gap between the two copies of a ticker's text. The keyframe translates by
  *  half the track plus half this gap, so the second copy lands exactly where
  *  the first one started and the loop has no visible seam. */
 const TICKER_GAP = 28
 const SEP = ' · '
+
+/** How many changed files the overview lists before it defers to the diff
+ *  pane. Five rows is what fits under the context block without the popover
+ *  growing past the corner it hangs in. */
+const FILE_ROWS = 5
+
+/** `git status --porcelain` prints two columns (index, worktree); the overview
+ *  trims them into one token, so "MM" and "??" both arrive whole. */
+function statusTone(status: string): string {
+  if (status.includes('?')) return 'is-new'
+  if (status.includes('D')) return 'is-gone'
+  if (status.includes('A')) return 'is-new'
+  if (status.includes('R')) return 'is-moved'
+  return 'is-edit'
+}
 
 /** One run of text in the ticker. The +/− counts keep the diff drawer's
  *  semantic colours, so even a scrolling line still reads as a diff. */
@@ -140,6 +162,41 @@ export interface SessionRailProps {
 export function SessionRail(props: SessionRailProps) {
   const contextWindow = props.contextWindow
   const modelName = props.modelName
+  const [open, setOpen] = useState(false)
+  const dock = useRef<HTMLDivElement>(null)
+  const trigger = useRef<HTMLButtonElement>(null)
+
+  // The overview closes on the two things that make a popover stale: a press
+  // outside it, and Escape. It is anchored to the head, which never scrolls,
+  // so a scrolling transcript is not a reason to fold it away — and a menu or
+  // a modal that is already up keeps Escape for itself.
+  useEffect(() => {
+    if (!open) return
+    const onDown = (event: PointerEvent) => {
+      if (dock.current?.contains(event.target as Node)) return
+      setOpen(false)
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || layerAboveOwnsEscape()) return
+      event.stopPropagation()
+      setOpen(false)
+      trigger.current?.focus({ preventScroll: true })
+    }
+    // Capture, because a surface under the popover may swallow the press.
+    document.addEventListener('pointerdown', onDown, true)
+    document.addEventListener('keydown', onKey, true)
+    return () => {
+      document.removeEventListener('pointerdown', onDown, true)
+      document.removeEventListener('keydown', onKey, true)
+    }
+  }, [open])
+
+  // The overview is a dialog, so the keys have to enter it: without this the
+  // next Tab walked back into the head instead of through the panel's links.
+  const pop = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (open) pop.current?.focus({ preventScroll: true })
+  }, [open])
 
   // Root rows only: a sub-agent is part of its parent's row, and the count of
   // them is the "N 子任务" tail — the rail is a summary, so a delegation tree
@@ -185,6 +242,10 @@ export function SessionRail(props: SessionRailProps) {
     0,
   )
   const stat = props.diff?.stat
+  // The patch is up to 128 KiB and the head re-renders on every streamed
+  // event; read the per-file counts only when the patch itself changed.
+  const patch = props.diff?.patch ?? ''
+  const perFile = useMemo(() => patchFileStats(patch), [patch])
 
   const pct = contextShare(props.contextTokens, contextWindow)
   // A thread that has spent 144 tokens of a million rounds to 0%, which reads
@@ -258,29 +319,85 @@ export function SessionRail(props: SessionRailProps) {
         .filter(Boolean)
         .join(SEP)
 
-  const openTask = () => {
-    if (running && live.length === 1) props.onOpenTask(running.id)
-    else props.onOpenQueue()
+  // What the overview lists under 改动: the worktree's own rows first, then
+  // the files a run reported outside version control, capped at FILE_ROWS.
+  // Anything that did not fit is named by the "还有 N 个" line, so the cap
+  // never drops a path without saying so.
+  const diffStat =
+    stat && changes.length > 0
+      ? { add: stat.insertions, del: stat.deletions }
+      : reportedAdded > 0
+        ? { add: reportedAdded, del: 0 }
+        : null
+  const fileRows: { path: string; status: string; add?: number; del?: number }[] = []
+  for (const c of changes.slice(0, FILE_ROWS)) {
+    const s = perFile.get(c.path)
+    fileRows.push({ path: c.path, status: c.status, add: s?.insertions, del: s?.deletions })
+  }
+  for (const path of extra) {
+    if (fileRows.length >= FILE_ROWS) break
+    const s = reportedStats.get(path)
+    // No stat means the run predates the annotation: the path is known but
+    // its fate is not, and a guessed letter would be worse than a neutral dot.
+    const status = !s ? '' : s.kind === 'added' ? 'A' : s.kind === 'removed' ? 'D' : 'M'
+    const lines = s?.kind === 'added' ? (s.lines ?? 0) : 0
+    fileRows.push({
+      path,
+      status,
+      add: lines > 0 ? lines : undefined,
+      del: lines > 0 ? 0 : undefined,
+    })
+  }
+  const hiddenFiles = Math.max(0, paths.length - fileRows.length)
+
+  // The overview prints state and machine on separate rows; the line joins
+  // them into one sentence, so it cannot hand its words over whole.
+  const stateWord =
+    live.length > 0
+      ? t('state.running')
+      : props.working
+        ? t('sessionRail.modelRunning')
+        : t('sessionRail.idle')
+  const whereLine = t('sessionRail.runsOn', { machine: where })
+
+  // One running task's second line: who is on it, where, how long, and how
+  // many sub-agents it grew. Elapsed is a snapshot taken when the panel
+  // renders — a clock ticking in a folded panel is a timer with no reader.
+  const taskMeta = (task: Task): string => {
+    const parts: string[] = []
+    if (task.agent) parts.push(prettyAgent(task.agent))
+    parts.push(
+      task.origin_local
+        ? t('sessionRail.thisMachine')
+        : task.origin_node
+          ? nodeName(props.nodes, task.origin_node)
+          : props.machine,
+    )
+    const kids = props.tasks.filter((c) => c.parent_id === task.id).length
+    if (kids > 0) parts.push(t('sessionRail.kids', { n: String(kids) }))
+    const started = Date.parse(task.created_at)
+    if (Number.isFinite(started)) parts.push(formatDuration(Date.now() - started))
+    return parts.join(SEP)
   }
 
   return (
-    <div class="rail-dock">
+    <div class="rail-dock" ref={dock}>
       {/* `has-changes` is what tells the stylesheet there is a list to make
           room for: without it the bar hugs the sentence, so an idle thread's
           line ends at the dash instead of holding a blank lane open beside
           it. The ticker's own measurement still decides scrolling. */}
-      <div
-        class={`rail-bar${paths.length > 0 ? ' has-changes' : ''}`}
-        role="group"
+      <button
+        ref={trigger}
+        type="button"
+        class={`rail-bar${paths.length > 0 ? ' has-changes' : ''}${open ? ' is-open' : ''}`}
+        aria-expanded={open}
+        aria-haspopup="dialog"
         aria-label={t('sessionRail.label')}
+        title={t('sessionRail.label')}
+        onClick={() => setOpen(!open)}
       >
         <Icon name="activity" size={16} class={`rail-bar-icon${running || props.working ? ' is-live' : ''}`} />
-        <button
-          type="button"
-          class={`rail-bar-task${running ? ' is-live' : ''}`}
-          title={taskLine}
-          onClick={openTask}
-        >
+        <span class="rail-bar-task" title={taskLine}>
           {running ? (
             <>
               <span class="rail-bar-task-title">{taskTitle}</span>
@@ -295,7 +412,7 @@ export function SessionRail(props: SessionRailProps) {
           ) : (
             <span class="rail-bar-task-title">{taskLine}</span>
           )}
-        </button>
+        </span>
         <span class="rail-bar-sep" aria-hidden="true">
           ·
         </span>
@@ -312,16 +429,173 @@ export function SessionRail(props: SessionRailProps) {
         <span class="rail-bar-sep" aria-hidden="true">
           ·
         </span>
-        {props.diff ? (
-          <button type="button" class="rail-bar-changes" title={changeTitle} onClick={props.onOpenDiff}>
-            <ScrollingText text={changeText} parts={changeParts} />
-          </button>
-        ) : (
-          <span class="rail-bar-changes" title={changeTitle}>
-            <ScrollingText text={changeText} parts={changeParts} />
-          </span>
-        )}
-      </div>
+        <span class="rail-bar-changes" title={changeTitle}>
+          <ScrollingText text={changeText} parts={changeParts} />
+        </span>
+        <Icon name="chevron-down" size={12} class="rail-bar-caret" />
+      </button>
+
+      {open && (
+        <div
+          ref={pop}
+          class="rail-pop"
+          role="dialog"
+          aria-label={t('sessionRail.label')}
+          tabIndex={-1}
+        >
+          {/* ---- Running --------------------------------------------- */}
+          <section class="rail-pop-sec">
+            <div class="rail-pop-status">
+              <span
+                class={`rail-pop-dot${running || props.working ? ' is-live' : ''}`}
+                aria-hidden="true"
+              />
+              <span class="rail-pop-state">{stateWord}</span>
+              <span class="rail-pop-where" title={where}>
+                {whereLine}
+              </span>
+            </div>
+            {live.length > 0 && (
+              <ul class="rail-pop-tasks">
+                {live.slice(0, 4).map((task) => (
+                  <li key={task.id}>
+                    <button
+                      type="button"
+                      class="rail-pop-task"
+                      title={oneLine(task.title || '')}
+                      onClick={() => {
+                        setOpen(false)
+                        props.onOpenTask(task.id)
+                      }}
+                    >
+                      <span class="rail-pop-task-title">
+                        {oneLine(task.title || '') ||
+                          t('sessionRail.running', { n: String(live.length) })}
+                      </span>
+                      <span class="rail-pop-task-meta">{taskMeta(task)}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {live.length > 4 && (
+              <p class="rail-pop-note">
+                {t('sessionRail.moreTasks', { n: String(live.length - 4) })}
+              </p>
+            )}
+            {props.tasks.length > 0 && (
+              <button
+                type="button"
+                class="rail-pop-link"
+                onClick={() => {
+                  setOpen(false)
+                  props.onOpenQueue()
+                }}
+              >
+                {t('sessionRail.openQueue')}
+                <Icon name="arrow-right" size={13} />
+              </button>
+            )}
+          </section>
+
+          {/* ---- Context --------------------------------------------- */}
+          <section class="rail-pop-sec">
+            <div class="rail-pop-row">
+              <span class="rail-pop-label">{t('sessionRail.context')}</span>
+              <span class={`rail-pop-pct${pct !== null && pct >= 80 ? ' is-high' : ''}`}>
+                {shareLabel || '—'}
+              </span>
+            </div>
+            <span
+              class={`rail-pop-meter${pct !== null && pct >= 80 ? ' is-high' : ''}${
+                pct === null ? ' is-unknown' : ''
+              }`}
+              role="img"
+              aria-label={
+                pct === null ? t('sessionRail.contextUnknown') : shareLabel || t('sessionRail.contextUnknown')
+              }
+            >
+              {pct !== null && <i style={`width:${pct}%`} />}
+            </span>
+            <div class="rail-pop-foot">
+              <span class="rail-pop-nums">{usage || '—'}</span>
+              <span class="rail-pop-model" title={contextWindow > 0 ? modelName : undefined}>
+                {contextWindow > 0
+                  ? t('sessionRail.contextNote', { model: modelName })
+                  : t('sessionRail.contextNoWindow')}
+              </span>
+            </div>
+          </section>
+
+          {/* ---- Changes --------------------------------------------- */}
+          <section class="rail-pop-sec">
+            <div class="rail-pop-row">
+              <span class="rail-pop-label">{t('sessionRail.changes')}</span>
+              {diffStat ? (
+                <span class="rail-pop-diffstat">
+                  <span class="rail-tone-add">+{diffStat.add}</span>
+                  <span class="rail-tone-del">−{diffStat.del}</span>
+                  {paths.length > 0 && (
+                    <span class="rail-pop-count">
+                      {t('sessionRail.files', { n: String(paths.length) })}
+                    </span>
+                  )}
+                </span>
+              ) : (
+                <span class="rail-pop-none">—</span>
+              )}
+            </div>
+            {fileRows.length > 0 ? (
+              <ul class="rail-pop-files">
+                {fileRows.map((row) => (
+                  <li key={row.path} class="rail-pop-file">
+                    <span
+                      class={`rail-pop-file-state mono ${
+                        row.status ? statusTone(row.status) : 'is-none'
+                      }`}
+                    >
+                      {row.status || <i class="rail-pop-file-dot" />}
+                    </span>
+                    <span class="rail-pop-file-path" title={row.path}>
+                      {row.path}
+                    </span>
+                    {row.add !== undefined && row.del !== undefined && (
+                      <span class="rail-pop-file-stat">
+                        <span class="rail-tone-add">+{row.add}</span>
+                        <span class="rail-tone-del">−{row.del}</span>
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <>
+                <p class="rail-pop-note">
+                  {props.diff ? t('sessionRail.noChanges') : t('sessionRail.noWorktree')}
+                </p>
+                {props.tasks.length > 0 && (
+                  <p class="rail-pop-note">{t('sessionRail.noReported')}</p>
+                )}
+              </>
+            )}
+            {paths.length > 0 && (
+              <button
+                type="button"
+                class="rail-pop-link"
+                onClick={() => {
+                  setOpen(false)
+                  props.onOpenDiff()
+                }}
+              >
+                {hiddenFiles > 0
+                  ? t('sessionRail.moreFiles', { n: String(hiddenFiles) })
+                  : t('sessionRail.openDiff')}
+                <Icon name="arrow-right" size={13} />
+              </button>
+            )}
+          </section>
+        </div>
+      )}
     </div>
   )
 }

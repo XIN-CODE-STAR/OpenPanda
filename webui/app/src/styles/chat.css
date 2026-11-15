@@ -15,13 +15,11 @@
      inside the dock's body — the card is a sibling of the column, not a child,
      so it cannot read a variable set on the column itself. */
   --dock-head-h: 56px;
-  /* The step back to the start pane, above every pane (see `.dock-back`). The
-     body's content starts under it, so the offset below pays for it too. */
-  --dock-back-h: 30px;
-  /* Where that body starts, from the top of the pane: the head, the crumb, the
-     column's own 1px hairline, and the tool page's 12px padding. This is the
-     line the floating task card aligns to. */
-  --dock-body-top: calc(var(--dock-head-h) + var(--dock-back-h) + 13px);
+  /* Where the body starts, from the top of the pane: the head, the column's
+     own 1px hairline, and the tool page's 12px padding. This is the line the
+     floating task card aligns to. (The step back to the start pane is a button
+     in the head now, so it no longer takes a row of its own here.) */
+  --dock-body-top: calc(var(--dock-head-h) + 13px);
   gap: 10px;
   flex: 1;
   min-height: 0;
@@ -1739,34 +1737,6 @@
   font-size: var(--text-xs);
   color: var(--text-tertiary);
 }
-/* The paths behind "改动 N 个文件": a count is not a change. Chips, not a
-   bullet list — the fold's body is already a list of steps, and a second list
-   under it reads as a second timeline. */
-.task-run-files {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 6px;
-  margin: 0 0 8px;
-  padding: 0;
-  list-style: none;
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-}
-.task-run-files li {
-  max-width: 100%;
-  min-width: 0;
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--text) 6%, transparent);
-  color: var(--text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.task-run-files li.is-more {
-  background: none;
-  color: var(--text-tertiary);
-}
 .task-run-timeline {
   list-style: none;
   margin: 0;
@@ -2536,10 +2506,10 @@
   overscroll-behavior: contain;
 }
 .orch-panel {
-  /* One tile's height, and the grid's view is two of them plus the gap: four
+  /* One row's height, and the list's view is four of them plus the gaps: four
      tasks on screen, which is what the strips are sized around. Declared here
-     so the tile, the empty slot and the grid's ceiling cannot drift apart. */
-  --orch-card-h: 128px;
+     so the row, the empty slot and the list's ceiling cannot drift apart. */
+  --orch-row-h: 84px;
   position: relative;
   display: flex;
   flex-direction: column;
@@ -2777,20 +2747,20 @@
   text-align: center;
   color: var(--text-tertiary);
 }
-/* A strip with nothing in it still reserves one tile row: `--orch-card-h` is
-   the height of a chip (three-line title + meta + the acts strip — measured,
-   not guessed), so an empty strip is exactly as tall as a strip with one task
-   in it. Drawn as a dashed slot rather than a bare line so the reserved space
-   reads as "nothing here yet" instead of as a gap the card forgot to collapse. */
+/* A strip with nothing in it still reserves one row: `--orch-row-h` is the
+   height of a row (two-line title + meta — measured, not guessed), so an empty
+   strip is exactly as tall as a strip with one task in it. Drawn as a dashed
+   slot rather than a bare line so the reserved space reads as "nothing here
+   yet" instead of as a gap the card forgot to collapse. */
 .orch-sec-slot {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: var(--orch-card-h);
+  min-height: var(--orch-row-h);
   margin: 0 6px;
   border: 1px dashed var(--border-soft);
   border-radius: var(--radius-md);
-  /* No fill: the chips beside it are `--bg-inset`, and a filled slot turned
+  /* No fill: the rows beside it are `--bg-inset`, and a filled slot turned
      two empty strips into the heaviest blocks on the card. */
   background: none;
   font-size: var(--text-sm);
@@ -2804,46 +2774,44 @@
   font-size: var(--text-sm);
   color: var(--text-tertiary);
 }
-/* The strip is one row of fixed-width tiles running left to right. The chip
-   never grows with the card around it: a wider dock simply fits more of them,
-   a narrower one keeps the same tiles and scrolls sideways. This is the
-   original strip behaviour — a 1fr grid made the tiles swell to half of a
-   760px dock, which turned one task into a poster.
-   `--orch-chip-w` is the tile's whole width; `--orch-card-h` is its height.
-   Wheel, press-drag and a thin scrollbar all move it (`.is-dragging`, bound in
-   `strip-drag.ts` with the `x` axis). */
-.orch-grid {
-  --orch-chip-w: 156px;
+/* The list runs downwards: one full-width row per task, four rows in view, the
+   rest one wheel-notch below. It used to be a row of 156px tiles running
+   sideways, which at a 380px dock cut the third task in half and put the rest
+   behind a horizontal drag — a list of tasks is read top-down, and a title is a
+   sentence that needs the width.
+   The list scrolls itself, not the card: the ceiling is four rows and nothing
+   else, so 待审核 never gets pushed off the bottom of the pane.
+   `--orch-row-h` is the row's whole height. Wheel, press-drag and a thin
+   scrollbar all move it (`.is-dragging`, bound in `strip-drag.ts` with the `y`
+   axis). */
+.orch-list {
   display: flex;
+  flex-direction: column;
   gap: 8px;
-  padding: 0 6px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  overscroll-behavior-x: contain;
-  scroll-snap-type: x proximity;
+  padding: 0 6px 2px;
+  max-height: calc(var(--orch-row-h) * 4 + 8px * 3);
+  overflow-y: auto;
   scrollbar-width: thin;
-  /* A strip that can be pulled says so before the first pull. */
+  /* A list that can be pulled says so before the first pull. */
   cursor: grab;
 }
 /* Mid-drag: the hand closes, and the text under the pointer stops being
    selectable so a pull across a title does not turn into a highlight. The
-   descendant rule is what makes the closed hand win over the pointer a tile
+   descendant rule is what makes the closed hand win over the pointer a row
    carries — `cursor` is inherited, but a child's own rule beats the parent's,
-   and a drag that shows an arrow over the tile it started on reads as stuck. */
-.orch-grid.is-dragging,
-.orch-grid.is-dragging * {
+   and a drag that shows an arrow over the row it started on reads as stuck. */
+.orch-list.is-dragging,
+.orch-list.is-dragging * {
   cursor: grabbing;
   user-select: none;
 }
 .orch-chip {
-  /* Fixed, not 1fr: the number of tiles on screen is a function of the dock's
-     width, the tile itself never changes size. */
-  flex: 0 0 var(--orch-chip-w);
-  width: var(--orch-chip-w);
-  scroll-snap-align: start;
+  /* Fixed height, not a min: four rows means four rows, whether the titles in
+     them are one line or two. */
+  flex: none;
   display: flex;
-  flex-direction: column;
-  min-height: var(--orch-card-h);
+  align-items: stretch;
+  height: var(--orch-row-h);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-md);
   background: var(--bg-inset);
@@ -2859,15 +2827,16 @@
   border-color: var(--border-strong);
   background: var(--bg-hover);
 }
-/* The tile's open target is a button of its own, not the whole tile: the
-   action beside it is a real button too, and a button inside a button is not
+/* The row's open target is a button of its own, not the whole row: the action
+   beside it is a real button too, and a button inside a button is not
    something a keyboard can reach. */
 .orch-chip-open {
   display: flex;
   flex: 1;
+  min-width: 0;
   flex-direction: column;
-  gap: 7px;
-  padding: 8px 9px 5px;
+  gap: 5px;
+  padding: 8px 10px;
   border: none;
   background: transparent;
   color: var(--text);
@@ -2876,24 +2845,20 @@
 }
 .orch-chip-title {
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  font-size: var(--text-md);
-  line-height: 1.35;
-  /* Three lines is the tile's budget, and the budget is what the tile's height
-     was measured against: titles are sentences, and a tile tall enough to read
-     four of them at once can afford the third line. */
-  min-height: calc(3 * 1.35em);
+  font-size: var(--text-sm);
+  line-height: 1.4;
 }
 .orch-chip-meta {
   display: flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
-  /* Badge and age sit on the tile's bottom edge, not under the title: four
-     tiles of different title lengths read as a row of columns only if the
-     state of each lands on the same line. */
+  /* Badge and age sit on the row's bottom edge, not under the title: rows of
+     different title lengths read as a table only if the state of each lands on
+     the same line. */
   margin-top: auto;
 }
 .orch-chip-age {
@@ -2901,11 +2866,16 @@
   color: var(--text-tertiary);
 }
 .orch-chip-acts {
+  flex: none;
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
   gap: 4px;
-  padding: 0 6px 6px;
-  margin-top: auto;
+  padding: 0 10px 0 2px;
+}
+/* A finished row has no action, and the empty column would still take its
+   padding off the title. */
+.orch-chip-acts:empty {
+  display: none;
 }
 .orch-act {
   padding: 2px 7px;
@@ -4410,12 +4380,19 @@
    than a textarea: a textarea cannot host a live node among its text.
 
    Measured off the reference: a 23px-tall ink band on the secondary grey, a
-   glyph in front of the name, no size line and no remove cross — the pill is
-   its own control, so clicking it takes the file back out of the turn. */
+   glyph in front of the name, no size line. The reference chip ends in a ×;
+   this one carries two controls, enlarge then remove, because a picture in the
+   composer had no way to be looked at before it was sent. */
 .attach-pill {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  /* No gap: the controls are out of the flow, and a gap would leave a
+     permanent 6px hole at the pill's right edge. The 6px that separates the
+     leading glyph from the name is a margin on that child instead. */
+  gap: 0;
+  /* The controls sit over the pill's own right end, so the pill is the
+     containing block for them. */
+  position: relative;
   margin: 0 2px;
   padding: 1px 8px;
   border-radius: 8px;
@@ -4426,19 +4403,36 @@
   font-size: 0.92em;
   line-height: 1.5;
   white-space: nowrap;
-  cursor: pointer;
+  /* The body only means something for a picture (it opens the lightbox); a
+     text reference is a label with two buttons on its right edge. */
+  cursor: default;
   user-select: none;
-  vertical-align: baseline;
+  /* Not `baseline`: the pill's baseline comes from the name inside it, which
+     parks the 23px box entirely above the sentence's baseline and leaves the
+     chip riding high next to the CJK text around it. -2px drops the box so
+     its optical centre lands on the line's — measured against the run of text
+     beside it, baseline was 2.5px high, -2px is within half a pixel. */
+  vertical-align: -2px;
   /* Atomic to the caret: the browser steps over a contenteditable=false span
      as one unit, so the pill can never be split mid-name by a delete. */
+}
+.attach-pill.is-image {
+  cursor: zoom-in;
 }
 .attach-pill:hover {
   background: var(--bg-active);
 }
+/* Optical centring: a flex row centres the glyph boxes on the line box, but
+   the eye reads the x-height of the name — which sits about a pixel lower.
+   Both ends of the pill take the same nudge, or the leading picture glyph and
+   the two controls would disagree by that pixel. */
 .attach-pill-ico {
   flex: none;
   display: inline-grid;
   place-items: center;
+  margin-right: 6px;
+  position: relative;
+  top: 1px;
   color: var(--text-tertiary);
 }
 /* The image glyph carries a solid mountain inside its hairline frame, so it
@@ -4447,6 +4441,74 @@
    step up the text ramp keeps the shape legible at 16px. */
 .attach-pill-ico.img {
   color: var(--text-secondary);
+}
+.attach-pill-name {
+  min-width: 0;
+}
+/* The name gives way where the controls land: a mask dissolves its tail under
+   them instead of a scrim slicing the text off at a hard edge. The window is
+   fixed — the controls are 43px wide and the name ends 8px inside the pill —
+   so a short name simply dissolves away entirely, which reads as "the pill
+   made room" rather than as a letter with an icon standing on it. The floating
+   copy above still carries the name in full while the pointer is here. */
+.attach-pill:hover .attach-pill-name {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    #000 calc(100% - 33px),
+    transparent calc(100% - 27px)
+  );
+  mask-image: linear-gradient(
+    to right,
+    #000 calc(100% - 33px),
+    transparent calc(100% - 27px)
+  );
+}
+
+/* The pill's own controls: enlarge, then remove. They are a hover disclosure,
+   laid *over* the pill's right end rather than pushed in beside the name —
+   the pill is a node inside a sentence being typed, so anything that widens
+   it shoves the rest of the line and the caret sideways while the pointer is
+   only passing through. Fixed width, always inside the pill's own bounds. */
+.attach-pill-acts {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  /* 2px of top padding is the same optical nudge the leading glyph takes:
+     centring the buttons in the padding box leaves them a pixel high. */
+  padding: 2px 4px 0 8px;
+  border-radius: 0 8px 8px 0;
+  opacity: 0;
+  /* Not a surface while it is invisible: a click meant for the pill must not
+     land on a button nobody can see. */
+  pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+.attach-pill:hover .attach-pill-acts {
+  opacity: 1;
+  pointer-events: auto;
+}
+.attach-pill-act {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease);
+}
+.attach-pill:hover .attach-pill-act {
+  color: var(--text-secondary);
+}
+/* One step past the pill's own hover: the pointer is on the control, not just
+   on the chip. */
+.attach-pill-act:hover {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+  color: var(--text);
 }
 
 /* The placeholder. A contenteditable has no placeholder attribute, so the
@@ -5224,136 +5286,251 @@
 }
 
 /* ---- Session overview ----------------------------------------------------
-   One always-visible line in the pane head: the running task and its machine,
-   the context share, and the change description. There is no card to open.
-   The overview used to be a popover behind a trigger; it covered the right
-   edge of the transcript — exactly where a short thread's right-aligned
-   question ends — and most threads never opened it, so its three answers
-   were never read. Printing them in the head costs one row of chrome and
-   nothing from the transcript.
+   Three answers a running thread raises — what changed, how full the context
+   is, what is still working — folded into one control in the pane head.
 
-   The line has no frame of its own: it sits on the head's own surface and
-   only borrows a hover tint, the way the icon buttons beside it do. Framing
-   it — a border, hairline dividers, coloured dots, a nested well for the
-   ticker — turned one sentence into four separate objects. The three answers
-   are now separated by nothing but a faint middot and colour *in* the type:
-   blue for the context count, green/red for additions and deletions. The task
-   and change segments are still their own controls (queue / the dock's 改动
-   pane), and the change text still owns a borderless scroll viewport that
-   gives up width before anything else in the head is pushed out. */
+   It used to be a card pinned to the transcript's top-right corner. That
+   corner is exactly where a short thread's right-aligned question ends, so on
+   any pane narrower than ~1364px the card covered the question that started
+   the turn. A permanent lane was rejected earlier: it slid every line of the
+   conversation left. Moving the summary into the head costs nothing in the
+   resting state.
+
+   The expanded panel is a popover, not a lane: opening it does not move the
+   log, the composer or the jump arrow, so nothing the reader is mid-sentence
+   on shifts sideways. The cost is that it covers ~280px on the right, and it
+   only exists while the reader asked for it — an earlier lane would have slid
+   the whole reading column for a panel most threads never open. The panel's
+   right edge aligns with its trigger, so it unfolds from the control rather
+   than from the pane's edge.
+
+   The panel steps aside for the surfaces that own that corner outright: the
+   side dock and the task rail. */
+.chat-pane.panel-open .rail-dock,
+.chat-pane:has(.task-rail) .rail-dock {
+  display: none;
+}
 
 .rail-dock {
+  /* The overview hangs off this box, so it shares the bar's own right edge
+     instead of the head's — the popover and the sentence it expands line up. */
+  position: relative;
   display: flex;
   align-items: center;
-  flex: 0 1 auto;
-  min-width: 0;
+  flex: none;
 }
-.rail-bar {
-  display: flex;
+/* One line in the head, not a card on the canvas: idle/running, context
+   share, change count. The numbers are the ones the panel expands, so the
+   resting state never hides something the reader would have opened it for. */
+.rail-trigger {
+  display: inline-flex;
   align-items: center;
   gap: 6px;
   /* The pill hugs the sentence instead of holding a fixed lane open. A thread
      with no changed files ends the line at the dash, and a fixed width left
-     the rest of the pill blank — still tinted on hover, still a click target
-     for the 改动 pane, but saying nothing. The cap is what a long path list
-     grows into; from there the ticker gives up the width, not the task. */
+     the rest of the pill blank — still tinted on hover, still a click target,
+     but saying nothing. The cap is what a long path list grows into; from
+     there the ticker gives up the width, not the task. */
   width: max-content;
   max-width: clamp(260px, 38vw, 480px);
   height: var(--head-tool);
-  padding: 0 8px;
-  border: 0;
+  max-width: 250px;
+  padding: 0 10px;
+  border: 1px solid transparent;
   border-radius: 10px;
-  background: transparent;
-  color: var(--text-tertiary);
+  background: none;
+  color: var(--text-secondary);
   font: inherit;
   font-size: var(--text-xs);
+  text-align: left;
+  cursor: pointer;
   /* One fixed line box for every segment. Each of them is a different kind of
-     element (button, span, scrolling viewport) and a different font, so their
-     own `normal` line heights put the baselines a pixel or two apart. */
+     element (span, scrolling viewport) and a different font, so their own
+     `normal` line heights put the baselines a pixel or two apart. */
   line-height: 16px;
   transition: background var(--dur-fast) var(--ease-standard);
 }
-/* The only moment the line becomes a button: on hover it borrows the same
-   tint as the icon buttons beside it, then disappears back into the head. */
+/* The line is a button in its entirety: it borrows the same tint as the icon
+   buttons beside it on hover, and keeps it while its overview is up — the
+   popover is an extension of this control, so the control stays pressed. */
 .rail-bar:hover {
   background: var(--bg-chrome);
+}
+.rail-bar.is-open {
+  background: var(--bg-hover);
+  color: var(--text-secondary);
 }
 .rail-bar-icon {
   flex: none;
   color: var(--text-disabled);
 }
-.rail-bar-icon.is-live {
-  color: var(--semantic-good);
+.rail-trigger:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 1px;
 }
-/* A middot is punctuation, not a divider: it belongs to the sentence rather
-   than drawing a line through the head. */
-.rail-bar-sep {
+.rail-trigger-icon {
   flex: none;
-  /* The middot inside the sentences is a character with ordinary spaces;
-     this one sits between flex children, so pull the gap back to the same
-     optical distance instead of letting it read as a wider pause. */
-  margin: 0 -2px;
-  color: var(--text-disabled);
+  color: var(--text-tertiary);
 }
 /* The task segment holds its own words, and the machine at its end never
    shrinks at all: a long title may ellipsis, but the answer "on which device"
    must stay on screen. The cap only exists when the ticker has a list to show
    — the bar is sized by its content now, so a percentage cap against a bar
    that hugs the sentence would clip the idle line ("空闲 · 在自动（最佳节点）上
-   运行") before anything else ran out of room. */
+   运行") before anything else ran out of room. It is not its own control: the
+   whole bar opens the overview, so the segment has no hover state of its own. */
 .rail-bar-task {
   flex: 0 1 auto;
   display: inline-flex;
   align-items: center;
   gap: 4px;
   min-width: 0;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  background: none;
   color: var(--text-secondary);
-  font: inherit;
-  text-align: left;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.rail-trigger-sep {
+  flex: none;
+  color: var(--text-disabled);
+}
+.rail-trigger-diff {
+  display: inline-flex;
+  gap: 3px;
+}
+.rail-trigger-text .is-high {
+  color: var(--semantic-warn);
+}
+.rail-pop {
+  position: absolute;
+  /* Below the trigger, not below the whole header: the trigger is the anchor
+     the reader just pressed, and a panel starting at the header's bottom edge
+     reads as detached from it. The trigger is vertically centred in a 56px
+     head and is 36px tall, so 10px of gap lands the panel exactly on the
+     head's bottom edge — not two pixels up inside it. */
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  width: 280px;
+  /* A summary, not a second transcript: it never grows past the reading area
+     it annotates, and scrolls inside when the change list is long. */
+  max-height: min(60vh, 460px);
+  min-height: 0;
   overflow: hidden;
-  cursor: pointer;
 }
-/* With paths to print, the title yields half the row to them: a long title
-   may ellipsis, the list is the reason the line exists. */
-.rail-bar.has-changes .rail-bar-task {
-  max-width: 46%;
+
+.rail-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 3px 0;
 }
-.rail-bar-task:hover {
-  color: var(--text);
+
+/* A section is a title row plus a body. The panel itself is the fold now, so
+   the titles are static text — asking the reader to open each section a
+   second time was one click too many. */
+/* The separator has to be darker than the card, not lighter: on a grey sheet
+   a hairline in the page's border colour reads as a groove. */
+.rail-sec + .rail-sec {
+  border-top: 1px solid var(--border-float);
+}
+.rail-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* 10px is the card's content inset — every list row, note and button below
+     uses it, so the titles have to start on the same line as their body. */
+  padding: 7px 10px;
 }
 .rail-bar-task-title {
   min-width: 0;
   overflow: hidden;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.rail-sec-body {
+  padding: 0 0 6px;
+}
+.rail-none {
+  color: var(--text-tertiary);
+}
+.rail-add {
+  color: var(--semantic-good);
+}
+.rail-del {
+  color: var(--semantic-danger);
+}
+
+/* ---- Changes ---- */
+.rail-files {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.rail-file {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 3px 10px;
+}
+.rail-file:hover {
+  background: var(--bg-active);
+}
+/* One fixed column for the porcelain token, so the paths line up whether the
+   row says M, MM or ??. */
+.rail-file-state {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  width: 12px;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1;
+}
+.rail-file-state.is-edit {
+  color: var(--semantic-warn);
+}
+.rail-file-state.is-new {
+  color: var(--semantic-good);
+}
+.rail-file-state.is-gone {
+  color: var(--semantic-danger);
+}
+.rail-file-state.is-moved {
+  color: var(--semantic-info);
+}
+/* The path, not the directory, is what identifies a row: it starts at the
+   left and the directory is what gets the ellipsis. `title` carries the
+   whole path for the rows that had to be cut. */
+.rail-file-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 11px;
+  color: var(--text-secondary);
 }
-.rail-bar-task-sep {
+.rail-file-stat {
   flex: none;
-  color: var(--text-disabled);
-}
-/* One step brighter than the title, not a second colour: the machine is the
-   answer this line exists to give, and ink is enough to make it findable. */
-.rail-bar-task-where {
-  flex: none;
-  color: var(--text);
-}
-/* Blue is the only hue left on the line, and it is the digits themselves —
-   no capsule behind them, so the count reads as part of the sentence. */
-.rail-bar-ctx {
-  flex: none;
-  /* Same font, same size, same line box as the words beside it. The global
-     `.mono` helper shrinks to 0.92em, and a mono face has different metrics
-     from the CJK face — either one leaves the digits a pixel off the baseline. */
+  display: inline-flex;
+  gap: 4px;
+  font-size: 10px;
   font-variant-numeric: tabular-nums;
-  color: var(--accent-2);
 }
-.rail-bar-ctx.is-high {
-  color: var(--semantic-warn);
+/* The reported-but-unknown marker: a dot sized to the status column, so rows
+   without a letter still line up with the ones that have one. */
+.rail-file-dot {
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  margin-left: 3px;
+  border-radius: 50%;
+  background: var(--text-disabled);
 }
 /* A viewport with no visible edge: the change text simply continues the line
    and scrolls inside the space left over. Giving it a well or a coloured bar
@@ -5373,101 +5550,434 @@
   min-width: 12px;
   display: flex;
   align-items: center;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  background: none;
   color: var(--text-tertiary);
-  font: inherit;
-  text-align: left;
 }
-button.rail-bar-changes {
-  cursor: pointer;
+/* The caret is the one glyph that says the line opens something. It sits at
+   the end, dims to the point of being punctuation, and turns over while the
+   overview is up. */
+.rail-bar-caret {
+  flex: none;
+  margin-left: 1px;
+  color: var(--text-disabled);
+  transition: transform var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease);
 }
-button.rail-bar-changes:hover {
-  color: var(--text-secondary);
+.rail-bar:hover .rail-bar-caret {
+  color: var(--text-tertiary);
 }
-:is(button.rail-bar-task, button.rail-bar-changes):focus-visible {
+.rail-bar.is-open .rail-bar-caret {
+  color: var(--text-tertiary);
+  transform: rotate(180deg);
+}
+.rail-bar:focus-visible {
   outline: 2px solid var(--accent-border);
   outline-offset: 1px;
-  border-radius: 4px;
 }
-
-/* ---- Ticker -------------------------------------------------------------- */
-/* The change line keeps the diff's own colours: additions green, deletions
-   red, explanation and paths a step quieter. These sit on runs inside both
-   ticker copies, so the loop never changes colour mid-scroll. */
-.rail-tone-add {
-  color: var(--semantic-good);
+.rail-meter {
+  height: 5px;
+  margin: 2px 10px 6px;
+  border-radius: 3px;
+  /* `--bg-inset` is within a hair of the card in both themes, and a 5px track
+     that reads as a hairline is not a meter. The border tone is the lightest
+     grey that still says "this is a container with something in it". */
+  background: var(--border-soft);
+  overflow: hidden;
 }
-.rail-tone-del {
-  color: var(--semantic-danger);
+.rail-meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--text-tertiary);
+  transition: width var(--dur-med) var(--ease-standard);
 }
-.rail-tone-muted {
+.rail-meter.is-high .rail-meter-fill {
+  background: var(--semantic-warn);
+}
+.rail-ctx-nums {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 0 10px;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.rail-dim {
   color: var(--text-tertiary);
 }
-.rail-ticker {
-  display: block;
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  line-height: inherit;
+.rail-note {
+  margin: 2px 0 0;
+  padding: 0 10px;
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  color: var(--text-tertiary);
 }
-/* Only a scrolling ticker gets the fades. The left one is narrow so the first
-   glyph survives the hold; the right one is wider, so a sentence that runs
-   past the viewport dissolves instead of ending on a hard, cut-looking edge. */
-.rail-ticker.is-scrolling {
-  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 4px, #000 calc(100% - 14px), transparent 100%);
-  mask-image: linear-gradient(90deg, transparent 0, #000 4px, #000 calc(100% - 14px), transparent 100%);
+
+/* ---- Tasks ---- */
+.rail-live {
+  color: var(--semantic-warn);
+  font-weight: 600;
 }
-.rail-ticker-track {
-  display: inline-flex;
-  gap: 28px;
-  width: max-content;
+.rail-tasks {
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
-.rail-ticker.is-scrolling .rail-ticker-track {
-  animation-name: rail-ticker;
-  /* The component measures the track and overrides this with a speed that is
-     constant in px/s; the fallback keeps the text moving if it cannot. */
-  animation-duration: 14s;
-  animation-timing-function: linear;
-  animation-iteration-count: infinite;
+.rail-task {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
-.rail-ticker:hover .rail-ticker-track {
-  animation-play-state: paused;
+.rail-task:hover {
+  background: var(--bg-hover);
 }
-@keyframes rail-ticker {
-  /* Hold on the beginning, then on the second copy (which looks identical), so
-     a sentence is readable at rest instead of always being caught mid-word. */
+.rail-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--semantic-warn);
+  animation: rail-pulse 1.8s var(--ease-standard) infinite;
+}
+@keyframes rail-pulse {
   0%,
-  16% {
-    transform: translateX(0);
-  }
-  84%,
   100% {
-    /* Half the track is one copy plus half the gap; the other half of the gap
-       is what makes copy two land exactly where copy one started. */
-    transform: translateX(calc(-50% - 14px));
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .rail-ticker.is-scrolling .rail-ticker-track {
+  .rail-dot {
     animation: none;
   }
-  .rail-ticker.is-scrolling .rail-ticker-copy[aria-hidden='true'] {
-    display: none;
+}
+
+/* ---- Overview popover ---------------------------------------------------- */
+/* The line's full sentence, under the head. The reason the old overview card
+   was folded into one line is still true — a card on the transcript's corner
+   sits exactly where a short thread's right-aligned question ends — so this is
+   a popover the next press folds away, not a panel that stays. 320px is one
+   path column and the context meter; wider only buys longer paths, which the
+   diff pane does better anyway. */
+.rail-pop {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 20;
+  width: min(320px, calc(100vw - 40px));
+  padding: 12px 14px 13px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-pop);
+  animation: rail-pop-in var(--dur-fast) var(--ease-enter);
+}
+/* Focus lands here on open so Tab walks into the panel instead of back into
+   the head; the ring belongs to the links, not to the card itself. */
+.rail-pop:focus {
+  outline: none;
+}
+@keyframes rail-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
   }
-  .rail-ticker.is-scrolling {
-    overflow-x: auto;
-    scrollbar-width: none;
-    -webkit-mask-image: none;
-    mask-image: none;
-  }
-  .rail-ticker::-webkit-scrollbar {
-    display: none;
+  to {
+    opacity: 1;
+    transform: none;
   }
 }
+/* A hairline between the three answers. It is drawn from the ink rather than
+   `--border-soft`: on the raised card the soft line disappears at night, and a
+   rule that cannot be seen is worse than no rule. */
+.rail-pop-sec + .rail-pop-sec {
+  margin-top: 11px;
+  padding-top: 11px;
+  border-top: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+/* ---- Running ---- */
+.rail-pop-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.rail-pop-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-disabled);
+}
+.rail-pop-dot.is-live {
+  background: var(--semantic-good);
+  box-shadow: 0 0 0 3px var(--semantic-good-soft);
+}
+.rail-pop-state {
+  flex: none;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+}
+.rail-pop-where {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rail-pop-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  /* The rows' own padding would indent their titles 7px past the block's
+     label and its link; pulling the list out by the same amount puts the
+     hover tint around the text and the text back on the card's left edge. */
+  margin: 8px -7px 0;
+  padding: 0;
+  list-style: none;
+}
+/* A task row is the panel's only jump into the queue, so it owns a hover tint
+   the way the node card's rows do. */
+.rail-pop-task {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.rail-pop-task:hover {
+  background: var(--bg-hover);
+}
+.rail-pop-task-title {
+  display: block;
+  overflow: hidden;
+  font-size: 12.5px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rail-pop-task-meta {
+  display: block;
+  overflow: hidden;
+  margin-top: 1px;
+  color: var(--text-tertiary);
+  font-size: 11.5px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- Context ---- */
+.rail-pop-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.rail-pop-label {
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+.rail-pop-pct {
+  margin-left: auto;
+  color: var(--accent-2);
+  font-size: 20px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+}
+.rail-pop-pct.is-high {
+  color: var(--semantic-warn);
+}
+.rail-pop-meter {
+  display: block;
+  height: 4px;
+  margin-top: 8px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--text-tertiary) 20%, transparent);
+  border-radius: var(--radius-pill);
+}
+.rail-pop-meter i {
+  display: block;
+  height: 100%;
+  background: var(--accent-2);
+  border-radius: var(--radius-pill);
+  transition: width var(--dur-med) var(--ease-standard);
+}
+.rail-pop-meter.is-high i {
+  background: var(--semantic-warn);
+}
+/* No window on record: the track stays as an empty rail rather than a full
+   bar, which would read as a hundred percent. */
+.rail-pop-meter.is-unknown {
+  opacity: 0.4;
+}
+.rail-pop-foot {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 7px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+}
+.rail-pop-nums {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+.rail-pop-model {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- Changes ---- */
+.rail-pop-diffstat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-left: auto;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.rail-pop-count {
+  color: var(--text-tertiary);
+  font-size: 11.5px;
+}
+.rail-pop-none {
+  margin-left: auto;
+  color: var(--text-disabled);
+}
+.rail-pop-files {
+  margin: 7px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.rail-pop-file {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+  padding: 2px 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.rail-pop-file-state {
+  flex: none;
+  width: 11px;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-align: center;
+}
+.rail-pop-file-state.is-new {
+  color: var(--semantic-good);
+}
+.rail-pop-file-state.is-gone {
+  color: var(--semantic-danger);
+}
+.rail-pop-file-state.is-moved {
+  color: var(--accent-2);
+}
+.rail-pop-file-state.is-edit {
+  color: var(--text-tertiary);
+}
+/* A reported path with no stat: the run predates the annotation, so the row
+   carries a neutral dot instead of a letter it cannot stand behind. */
+.rail-pop-file-dot {
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--text-disabled);
+  vertical-align: middle;
+}
+.rail-pop-file-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rail-pop-file-stat {
+  flex: none;
+  display: inline-flex;
+  gap: 5px;
+  font-variant-numeric: tabular-nums;
+}
+/* The one link under each block: where the abbreviated answer lives in full.
+   Secondary ink, not accent: it is a way out of the card, not the card's
+   subject, and two blue lines would outweigh the numbers they sit under. */
+.rail-pop-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 7px 0 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease);
+}
+.rail-pop-link svg {
+  color: var(--text-tertiary);
+  transition: color var(--dur-fast) var(--ease);
+}
+.rail-pop-link:hover {
+  color: var(--text);
+}
+.rail-pop-link:hover svg {
+  color: var(--text-secondary);
+}
+.rail-pop-link:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.rail-pop-note {
+  margin: 7px 0 0;
+  color: var(--text-tertiary);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+/* Two different emptinesses ("no worktree" and "the run reported nothing")
+   are two sentences, not one joined by a middot — the second only appears
+   when the first leaves the reader asking why the list is blank. */
+.rail-pop-note + .rail-pop-note {
+  margin-top: 2px;
+}
+
 @media (max-width: 900px) {
   .rail-bar {
     max-width: clamp(190px, 40vw, 300px);
