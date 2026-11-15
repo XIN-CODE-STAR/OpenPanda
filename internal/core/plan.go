@@ -28,6 +28,7 @@ package core
 // shadow this package's import.
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -1533,7 +1534,25 @@ func agentResultSchemaFor(abilities []string, restricted bool, maxChildren int) 
 			`"description": "done = finished; question = blocked on input or a PERMISSION only the user can grant; delegate = requested sub-tasks; failed = could not complete. NOTE: this session is READ-ONLY (no Write/Edit/Bash). If completing the task requires writing files or running commands, report status=question explaining that the user must authorize the task — do NOT delegate: a sub-task cannot grant a permission this session lacks."`,
 			1)
 	}
-	return s
+	// The schema travels on the agent CLI's command line (--json-schema), and
+	// a Windows command line is capped at 8191 characters. Indented, this
+	// document is ~5.5k on its own — the adapter's own budget check (6000)
+	// then refuses to spawn the run even after the prompt has moved to stdin,
+	// which is how a task parked with "command line is still 6410 characters".
+	// Minified it is ~4.5k, leaving room for the rest of the argv. The literal
+	// above stays indented: humans read it, the CLI does not.
+	return compactJSON(s)
+}
+
+// compactJSON strips the whitespace a hand-written JSON literal carries.
+// A literal that cannot be compacted is a build-time bug, not a reason to
+// fail a run, so the input comes back unchanged.
+func compactJSON(s string) string {
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, []byte(s)); err != nil {
+		return s
+	}
+	return buf.String()
 }
 
 // abilityIDs lists every capability id this node declares — native commands

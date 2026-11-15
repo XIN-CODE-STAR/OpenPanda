@@ -292,6 +292,60 @@ print(json.dumps({"type":"result", "is_error":False, "result":"resumed",
         self.assertEqual(payload["result"], "resumed")
         self.assertEqual(payload["session_id"], "sess-next")
 
+    @unittest.skipUnless(sys.platform == "win32",
+                         "the command-line budget only exists on Windows")
+    def test_claude_sheds_optional_payloads_to_fit_the_windows_line(self):
+        """A payload too big for argv must cost the payload, not the run.
+
+        The protocol schema alone is ~5.5k characters and the passthrough MCP
+        document a few hundred more: once the prompt moves to stdin the line
+        can still exceed the adapter's 6000-character budget. Refusing to
+        spawn there parked a real task in review with "the command line is
+        still 6410 characters". Both payloads have a fallback — the CLI
+        discovers its own .mcp.json, and without the schema the orchestrator
+        parses text markers — so they are shed and the run proceeds.
+        """
+        schema = json.dumps({"type": "object", "properties": {
+            "answer": {"type": "string", "description": "x" * 6000}}})
+        payload, progress, _ = run_adapter(
+            "claude_code.py", "claude", r'''
+import json, sys
+args = sys.argv[1:]
+assert "--json-schema" not in args, args
+assert "--mcp-config" not in args, args
+assert "-p" in args
+prompt = sys.stdin.read()
+assert "contract prompt" in prompt, prompt
+print(json.dumps({"type":"result", "is_error":False, "result":"shed",
+                  "usage":{"input_tokens":1,"output_tokens":1}}))
+''',
+            extra_request={"result_schema": schema,
+                           "mcp_config": '{"mcpServers":{}}'},
+        )
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["result"], "shed")
+        # The drop is reported, so a run that lost the structured contract
+        # can be explained afterwards.
+        self.assertTrue(any("--json-schema" in line for line in progress), progress)
+
+    def test_claude_keeps_optional_payloads_that_fit(self):
+        """Shedding is a budget measure, not the default: a line that fits
+        keeps the structured contract and the MCP passthrough."""
+        payload, _, _ = run_adapter(
+            "claude_code.py", "claude", r'''
+import json, sys
+args = sys.argv[1:]
+assert args[args.index("--json-schema") + 1] == '{"type":"object"}', args
+assert "--mcp-config" in args, args
+print(json.dumps({"type":"result", "is_error":False, "result":"kept",
+                  "usage":{"input_tokens":1,"output_tokens":1}}))
+''',
+            extra_request={"result_schema": '{"type":"object"}',
+                           "mcp_config": '{"mcpServers":{}}'},
+        )
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["result"], "kept")
+
     def test_claude_timeout_reports_session_checkpoint(self):
         """A watchdog-killed stream run reports the session id the init
         envelope carried, so the orchestrator's retry resumes the same

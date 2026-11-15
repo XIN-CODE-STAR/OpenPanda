@@ -600,3 +600,18 @@ func TestAgentResultSchemaFor(t *testing.T) {
 		}
 	}
 }
+
+// TestAgentResultSchemaIsMinified guards the Windows command-line budget the
+// schema spends. The document rides --json-schema, so every indented byte is
+// a byte the prompt (already on stdin) and the rest of the argv cannot use:
+// indented it was 5541 characters, ~5.9k once argv-quoted, which the adapter
+// refused to spawn against its 6000-character limit.
+func TestAgentResultSchemaIsMinified(t *testing.T) {
+	s := agentResultSchemaFor([]string{"git", "net:curl"}, false, 8)
+	if strings.Contains(s, "\n") {
+		t.Fatal("rendered schema still carries the literal's indentation")
+	}
+	if len(s) > 5000 {
+		t.Fatalf("rendered schema is %d chars; a Windows command line has no room for it", len(s))
+	}
+}
