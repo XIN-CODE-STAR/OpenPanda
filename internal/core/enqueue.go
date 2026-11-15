@@ -50,53 +50,8 @@ func DefaultQueueSpec() QueueSpec {
 // and an execution slot is available. It is the panel's task-submission path
 // (queue redesign), contrasting Submit/SubmitLocal which block until done.
 func (c *Core) Enqueue(ctx context.Context, in TaskInput, q QueueSpec) (Task, error) {
-	if q.Priority < PriorityHigh || q.Priority > PriorityLow {
-		return Task{}, fmt.Errorf("queue priority %d out of range", q.Priority)
-	}
-	// The conversation owns the lock lane, so it has to be on the input before
-	// any key is derived — resourceKeysFor runs below, and childResourceKeys
-	// re-derives for scoped/isolated children from the same field.
-	in.SessionID = q.SessionID
-	autoKeys := len(q.ResourceKeys) == 0
-	if autoKeys {
-		q.ResourceKeys = c.resourceKeysFor(in)
-	} else {
-		q.ResourceKeys = mergeActuatorKeys(q.ResourceKeys, in.Requires, in.SpecJSON)
-	}
-	t, _, _, err := c.createTask(ctx, in)
-	if err != nil {
-		return Task{}, fmt.Errorf("create task: %w", err)
-	}
-	// Auto-derived keys recomputed once the id exists: an input carrying a
-	// scope declaration (paths) or isolation intent must not hold the
-	// whole-project set — that silently serializes what the declaration
-	// meant to run in parallel, and the isolate branch needs the task key.
-	if autoKeys && in.Project != "" && (len(in.Paths) > 0 || in.Isolate) {
-		q.ResourceKeys = childResourceKeys(t.TaskID, in)
-	}
-	// createTask stamps the scope/isolate row flags from the input — the run
-	// reads the row, and a narrowed key claim must never pair with the
-	// un-narrowed behavior.
-	if err := c.store.SetQueueMeta(ctx, t.TaskID, q.Priority, q.SessionID, q.WorkDir, q.ResourceKeys); err != nil {
-		// The row exists in submitted state; leaving it there means the
-		// stale-submitted rescue would pick it up and run work the caller was
-		// told had failed. Cancel it before returning.
-		_ = c.store.Cancel(ctx, t.TaskID)
-		return Task{}, fmt.Errorf("set queue meta: %w", err)
-	}
-	if err := c.store.Queue(ctx, t.TaskID, c.nodeID); err != nil {
-		_ = c.store.Cancel(ctx, t.TaskID)
-		return Task{}, fmt.Errorf("queue task: %w", err)
-	}
-	t.Priority = q.Priority
-	t.SessionID = q.SessionID
-	t.WorkDir = q.WorkDir
-	t.ResourceKeys = q.ResourceKeys
-	t.Scheduled = true
-	t.State = StateQueued
-	c.queueWake()
-	c.logger.Info("task enqueued", "task", t.TaskID, "priority", q.Priority)
-	return t, nil
+	result, err := c.enqueueAtomic(ctx, in, q, nil)
+	return result.Task, err
 }
 
 // resourceKeysFor is the submission-time entry point: deriveResourceKeys plus
@@ -390,7 +345,12 @@ func (c *Core) runScheduled(ctx context.Context, taskID string) {
 	// its task_result completes the local row via handleResult, so there is
 	// nothing left to run here. Queued tasks are first-class network
 	// citizens, not local-only work.
-	if c.forwardScheduled(ctx, t) {
+	remoteBusiness, businessErr := c.isRemoteBusiness(ctx, taskID)
+	if businessErr != nil {
+		c.failLocal(ctx, taskID, businessErr, t.AttemptID)
+		return
+	}
+	if !remoteBusiness && c.forwardScheduled(ctx, t) {
 		return
 	}
 	// Fail closed for an explicit device pin. forwardScheduled owns every
@@ -417,6 +377,14 @@ func (c *Core) runScheduled(ctx context.Context, taskID string) {
 			"task", taskID, "preferred", ref)
 	}
 	result, err := c.run(ctx, taskID, t.Intent, t.Requires, nil)
+	if remoteBusiness {
+		// A remote request is recovered by its cloud fence and business
+		// ledger. Kernel retry must not silently create another action.
+		if err != nil {
+			c.logger.Warn("business preparation stopped", "task", taskID, "err", err)
+		}
+		return
+	}
 	final, _, rerr := c.retryLoop(ctx, taskID, t.Intent, t.Requires, result, err)
 	if rerr != nil && !errors.Is(rerr, ErrCancelled) {
 		c.logger.Warn("queue: task run error", "task", taskID, "err", rerr)

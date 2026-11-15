@@ -1554,6 +1554,28 @@
   font-weight: 600;
 }
 
+.skill-preview {
+  max-width: 840px;
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+}
+
+.skill-preview-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.skill-preview-head strong { min-width: 0; overflow-wrap: anywhere; }
+.skill-preview-head button { flex-shrink: 0; }
+.skill-preview .mono { overflow-wrap: anywhere; }
+.skill-preview .skill-modal-actions { flex-wrap: wrap; justify-content: flex-start; }
+.skill-preview-resources { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.skill-preview-resources button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: left; }
+.skill-preview-resources [aria-current] { border-color: var(--accent); }
+.skill-preview-content { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 50vh; overflow: auto; margin: 0; }
+
 .skill-form-group {
   display: flex;
   flex-direction: column;
@@ -10530,6 +10552,17 @@ input.switch:focus-visible {
   display: flex;
   flex-direction: column;
 }
+.plan-graph-wrap { padding: var(--sp-3) var(--sp-4); border-top: 1px solid var(--border-soft); min-width: 0; }
+.plan-graph-wrap > p { font-size: var(--text-sm); margin: 0 0 var(--sp-2); }
+.plan-graph-scroll { max-width: 100%; max-height: 560px; overflow: auto; border-radius: var(--radius-md); background: var(--bg-inset); }
+.plan-graph { position: relative; }
+.plan-graph > svg { position: absolute; inset: 0; pointer-events: none; }
+.plan-graph path { fill: none; stroke: var(--border); stroke-width: 2; }
+.plan-graph-node { position: absolute; width: 232px; height: 108px; padding: 10px; display: flex; flex-direction: column; gap: 6px; text-align: left; background: var(--bg-card, var(--bg)); border: 1px solid var(--border); border-radius: var(--radius-md); }
+.plan-graph-node:hover, .plan-graph-node:focus-visible { border-color: var(--accent); }
+.plan-graph-node > strong, .plan-graph-node > .mono { width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.plan-graph-status { display: flex; align-items: center; gap: 6px; font-size: var(--text-xs); }
+.plan-graph-node.state-running, .plan-graph-node.state-dispatched { border-color: var(--accent); }
 /* Each stage is a node on a vertical pipeline rail: a status-colored dot on
    a hairline connector — the DAG reads top-to-bottom at a glance. */
 .plan-stage {
@@ -11499,10 +11532,7 @@ main .pipeline-chip {
   text-decoration: underline;
 }
 
-/* ---- 团队 (views/team.tsx) ----
-   A destination that exists before its features do. The header is the whole
-   page on purpose; the only thing under it is a sentence saying there is
-   nothing here, so nobody goes hunting for a button that was never drawn. */
+/* ---- Tasks and collaboration (views/team.tsx) ---- */
 
 .tm-page {
   /* `.main` is a flex row, so a flex item shrinks to its content unless it asks
@@ -11522,6 +11552,63 @@ main .pipeline-chip {
   gap: 2px;
   min-width: 0;
 }
+
+.work-head, .work-toolbar, .work-actions, .work-card-head {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+.work-head > div, .work-toolbar input { flex: 1; min-width: 0; }
+.work-actions { justify-content: flex-start; }
+.work-tabs { align-self: flex-start; max-width: 100%; flex-wrap: wrap; }
+.work-tabs button, .work-actions button, .work-toolbar button { min-height: 44px; }
+.work-grid, .work-history {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+  gap: var(--sp-4);
+}
+.work-page .card { min-width: 0; padding: var(--sp-4); }
+.work-title {
+  display: block;
+  padding: var(--sp-2) 0;
+  min-height: 44px;
+  border: 0;
+  background: none;
+  color: var(--text-primary);
+  font: inherit;
+  font-weight: 600;
+  text-align: start;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.work-title:hover { color: var(--accent); }
+.work-title:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 3px; }
+.work-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
+  gap: var(--sp-3);
+  margin: var(--sp-3) 0;
+}
+.work-facts dt { color: var(--text-secondary); font-size: var(--fs-caption); }
+.work-facts dd { margin: var(--sp-1) 0 0; overflow-wrap: anywhere; }
+.work-description { white-space: pre-wrap; overflow-wrap: anywhere; }
+.work-form, .work-form label { display: flex; flex-direction: column; gap: var(--sp-2); }
+.work-form { gap: var(--sp-4); }
+.work-form-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  gap: var(--sp-3);
+}
+.work-form input, .work-form select, .work-form textarea, .work-toolbar input {
+  width: 100%;
+  min-height: 44px;
+  box-sizing: border-box;
+}
+.work-form button { align-self: flex-start; min-height: 44px; }
+.work-error { color: var(--semantic-danger); overflow-wrap: anywhere; }
 
 /* Dashed, not a card: a card would read as content that failed to load. The
    dashed edge says "reserved", which is what this area actually is. Capped in
@@ -12244,3 +12331,15 @@ main .pipeline-chip {
     padding-top: 7px;
   }
 }
+
+/* Persisted business results and exact local consent. */
+.work-result { margin-block: 12px; }
+.work-result > summary, .work-space-policy > summary { cursor: pointer; padding-block: 10px; overflow-wrap: anywhere; }
+.work-delivery, .work-action, .work-sync { margin-top: 16px; padding-block: 12px; border-top: 1px solid var(--border); }
+.work-payload { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 32rem; overflow: auto; padding: 12px; background: var(--bg-inset); border-radius: 8px; }
+.work-code { overflow-wrap: anywhere; font-family: var(--font-mono, monospace); font-size: .9em; }
+.work-form .work-check { display: flex; flex-direction: row; align-items: flex-start; gap: 10px; }
+.work-action .work-facts { grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); }
+.work-form .work-check input { width: auto; min-height: 0; flex: none; margin-top: .25em; }
+.work-form fieldset { min-width: 0; display: grid; gap: 12px; border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+.work-space-policy { margin-top: 12px; }

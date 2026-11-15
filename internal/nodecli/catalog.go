@@ -184,6 +184,12 @@ var catalog = []Command{
 	{Names: []string{"todo", "todos"},
 		Usage:   "panda todo list|add|edit|done|rm|move|start",
 		HelpKey: "cli.help.d.todo", Group: GroupTasks},
+	{Names: []string{"work"},
+		Usage:   "panda work list|show|add|edit|run|history|binding|policy|runs|result|export|research|approve|reject|accept|return|pause",
+		HelpKey: "cli.help.d.work", Group: GroupTasks},
+	{Names: []string{"connection"},
+		Usage:   "panda connection connect|list|status|sync|disconnect",
+		HelpKey: "cli.help.d.connection", Group: GroupTasks},
 
 	// — memory —
 	{Names: []string{"memory"},
@@ -204,7 +210,7 @@ var catalog = []Command{
 		Usage:   "panda reminder list|add|rm",
 		HelpKey: "cli.help.d.reminder", Group: GroupSettings},
 	{Names: []string{"skill"},
-		Usage:   "panda skill list|find|hub|add|reset",
+		Usage:   "panda skill list|search|show|read|find|hub|add|reset",
 		HelpKey: "cli.help.d.skill", Group: GroupSettings},
 	{Names: []string{"mcp"},
 		Usage:   "panda mcp",

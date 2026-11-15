@@ -66,6 +66,7 @@ type Peer struct {
 // Core wires the node lifecycle, task store, and WebSocket transport into a
 // running daemon. It is the root type for the Phase 0 loop.
 type Core struct {
+	businessExecutor BusinessExecutor // mu
 	agentConcurrency *commander.AgentConcurrency
 
 	db     *sql.DB
@@ -1798,8 +1799,12 @@ func (c *Core) handleHeartbeat(ctx context.Context, env bus.Envelope) {
 // those rows.
 func (c *Core) Recover(ctx context.Context) (int, error) {
 	n, err := c.store.Recover(ctx, c.nodeID)
+	if err != nil {
+		return n, err
+	}
+	m, err := c.RecoverLocalRequests(ctx)
 	c.resumeReviewHolds(ctx)
-	return n, err
+	return n + m, err
 }
 
 // blockedAgents enumerates this node's circuit-open agent names (breaker

@@ -103,6 +103,12 @@ var migrations = []Migration{
 	{Version: 66, Name: "add_intake_seen", Apply: migrateV66},
 	{Version: 67, Name: "add_ask_rounds", Apply: migrateV67},
 	{Version: 68, Name: "add_children_wait_attempt", Apply: migrateV68},
+	{Version: 69, Name: "add_business_task_hub", Apply: migrateV69},
+	{Version: 70, Name: "add_business_mutation_identity", Apply: migrateV70},
+	{Version: 71, Name: "add_business_request_recovery", Apply: migrateV71},
+	{Version: 72, Name: "add_task_sync_runtime", Apply: migrateV72},
+	{Version: 73, Name: "add_task_automation_and_delivery", Apply: migrateV73},
+	{Version: 74, Name: "version_business_deliveries_and_consent", Apply: migrateV74},
 }
 
 // migrateV62 adds employee_cache.dir_signer: the Ed25519 key that SIGNED a

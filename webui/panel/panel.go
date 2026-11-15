@@ -35,6 +35,8 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/scheduler"
 	"github.com/Xustalis/OpenPanda/internal/sessions"
 	"github.com/Xustalis/OpenPanda/internal/skills"
+	"github.com/Xustalis/OpenPanda/internal/taskflow"
+	"github.com/Xustalis/OpenPanda/internal/taskhub"
 	"github.com/Xustalis/OpenPanda/internal/todos"
 	"github.com/Xustalis/OpenPanda/internal/updater"
 	"github.com/Xustalis/OpenPanda/internal/util"
@@ -64,6 +66,7 @@ type Deps struct {
 	// set; Engine is the last static fallback.
 	EngineFn     func() *askengine.Engine
 	DB           *sql.DB
+	TaskFlow     *taskflow.Service
 	Projects     *memory.Projects
 	ProjectStore *projectstore.Store // nil falls back to memory-only projects
 	Push         *push.Service
@@ -115,6 +118,7 @@ func New(d Deps) http.Handler {
 		engines:      d.EngineHolder,
 		engineFn:     d.EngineFn,
 		db:           d.DB,
+		taskFlow:     d.TaskFlow,
 		projects:     d.Projects,
 		projectStore: d.ProjectStore,
 		push:         d.Push,
@@ -140,6 +144,9 @@ func New(d Deps) http.Handler {
 		activeAsks:         make(map[string]sessionOperation),
 		approvalOperations: make(map[string]approvalOperation),
 		serviceCtx:         context.Background(),
+	}
+	if h.taskFlow == nil && d.DB != nil && d.Cfg != nil {
+		h.taskFlow = taskflow.New(d.DB, d.Cfg.Storage.DBPath)
 	}
 	// Session summary finalizer (queue redesign §5): finished tasks fold
 	// their result into the linked chat as an assistant turn. Runs for the
@@ -283,6 +290,7 @@ func New(d Deps) http.Handler {
 	}
 	if d.SkillStore != nil {
 		mux.HandleFunc("GET /api/skills", h.listSkills)
+		mux.HandleFunc("GET /api/skills/read", h.readSkill)
 		mux.HandleFunc("POST /api/skills/approve", h.skillAction(true))
 		mux.HandleFunc("POST /api/skills/reject", h.skillAction(false))
 		mux.HandleFunc("POST /api/skills/reset", h.resetSkill)
@@ -299,6 +307,35 @@ func New(d Deps) http.Handler {
 	}
 	// 待办: the user's own board, beside the task queue. /start is the one
 	// crossing into the task plane — it enqueues a task and links the rows.
+	if d.DB != nil {
+		mux.HandleFunc("GET /api/work/tasks", h.listWork)
+		mux.HandleFunc("POST /api/work/tasks", h.createWork)
+		mux.HandleFunc("GET /api/work/tasks/{key}", h.getWork)
+		mux.HandleFunc("PATCH /api/work/tasks/{key}", h.patchWork)
+		mux.HandleFunc("POST /api/work/tasks/{key}/run", h.runWork)
+		mux.HandleFunc("GET /api/work/tasks/{key}/history", h.workHistory)
+	}
+	if h.taskFlow != nil {
+		mux.HandleFunc("GET /api/work/connections/{id}/spaces/{space}/members", h.connectionMembers)
+		mux.HandleFunc("POST /api/work/connections/{id}/spaces/{space}/tasks", h.createRemoteWork)
+		mux.HandleFunc("GET /api/work/runs", h.workRuns)
+		mux.HandleFunc("GET /api/work/connections/{id}/spaces/{space}/bindings", h.workBindings)
+		mux.HandleFunc("PUT /api/work/connections/{id}/spaces/{space}/bindings", h.workBindings)
+		mux.HandleFunc("GET /api/work/runs/{id}", h.workRunResult)
+		mux.HandleFunc("GET /api/work/runs/{id}/{format}", h.workRunResult)
+		mux.HandleFunc("POST /api/work/runs/{id}/pause", h.pauseWorkRun)
+		mux.HandleFunc("GET /api/work/tasks/{key}/research", h.workResearch)
+		mux.HandleFunc("POST /api/work/actions/{id}/decisions", h.workActionDecision)
+		mux.HandleFunc("POST /api/work/deliveries/{id}/decisions", h.workDeliveryDecision)
+		mux.HandleFunc("GET /api/work/connections/{id}/spaces/{space}/policy", h.workPolicy)
+		mux.HandleFunc("PUT /api/work/connections/{id}/spaces/{space}/policy", h.workPolicy)
+		mux.HandleFunc("GET /api/work/connections", h.listConnections)
+		mux.HandleFunc("POST /api/work/connections", h.connectTasks)
+		mux.HandleFunc("GET /api/work/connections/{id}", h.getConnection)
+		mux.HandleFunc("POST /api/work/connections/{id}/exchange", h.exchangeTasks)
+		mux.HandleFunc("POST /api/work/connections/{id}/sync", h.syncTasks)
+		mux.HandleFunc("POST /api/work/connections/{id}/disconnect", h.disconnectTasks)
+	}
 	if d.Todos != nil {
 		mux.HandleFunc("GET /api/todos", h.listTodos)
 		mux.HandleFunc("POST /api/todos", h.createTodo)
@@ -653,6 +690,7 @@ type handler struct {
 	engines   *EngineHolder            // reloadable engine source; nil = static
 	engineFn  func() *askengine.Engine // live resolver; preferred over engine
 	db        *sql.DB
+	taskFlow  *taskflow.Service
 	projects  *memory.Projects
 	// projectStore is the project metadata table (work dir, description, the
 	// active pointer). nil on a database from before the projects migration, which
@@ -749,8 +787,9 @@ type taskChildJSON struct {
 // optional (omitempty): old clients never see them, new clients paint richer
 // views when they are present.
 type taskJSON struct {
-	ID       string `json:"id"`
-	ParentID string `json:"parent_id"`
+	WorkSource *taskhub.Source `json:"work_source,omitempty"`
+	ID         string          `json:"id"`
+	ParentID   string          `json:"parent_id"`
 	// SpawnDepth is the task's generation inside a delegation tree (0 root,
 	// 1 child, 2 grandchild); omitted for standalone rows so the kanban only
 	// badges cards that belong to a sub-agent fan-out.
@@ -1168,6 +1207,7 @@ func (h *handler) listTasks(w http.ResponseWriter, r *http.Request) {
 	// cause rides the list too — one query for every parked row, not one per
 	// row on the page that polls fastest.
 	h.attachReviewCauses(r.Context(), out)
+	h.attachWorkSources(r.Context(), out)
 	writeJSON(w, out)
 }
 
@@ -1388,6 +1428,8 @@ var visibleTraceTypes = map[string]bool{
 	"route_decision":     true,
 	"delegation_hop":     true,
 	"exec_agent_start":   true,
+	"skill_load":         true,
+	"prompt_context":     true,
 	"supervision_round":  true,
 	"tier2_triggered":    true,
 	"plan_stage_changed": true,
@@ -1422,6 +1464,9 @@ func (h *handler) getTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := h.toTaskJSON(t)
+	sourceRows := []taskJSON{out}
+	h.attachWorkSources(r.Context(), sourceRows)
+	out = sourceRows[0]
 	// A parked row's cause lives on its newest review event, not on the row.
 	// Filled here rather than per-surface: the chat card, the board and the
 	// detail banner all explain the same park and must agree on what the fix

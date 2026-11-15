@@ -56,10 +56,26 @@ API: `GET /api/settings/execution`, `PUT /api/settings/execution` (Bearer token)
 - OpenCode 的 provider/session 失败事件会立即结束调用；收到回答后的终态 idle 也会结束仍保持管道打开的 CLI。初始 idle、工具失败及其他会话事件不会被当成本任务完成。
 - 托管 Codex 任务保留磁盘会话以供中断和验收续跑；独立诊断调用仍可使用临时会话。支持 `thread.started` 与旧版 session 事件。
 - agent 提示按复杂度使用 12,000 / 32,000 / 64,000 字节软预算，复杂度未知用 32,000。用户要求、验收标准、作用域和协议约束始终保留。技能正文及退化索引共用剩余预算；个人记忆索引至多选择六个相关主题并控制在 4,000 字节内，项目/个人隔离不变。命令参考按任务选择，完整命令仍可通过 `panda help` 查询。
-- 上下文溢出时重试预算减半且不超过 32,000 字节；运行笔记可压缩至 12,000 字节，省略部分有明确标记并保留 UTF-8 边界。续跑仍携带完整任务要求，以支持冷启动候选。`exec_agent_start` 记录 `prompt_bytes` 与 `context_budget_bytes`，它们是字节数而非 token 数。
+- 上下文溢出时重试预算减半且不超过 32,000 字节；运行笔记可压缩至 12,000 字节，省略部分有明确标记并保留 UTF-8 边界。始终保留完整任务作为恢复输入；满足下述条件的续跑可只发送新增指令。`exec_agent_start` 记录准备好的完整输入大小，`prompt_context` 记录实际发送的大小，它们是字节数而非 token 数。
 - 验收/摘要调用使用相同模型的独立短输出配置，上限 2,048 token、最多一次传输重试，并请求关闭扩展思考（具体行为取决于 provider）。验收总时限为 45 秒，失败仍进入人工复核；常规对话及 agent 的模型配置不变。查询已配置/当前模型使用只读 `model_list` 工具，无需派发 agent。
 
 这些执行逻辑需部署新的二进制与适配器后生效；配置热更新不会替换已运行的程序代码。
+
+## 技能主动加载与精简上下文
+
+- 已生效技能可由入口模型和执行 agent 按任务需要主动搜索、读取，执行中也可补充加载，无需用户先声明技能名。普通匹配只传名称、描述、范围和路径；`always` 小技能在正文不超过 3,200 字节且预算允许时预加载。关闭 `routing.panda_tools` 时保留匹配正文的预算加载兜底。
+- `panda skill search <关键词>` 查本地元数据，`panda skill show <名称>`（别名 `read`）读取正文。TUI 使用 `/skills search`、`/skills show`。同名技能用 `--scope project --key 项目名` 消歧；`--path references/guide.md` 读取配套资源。返回 `next_offset`、`sha256`、资源列表与目录；续页传 `--offset N --sha256 HASH`，防止拼接已变化的文件。默认每页 6,000、最大 16,000 字节，保持 UTF-8 边界。
+- 目录、zip、tar.gz 导入保留脚本、参考文档与资源，展开后总量最多 10 MiB、最多 1,024 文件；拒绝越界路径与链接。agent 发起的新下载仍为 `pending`，前台批准后可主动使用。运行态只访问全局、当前项目与当前设备的可用技能；前台预览 pending 不会激活或记作使用。技能库在执行节点本地解析，本次没有增加跨设备技能同步。
+- 入口先提供必要工具，通过 `tool_search` 加载其他 schema，`query="*"` 可分页浏览。普通任务保留六轮执行上限，真正新增 schema 的纯发现轮最多额外补偿两轮。自带 MCP 默认采用 `panda mcp --compact`，通过 `panda_tools` 发现、`panda_tool_call` 调用；不带此选项仍提供完整工具列表。外部 MCP 配置、操作授权与调度限制保持原有规则。
+- 同一运行周期内，只有已成功发送过完整上下文的 Claude Code/Codex 会话，在 adapter、session、静态指导和根规则指纹均匹配时采用增量输入。首轮、进程重启、规则变化、其他 adapter、上下文溢出和冷启动候选发送完整输入。明确拒绝当前 checkpoint 且没有观察到工具工作的新会话错误，最多触发一次完整恢复。
+- 技能页支持搜索、正文和资源预览、翻页及同名范围识别。任务时间线显示 `skill_load` 的实际资源读取，以及 `prompt_context` 的完整/增量/恢复模式和实际/完整字节数；`loaded_skills` 只包含本轮实际预加载的正文。名称匹配不算加载，读取也不证明模型遵守或成功执行。供应商上报的缓存读取/创建 token 单独累计；字节缩减与估算费用均不能代替真实账单。
+
+## 计划汇合与执行视图
+
+- 自然语言生成的计划可用 `final_stage` 指定最终交付阶段，该阶段必须是所有分支可达的唯一终点。多阶段计划遗漏该字段时，系统补充一个依赖所有终点的汇合 agent 阶段；最多仍为 64 阶段。单阶段直接标记为最终阶段，手写 YAML 的拓扑不变。汇合阶段仍受节点能力、用户指定设备、agent 名单和权限限制。
+- 每个模型生成阶段保留原有验收项、工具策略与轮数参数；用户整体验收条件加到最终阶段，同名但不同的检查都会保留。各阶段把脱敏且有长度上限的文本结果写为 `.panda-stage-reports/<stage>.json`，随现有因果产物通路交给后继。报告记录的是最终验收前的候选输出，不能代替验收结论。
+- 全部阶段完成后，CLI/TUI 的等待结果使用最终阶段的回答；Web 会话保留阶段报告和最终交付。计划展开页新增依赖图、最终阶段标记、状态刷新，以及派发目标/已回传执行设备的区分；可进入各任务查看 agent、模型及执行证据。同列表示依赖深度相同，不证明实际同时计算。
+- 此优化沿用已有节点配对、能力调度和产物传输。它不构成 Windows/Linux/macOS 或派板真机的连通性验收，也不保证所有任务的全局最短耗时、最低费用或最优质量；设备泳道时间线与跨设备技能库同步尚未提供。
 
 ## 调查任务与执行证据
 
@@ -91,7 +107,8 @@ of globally shortest resource-constrained execution or a time estimate.
 The derived rank is persisted in each stage's resource_json as
 critical_path_rank; legacy plans without it retain FIFO behavior. The execution
 trace's loaded_skills records names, scopes, body sizes and SHA256 hashes for
-full skill bodies actually injected into the prompt. This proves loading, not
+full skill bodies actually injected into that attempt; skill_load records
+on-demand reads separately. This proves loading, not
 that the model obeyed the skill or invoked a native harness Skill tool.
 Unchanged skill metadata is cached after stat checks; bodies still load only on
 demand. Usage updates are serialized within one skill Store (not across separate
@@ -152,3 +169,34 @@ low tool cap on a genuinely complex task.
 - 等待子任务期间，父任务会释放队列执行额度和工作树锁，保留心跳、取消和设备互斥；恢复前重新取得额度与锁。等待标记绑定当前 attempt，重试、取消和重启恢复不会继承旧标记。
 - 隔离合并失败、基线缺失或文件冲突会阻塞在需要修改输入的审核状态，保留工作区，不能仅通过批准宣告交付完成。同一批兄弟任务复用不可变源快照，显式工作目录保持原有含义。
 - DAG 计划一次事务发布完整依赖图。阶段产物携带内核生成的版本化因果元数据，保留修改与删除，后代覆盖祖先，不同并发修改产生冲突；相同结果可合并。新计划只发送给声明兼容协议的节点；缺少可信基线的多份旧快照会明确阻塞。计划产物不会自动写回原始 checkout。
+
+## 业务任务、TaskSync 与受控交付
+
+`work` 管理业务目标及其历史，内核 `task` 仍代表执行记录。Web「任务与协作」展示本地任务、团队空间和待确认事项。`todo start` 复用已关联执行，`work run` 显式建立新请求。本地 todo 是事实来源，远端任务只保留按账号隔离的授权缓存。
+
+使用 `panda connection connect --root https://example.com/tsync/ --id team` 连接，并在外部浏览器授权，Panda 不收集 TaskSync 密码。默认权限为 `tasks:read,members:read`；执行另需 `execution:read,execution:claim,execution:report`，交付需 `delivery:write`，代报本人验收需 `delivery:report-decision`。需要新增权限时，重连并通过 `--scopes` 明确申请。凭据与签名密钥保存在数据库旁的受限文件中，不出现在连接输出和成果导出中。
+
+连接后只同步，预研、执行和最终动作由有期限的本地空间策略分别开启。可在 Web 空间详情设置，或运行 `panda work policy --connection team --space SPACE --file policy.json`；省略 `--file` 查看策略。策略绑定账号及明确的任务/项目 ID，并限制 token 和并发。未认领任务只生成少量私有预研，不认领、不改业务状态。通过 `panda work research INSTANCE/WORKSPACE/SPACE/TASK --connection team` 读取当前授权简报。个人预研记忆不会注入项目执行。
+
+通过空间展开项或 CLI work binding 显式绑定项目记忆。--connection 和 --space 指定范围，--remote-project 指定远端项目，省略则绑定整个空间。省略 --local-project 查看绑定，显式传入空值解除绑定。项目绑定优先于空间绑定，不按名称自动匹配。修改绑定会暂停现有工作并清除私有简报，不授予目录或动作权限。
+
+首个受控最终动作 adapter 将具体文本发布到显式授权的本机绝对目录，固定目录身份且不覆盖已有文件。此工作流中的其他 agent、shell 和浏览器工具仅用于准备，策略不授予其最终动作权限。文件草稿本身不代表完整目标完成，覆盖完整目标需要人类单独明确确认。浏览器身份、登录交接与扩展流程仍有后续独立验收门槛。
+
+```sh
+panda work runs --connection team
+panda work result REQUEST
+panda work export REQUEST
+panda work approve ACTION --fingerprint HASH
+panda work reject ACTION --fingerprint HASH
+panda work accept DELIVERY --revision 1
+panda work return DELIVERY --revision 1 --reason '需要更多核验'
+panda work pause REQUEST
+```
+
+`before_submit` 在发布前要求本地同意具体内容、目标、账号、尝试及输入版本；`after_execution` 先有明确预授权，再由本人验收指定交付版本。退回成果不会撤销已发生动作。Web 与 REPL `/work` 使用同一份持久成果和决定，内核操作授权仍单独处理。
+
+响应丢失或重启后，dispatching/unknown 动作只核对回执，不直接再次发送。持久 outbox 只重投事实；成果完成但远端尚未确认时显示待同步。连接状态及成果同步诊断提供错误信息。设备收到撤权、账号或输入变化后，使派生工作失效并清除页面中不可读的私有内容；已离线复制的数据无法远程擦除。回滚前先暂停新请求并保存执行/outbox 检查点，旧二进制可能拒绝新 schema，不能用旧库覆盖之后的新事实。
+
+远端新增/编辑需要服务协商 taskWrite，并同时授予连接与空间 tasks:write。使用 work add --connection team --space SPACE --title 标题 --remote-priority 2，编辑时通过完整任务键和 --if-match 指定来源版本。--remote-project 指来源项目 ID，空字符串可移除项目。--start-at/--due-at 接受含 kind、value 和可选 timezone 的类型化 JSON，null 用于清除；浮动时间不推导设备时区。远端 work run --connection team 仅申请当前代次，遵守现有本地策略且先持久化请求；不接受本地 Plan，不能自行增加云端代次。远端重做须由用户在 TaskSync 创建新代次。相同 --request 重试复用原请求，写入响应只触发后台同步，不直接覆盖 feed 缓存。
+
+MCP 提供 panda_work_list、panda_work_show、panda_work_history、panda_work_request 和 panda_work_result。项目 agent 只能查询当前本地项目及显式绑定的远端任务，调用方不能指定其他项目扩大范围。成果读取还校验执行时的本地项目，重新绑定不会泄露旧项目上下文。结果按字节分页，后续页使用 nextOffset 和 sha256；未知执行上下文拒绝读取。MCP 不提供策略修改、签名、最终同意、成果验收或私有预研入口。

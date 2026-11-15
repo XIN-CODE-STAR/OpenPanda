@@ -20,6 +20,113 @@ export interface ModelRoster {
   owners: Record<string, string>
 }
 
+export interface WorkInput {
+  title: string
+  description?: string
+  status?: string
+  priority?: 'high' | 'normal' | 'low'
+  project?: string
+  due_at?: number
+  tags?: string[]
+}
+export interface WorkTask {
+  connectionId: string
+  accountId: string
+  snapshot: {
+    key: { instanceId: string; workspaceId: string; spaceId: string; taskId: string }
+    title: string
+    description: string
+    status: string
+    priority: number
+    spaceName: string
+    projectName: string
+    projectId: string
+    assigneeAccountIds: string[] | null
+    sourceRef: { provider: string; id: string; url?: string }
+    dueAt?: { kind: string; value: string } | null
+    taskRevision: string
+    inputRevision: string
+    permissions: { read: boolean; edit: boolean; execute: boolean }
+  }
+  local?: { id: number; task_id: string; priority: 'high' | 'normal' | 'low' }
+}
+export interface WorkHistory {
+  requestId: string
+  taskId: string
+  planId: string
+  stageId: string
+  state: string
+  executionState: string
+  createdAt: number
+}
+export function workTaskKey(task: WorkTask): string {
+  const k = task.snapshot.key
+  return [k.instanceId, k.workspaceId, k.spaceId, k.taskId].join('/')
+}
+
+export interface WorkConnection {
+  connectionId: string
+  authEpoch: string
+  rootUrl: string
+  accountId: string
+  state: string
+  lastError: string
+  syncedAt: number
+  scopes: string[]
+  capabilities?: { capabilities: string[] }
+  spaces: { spaceId: string; workspaceId: string; name: string; scopes: string[] }[]
+}
+export interface WorkAuthorization {
+  userCode: string
+  verificationUri: string
+  verificationUriComplete: string
+  expiresAt: number
+  interval: number
+}
+
+export interface WorkProjectBinding {
+  remoteProjectId: string
+  localProject: string
+}
+export interface RemoteWorkInput {
+  title: string; description: string; priority: number; projectId: string
+}
+export interface WorkPolicy {
+  research: boolean; execute: boolean; finalAction: boolean
+  mode: 'before_submit' | 'after_execution' | ''
+  expiresAt: number; maxConcurrent: number; dailyTokens: number; preparationTokens: number
+  taskIds: string[] | null; projectId: string; capabilities: string[] | null
+  publication?: { directory: string; directoryIdentity?: string; filename: string; fullGoal: boolean }
+}
+export interface WorkRunSummary {
+  requestId: string; connectionId: string; taskKey: string; title: string
+  state: string; error: string; mode: string; updatedAt: number
+}
+export interface WorkRun {
+  requestId: string; connectionId: string; taskKey: string; title: string
+  state: string; error: string; mode: string; prepared: string
+  deliveries: {
+    delivery: {
+      deliveryId: string; revision: number; summary: string
+      scope: { fullGoal: boolean; objectives: string[] }
+      steps: { title: string; outcome: string }[]
+      verification: { status: string; summary: string; method: string }[]
+      remaining: string[]
+    }
+    files: string[]; failure: string; syncState: string; attemptId: string
+  }[]
+  actions: {
+    actionId: string; fingerprint: string; state: string; deliveryId: string; deliveryRevision: number
+    intent: { accountId: string; deviceId: string; directory: string; filename: string; content: string; sha256: string; expiresAt: number; inputRevision: string; attemptId: string }
+    receipt?: { filename: string; sha256: string; method: string; size: number }
+  }[]
+  sync: { eventId: string; kind: string; state: string; error: string; attempts: number; nextAt: number }[]
+}
+export interface WorkResearch {
+  brief: string; state: string; inputRevision: string; modelVersion: string
+  reservedTokens: number; createdAt: number; expiresAt: number
+}
+
 export class ApiError extends Error {
   readonly status: number
   constructor(status: number, message: string) {
@@ -126,9 +233,9 @@ async function request<T>(
   method: string,
   path: string,
   body?: unknown,
-  opts?: { timeoutMs?: number },
+  opts?: { timeoutMs?: number; headers?: Record<string, string> },
 ): Promise<T> {
-  const headers: Record<string, string> = {}
+  const headers: Record<string, string> = { ...opts?.headers }
   const token = currentToken()
   if (token) headers.Authorization = `Bearer ${token}`
   if (body !== undefined) headers['Content-Type'] = 'application/json'
@@ -356,6 +463,7 @@ export interface TaskChild {
 }
 
 export interface Task {
+  work_source?: { connectionId: string; taskKey: string; requestId: string }
   id: string
   parent_id: string
   /** Sub-agent generation inside a delegation tree: 1 = direct child,
@@ -1086,6 +1194,79 @@ export interface HealthStatus {
 // ---- Endpoints ----
 
 export const api = {
+  workConnections(): Promise<WorkConnection[]> {
+    return request('GET', '/api/work/connections')
+  },
+  connectWork(body: { connectionId: string; rootUrl: string; scopes?: string[] }): Promise<{ connection: WorkConnection; authorization: WorkAuthorization }> {
+    return request('POST', '/api/work/connections', body)
+  },
+  syncWorkConnection(id: string): Promise<{ queued: boolean }> {
+    return request('POST', `/api/work/connections/${encodeURIComponent(id)}/sync`)
+  },
+  disconnectWork(id: string): Promise<{ disconnected: boolean }> {
+    return request('POST', `/api/work/connections/${encodeURIComponent(id)}/disconnect`)
+  },
+  workMembers(id: string, space: string): Promise<{ accountId: string; name: string; role: string }[]> {
+    return request('GET', `/api/work/connections/${encodeURIComponent(id)}/spaces/${encodeURIComponent(space)}/members`)
+  },
+  workPolicy(id: string, space: string): Promise<WorkPolicy> {
+    return request('GET', `/api/work/connections/${encodeURIComponent(id)}/spaces/${encodeURIComponent(space)}/policy`)
+  },
+  workBindings(id: string, space: string): Promise<WorkProjectBinding[]> {
+    return request('GET', `/api/work/connections/${encodeURIComponent(id)}/spaces/${encodeURIComponent(space)}/bindings`)
+  },
+  setWorkBinding(id: string, space: string, binding: WorkProjectBinding): Promise<WorkProjectBinding[]> {
+    return request('PUT', `/api/work/connections/${encodeURIComponent(id)}/spaces/${encodeURIComponent(space)}/bindings`, binding)
+  },
+  setWorkPolicy(id: string, space: string, policy: WorkPolicy): Promise<WorkPolicy> {
+    return request('PUT', `/api/work/connections/${encodeURIComponent(id)}/spaces/${encodeURIComponent(space)}/policy`, policy)
+  },
+  workRuns(connection = '', key = ''): Promise<WorkRunSummary[]> {
+    return request('GET', `/api/work/runs?${new URLSearchParams({ connection, key })}`)
+  },
+  workResult(id: string): Promise<WorkRun> { return request('GET', `/api/work/runs/${encodeURIComponent(id)}`) },
+  exportWork(id: string): Promise<string> { return requestText('GET', `/api/work/runs/${encodeURIComponent(id)}/export`) },
+  workResearch(connection: string, key: string): Promise<WorkResearch[]> {
+    return request('GET', `/api/work/tasks/${encodeURIComponent(key)}/research?connection=${encodeURIComponent(connection)}`)
+  },
+  decideWorkAction(id: string, fingerprint: string, decision: 'approve' | 'reject'): Promise<{ recorded: boolean }> {
+    return request('POST', `/api/work/actions/${encodeURIComponent(id)}/decisions`, { fingerprint, decision })
+  },
+  decideWorkDelivery(id: string, revision: number, decision: 'accept' | 'return', reason: string): Promise<{ recorded: boolean }> {
+    return request('POST', `/api/work/deliveries/${encodeURIComponent(id)}/decisions`, { revision, decision, reason })
+  },
+  pauseWork(id: string): Promise<{ recorded: boolean }> { return request('POST', `/api/work/runs/${encodeURIComponent(id)}/pause`, {}) },
+  workTasks(connection?: string): Promise<WorkTask[]> {
+    return request('GET', `/api/work/tasks${connection ? `?connection=${encodeURIComponent(connection)}` : ''}`)
+  },
+  workTask(key: string, connection = 'local'): Promise<WorkTask> {
+    return request('GET', `/api/work/tasks/${encodeURIComponent(key)}?connection=${encodeURIComponent(connection)}`)
+  },
+  workHistory(key: string, connection = 'local'): Promise<WorkHistory[]> {
+    return request('GET', `/api/work/tasks/${encodeURIComponent(key)}/history?connection=${encodeURIComponent(connection)}`)
+  },
+  createWork(body: WorkInput, idempotencyKey: string): Promise<WorkTask> {
+    return request('POST', '/api/work/tasks', body, { headers: { 'Idempotency-Key': idempotencyKey } })
+  },
+  createRemoteWork(connection: string, space: string, body: RemoteWorkInput, key: string): Promise<WorkTask> {
+    return request('POST', `/api/work/connections/${encodeURIComponent(connection)}/spaces/${encodeURIComponent(space)}/tasks`, body, { headers: { 'Idempotency-Key': key } })
+  },
+  patchRemoteWork(connection: string, task: WorkTask, body: RemoteWorkInput, key: string): Promise<WorkTask> {
+    return request('PATCH', `/api/work/tasks/${encodeURIComponent(workTaskKey(task))}?connection=${encodeURIComponent(connection)}`, body, { headers: { 'Idempotency-Key': key, 'If-Match': JSON.stringify(task.snapshot.taskRevision) } })
+  },
+  requestWork(connection: string, taskKey: string, requestId: string): Promise<{ requestId: string; alreadyStarted: boolean; state: string }> {
+    return request('POST', `/api/work/tasks/${encodeURIComponent(taskKey)}/run?connection=${encodeURIComponent(connection)}`, { requestId, purpose: 'execute' }, { headers: { 'Idempotency-Key': requestId } })
+  },
+  patchWork(key: string, revision: string, body: Partial<WorkInput>, idempotencyKey: string): Promise<WorkTask> {
+    return request('PATCH', `/api/work/tasks/${encodeURIComponent(key)}`, body, {
+      headers: { 'Idempotency-Key': idempotencyKey, 'If-Match': JSON.stringify(revision) },
+    })
+  },
+  runWork(key: string, requestId: string): Promise<{ task: Task; requestId: string; alreadyStarted: boolean; warning: string }> {
+    return request('POST', `/api/work/tasks/${encodeURIComponent(key)}/run`, { requestId, purpose: 'rerun' }, {
+      headers: { 'Idempotency-Key': requestId },
+    })
+  },
   health(): Promise<HealthStatus> {
     return request('GET', '/api/healthz')
   },
@@ -1816,16 +1997,22 @@ export const api = {
     return request('GET', '/api/audit/entries')
   },
 
+  readSkill(skill: SkillEntry, path = 'SKILL.md', offset = 0, sha256 = ''): Promise<SkillRead> {
+    const params = new URLSearchParams({ name: skill.name, scope: skill.scope, key: skill.key ?? '', path, offset: String(offset) })
+    if (sha256) params.set('sha256', sha256)
+    return request('GET', '/api/skills/read?' + params.toString())
+  },
+
   skills(): Promise<SkillEntry[]> {
     return request('GET', '/api/skills')
   },
 
-  approveSkill(name: string): Promise<void> {
-    return request('POST', '/api/skills/approve', { name })
+  approveSkill(name: string, scope?: string, key?: string): Promise<void> {
+    return request('POST', '/api/skills/approve', { name, scope, key })
   },
 
-  rejectSkill(name: string): Promise<void> {
-    return request('POST', '/api/skills/reject', { name })
+  rejectSkill(name: string, scope?: string, key?: string): Promise<void> {
+    return request('POST', '/api/skills/reject', { name, scope, key })
   },
 
   resetSkill(name: string): Promise<{ ok: boolean; name: string }> {
@@ -2298,6 +2485,9 @@ export interface PlanStage {
   title?: string
   state: string
   owner?: string
+  executor?: string
+  target?: string
+  final?: boolean
   needs?: string[]
   inputs?: PlanArtifact[]
   output_artifact?: string
@@ -3277,3 +3467,17 @@ export function subscribeEvents(opts: SubscribeEventsOptions): Promise<void> {
 
 const RECONNECT_MIN_MS = 1000
 const RECONNECT_MAX_MS = 15000
+
+export interface SkillRead {
+ name: string
+ scope: string
+ key?: string
+ path: string
+ content: string
+ sha256: string
+ total_bytes: number
+ offset: number
+ next_offset: number
+ truncated: boolean
+ resources?: string[]
+}

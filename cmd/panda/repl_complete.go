@@ -233,6 +233,14 @@ func (r *repl) argCandidates(cmd string, args []string) []string {
 		if len(args) == 1 {
 			return append(r.nodeIDs(), "auto")
 		}
+	case "work":
+		if len(args) == 1 {
+			return []string{"list", "show", "add", "edit", "run", "history", "binding", "policy", "runs", "result", "export", "research", "approve", "reject", "accept", "return", "pause"}
+		}
+	case "connection":
+		if len(args) == 1 {
+			return []string{"connect", "list", "status", "sync", "disconnect"}
+		}
 	case "todo", "todos":
 		if len(args) == 1 {
 			return []string{"list", "add", "edit", "show", "done", "reopen", "pause", "running", "rm", "move", "start"}
@@ -273,7 +281,7 @@ func (r *repl) argCandidates(cmd string, args []string) []string {
 	case "skill", "skills":
 		switch len(args) {
 		case 1:
-			return []string{"list", "find", "discover", "hub", "reset", "add", "import"}
+			return []string{"list", "search", "show", "read", "find", "discover", "hub", "reset", "add", "import"}
 		case 2:
 			if section == "reset" {
 				return []string{"all", "api-debug", "code-review", "docker-compose", "git-workflow", "node-workflow", "python-env", "system-diagnostics", "unit-testing"}
