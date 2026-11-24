@@ -1722,7 +1722,7 @@ function DraftRow(props: {
                 onValue={(v) => props.onPatch({ model: v, alias: d.alias === d.model ? v : d.alias })}
                 options={props.remote?.ids ?? []}
                 owners={props.remote?.owners}
-                placeholder="model-id"
+                placeholder={t('models.col.model')}
                 disabled={locked}
               />
               {locked && <p class="hint draft-drop-note">{t('models.removeOnSave')}</p>}

@@ -217,11 +217,9 @@ assert args[args.index("--model") + 1] == "selected-model", args
                 self.assertTrue(payload["ok"], payload)
 
         payload, _, _ = run_adapter("deepseek_harness.py", "dsh", r'''
-import pathlib, sys
-args = sys.argv[1:]
-patch = pathlib.Path(args[args.index("--patch") + 1]).read_text()
-assert 'model: "selected-model"' in patch, patch
-print("dsh selected")
+import json, sys
+assert "--patch" not in sys.argv
+print(json.dumps({"type":"final", "text":"dsh selected"}))
 ''', env={"OPENPANDA_AGENT_MODELS": '["selected-model"]'})
         self.assertTrue(payload["ok"], payload)
 
@@ -260,6 +258,7 @@ if os.name == "posix":
     assert os.path.samefile(os.environ["PWD"], os.getcwd())
 assert os.environ.get("ANTHROPIC_API_KEY") == "native-key"
 print(json.dumps({"type":"assistant", "message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"pwd"}}]}}))
+print(json.dumps({"type":"assistant", "message":{"content":[{"type":"tool_use","name":"Task","input":{"description":"inspect the image renderer"}}]}}))
 print(json.dumps({"type":"result", "is_error":False, "result":"claude answer", "session_id":"sess-123", "usage":{"input_tokens":3,"output_tokens":5,"cache_read_input_tokens":2,"cache_creation_input_tokens":1}, "total_cost_usd":0.25}))
 ''',
             env={"ANTHROPIC_API_KEY": "native-key", "CLAUDE_MODEL": "claude-test"},
@@ -275,6 +274,7 @@ print(json.dumps({"type":"result", "is_error":False, "result":"claude answer", "
             "cache_read_tokens": 2, "cache_write_tokens": 1,
         })
         self.assertTrue(any("Bash: pwd" in line for line in progress), progress)
+        self.assertTrue(any('"kind": "subagent"' in line for line in progress), progress)
 
     def test_claude_resume_and_extended_policy_contract(self):
         payload, _, _ = run_adapter(
@@ -600,6 +600,7 @@ print(json.dumps({"type":"session_meta","payload":{"id":"cs-1"}}))
 print(json.dumps({"type":"item.started","item":{"id":"i1","type":"command_execution","command":"ls -la","status":"in_progress"}}))
 print(json.dumps({"type":"item.completed","item":{"id":"i2","type":"reasoning","text":"pondering"}}))
 print(json.dumps({"type":"item.completed","item":{"id":"i1","type":"command_execution","command":"ls -la","status":"completed","aggregated_output":"total 0"}}))
+print(json.dumps({"type":"item.completed","item":{"id":"i4","type":"mcp_tool_call","server":"codex","tool":"spawn_agent","arguments":{"task":"inspect the UI"},"output":"started"}}))
 print(json.dumps({"type":"item.completed","item":{"id":"i3","type":"agent_message","text":"codex answer"}}))
 ''',
         )
@@ -610,7 +611,7 @@ print(json.dumps({"type":"item.completed","item":{"id":"i3","type":"agent_messag
         # "session" announces the minted conversation id the moment it is
         # known — Go latches it so a killed run can resume — ahead of the
         # transcript items.
-        self.assertEqual(kinds, ["session", "tool_use", "thinking", "tool_result", "text"])
+        self.assertEqual(kinds, ["session", "tool_use", "thinking", "tool_result", "tool_use", "tool_result", "text"])
         self.assertEqual(events[0]["id"], "cs-1")
         self.assertEqual(events[1]["name"], "shell")
         self.assertEqual(events[1]["input"], {"command": "ls -la"})
@@ -619,8 +620,10 @@ print(json.dumps({"type":"item.completed","item":{"id":"i3","type":"agent_messag
         self.assertEqual(events[3]["tool_use_id"], "i1")
         self.assertEqual(events[3]["content"], "total 0")
         self.assertFalse(events[3]["is_error"])
-        self.assertEqual(events[4]["text"], "codex answer")
-        self.assertEqual(events[4]["id"], "i3")
+        self.assertEqual(events[4]["name"], "mcp:codex.spawn_agent")
+        self.assertEqual(events[6]["text"], "codex answer")
+        self.assertEqual(events[6]["id"], "i3")
+        self.assertTrue(any('"kind": "subagent"' in line for line in lines), lines)
 
     def test_codex_updated_text_keeps_item_id_and_only_completion_is_delivered(self):
         payload, lines, _ = run_adapter(
@@ -699,6 +702,29 @@ print(json.dumps({"type":"text","sessionID":"s1","part":{"id":"px","type":"text"
         # First sighting wins — the update does not re-emit a second row.
         self.assertEqual(events[2]["text"], "half")
 
+    def test_delegation_across_streaming_adapters(self):
+        streams = [
+            ("opencode.py", "opencode", OC_HELP_CURRENT, [
+                {"type":"tool_use", "part":{"id":"t1", "type":"tool", "tool":"task", "state":{"status":"running"}}},
+                {"type":"text", "part":{"id":"m1", "type":"text", "text":"done"}},
+            ]),
+            ("pi.py", "pi", "", [
+                {"type":"tool_execution_start", "toolCallId":"t1", "toolName":"subagent", "args":{"task":"inspect"}},
+                {"type":"message_end", "message":{"role":"assistant", "content":[{"type":"text", "text":"done"}]}},
+            ]),
+            ("grok_build.py", "grok", "", [
+                {"type":"tool_call", "toolCallId":"t1", "toolName":"spawn_agent", "input":{"task":"inspect"}},
+                {"type":"tool_result", "toolCallId":"t1", "result":"ok"},
+                {"type":"text", "data":"done"}, {"type":"end"},
+            ]),
+        ]
+        for adapter, cli, prefix, events in streams:
+            with self.subTest(adapter=adapter):
+                body = prefix + "\n" + "\n".join("print(%r, flush=True)" % json.dumps(e) for e in events)
+                payload, lines, _ = run_adapter(adapter, cli, body)
+                self.assertTrue(payload["ok"], payload)
+                self.assertEqual(sum('"kind": "subagent"' in line for line in lines), 1, lines)
+
     def test_opencode_v2_tool_part_shape(self):
         """v2 renamed two tool-part fields: the tool is `name` (not `tool`),
         and the result rides `state.content` as a list of typed parts (not
@@ -755,6 +781,7 @@ if sys.argv[1:2] == ["run"]:
         self.assertTrue(payload["ok"], payload)
         self.assertEqual(payload["result"], "done")
 
+    @mock.patch.dict(os.environ, {"OPENPANDA_OPENCODE_AUTO_MODEL": "1"})
     def test_opencode_v2_catalog_model_id_wins(self):
         """The v2 catalog carries the id twice; a run is handed `modelID`.
 
@@ -783,6 +810,7 @@ if sys.argv[1:2] == ["run"]:
         self.assertTrue(payload["ok"], payload)
         self.assertEqual(payload["result"], "on opencode/real-slug")
 
+    @mock.patch.dict(os.environ, {"OPENPANDA_OPENCODE_AUTO_MODEL": "1"})
     def test_opencode_probe_cache_across_processes(self):
         """Roster, catalog and flag probes survive between adapter processes.
 
@@ -1072,6 +1100,7 @@ if sys.argv[1:2] == ["models"]:
     sys.exit(0)
 '''
 
+    @mock.patch.dict(os.environ, {"OPENPANDA_OPENCODE_AUTO_MODEL": "1"})
     def test_opencode_auto_picks_most_capable_catalog_model(self):
         """No env pin: every run re-reads the roster and picks by capability —
         the 1M-context flagship with reasoning variants beats the flash tier
@@ -1093,6 +1122,7 @@ print(json.dumps({"type":"text","sessionID":"ses_p1","part":{"id":"px","type":"t
             progress,
         )
 
+    @mock.patch.dict(os.environ, {"OPENPANDA_OPENCODE_AUTO_MODEL": "1"})
     def test_opencode_auto_pick_slug_heuristic_without_catalog(self):
         """A build whose `api` subcommand fails still picks by slug heuristics:
         the coding-family model outranks the small/alpha entries."""
@@ -1117,6 +1147,7 @@ print(json.dumps({"type":"text","sessionID":"ses_p2","part":{"id":"px","type":"t
         )
         self.assertTrue(payload["ok"], payload)
 
+    @mock.patch.dict(os.environ, {"OPENPANDA_OPENCODE_AUTO_MODEL": "1"})
     def test_opencode_catalog_is_the_roster_when_models_is_empty(self):
         """v2 builds answer `opencode models` with an empty list. The catalog
         probe must then be the roster: an unpinned run still picks a model and
@@ -1148,6 +1179,7 @@ print(json.dumps({"type":"text","sessionID":"ses_c1","part":{"id":"px","type":"t
             progress,
         )
 
+    @mock.patch.dict(os.environ, {"OPENPANDA_OPENCODE_AUTO_MODEL": "1"})
     def test_opencode_billing_failure_falls_back_to_free_model(self):
         """A paid model the account cannot pay for is not a roster rotation:
         the adapter retries the same task on the best free model instead of
@@ -1176,6 +1208,7 @@ print(json.dumps({"type":"text","sessionID":"ses_b1","part":{"id":"px","type":"t
             progress,
         )
 
+    @mock.patch.dict(os.environ, {"OPENPANDA_OPENCODE_AUTO_MODEL": "1"})
     def test_opencode_go_models_need_a_credential(self):
         """The subscription roster without a stored login cannot serve:
         its models are disqualified so the pick lands on the free Zen tier
@@ -1569,6 +1602,7 @@ print(json.dumps({"type":"text","sessionID":"ses_i2","part":{"id":"px","type":"t
         )
         self.assertTrue(payload["ok"], payload)
 
+    @mock.patch.dict(os.environ, {"OPENPANDA_OPENCODE_AUTO_MODEL": "1"})
     def test_opencode_auto_pick_effort_maps_to_variant(self):
         """A requested reasoning effort rides the model's declared variant
         (provider/model#variant); an undeclared level leaves the bare id."""
@@ -1625,6 +1659,7 @@ if sys.argv[1:3] == ["api", "model.list"]:
     sys.exit(0)
 '''
 
+    @mock.patch.dict(os.environ, {"OPENPANDA_OPENCODE_AUTO_MODEL": "1"})
     def test_opencode_simple_task_prefers_free_models(self):
         """Free is the default tier. A paid entry is selected automatically
         only when the operator opted in (OPENPANDA_OPENCODE_ALLOW_PAID=1);
@@ -1688,6 +1723,7 @@ print(json.dumps({"type":"text","sessionID":"ses_f3","part":{"id":"px","type":"t
         )
         self.assertTrue(payload["ok"], payload)
 
+    @mock.patch.dict(os.environ, {"OPENPANDA_OPENCODE_AUTO_MODEL": "1"})
     def test_opencode_simple_task_free_preference_without_catalog(self):
         """Without catalog coverage the provider id is the cost tell: only
         opencode's own provider counts as the free tier."""
@@ -1710,6 +1746,7 @@ print(json.dumps({"type":"text","sessionID":"ses_f4","part":{"id":"px","type":"t
         )
         self.assertTrue(payload["ok"], payload)
 
+    @mock.patch.dict(os.environ, {"OPENPANDA_OPENCODE_AUTO_MODEL": "1"})
     def test_opencode_reprobes_roster_and_retries_on_rejected_model(self):
         """Every dispatch identifies the served models first — and when the
         roster rotates mid-flight (the picked model retired between probe and
@@ -2041,10 +2078,7 @@ assert "--format" not in args
 assert args[:2] == ["run", "--print-logs=false"]
 assert "--dangerously-skip-permissions" in args
 assert "--auto" not in args
-# The plain path always carries a resolvable model: with no env model set it
-# must be the built-in default, never the empty string.
-assert "--model" in args
-assert args[args.index("--model") + 1] == "opencode/deepseek-v4.1-flash-free"
+assert "--model" not in args and "--standalone" not in args, args
 print("plain opencode answer")
 ''',
         )
@@ -2062,6 +2096,7 @@ print("plain opencode answer")
 import json, sys
 args = sys.argv[1:]
 assert "--agent" in args and args[args.index("--agent") + 1] == "plan", args
+assert "--model" not in args and "--standalone" not in args, args
 assert "--auto" in args, args
 print(json.dumps({"type":"message.part.updated","properties":{"part":{"id":"p","type":"text","text":"readonly run"}}}))
 ''',
@@ -2150,23 +2185,27 @@ print("grok legacy answer")
         self.assertNotIn("session_id", payload)
 
     def test_plain_adapters_keep_their_cli_contract(self):
-        # dsh / hermes / openclaw stay thin passthroughs: pin each command
-        # line so a future change is a deliberate contract edit.
+        # dsh streams structured activity; hermes / openclaw remain passthroughs.
         payload, _, _ = run_adapter(
             "deepseek_harness.py", "dsh", r'''
-import sys
-assert sys.argv[1:] == ["--profile", "headless", "contract prompt"]
-print("dsh answer")
+import json, sys
+assert sys.argv[1:] == ["--profile", "headless", "--json", "contract prompt"]
+for event in ({"type":"session","sessionId":"dsh-session"},
+              {"type":"text","text":"dsh answer"},
+              {"type":"final","sessionId":"dsh-session","text":"dsh answer"}):
+    print(json.dumps(event))
 ''',
+            env={"DEEPSEEK_MODEL": "ambient", "OPENPANDA_AGENT_MODELS": '["unused"]'},
         )
         self.assertTrue(payload["ok"], payload)
         self.assertEqual(payload["result"], "dsh answer")
+        self.assertEqual(payload["session_id"], "dsh-session")
 
     def test_dsh_restricted_request_uses_read_only_preset(self):
         payload, _, _ = run_adapter("deepseek_harness.py", "dsh", """
 import sys
-assert sys.argv[1:] == ["--profile", "headless", "--permission-mode", "read-only", "--approval-policy", "never", "contract prompt"]
-print("read-only run")
+assert sys.argv[1:] == ["--profile", "headless", "--json", "--permission-mode", "read-only", "--approval-policy", "never", "contract prompt"]
+print('{"type":"final","text":"read-only run"}')
 """, extra_request={"restricted": True, "authorized": True})
         self.assertTrue(payload["ok"], payload)
 
@@ -2175,19 +2214,75 @@ print("read-only run")
             "deepseek_harness.py", "dsh", r'''
 import pathlib, sys
 args = sys.argv[1:]
-assert args[:2] == ["--profile", "headless"]
+assert args[:3] == ["--profile", "headless", "--json"]
+assert args[args.index("--session-id") + 1] == "dsh-prior" if "--session-id" in args else False
 patch = pathlib.Path(args[args.index("--patch") + 1]).read_text()
 assert "id: agent-default-model" in patch
 assert 'model: "glm-5.3-flash"' in patch
 assert "id: llm-deepseek" in patch
 assert "maxTokens: 131072" in patch
 assert args[-1] == "contract prompt"
-print("dsh injected answer")
+print('{"type":"final","sessionId":"dsh-session","text":"dsh injected answer"}')
 ''',
-            env={"DEEPSEEK_MODEL": "glm-5.3-flash"},
+            env={"DEEPSEEK_MODEL": "glm-5.3-flash", "OPENPANDA_INJECTED_MODEL": "1"},
+            extra_request={"resume": "dsh-prior"},
         )
         self.assertTrue(payload["ok"], payload)
         self.assertEqual(payload["result"], "dsh injected answer")
+
+    def test_dsh_streams_subagent_calls_and_images(self):
+        payload, events, _ = run_adapter("deepseek_harness.py", "dsh", r'''
+import json
+for event in (
+  {"type":"session","sessionId":"s"},
+  {"type":"tool_call","callId":"q","tool":"list_subagent_models","input":{}},
+  {"type":"tool_call","callId":"c1","tool":"subagent","input":{"task":"inspect screenshot"}},
+  {"type":"tool_result","callId":"c1","status":"completed","result":"done"},
+  {"type":"tool_call","callId":"c2","tool":"read","input":{"path":"/tmp/shot.png"}},
+  {"type":"final","sessionId":"s","text":"done"},
+): print(json.dumps(event))
+''')
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(sum('"kind": "subagent"' in line for line in events), 1, events)
+        decoded = [json.loads(line) for line in events if line.startswith("{")]
+        self.assertTrue(any(e.get("ev") == "tool_use" and e.get("name") == "read" for e in decoded), decoded)
+
+    def test_dsh_requires_successful_terminal_event(self):
+        for event, diagnosis in [({"type":"error", "message":"provider unavailable"}, "provider unavailable"),
+                                 ({"type":"text", "text":"partial"}, "no final text")]:
+            with self.subTest(event=event):
+                script = "print('[]')\nprint(%r)" % json.dumps(event)
+                payload, _, _ = run_adapter("deepseek_harness.py", "dsh", script)
+                self.assertFalse(payload["ok"], payload)
+                self.assertIn(diagnosis, payload["result"])
+
+    def test_dsh_legacy_flag_rejection(self):
+        payload, _, _ = run_adapter("deepseek_harness.py", "dsh", r'''
+import sys
+if "--json" in sys.argv:
+    sys.exit("error: unknown option '--json'")
+assert "--permission-mode" in sys.argv
+print("legacy done")
+''', extra_request={"restricted": True, "authorized": True})
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["result"], "legacy done")
+
+    def test_codex_native_collab_items(self):
+        payload, lines, _ = run_adapter("codex.py", "codex", r'''
+import json
+for tool in ("spawn_agent", "wait"):
+    for phase in ("started", "completed"):
+        print(json.dumps({"type":"item." + phase, "item":{"type":"collab_tool_call", "id":tool,
+              "tool":tool, "receiver_thread_ids":["child"], "agents_states":{}}}))
+print('{"type":"item.completed","item":{"type":"agent_message","text":"done"}}')
+''')
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(sum('"kind": "subagent"' in line for line in lines), 1, lines)
+        calls = [json.loads(line) for line in lines if '"ev": "tool_result"' in line]
+        self.assertEqual([e["tool_use_id"] for e in calls], ["spawn_agent", "wait"])
+        self.assertEqual(json.loads(calls[0]["content"])["receiver_thread_ids"], ["child"])
+
+    def test_hermes_and_openclaw_plain_contracts(self):
         payload, _, _ = run_adapter(
             "hermes.py", "hermes", r'''
 import sys
@@ -3043,6 +3138,35 @@ class HarnessContractTest(unittest.TestCase):
         self.assertEqual(payload["result"], "invalid request JSON")
         self.assertEqual(payload["exit_code"], 2)
         self.assertEqual(proc.returncode, 0)
+
+    def test_all_bundled_adapters_reject_invalid_requests(self):
+        for adapter in sorted(ADAPTERS.glob("*.py")):
+            if adapter.name.startswith("_"):
+                continue
+            with self.subTest(adapter=adapter.name):
+                proc = subprocess.run([sys.executable, str(adapter)], input="invalid",
+                                      capture_output=True, text=True, timeout=10, check=True)
+                result = json.loads(proc.stdout)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["exit_code"], 2)
+
+    def test_plain_runner_bounds_both_pipes_and_keeps_the_ends(self):
+        script = "import sys; data = b'START' + b'x' * 2000000 + b'END'; sys.stdout.buffer.write(data); sys.stderr.buffer.write(data)"
+        payload, _ = run_harness(
+            "import sys; rc, out, err = _harness.run_plain([sys.executable, '-c', %r]); "
+            "_harness.emit(True, str(all(s.startswith('START') and s.endswith('END') "
+            "and len(s) < 810000 and _harness.TRUNCATION_MARKER in s for s in (out, err))), rc)" % script)
+        self.assertEqual(payload["result"], "True")
+
+    def test_plain_runner_times_out_with_unread_stdin(self):
+        payload, _ = run_harness(
+            "import subprocess, sys\n"
+            "try:\n"
+            "    _harness.run_plain([sys.executable, '-c', 'import time; time.sleep(30)'], "
+            "timeout=0.25, input=b'x' * 2000000)\n"
+            "except subprocess.TimeoutExpired:\n"
+            "    _harness.emit(True, 'timed out', 0)")
+        self.assertEqual(payload["result"], "timed out")
 
     def test_run_simple_passes_exit_code_through(self):
         with tempfile.TemporaryDirectory() as td:

@@ -374,6 +374,9 @@ export type TraceKind =
   | 'progress'
   | 'agent_usage'
   | 'agent_fallback'
+  | 'agent_switch'
+  | 'adapter_execution_profile'
+  | 'harness_attempt_result'
   | 'judge_start'
   | 'supervise'
   | 'result'
@@ -500,6 +503,7 @@ export interface Task {
   executing?: boolean
   /** Adapter or native capability actually invoked in the current attempt. */
   call_name?: string
+  blocked_by?: string
   work_source?: { connectionId: string; taskKey: string; requestId: string }
   id: string
   parent_id: string
@@ -852,6 +856,8 @@ export interface DirectoryListing {
 
 /** GET /api/update — the self-update pipeline status snapshot. */
 export interface UpdateStatus {
+  downloaded_bytes?: number
+  total_bytes?: number
   stage: 'idle' | 'checking' | 'available' | 'downloading' | 'staged' | 'applying' | 'done' | 'error'
   current: string
   /** The running build's release codename (e.g. "Periapsis"), when known. */
@@ -1390,8 +1396,8 @@ export const api = {
    *  modes: queue (board context the agent reads at its next round) or
    *  inject (a steer that leads the next round, aborting the in-flight one
    *  when this console runs the task). */
-  sendTaskMessage(id: string, text: string, inject: boolean): Promise<TaskMessageResult> {
-    return request('POST', `/api/tasks/${encodeURIComponent(id)}/messages`, { text, inject })
+  sendTaskMessage(id: string, text: string, inject: boolean, attachments: string[] = []): Promise<TaskMessageResult> {
+    return request('POST', `/api/tasks/${encodeURIComponent(id)}/messages`, { text, inject, attachments })
   },
 
   /** The task's own board scope — queued user notes, steers and sibling
@@ -2111,7 +2117,7 @@ export const api = {
   },
 
   downloadUpdate(): Promise<UpdateStatus> {
-    return request('POST', '/api/update/download')
+    return request('POST', '/api/update/download?background=1')
   },
 
   applyUpdate(): Promise<UpdateStatus> {
@@ -2642,6 +2648,7 @@ export async function fetchBlob(path: string): Promise<Blob> {
 }
 
 export interface PlanStage {
+  blocked_by?: string
   stage: string
   task_id: string
   title?: string

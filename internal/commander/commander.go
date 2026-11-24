@@ -983,6 +983,7 @@ func (r *Router) execAgent(ctx context.Context, plan Plan, prompt string, cwd st
 		}
 	}
 	var unavailable []string
+	lastSwitch := 0
 	var lastExecRes *Result
 	rescueCauses := make(map[string]string)
 	for name, cause := range plan.injectAfterProbe {
@@ -1041,9 +1042,6 @@ func (r *Router) execAgent(ctx context.Context, plan Plan, prompt string, cwd st
 			if len(unavailable) > 0 {
 				reason = unavailable[len(unavailable)-1]
 			}
-			if sink, ok := ctx.Value(progressKey{}).(ProgressFunc); ok {
-				sink(fmt.Sprintf("agent fallback — %s; %s is running this round", reason, name), "agent_switch")
-			}
 			fallbackFrom, fallbackReason = plan.Agent, reason
 			if len(unavailable) > 0 {
 				fallbackReason = substitutionReason(plan.Agent, unavailable[0])
@@ -1095,6 +1093,12 @@ func (r *Router) execAgent(ctx context.Context, plan Plan, prompt string, cwd st
 				mode = "delta"
 			}
 			observe(ag.Adapter, mode, len(runPrompt), len(fullPrompt))
+		}
+		if i > 0 {
+			if sink, ok := ctx.Value(progressKey{}).(ProgressFunc); ok {
+				sink(fmt.Sprintf("%s → %s", security.Redact(strings.Join(unavailable[lastSwitch:], "; ")), name), "agent_switch")
+			}
+			lastSwitch = len(unavailable)
 		}
 		ar := runAdapter(runCtx, ag.Adapter, runPrompt, cwd)
 		// One bounded retry on provider-side turbulence (rate limit /
@@ -1190,7 +1194,15 @@ func (r *Router) execAgent(ctx context.Context, plan Plan, prompt string, cwd st
 		// that never got off the ground — the CLI is missing, the credential
 		// was rejected, the provider account is empty — may fall through to
 		// the next candidate.
-		providerFailure := providerRescueEligible(ag.Adapter, ar)
+		providerFailure := providerRescueEligible(runCtx, ag.Adapter, ar)
+		// A resumed session belongs to the CLI that owns its checkpoint.
+		// Handing the work to another agent would silently drop what the
+		// caller asked to continue, so the guard sits on the resume in the
+		// context — not on the result's session id, which a CLI also mints
+		// before it ever checks the login.
+		if ResumeID(runCtx) != "" && (ResumeAdapter(runCtx) == "" || ResumeAdapter(runCtx) == ag.Adapter) {
+			return res
+		}
 		if !agentFallbackEligible(ar) && !providerFailure {
 			return res
 		}
@@ -1204,7 +1216,7 @@ func (r *Router) execAgent(ctx context.Context, plan Plan, prompt string, cwd st
 		// retry or the next task does not hand the same locked-out CLI
 		// another 2.5-minute attempt.
 		r.markAgentDispatchFailure(name, describeAgentFailure(ar))
-		reason := describeAgentFailure(ar)
+		reason := security.Redact(describeAgentFailure(ar))
 		if len(attempts) > 1 && providerFailure && !ar.Injected && cause == "" && !ModelCredsWithheld(ctx) && r.canInjectRescue(name, ag.Adapter) {
 			// Every candidate gets one native attempt before a compatible one
 			// can be revisited with the node's model. The shared deadline holds.
@@ -1299,14 +1311,11 @@ func agentFallbackEligible(ar AgentResult) bool {
 	// nothing observed. Interrupted work is the signal that belongs to core
 	// recovery — timeouts, billed tokens, a touched workspace, a session the
 	// adapter itself declared dead.
-	if ar.ExitCode == 124 || ar.Tokens > 0 || ar.WorkObserved || ar.SessionDead {
+	if ar.ExitCode == 124 || ar.hasWorkEvidence() || ar.SessionDead {
 		return false // interrupted work belongs to core recovery, never fresh fallback
 	}
 	if ar.ExitCode == 126 || ar.ExitCode == 127 {
 		return true
-	}
-	if ar.Tokens > 0 {
-		return false // the model ran: this is the task's outcome, not dispatch
 	}
 	msg := strings.ToLower(strings.TrimSpace(ar.Result + "\n" + ar.Stderr))
 	if msg == "" {
@@ -1422,6 +1431,10 @@ type AgentResult struct {
 
 type recoveryModelKey struct{}
 
+func (ar AgentResult) hasWorkEvidence() bool {
+	return ar.WorkObserved || ar.Tokens > 0 || ar.Cost > 0 || (ar.Usage != nil && *ar.Usage != (UsageDetail{}))
+}
+
 type recoveryModelRequest struct {
 	agent, sessionID, cause string
 }
@@ -1519,6 +1532,7 @@ func (r *Router) runAdapterDefault(ctx context.Context, adapter string, prompt s
 		// (the adapter ignores it on an injected one), and the agent's own
 		// credential vars must survive alongside.
 		env = mergeAdapterEnv(env, modelEnvForAdapter(injModel, name, adapter))
+		ctx = context.WithValue(ctx, selectedModelKey{}, dec.Model)
 	}
 	// Native Agent credentials must survive the minimal sandbox even when PANDA
 	// does not inject its own model. Only adapter-specific keys are forwarded —
@@ -1533,7 +1547,11 @@ func (r *Router) runAdapterDefault(ctx context.Context, adapter string, prompt s
 	if resumingWithInjection || forcedCause != "" {
 		DropAgentSession(ctx, name, adapter)
 	}
-	res := r.runProcess(ctx, adapter, prompt, cwd, env)
+	launchEnv := env
+	if Restricted(ctx) && adapter == "claude_code.py" && !dec.Inject && !ModelCredsWithheld(ctx) {
+		launchEnv = mergeAdapterEnv(restrictedClaudeModelEnv(), env)
+	}
+	res := r.runHarnessAttempt(ctx, adapter, prompt, cwd, launchEnv)
 	if forcedCause != "" {
 		return injectedRescueResult(res, forcedCause, dec.Model, "")
 	}
@@ -1564,7 +1582,7 @@ func (r *Router) runAdapterDefault(ctx context.Context, adapter string, prompt s
 	// have refused a plaintext endpoint the model explicitly opted into.
 	// A kill the commander itself performed is not a provider failure even
 	// though its verdict says "timeout" — see commanderKill.
-	if ctx.Err() == nil && !res.Injected && canRescue && providerRescueEligible(adapter, res) {
+	if ctx.Err() == nil && !res.Injected && canRescue && providerRescueEligible(ctx, adapter, res) {
 		if ep := effectiveBaseURLFor(name, adapter, injModel); ep == "" || security.CheckModelEndpoint(ep, injModel.AllowPlaintext) == nil {
 			// Merged with the first attempt's environment, not replacing it:
 			// the retry is the same run with a different model endpoint, so the
@@ -1573,7 +1591,11 @@ func (r *Router) runAdapterDefault(ctx context.Context, adapter string, prompt s
 			injectedEnv := mergeAdapterEnv(env, modelEnvForAdapter(injModel, name, adapter))
 			if len(injectedEnv) > 0 {
 				DropAgentSession(ctx, name, adapter)
-				retryRes := r.runProcess(ctx, adapter, prompt, cwd, injectedEnv)
+				model := effectiveModelNameFor(name, adapter, injModel)
+				if sink, ok := ctx.Value(progressKey{}).(ProgressFunc); ok {
+					sink(fmt.Sprintf("%s: %s → %s (%s)", name, security.Redact(describeAgentFailure(res)), name, model), "agent_switch")
+				}
+				retryRes := r.runHarnessAttempt(context.WithValue(ctx, selectedModelKey{}, model), adapter, prompt, cwd, injectedEnv)
 				cause := strings.TrimSpace(res.Result)
 				if cause == "" {
 					cause = describeAgentFailure(res)
@@ -1598,13 +1620,15 @@ func injectedRescueResult(res AgentResult, cause, model, checkpoint string) Agen
 	return res
 }
 
-func providerRescueEligible(adapter string, res AgentResult) bool {
+func providerRescueEligible(ctx context.Context, adapter string, res AgentResult) bool {
 	// Claude emits a session id before its first provider response. Its
 	// api_retry failure envelope can precede any work. Tool activity, token
 	// usage and all ordinary checkpoints still forbid a full replay.
 	text := res.Result + " " + res.Stderr
-	if adapter == "opencode.py" && res.ProviderStartupFailure && res.Cost == 0 &&
-		(res.Usage == nil || *res.Usage == (UsageDetail{})) && strings.HasPrefix(res.Result, "provider failure: ") {
+	if ResumeID(ctx) != "" && (ResumeAdapter(ctx) == "" || ResumeAdapter(ctx) == adapter) {
+		return false
+	}
+	if adapter == "opencode.py" && res.ProviderStartupFailure && strings.HasPrefix(res.Result, "provider failure: ") {
 		res.SessionID = ""
 	} else if adapter == "claude_code.py" && (claudeProviderFailure(res) ||
 		// The plain "not logged in" refusal is the other shape of a startup
@@ -1656,7 +1680,7 @@ func isProviderFailureOrAuth(text string) bool {
 		// been logged in was not recognised as a credential failure, so the
 		// rescue injection never ran and the fallback chain answered the task
 		// as another agent instead.
-		"not signed in", "not logged in", "login required",
+		"not signed in", "not logged in", "login required", "missing_credential", "no credential for provider",
 		"unauthenticated", "invalid credentials", "please log in",
 		"failed to authenticate", "auth error",
 		"authentication failed", "no api key", "api key missing",
@@ -2079,6 +2103,10 @@ func (r *Router) agentTarget(name string, ag ledger.Agent) ProbeSpec {
 	// For non-Claude adapters retain their existing environment-override
 	// semantics: an unrelated config credential or rejection hint must not be
 	// applied to a different endpoint selected in the environment.
+	cfg := agentConfiguredTarget(ag.Adapter)
+	if cfg.NativeRoute {
+		return ProbeSpec{Model: cfg.Model}
+	}
 	if ag.Adapter != "claude_code.py" && k.ModelEnv != nil && k.ModelEnv.BaseURL != "" {
 		if v := strings.TrimSpace(os.Getenv(k.ModelEnv.BaseURL)); v != "" {
 			return ProbeSpec{Endpoint: v, APIType: apiType, APIKey: key, Model: model, KeyDefinitive: keyDef}
@@ -2089,7 +2117,6 @@ func (r *Router) agentTarget(name string, ag ledger.Agent) ProbeSpec {
 	// The same files often carry the credential too (codex's env_key, claude's
 	// settings env, auth.json tokens) — an authenticated probe answers 2xx and
 	// proves the model serves, where an anonymous 401 only proves the host.
-	cfg := agentConfiguredTarget(ag.Adapter)
 	if key == "" {
 		key, keyDef = cfg.APIKey, cfg.KeyDef
 	}
