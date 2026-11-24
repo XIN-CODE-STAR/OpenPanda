@@ -294,30 +294,39 @@ export function TaskProcessBody({ taskId, task, attemptId, finalText }: {
   taskId: string; task: Task; attemptId?: string; finalText?: string
 }) {
   const facts = deliveryFacts(task)
+  // A job that has not landed has nothing to report about acceptance or
+  // remaining work: both facts are derived from the absence of a result, so a
+  // running task announced "no independent verification recorded" and "the task
+  // did not complete successfully" over work that was still going. Until it
+  // settles the card shows what is true — the steps it is taking — and those
+  // two sections arrive with the result. Files it has already touched still
+  // show, because those are real the moment they are written.
+  const settled = !isActiveState(task.state)
+  const showFacts = settled || facts.files.length > 0
   return (
     <>
       <TaskObjectives task={task} />
-      <div class="task-delivery-facts">
-        <div>
+      {showFacts && <div class="task-delivery-facts">
+        {settled && <div>
           <h4 class="task-delivery-label">{t('sessions.deliveryVerification')}</h4>
           <span class={`task-delivery-verdict is-${facts.verification}`}>
             {t(`sessions.deliveryVerification.${facts.verification}`)}
           </span>
-        </div>
+        </div>}
         {facts.files.length > 0 && <div>
           <h4 class="task-delivery-label">{t('sessions.processFiles', { n: String(facts.files.length) })}</h4>
           <ul class="task-delivery-files">{facts.files.slice(0, 5).map(path => <li key={path}><code>{path}</code></li>)}</ul>
           {facts.files.length > 5 && <span class="task-run-empty">{t('sessions.deliveryFilesMore', { n: facts.files.length - 5 })}</span>}
         </div>}
-      </div>
+      </div>}
       <h4 class="task-delivery-label">{t('sessions.processTitle')}</h4>
       <TaskActivityLog taskId={taskId} attemptId={attemptId || task.attempt_id}
         active={isActiveState(task.state)} finalText={finalText}
         details={events => <TaskExecution task={task} events={events} />} />
-      <div class={`task-delivery-remaining is-${facts.remaining}`}>
+      {settled && <div class={`task-delivery-remaining is-${facts.remaining}`}>
         <h4 class="task-delivery-label">{t('sessions.deliveryRemaining')}</h4>
         <p>{facts.followup || t(`sessions.deliveryRemaining.${facts.remaining}`)}</p>
-      </div>
+      </div>}
     </>
   )
 }

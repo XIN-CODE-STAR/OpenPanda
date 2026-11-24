@@ -11,6 +11,7 @@ import {
   extOf,
   highlightLines,
   isDocFile,
+  isImageFile,
   prepareDocText,
   resolveDocPath,
   slugOf,
@@ -33,6 +34,16 @@ test('extension helpers understand both path flavours', () => {
   assert.equal(extOf('Makefile'), '')
   assert.equal(isDocFile('docs/guide.markdown'), true)
   assert.equal(isDocFile('docs/guide.mdx'), false)
+})
+
+test('pictures are recognised by name; svg stays source', () => {
+  assert.equal(isImageFile('shots/a.PNG'), true)
+  assert.equal(isImageFile('D:\\tmp\\clip.jpeg'), true)
+  assert.equal(isImageFile('assets/hero.webp'), true)
+  assert.equal(isImageFile('a.avif'), true)
+  assert.equal(isImageFile('logo.svg'), false)
+  assert.equal(isImageFile('notes.md'), false)
+  assert.equal(isImageFile('Makefile'), false)
 })
 
 test('language classification is conservative about unknown text', () => {

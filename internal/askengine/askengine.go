@@ -2081,7 +2081,11 @@ type AskScope struct {
 	confirmedImplementation bool
 	reviewedPlan            *entry.PlanSpec
 	planRevision            *proposalRevision
-	goalObjective           string
+	// PlanVersion is the proposal version the console was reviewing when it
+	// sent a plan revision. Zero means "no particular version" (a fresh plan
+	// request, which retires whatever proposal was there).
+	PlanVersion   int64
+	goalObjective string
 	// RoundID names a persisted dispatch boundary, independently of approval SessionID.
 	RoundID string
 	Project string
@@ -2341,13 +2345,30 @@ func (e *Engine) AskTurnsScoped(ctx context.Context, history []entry.Turn, promp
 			}()
 		}
 		if scope.Mode == "plan" && !state.Planning {
-			if err := conversations.SetPlanning(ctx, scope.SessionID, true); err != nil {
-				return nil, err
+			if scope.PlanVersion > 0 {
+				// Entering planning and retiring the named proposal is one
+				// transaction: done as two statements, a confirmation landing
+				// between them left the session in planning mode with the
+				// proposal blanked even though the revision was refused.
+				version, generation, err := conversations.store.BeginRevision(ctx, scope.SessionID, scope.PlanVersion)
+				if err != nil {
+					return nil, err
+				}
+				state.Planning = true
+				scope.Mode = "plan"
+				// A plan that interrupts a running goal carries that fact into
+				// the confirmation prompt, which is what the operator's hint
+				// restates.
+				scope.planRevision = &proposalRevision{version: version, generation: generation, continuesGoal: state.Goal != nil && state.Goal.PausedByPlan}
+			} else {
+				if err := conversations.SetPlanning(ctx, scope.SessionID, true); err != nil {
+					return nil, err
+				}
+				state.Planning = true
 			}
-			state.Planning = true
 		}
-		if state.Planning {
-			version, generation, err := conversations.store.BeginPlanningRequest(ctx, scope.SessionID)
+		if state.Planning && scope.planRevision == nil {
+			version, generation, err := conversations.store.BeginPlanningRequest(ctx, scope.SessionID, scope.PlanVersion)
 			if err != nil {
 				return nil, err
 			}

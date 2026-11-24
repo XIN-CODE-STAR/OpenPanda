@@ -24,7 +24,11 @@
   box-shadow: inset 0 1px var(--composer-highlight);
 }
 .ws-title, .control-title { margin: 0; font-size: var(--text-xl); letter-spacing: -.025em; }
-.ws-head, .control-head { border-bottom: 1px solid var(--border-soft); }
+/* 工作空间 draws no line under its bar: the bench's canvas fades in beneath it
+   (see `.ws-map` in workspace.css), and a hairline there would re-cut the seam
+   that fade exists to soften. The control page keeps the rule — its body is a
+   list on white, and the line is what separates the bar from it. */
+.control-head { border-bottom: 1px solid var(--border-soft); }
 :is(.control-tabs, .memory-tabs).segmented, .work-tabs {
   padding: 3px;
   gap: 3px;

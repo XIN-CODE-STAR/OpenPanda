@@ -351,13 +351,40 @@ func (c *Core) takeSteer(ctx context.Context, taskID string, seen msgSeen) strin
 	return body
 }
 
+// steerNote is one message the round is about to fold into its prompt. The
+// delivery stamp is deliberately separate from the read: peeking marks the
+// in-memory cursor (so this round folds the note once), while the durable
+// consumed_at and the audit event wait until the executor has actually been
+// handed the prompt.
+type steerNote struct {
+	scope, sender string
+	seq           int64
+	body          string
+	label         string
+	planDecision  string
+}
+
 func (c *Core) takeRoundSteer(ctx context.Context, taskID string, seen msgSeen) (string, string) {
-	if c == nil || c.store == nil {
+	note := c.peekRoundSteer(ctx, taskID, seen)
+	if note == nil {
 		return "", ""
+	}
+	c.markSteerDelivered(ctx, taskID, note)
+	return note.body, note.label
+}
+
+// peekRoundSteer selects the next pending steer note and advances the round
+// cursor, without recording delivery. The caller stamps it once the prompt
+// carrying it has left for the adapter (see markSteerDelivered); a restart in
+// that window must still find the note, especially a plan adjustment, whose
+// pending test is consumed_at==0.
+func (c *Core) peekRoundSteer(ctx context.Context, taskID string, seen msgSeen) *steerNote {
+	if c == nil || c.store == nil {
+		return nil
 	}
 	msgs, err := c.store.TaskMessages(ctx, "task:"+taskID)
 	if err != nil {
-		return "", ""
+		return nil
 	}
 	for _, m := range msgs {
 		if !pendingRoundSteer(m, taskID, seen) {
@@ -365,25 +392,39 @@ func (c *Core) takeRoundSteer(ctx context.Context, taskID string, seen msgSeen) 
 		}
 		k := msgSlotKey(m)
 		seen[k] = m.SenderSeq
-		// Write the delivery back to the row. The in-memory seen-set is the
-		// round loop's own cursor and nothing else can read it, so a console in
-		// another process — the web panel, a remote daemon — would otherwise
-		// keep drawing this note as "waiting for the next round" forever.
-		// Best-effort by design: the note has already been read here, and a
-		// failed stamp costs a stale badge, never a message.
-		if err := c.store.MarkTaskMessageConsumed(ctx, m.Scope, m.Sender, m.SenderSeq); err != nil && c.logger != nil {
-			c.logger.Debug("mark steer consumed", "task", taskID, "err", err)
+		note := &steerNote{
+			scope: m.Scope, sender: m.Sender, seq: m.SenderSeq,
+			body: strings.TrimSpace(m.Body),
 		}
 		if strings.HasPrefix(m.Sender, planSenderPrefix) {
-			c.EvTrace(ctx, taskID, EvPlanAdjustmentRead, map[string]any{"decision_id": strings.TrimPrefix(m.Sender, planSenderPrefix), "instruction": m.Body})
-			return strings.TrimSpace(m.Body), "[Panda plan adjustment]"
+			note.label = "[Panda plan adjustment]"
+			note.planDecision = strings.TrimPrefix(m.Sender, planSenderPrefix)
+		} else {
+			note.label = "[user directive]"
 		}
-		c.EvTrace(ctx, taskID, EvUserMsgConsumed, map[string]any{
-			"mode": "inject", "seq": m.SenderSeq, "text": m.Body,
-		})
-		return strings.TrimSpace(m.Body), "[user directive]"
+		return note
 	}
-	return "", ""
+	return nil
+}
+
+// markSteerDelivered records that the executor received the note: the row is
+// stamped consumed (the console's "read at round N" badge) and the audit event
+// lands. Called after the prompt was handed to the adapter, never at drain
+// time — a crash before the hand-off must leave the note deliverable.
+func (c *Core) markSteerDelivered(ctx context.Context, taskID string, note *steerNote) {
+	if c == nil || c.store == nil || note == nil {
+		return
+	}
+	if err := c.store.MarkTaskMessageConsumed(ctx, note.scope, note.sender, note.seq); err != nil && c.logger != nil {
+		c.logger.Debug("mark steer consumed", "task", taskID, "err", err)
+	}
+	if note.planDecision != "" {
+		c.EvTrace(ctx, taskID, EvPlanAdjustmentRead, map[string]any{"decision_id": note.planDecision, "instruction": note.body})
+		return
+	}
+	c.EvTrace(ctx, taskID, EvUserMsgConsumed, map[string]any{
+		"mode": "inject", "seq": note.seq, "text": note.body,
+	})
 }
 
 func pendingRoundSteer(m TaskMessage, taskID string, seen msgSeen) bool {

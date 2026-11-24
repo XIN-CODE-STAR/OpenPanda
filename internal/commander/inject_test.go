@@ -1722,3 +1722,20 @@ func TestCodexExplicitResponsesProviderInjection(t *testing.T) {
 		t.Fatal("probe did not use the injected Responses provider")
 	}
 }
+
+// Claude mints a session id before it verifies the login. A refusal with zero
+// tokens and no observed work is a dispatch failure, not interrupted work: it
+// has to count as "no provider work" so the task can move to a healthy peer.
+func TestClaudeAuthRefusalWithMintedSessionCountsAsNoProviderWork(t *testing.T) {
+	cleanCredentialEnv(t)
+	r := injectionRouter(config.ModelConfig{}, config.InjectionModelNever)
+	r.SetAgentProber(func(string, ledger.Agent) bool { return true })
+	r.SetAdapterProcessRunner(func(_ context.Context, _, _, _ string, _ []string) AgentResult {
+		return AgentResult{ExitCode: 1, Result: "Invalid API key · Please run /login", SessionID: "ses_startup"}
+	})
+	plan := Plan{Kind: "agent", Agent: "claude_code", Adapter: "claude_code.py"}
+	res := r.execAgent(context.Background(), plan, "job", "")
+	if res.OK || !res.NoProviderWork {
+		t.Fatalf("result = %+v, want a no-provider-work dispatch failure", res)
+	}
+}

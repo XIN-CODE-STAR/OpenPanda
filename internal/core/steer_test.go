@@ -5,8 +5,12 @@ package core
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Xustalis/OpenPanda/internal/commander"
+	"github.com/Xustalis/OpenPanda/internal/defense"
 )
 
 // steerTestTask enqueues one task without a scheduler running, so it sits
@@ -135,6 +139,105 @@ func TestUserMessageModes(t *testing.T) {
 	}
 	if _, err := c.InjectUserMessage(ctx, tk.TaskID, "late"); err == nil {
 		t.Fatal("inject must refuse a terminal task")
+	}
+}
+
+// A steer note is stamped "read" only when an adapter actually took the
+// prompt. The callback that used to stamp it fired before the adapter was
+// called, so a round whose adapter never launched still consumed the user's
+// instruction: the console stopped offering it to edit, and no agent had seen
+// it. Both directions are pinned — the gate must not turn stamping off.
+func TestSteerNoteDeliveryFollowsTheAdapterLaunch(t *testing.T) {
+	run := func(t *testing.T, announce bool) int64 {
+		t.Helper()
+		ctx := context.Background()
+		c := newSuperviseCore(t, "steer-launch", defense.TierReversible)
+		c.SetSuperviseRounds(1)
+		c.router.SetAdapterRunner(func(runCtx context.Context, _, _, _ string) commander.AgentResult {
+			if announce {
+				commander.PromptDelivered(runCtx)
+			}
+			return commander.AgentResult{OK: false, ExitCode: 127, Result: "adapter script not found"}
+		})
+		task, err := c.Enqueue(ctx, TaskInput{
+			Title: "steer", Intent: "work", Requires: []string{"code:modify"}, Authorized: true,
+		}, DefaultQueueSpec())
+		if err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+		if _, err := c.InjectUserMessage(ctx, task.TaskID, "stop and read the log first"); err != nil {
+			t.Fatalf("inject: %v", err)
+		}
+		if err := c.store.ClaimLocal(ctx, task.TaskID, c.nodeID); err != nil {
+			t.Fatalf("claim: %v", err)
+		}
+		c.runScheduled(ctx, task.TaskID)
+		return consumedAt(t, c, task.TaskID, "stop and read the log first")
+	}
+	// A launch refusal: nothing read the prompt, so the note stays pending and
+	// a later round (or the user) can still deliver it.
+	if got := run(t, false); got != 0 {
+		t.Fatalf("a launch failure stamped the note read: consumed_at=%d", got)
+	}
+	// A delivered run: the row must say so, or the console keeps offering to
+	// edit an instruction the agent already has.
+	if got := run(t, true); got == 0 {
+		t.Fatal("a delivered note must be stamped read")
+	}
+}
+
+// A round can be aborted between the peek and the hand-off: the directive is
+// already folded into the intent, the user injects a second one, and the
+// cancelled round never reaches an adapter. The next round's prompt carries
+// both notes, so delivery must stamp both — stamping only the note that round
+// peeked left the first one pending forever while the agent was reading it.
+func TestSteerNotesAbortedBeforeDeliveryAreStampedNextRound(t *testing.T) {
+	ctx := context.Background()
+	c := newSuperviseCore(t, "steer-abort", defense.TierReversible)
+	c.SetSuperviseRounds(1)
+	task, err := c.Enqueue(ctx, TaskInput{
+		Title: "steer abort", Intent: "work", Requires: []string{"code:modify"}, Authorized: true,
+	}, DefaultQueueSpec())
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if _, err := c.InjectUserMessage(ctx, task.TaskID, "directive A"); err != nil {
+		t.Fatalf("inject A: %v", err)
+	}
+	entered := make(chan struct{})
+	var calls atomic.Int32
+	c.router.SetAdapterRunner(func(runCtx context.Context, _, prompt, _ string) commander.AgentResult {
+		if calls.Add(1) == 1 {
+			// The round is live but the prompt has not been delivered: wait
+			// for the inject that aborts it.
+			close(entered)
+			<-runCtx.Done()
+			return commander.AgentResult{ExitCode: 1, Result: "interrupted"}
+		}
+		if !strings.Contains(prompt, "directive A") || !strings.Contains(prompt, "directive B") {
+			t.Errorf("second round prompt lost a directive: %q", prompt)
+		}
+		commander.PromptDelivered(runCtx)
+		return commander.AgentResult{OK: true, Result: "done"}
+	})
+	if err := c.store.ClaimLocal(ctx, task.TaskID, c.nodeID); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.runScheduled(ctx, task.TaskID)
+	}()
+	<-entered
+	if status, err := c.InjectUserMessage(ctx, task.TaskID, "directive B"); err != nil || status != "interrupted" {
+		close(done)
+		t.Fatalf("inject B: status=%q err=%v", status, err)
+	}
+	<-done
+	for _, body := range []string{"directive A", "directive B"} {
+		if got := consumedAt(t, c, task.TaskID, body); got == 0 {
+			t.Fatalf("%q rode the delivered prompt but is still unread", body)
+		}
 	}
 }
 
@@ -372,4 +475,69 @@ func TestConsumedNoteRefusesEdits(t *testing.T) {
 		!strings.Contains(err.Error(), "no such note") {
 		t.Fatalf("edit of an unknown key = %v, want no-such-note", err)
 	}
+}
+
+// Reading a steer into a round must not claim the executor received it. The
+// durable stamp is what a restart consults (and what the console draws as
+// "read"); a crash between the drain and the adapter hand-off has to leave the
+// note deliverable.
+func TestPeekRoundSteerLeavesDeliveryUnstamped(t *testing.T) {
+	c := queueTestCore(t)
+	ctx := context.Background()
+	tk := steerTestTask(t, c)
+	if _, err := c.InjectUserMessage(ctx, tk.TaskID, "keep the API stable"); err != nil {
+		t.Fatalf("inject: %v", err)
+	}
+	seen := msgSeen{}
+	note := c.peekRoundSteer(ctx, tk.TaskID, seen)
+	if note == nil || note.body != "keep the API stable" || note.label != "[user directive]" {
+		t.Fatalf("peek = %+v", note)
+	}
+	if got := consumedAt(t, c, tk.TaskID, "keep the API stable"); got != 0 {
+		t.Fatalf("peek stamped the note consumed_at=%d, want pending", got)
+	}
+	c.markSteerDelivered(ctx, tk.TaskID, note)
+	if got := consumedAt(t, c, tk.TaskID, "keep the API stable"); got == 0 {
+		t.Fatal("delivered note must be stamped consumed")
+	}
+}
+
+// The durable stamp must land when the adapter receives the prompt, not when
+// its process exits: an agent can run for minutes, and a note still marked
+// pending stays editable in the console while the instruction is executing.
+func TestSteerStampedWhenPromptReachesAdapter(t *testing.T) {
+	c := newCoreWithTwoAgents(t)
+	ctx := context.Background()
+	tk, err := c.Enqueue(ctx, TaskInput{
+		Title: "steer target", ContextType: "file", Intent: "edit a file",
+		Requires: []string{"code:modify"},
+	}, DefaultQueueSpec())
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if _, err := c.InjectUserMessage(ctx, tk.TaskID, "keep the API stable"); err != nil {
+		t.Fatalf("inject: %v", err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	c.router.SetAdapterRunner(func(runCtx context.Context, _, _, _ string) commander.AgentResult {
+		// What a real adapter does at the moment it takes the prompt.
+		commander.PromptDelivered(runCtx)
+		close(entered)
+		<-release
+		return commander.AgentResult{OK: true, Result: "done", ExitCode: 0}
+	})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _, _ = c.runLocal(ctx, tk, TaskInput{Intent: "edit a file", Requires: []string{"code:modify"}})
+	}()
+	<-entered
+	if got := consumedAt(t, c, tk.TaskID, "keep the API stable"); got == 0 {
+		close(release)
+		<-done
+		t.Fatal("the adapter is running but the steer note is still unconsumed")
+	}
+	close(release)
+	<-done
 }

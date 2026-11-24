@@ -2,8 +2,9 @@
 
 /* ==== Connection-grouped registry (upstream) ====
    Kept whole from the upstream registry rewrite: one card per endpoint+key,
-   its models underneath. This branch paints those models as tiles instead of
-   rows, so the row rules here only serve the dialogs that still use them. */
+   its models underneath. This branch paints those models as compact rows, so
+   the row styling lives in model-registry.css — the block that used to live
+   here is noted, and removed, further down this file. */
 /* ---- Models registry (settings → models) ---- */
 
 .models-section {
@@ -11,61 +12,15 @@
   flex-direction: column;
   gap: var(--sp-4);
 }
-.model-items {
-  display: flex;
-  flex-direction: column;
-  margin-top: var(--sp-3);
-}
-.model-item {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--sp-4);
-  /* The confirm hint is a full-width flex item; without wrapping it squeezed
-     the identity column to nothing and the buttons landed on the model name. */
-  flex-wrap: wrap;
-  padding: var(--sp-3) 0;
-  border-top: 1px solid var(--border-soft);
-}
-.model-item-main {
-  flex: 1 1 240px;
-  min-width: 0;
-}
-.model-item-top {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  flex-wrap: wrap;
-}
-.model-alias {
-  font-weight: 600;
-  font-size: var(--text-md);
-}
-.model-item-sub {
-  font-size: var(--text-sm);
-  margin-top: 2px;
-  overflow-wrap: anywhere;
-}
-.model-item-actions {
-  display: flex;
-  gap: 6px;
-  flex: none;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-/* Four two-character buttons (switch, test, edit, remove) is the widest row;
-   reserving that width keeps the labels in one column whether or not the row
-   happens to be the live one and therefore has no "switch". Without it every
-   row's buttons sat at a different offset. */
-.model-item-actions {
-  min-width: 210px;
-}
-.model-item-confirm {
-  flex-basis: 100%;
-  font-size: var(--text-xs);
-  text-align: right;
-  margin: 4px 0 0;
-}
+/* The upstream row rules that used to sit here — .model-items, .model-item,
+   .model-item-main, .model-item-top, .model-alias, .model-item-sub,
+   .model-item-actions, .model-item-confirm — are gone. This branch paints
+   models as compact rows inside the connection card, and this file imports
+   after model-registry.css, so those leftovers silently won: the row lost its
+   centring and hover padding, gained a hairline and a 12px vertical pad, and
+   .model-item-sub fell back to a plain block with overflow-wrap:anywhere —
+   which is what wrapped the test verdict onto its own line under the "in use"
+   badge. No view renders those class names any more. */
 
 /* The repair offer inside the edit dialog: names the mismatch and does the
    switch in one click, instead of leaving the user to guess which of the two
@@ -156,6 +111,29 @@
   margin-top: 26px;
   flex: none;
 }
+/* A row that is already registered has no "register this one" tick; the
+   spacer keeps its fields on the same column as the new rows below it. */
+.draft-check-space {
+  flex: none;
+  width: 13px;
+  margin: 0 3px;
+}
+/* The row the sheet was opened from — the pencil that started this edit. */
+.draft-row.focus {
+  background: var(--accent-soft);
+  border-radius: var(--radius-md);
+  box-shadow: inset 3px 0 0 var(--accent-border);
+}
+/* Marked for deletion, not yet deleted: the fields go quiet, the note says
+   when it happens, and the trash turns into an undo. */
+.draft-row.dropped .draft-fields-row,
+.draft-row.dropped .draft-advanced-toggle {
+  opacity: 0.5;
+}
+.draft-drop-note {
+  margin: 2px 0 0;
+  color: var(--danger);
+}
 .draft-fields {
   flex: 1;
   min-width: 0;
@@ -189,19 +167,13 @@
   font-size: var(--text-xs);
   color: var(--text-tertiary);
 }
-/* The edit sheet keeps the narrow modal (no .wizard-roomy), so its pane is
-   ~200px tighter than the add sheet's: the model id — the one field that has
-   to be read back verbatim — takes the width the two numeric columns can
-   spare. Declared after the base template so it wins on equal specificity. */
-.wizard-modal:not(.wizard-roomy) .draft-fields-row {
-  grid-template-columns: minmax(0, 2.2fr) minmax(0, 1.1fr) 96px 104px 28px;
-}
+/* The edit sheet used to keep the narrow modal and needed its own column
+   template. It now opens the same roomy table as the add sheet — the two are
+   one sheet — so only the base template and its phone breakpoint remain. */
 /* Below the phone breakpoint four fields stop fitting on one line: two per
-   row keeps the model id readable instead of shaving it to 90px. Declared
-   after the base template so it wins on equal specificity. */
+   row keeps the model id readable instead of shaving it to 90px. */
 @media (max-width: 620px) {
-  .draft-fields-row,
-  .wizard-modal:not(.wizard-roomy) .draft-fields-row {
+  .draft-fields-row {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
 }

@@ -54,6 +54,12 @@
      mode, which made the bench's top edge heavier than the thread's. */
   background: var(--chat-head);
   flex: none;
+  /* No hairline under this bar. The bench is a canvas, and the canvas begins
+     as a fade right below the header (see `.ws-map`), so the bar and the paper
+     read as one surface with a soft edge instead of two bands cut apart by a
+     rule — the line is what made the top of the page look like a separate
+     white slab. */
+  border-bottom: 0;
   /* The orchestration card hangs out of this bar and over the map, the same
      way the chat's cards hang over the transcript. Owning a stacking context
      here is what lets it paint above the drawing. */
@@ -925,11 +931,26 @@
   /* Dot paper, the way the drawing on the desk was ruled: the pane is mostly
      empty with one or two machines on it, and a ruled surface reads as canvas
      where a blank one reads as a rendering failure. `local` keeps the dots
-     travelling with the panels when the fleet outgrows the pane. */
-  background-image: radial-gradient(circle at 1px 1px, var(--border-soft) 1px, transparent 0),
+     travelling with the panels when the fleet outgrows the pane.
+
+     The first layer is the seam under the header: a wash of the header's own
+     colour that dissolves into the paper over the first 44px, so the canvas
+     opens with a fade rather than a cut edge. It is a *background* layer on
+     purpose — an overlay would dim the pet standing in that headroom, while a
+     layer sits under every child and only softens the dots. Its attachment is
+     `scroll` where the paper is `local`: the wash stays put under the bar
+     while the dots travel with the panels. */
+  background-image: linear-gradient(
+      to bottom,
+      var(--chat-head) 0,
+      color-mix(in srgb, var(--chat-head) 58%, transparent) 20px,
+      transparent 44px
+    ),
+    radial-gradient(circle at 1px 1px, var(--border-soft) 1px, transparent 0),
     radial-gradient(ellipse at 28% 30%, color-mix(in srgb, var(--glow-blue) 45%, transparent), transparent 65%);
-  background-size: 22px 22px, 100% 100%;
-  background-attachment: local;
+  background-size: 100% 100%, 22px 22px, 100% 100%;
+  background-repeat: no-repeat, repeat, no-repeat;
+  background-attachment: scroll, local, local;
 }
 
 .ws-panels {

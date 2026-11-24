@@ -26,6 +26,11 @@ func TestBranchVerdictRedirectsLiveSiblingAndAddsVerification(t *testing.T) {
 	apiStarted, docsStarted, corrected := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var apiRuns, docsRuns, followupRuns atomic.Int32
 	c.router.SetAdapterRunner(func(run context.Context, adapter, prompt, dir string) commander.AgentResult {
+		// A stub standing in for the adapter owes the same announcement the
+		// real executors make: the plan adjustment rides the prompt as a steer
+		// note, and its "read" event is what the audit hands the deliver
+		// stage. Without this the run looks like it never received anything.
+		commander.PromptDelivered(run)
 		switch filepath.Base(dir) {
 		case "inspect":
 			for _, started := range []chan struct{}{apiStarted, docsStarted} {

@@ -9,7 +9,9 @@
 // the console fetches /api/fs/image itself and hands the <img> an object URL.
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
+import { createPortal } from 'preact/compat'
 import { fetchBlob } from '../api/client'
+import { imageBytesUrl } from './attach'
 import { t } from '../i18n'
 import { Icon } from './icons'
 import { useModalFocus } from './modal-focus'
@@ -130,7 +132,7 @@ export function ImagePreview({ path, dataUrl, label, className = '' }: ImagePrev
  *  and the picture stays one hover (a floating copy) and one click (the
  *  lightbox) away. Bytes are fetched on first hover, not on mount: a thread can
  *  hold dozens of pasted screenshots and most are never opened. */
-export function ImagePill({ path, label }: { path: string; label: string }) {
+export function ImagePill({ path, label, session }: { path: string; label: string; session?: string | null }) {
   const [url, setUrl] = useState('')
   const [zoom, setZoom] = useState(false)
   const [anchor, setAnchor] = useState<DOMRect | null>(null)
@@ -151,7 +153,7 @@ export function ImagePill({ path, label }: { path: string; label: string }) {
   /** The object URL for this picture, fetched at most once. */
   async function bytes(): Promise<string> {
     if (url) return url
-    const blob = await fetchBlob(`/api/fs/image?path=${encodeURIComponent(path)}`)
+    const blob = await fetchBlob(imageBytesUrl(path, session))
     if (!alive.current) throw new Error('unmounted')
     made.current = URL.createObjectURL(blob)
     setUrl(made.current)
@@ -254,7 +256,12 @@ export function HoverPreview({ src, name, anchor }: { src: string; name: string;
 
 /** Full-screen view. Rendered inline with position:fixed — the same overlay
  *  convention the confirm dialog and the todo sheet use — and it closes on
- *  Esc, on the × button, and on a click outside the picture. */
+ *  Esc, on the × button, and on a click outside the picture.
+ *
+ *  Portalled to the body: a fixed overlay is still trapped by an ancestor's
+ *  stacking context, and this one is opened from inside the dock, whose
+ *  column carries a z-index of its own — the chat head painted straight over
+ *  the picture. */
 export function Lightbox({
   src,
   path,
@@ -281,7 +288,7 @@ export function Lightbox({
   }, [onClose])
 
   const name = label || (path ? baseName(path) : 'image')
-  return (
+  return createPortal(
     <div
       class="img-lightbox"
       role="dialog"
@@ -309,6 +316,7 @@ export function Lightbox({
           <Icon name="x" size={16} />
         </button>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

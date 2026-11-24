@@ -198,6 +198,13 @@ func (s *ConversationService) sweepPlans(ctx context.Context) {
 				if !goalTaskSettled(t.State) || round.PendingRecovery[t.TaskID] {
 					settled = false
 				}
+				// A helper sub-task a parent absorbed is not the delivery
+				// contract — the parent row is. Counting the helper made a run
+				// whose transcript already said "delivered" settle as failed.
+				// (Plan stages are top-level; their children are the helpers.)
+				if t.ParentID != "" {
+					continue
+				}
 				if t.State != core.StateDone && !round.Withdrawn[t.TaskID] {
 					success = false
 				}
@@ -380,6 +387,11 @@ func (s *ConversationService) runPlan(sid, round, proposal string, version int64
 	workDir := s.engine.SessionWorkDir(sess)
 	scope := AskScope{confirmedImplementation: true, SessionID: sid, RoundID: round, WorkDir: workDir, Project: sess.Project, Agents: sess.Team, PermissionMode: sess.PermissionMode, PersonalMemory: true}
 	if !resuming {
+		// Nothing followed the confirmation, so this run has not started
+		// executing: dispatch the graph the user approved. Re-classifying it
+		// through the entry model here is how a restart with no tasks yet
+		// turned a three-stage plan into "model not configured" and zero
+		// stages.
 		var spec entry.PlanSpec
 		if json.Unmarshal([]byte(proposal), &spec) == nil && entry.ValidatePlanSpec(&spec) == nil {
 			scope.reviewedPlan = &spec
@@ -609,6 +621,12 @@ func (w *planPhaseWriter) flushLocked() {
 
 // The plan:user turn is the durable boundary between planning discussion and
 // the implementation. Older sessions persisted the same version prefix.
+//
+// The second return says the implementation has *conversation* after that
+// boundary — a clarification question and its answer — which is what a
+// continuation needs to fold into the work. The confirmation turn alone is
+// not evidence that execution began: a process can die after writing it and
+// before dispatching anything, and that run must still use the reviewed graph.
 func confirmedPlanHistory(sess *sessions.Session, version int64, window int) ([]entry.Turn, bool) {
 	prefix := fmt.Sprintf("Implement user-confirmed proposal version %d in the current session.", version)
 	for i, t := range sess.Turns {
@@ -622,7 +640,7 @@ func confirmedPlanHistory(sess *sessions.Session, version int64, window int) ([]
 				history = append(history, entry.Turn{Role: t.Role, Content: t.Text})
 			}
 		}
-		return history, true
+		return history, len(history) > 0
 	}
 	return nil, false
 }

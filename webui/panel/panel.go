@@ -267,6 +267,12 @@ func New(d Deps) http.Handler {
 	mux.HandleFunc("GET /api/fs/image", h.getImage)
 	mux.HandleFunc("GET /api/fs/files", h.listFiles)
 	mux.HandleFunc("POST /api/fs/reveal", h.revealPath)
+	// The directory picker's two write-side helpers: a star that outlives the
+	// card (node-wide, see projects.Favorites) and a folder created while the
+	// card is open.
+	mux.HandleFunc("GET /api/prefs", h.getPrefs)
+	mux.HandleFunc("POST /api/prefs/favorite", h.postFavorite)
+	mux.HandleFunc("POST /api/fs/mkdir", h.mkdir)
 	// The console's browser pane: one page fetched server-side and framed under
 	// a sandbox, so the pane can show a URL a browser would refuse to frame.
 	// Two faces of one fetcher: the Bearer route for anything that can send a

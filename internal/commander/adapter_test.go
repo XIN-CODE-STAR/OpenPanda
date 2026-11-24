@@ -1056,3 +1056,20 @@ func TestClaudeInjectionClearsNativeModelAliases(t *testing.T) {
 	merged := mergeAdapterEnv(native, injected)
 	assertEnv(t, merged, map[string]string{"ANTHROPIC_AUTH_TOKEN": "", "ANTHROPIC_DEFAULT_OPUS_MODEL": "", "ANTHROPIC_DEFAULT_SONNET_MODEL": "", "ANTHROPIC_DEFAULT_HAIKU_MODEL": "", "CLAUDE_CODE_SUBAGENT_MODEL": "", "OPENPANDA_INJECTED_MODEL": "1"})
 }
+
+// A run that never launched must not announce a hand-off: the round stamps its
+// steer notes read on that announcement, and a refused launch never handed the
+// prompt to anything. An unregistered context stays silent (probes, non-task
+// runs), so the announcement is opt-in.
+func TestRefusedLaunchDoesNotAnnounceDelivery(t *testing.T) {
+	PromptDelivered(context.Background()) // no callback registered: must not panic
+	var calls int
+	ctx := WithPromptDelivered(context.Background(), func() { calls++ })
+	res := runAdapterProcess(ctx, "definitely-not-an-adapter.py", "hello", t.TempDir(), nil)
+	if res.OK {
+		t.Fatal("a missing adapter reported success")
+	}
+	if calls != 0 {
+		t.Fatalf("a refused launch announced delivery %d times", calls)
+	}
+}

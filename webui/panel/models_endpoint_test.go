@@ -256,3 +256,40 @@ func TestAddModelCopyCarriesCredentialAndOverrides(t *testing.T) {
 		t.Fatalf("source entry was overwritten: %+v", source)
 	}
 }
+
+// The raw params/headers are not part of the entry JSON, so the edit form
+// cannot echo them back. An edit that only touches a visible field must keep
+// them: rebuilding the row from the request alone wiped both on every save.
+func TestUpdateModelKeepsUnstatedParamsAndHeaders(t *testing.T) {
+	h, path := newModelPanel(t, func(c *config.Config) {
+		c.Models = []config.ModelConfig{{
+			Name: "relay", Provider: "custom", APIType: config.APITypeOpenAI,
+			BaseURL: "http://127.0.0.1:3065/v1", Model: "m-1", APIKey: "sk-source",
+			Params:  map[string]any{"temperature": 0.3},
+			Headers: map[string]string{"X-Tenant": "blue"},
+		}}
+	})
+	body := `{"provider":"custom","api_type":"openai","base_url":"http://127.0.0.1:3065/v1",` +
+		`"model":"m-1","alias":"relay","context_window":64000}`
+	if code, out := doJSON(t, h, jsonReq(http.MethodPut, entryURL("relay", "", ""), body)); code != http.StatusOK {
+		t.Fatalf("update: status = %d, want 200 (out %v)", code, out)
+	}
+	cfg := readConfig(t, path)
+	for i := range cfg.Models {
+		m := cfg.Models[i]
+		if m.Alias() != "relay" {
+			continue
+		}
+		if fmt.Sprint(m.Params["temperature"]) != "0.3" {
+			t.Fatalf("params = %v, want the stored temperature", m.Params)
+		}
+		if m.Headers["X-Tenant"] != "blue" {
+			t.Fatalf("headers = %v, want the stored X-Tenant", m.Headers)
+		}
+		if m.ContextWindow != 64000 {
+			t.Fatalf("context window = %d, want the request's 64000", m.ContextWindow)
+		}
+		return
+	}
+	t.Fatal("relay was not rewritten")
+}

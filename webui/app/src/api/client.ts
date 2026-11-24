@@ -159,7 +159,11 @@ export function getToken(): string {
 
 export function setToken(token: string): void {
   if (!isHeaderSafeToken(token)) {
-    clearToken()
+    // A connect link can carry anything after `?token=`, including a value
+    // this browser could never put in a header. Refusing that token must not
+    // take the working sign-in down with it: drop the new one, keep the one
+    // already stored. `currentToken` still evicts a bad token found *in
+    // storage* — that is the only case where clearing is the fix.
     return
   }
   try {
@@ -830,11 +834,20 @@ export interface ChooseDirectoryResult {
   error?: string
 }
 
+/** The console's node-wide preferences (GET /api/prefs). */
+export interface Prefs {
+  /** Starred directories, most recently starred first. */
+  favorites: string[]
+}
+
 export interface DirectoryListing {
   current: string
   parent: string
   separator: string
-  directories: { name: string; path: string }[]
+  /** An empty folder answers `[]`; a panel built before that fix answered
+   *  `null`, so readers must tolerate it (the picker filters this list the
+   *  moment it arrives). */
+  directories: { name: string; path: string }[] | null
 }
 
 /** GET /api/update — the self-update pipeline status snapshot. */
@@ -1980,6 +1993,25 @@ export const api = {
     return request('GET', `/api/fs/directories${q}`)
   },
 
+  /** The console's node-wide preferences. Today that is the starred
+   *  directories; the shape is an object so the next one does not change the
+   *  call. */
+  prefs(): Promise<Prefs> {
+    return request('GET', '/api/prefs')
+  },
+
+  /** Star or unstar one directory. The answer is the whole list, so the card
+   *  never has to guess what the store holds after a toggle. */
+  setFavorite(path: string, favorite: boolean): Promise<Prefs> {
+    return request('POST', '/api/prefs/favorite', { path, favorite })
+  },
+
+  /** Create one folder (the parent must exist). The picker's "创建文件夹"
+   *  row uses it so the directory exists while the card is still open. */
+  mkdir(path: string): Promise<{ ok: boolean; path: string }> {
+    return request('POST', '/api/fs/mkdir', { path })
+  },
+
   // ---- Reminders ----
 
   reminders(): Promise<Reminder[]> {
@@ -2260,8 +2292,14 @@ export const api = {
     return request('GET', '/api/cost')
   },
 
-  fsRead(path: string): Promise<FsReadResult> {
-    return request('GET', `/api/fs/read?path=${encodeURIComponent(path)}`)
+  /** A prompt-sized blob of one file. `session` anchors a relative path at the
+   *  thread's own workspace and admits that worktree as a readable root — the
+   *  same ladder /api/fs/file walks. Without it `@same.txt` expands the file
+   *  from work_path while the panel is reading the thread's copy. */
+  fsRead(path: string, session?: string): Promise<FsReadResult> {
+    const q = new URLSearchParams({ path })
+    if (session) q.set('session', session)
+    return request('GET', `/api/fs/read?${q}`)
   },
 
   /** One file for the transcript's read-only drawer: the lines around a focus
@@ -2510,6 +2548,9 @@ export interface AddModelRequest {
   /** Alias of the entry whose key this one borrows — says *which* account of
    *  a vendor is being extended when one vendor is registered twice. */
   reuse_from?: string
+  /** The lender row's key_fingerprint. The alias alone resolves to the first
+   *  row carrying it, which is the other account when both share a name. */
+  reuse_from_key?: string
   api_type?: string
   base_url?: string
   // Explicit consent to reach a plain-http endpoint (the network guard refuses
@@ -3332,6 +3373,10 @@ export async function askSessionStream(
   resumeQueued?: boolean,
   /** The current prompt's interaction mode, independent of its permissions. */
   mode?: 'plan',
+  /** The proposal version the reviewer was looking at. A plan revision that
+   *  names a version the store has already replaced is refused instead of
+   *  retiring the newer proposal. */
+  planVersion?: number,
 ): Promise<void> {
   await openSSE(`/api/sessions/${encodeURIComponent(id)}/ask`, {
     method: 'POST',
@@ -3343,6 +3388,7 @@ export async function askSessionStream(
       permission_mode: permissionMode || undefined,
       resume_queued: resumeQueued || undefined,
       mode,
+      plan_version: planVersion || undefined,
       // Server-written prose for this round (its closing summary) is read
       // back here, so the round records the console's language instead of
       // the engine's.

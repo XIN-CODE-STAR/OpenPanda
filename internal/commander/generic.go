@@ -236,7 +236,14 @@ func runGenericNative(ctx context.Context, agentName, prompt, cwd string, env []
 		return AgentResult{ExitCode: 127, Result: security.Redact(err.Error())}
 	}
 	emitExecutionProfile(ctx, adapterExecutionProfile(ctx, agents.GenericNativeAdapter, req, cmd.Env, "native_generic"))
-	err := cmd.Run()
+	// Start and Wait rather than Run, for the same reason as the script path:
+	// the successful spawn is the hand-off the round stamps its notes on, and
+	// a command that never launched must not claim one.
+	err := cmd.Start()
+	if err == nil {
+		PromptDelivered(ctx)
+		err = cmd.Wait()
+	}
 	res := AgentResult{ExitCode: 0}
 	res.Result = strings.TrimSpace(stdout.String())
 	if res.Result == "" {

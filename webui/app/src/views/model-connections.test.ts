@@ -15,6 +15,7 @@ import {
   hostOf,
   isLoopbackURL,
   keyOf,
+  lenderOf,
   refOf,
 } from './model-connections.ts'
 
@@ -215,4 +216,33 @@ test('loopback detection covers localhost, v4 and v6', () => {
   assert.ok(isLoopbackURL('http://[::1]:1234/v1'))
   assert.equal(isLoopbackURL('https://dashscope.aliyuncs.com/compatible-mode/v1'), false)
   assert.equal(isLoopbackURL('not a url'), false)
+})
+
+test('a new row borrows the key of the account it names, not the first alias match', () => {
+  const a = entry({ alias: 'shared', model: 'm-a', key_fingerprint: 'aaaa1111' })
+  const b = entry({ alias: 'shared', model: 'm-b', key_fingerprint: 'bbbb2222' })
+  // The trash marks A; B is kept and lends. An alias-only borrow lets the
+  // server resolve whichever row carries the name — in the report, A — so the
+  // fingerprint is what pins the new row to B's credential.
+  const lender = lenderOf(
+    [
+      { id: 1, alias: 'shared', dropped: true, src: a },
+      { id: 2, alias: 'shared', src: b },
+    ],
+  )
+  assert.deepEqual(lender, { alias: 'shared', key: 'bbbb2222' })
+})
+
+test('a dropped lender keeps its stored name; a renamed kept row lends its saved name', () => {
+  const a = entry({ alias: 'old', key_fingerprint: 'aaaa1111' })
+  const dropped = lenderOf([{ id: 1, alias: 'typed-in-trash', dropped: true, src: a }])
+  assert.deepEqual(dropped, { alias: 'old', key: 'aaaa1111' })
+
+  const kept = lenderOf([{ id: 2, alias: 'typed', src: a }], new Map([[2, 'old-2']]))
+  assert.deepEqual(kept, { alias: 'old-2', key: 'aaaa1111' })
+})
+
+test('a connection with no keyed row has no lender', () => {
+  assert.equal(lenderOf([{ id: 1, alias: 'x', src: entry({ key_set: false, key_fingerprint: undefined }) }]), undefined)
+  assert.equal(lenderOf([{ id: 2, alias: 'y' }]), undefined)
 })

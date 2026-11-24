@@ -25,6 +25,7 @@ package projects
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -37,6 +38,13 @@ import (
 // "which project am I in" is a property of this machine, not of a session: the
 // REPL, a bare `panda ask` and the web console are all looking at the same node.
 const activeKey = "active_project"
+
+// favoritesKey is the settings row holding the directories the console user
+// starred in the directory picker. A JSON array of absolute paths, most
+// recently starred first. It lives beside active_project rather than in a table
+// of its own: a star is a preference of this machine, the same way "which
+// project am I in" is, and both are a handful of rows at most.
+const favoritesKey = "favorite_dirs"
 
 // ErrNotFound reports a project name that is not in the table.
 var ErrNotFound = errors.New("projects: no such project")
@@ -562,6 +570,114 @@ func (s *Store) SetActive(name string) error {
 // are not in a project is not an error, it is already true.
 func (s *Store) ClearActive() error {
 	_, err := s.db.Exec(`DELETE FROM settings WHERE key = ?`, activeKey)
+	return err
+}
+
+// Favorites returns the starred directories, most recently starred first. A
+// missing row is an empty list and not an error — nobody has starred anything
+// yet — and a row that no longer parses reads the same way: the picker must
+// open even if the settings file was hand-edited into nonsense.
+func (s *Store) Favorites() ([]string, error) {
+	return readFavorites(s.db)
+}
+
+// rowQueryer is the read half both the connection and a transaction satisfy:
+// the star update reads and writes inside one transaction, and the plain read
+// runs the same code on the connection.
+type rowQueryer interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+// execer is the write half, for the same reason.
+type execer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func readFavorites(q rowQueryer) ([]string, error) {
+	var raw string
+	err := q.QueryRow(`SELECT value FROM settings WHERE key = ?`, favoritesKey).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return []string{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var dirs []string
+	if err := json.Unmarshal([]byte(raw), &dirs); err != nil {
+		return []string{}, nil
+	}
+	if dirs == nil {
+		return []string{}, nil
+	}
+	return dirs, nil
+}
+
+// SetFavorite stars or unstars one directory and returns the new list. The
+// comparison is the picker's own (`favoriteKey`): a trailing separator or a
+// different case does not make a second star, because on Windows those are the
+// same folder and starring it twice would show two rows for one place.
+//
+// The read and the write share one transaction. Done as two statements they
+// were a lost-update race — every caller read the same list and the last
+// writer's copy won, so 24 concurrent stars left five rows — and a star is
+// only useful if the next read returns it. The store opens with
+// `_txlock=immediate` (internal/storage), so Begin takes the write lock and
+// concurrent stars queue on it instead of overwriting each other.
+func (s *Store) SetFavorite(path string, on bool) ([]string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, errors.New("projects: empty favourite path")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	dirs, err := readFavorites(tx)
+	if err != nil {
+		return nil, err
+	}
+	key := favoriteKey(path)
+	out := make([]string, 0, len(dirs)+1)
+	if on {
+		// Newest first: the star you just set is the one you are about to use.
+		out = append(out, path)
+	}
+	for _, d := range dirs {
+		if favoriteKey(d) == key {
+			continue
+		}
+		out = append(out, d)
+	}
+	if err := writeFavorites(tx, out); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// favoriteKey is the identity of a starred folder: cleaned, trimmed and
+// case-folded, which is what "the same directory" means to the console.
+func favoriteKey(p string) string {
+	return strings.ToLower(filepath.Clean(strings.TrimSpace(p)))
+}
+
+// writeFavorites replaces the row. An empty list deletes it rather than storing
+// `[]`, so "no favourites" has one representation on disk.
+func writeFavorites(e execer, dirs []string) error {
+	if len(dirs) == 0 {
+		_, err := e.Exec(`DELETE FROM settings WHERE key = ?`, favoritesKey)
+		return err
+	}
+	raw, err := json.Marshal(dirs)
+	if err != nil {
+		return err
+	}
+	_, err = e.Exec(
+		`INSERT INTO settings (key, value) VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`, favoritesKey, string(raw))
 	return err
 }
 

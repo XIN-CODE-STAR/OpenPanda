@@ -82,6 +82,30 @@ func WithPromptObserver(ctx context.Context, fn PromptObserver) context.Context 
 	return context.WithValue(ctx, promptObserverKey{}, fn)
 }
 
+// promptDeliveredKey carries the callback a run announces its hand-off on.
+// The observer above fires before the adapter is called, which is too early to
+// claim delivery — a run whose script or interpreter is missing still reaches
+// it. The executors (one-shot spawn, native generic, session turn) call
+// PromptDelivered at the moment the prompt is actually handed over.
+type promptDeliveredKey struct{}
+
+// WithPromptDelivered registers the callback that fires once the adapter has
+// taken this round's prompt. It is called at most once per adapter process
+// start; callers that must be idempotent (a retry, a session turn after a
+// one-shot) guard themselves.
+func WithPromptDelivered(ctx context.Context, fn func()) context.Context {
+	return context.WithValue(ctx, promptDeliveredKey{}, fn)
+}
+
+// PromptDelivered announces that the run's adapter has taken the prompt.
+// Nil-safe and idempotent by convention: the registered callback owns the
+// "already announced" flag.
+func PromptDelivered(ctx context.Context) {
+	if fn, ok := ctx.Value(promptDeliveredKey{}).(func()); ok && fn != nil {
+		fn()
+	}
+}
+
 type nodeConfigKey struct{}
 
 func withNodeConfigPath(ctx context.Context, path string) context.Context {

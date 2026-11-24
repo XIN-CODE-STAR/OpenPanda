@@ -35,6 +35,7 @@ import {
   isLoopbackURL,
   keyOf,
   labelOf,
+  lenderOf,
   refOf,
 } from './model-connections'
 
@@ -55,8 +56,12 @@ import {
  *    - 添加: one key, fetch the roster, tick the ids to register, one save.
  *      Several models of one account are the normal case, not five passes
  *      through the same form.
- *    - 编辑: the same sheet on a single row, with the endpoint, the limits and
- *      the tuning the row was configured with.
+ *    - 编辑: the same sheet on the whole connection. Every model that key can
+ *      ask for is one row; an existing row is rewritten in place, a new row is
+ *      appended to the same account, and a row dropped from the table goes
+ *      with the save. Editing one model used to open a one-row form while
+ *      appending guessed which account the new row belonged to — the table is
+ *      the account, so there is nothing left to guess.
  */
 
 /** What one connectivity test said. `ms` is the panel round trip, measured in
@@ -269,11 +274,11 @@ export function ModelsSection() {
     }
   }
 
-  /** 卡片的「编辑」落在连接上：拿这条账号里第一行注册过的模型开表，表里
-   *  既能改端点和密钥，也能在「更多模型」里继续给这个账号加型号。 */
-  function editConn(c: Conn) {
-    const e = c.members.find((m) => m.registry)?.entry ?? c.members[0]?.entry
-    if (e) setSheet({ kind: 'edit', entry: e, conn: c })
+  /** 卡片的「编辑」落在连接上：整条连接一起进表。一个账号下有几个型号、
+   *  端点与密钥是什么、哪一行要换掉，都是同一张表上的事——把其中一行单独
+   *  拎出来编辑，才让「加一行」看起来像在另一处创建卡片。 */
+  function editConn(c: Conn, focus?: ModelEntry) {
+    setSheet({ kind: 'edit', conn: c, focus: focus ? keyOf(focus) : undefined })
   }
 
   return (
@@ -341,7 +346,7 @@ export function ModelsSection() {
             providers={data.providers}
             onUse={(e) => void switchTo(e)}
             onTest={(e) => void test(e)}
-            onEdit={(e) => setSheet({ kind: 'edit', entry: e })}
+            onEdit={(e) => editConn(c, e)}
             onCopy={(m) => void copy(m)}
             onRemove={(m) => void remove(m)}
             onEditConn={editConn}
@@ -533,8 +538,9 @@ function ConnectionTile(props: {
  *  what this page is for. The alias is a name a person typed and can retype;
  *  the model id is what the request carries, so when the two differ both are
  *  printed — an account serving three ids under human names is exactly the case
- *  this page exists for. A test verdict rides on the same line, because it has
- *  to survive the pointer staying on the row that started the test.
+ *  this page exists for. A test verdict takes a third line of its own, because
+ *  it has to survive the pointer staying on the row that started the test —
+ *  and because inline it crowded the id into an ellipsis on a 220px card.
  *
  *  Four verbs on a 220px row would squeeze every name, so they take the right
  *  edge on hover and the name gives up just that much room — the row never
@@ -582,34 +588,39 @@ function ModelRow(props: {
         <span class="model-item-mark" aria-hidden="true" />
         <span class="model-item-text">
           <span class="model-item-name">{entry.alias}</span>
-          {(showId || testing || props.result) && (
+          {showId && (
             <span class="model-item-sub">
-              {showId && <span class="model-item-id mono">{entry.model}</span>}
-              {showId && (testing || props.result) && <span class="model-item-sep">·</span>}
-              {(testing || props.result) && (
-                <span
-                  class={`model-item-result ${testing ? 'testing' : verdict}`}
-                  role="status"
-                  title={
-                    !testing && props.result && !props.result.ok
-                      ? `${t('models.testFailed')} · ${props.result.detail}`
-                      : undefined
-                  }
-                >
-                  <Icon
-                    name={testing ? 'refresh' : verdict === 'ok' ? 'check' : 'alert'}
-                    size={11}
-                    class={testing ? 'model-tile-result-spin' : undefined}
-                  />
-                  <span>
-                    {testing
-                      ? t('models.testing')
-                      : props.result!.ok
-                        ? fmtMs(props.result!.ms)
-                        : t('models.testFailed')}
-                  </span>
-                </span>
-              )}
+              <span class="model-item-id mono">{entry.model}</span>
+            </span>
+          )}
+          {/* The verdict gets its own line under the id rather than trailing
+              it inline. The card is 220px wide: the id alone already fills
+              most of that line, so an inline verdict pushed the id into an
+              ellipsis and — with the row's old leftover rules winning — the
+              whole thing wrapped under the "in use" badge. A line of its own
+              keeps both readable and sits clear of the badge. */}
+          {(testing || props.result) && (
+            <span
+              class={`model-item-result ${testing ? 'testing' : verdict}`}
+              role="status"
+              title={
+                !testing && props.result && !props.result.ok
+                  ? `${t('models.testFailed')} · ${props.result.detail}`
+                  : undefined
+              }
+            >
+              <Icon
+                name={testing ? 'refresh' : verdict === 'ok' ? 'check' : 'alert'}
+                size={11}
+                class={testing ? 'model-tile-result-spin' : undefined}
+              />
+              <span>
+                {testing
+                  ? t('models.testing')
+                  : props.result!.ok
+                    ? fmtMs(props.result!.ms)
+                    : t('models.testFailed')}
+              </span>
             </span>
           )}
         </span>
@@ -701,16 +712,16 @@ function ModelRow(props: {
 
 // ---- the sheet ----
 
-/** What the sheet is opened on: a new connection, an existing one (adding more
- *  models to it), or one registered row. An edit opened from the card carries
- *  the connection so the sheet can call itself "edit connection" and show the
- *  account it belongs to rather than pretending to edit a single model row. */
+/** What the sheet is opened on: a new connection, or an existing one. Editing
+ *  is connection-scoped on purpose — the account is the unit a person
+ *  recognises, and its table is where "one more id on this key" belongs.
+ *  `focus` is the row the click came from, scrolled to on open. */
 type SheetTarget =
   | { kind: 'add'; conn?: Conn }
-  | { kind: 'edit'; entry: ModelEntry; conn?: Conn }
+  | { kind: 'edit'; conn: Conn; focus?: string }
 
 function sheetKey(s: SheetTarget): string {
-  return s.kind === 'edit' ? `edit:${keyOf(s.entry)}` : `add:${s.conn?.id ?? ''}`
+  return s.kind === 'edit' ? `edit:${s.conn.id}:${s.focus ?? ''}` : `add:${s.conn?.id ?? ''}`
 }
 
 /** The catalogue entry to open on: the one behind the row being edited, else
@@ -737,6 +748,14 @@ interface Draft {
   headers: string
   picked: boolean
   open: boolean
+  /** The registry row this draft rewrites. Absent = a new row to POST; present
+   *  = the row is PUT back in place, which is what keeps "edit" from minting a
+   *  second card for an account that already exists. */
+  src?: ModelEntry
+  /** A row of this connection the table is offering to delete. Kept visible
+   *  (dimmed, undoable) until the save, so dropping the wrong line is one
+   *  click back instead of a cancelled sheet. */
+  dropped?: boolean
 }
 
 let draftSeq = 1
@@ -761,7 +780,8 @@ function newDraft(model = '', picked = true): Draft {
 }
 
 /** An existing row as a draft. A zero limit means "the catalogue's answer",
- *  which is exactly what the row's auto flags encode. */
+ *  which is exactly what the row's auto flags encode. `src` is the row this
+ *  draft rewrites — the whole edit table is built out of these. */
 function draftOfEntry(e: ModelEntry): Draft {
   return {
     id: draftSeq++,
@@ -776,6 +796,7 @@ function draftOfEntry(e: ModelEntry): Draft {
     headers: '',
     picked: true,
     open: false,
+    src: e,
   }
 }
 
@@ -784,58 +805,59 @@ function draftOfEntry(e: ModelEntry): Draft {
  *  Two shapes share it. Adding is the multi-model pass — one row per model the
  *  user means to register, and every ticked row is one POST. The provider's
  *  roster feeds those rows' model fields as a picker; it never creates rows of
- *  its own (see fetchRemote). Editing is the same form on one row, where the
- *  endpoint is a *choice* rather than a typed URL: picking a vendor in the rail
- *  re-points the row at that plan's endpoint, which is the fix for a base URL
- *  pasted from a sibling plan's docs.
+ *  its own (see fetchRemote). Editing is the same table on the whole
+ *  connection, where the endpoint is a *choice* rather than a typed URL:
+ *  picking a vendor in the rail re-points every row at that plan's endpoint,
+ *  which is the fix for a base URL pasted from a sibling plan's docs.
  */
 function ModelSheet(props: {
   target: SheetTarget
   providers: ProviderInfo[]
   active: ModelEntry
   onClose(): void
-  onDone(r: { added?: number; switched?: string; edited?: boolean }): void
+  onDone(r: { added?: number; switched?: string; edited?: boolean; removed?: number }): void
 }) {
-  const editing = props.target.kind === 'edit' ? props.target.entry : null
+  const conn = props.target.kind === 'edit' ? props.target.conn : null
+  const focus = props.target.kind === 'edit' ? props.target.focus : undefined
   const pre = props.target.kind === 'add' ? props.target.conn : null
-  const connEditing = props.target.kind === 'edit' ? props.target.conn : null
   const initial = providerFor(
     props.providers,
-    editing?.provider ?? pre?.provider ?? props.active.provider,
+    conn?.provider ?? pre?.provider ?? props.active.provider,
   )
 
   const [provider, setProvider] = useState<ProviderInfo | null>(initial)
   const [apiKey, setApiKey] = useState('')
   const [showKey, setShowKey] = useState(false)
-  const [baseURL, setBaseURL] = useState(editing?.base_url ?? pre?.baseURL ?? '')
-  const [apiType, setApiType] = useState(editing?.api_type ?? pre?.apiType ?? initial?.api_type ?? 'openai')
+  const [baseURL, setBaseURL] = useState(conn?.baseURL ?? pre?.baseURL ?? '')
+  const [apiType, setApiType] = useState(conn?.apiType ?? pre?.apiType ?? initial?.api_type ?? 'openai')
   // Consent to reach a plain-http endpoint. Opens on what is stored: an edit
-  // that never mentions the field must not silently revoke a waiver the row
-  // was configured with.
-  const [allowPlaintext, setAllowPlaintext] = useState(!!editing?.allow_plaintext)
-  const [noAuth, setNoAuth] = useState(!!(editing?.no_auth ?? pre?.noAuth ?? initial?.no_auth))
+  // that never mentions the field must not silently revoke a waiver the rows
+  // were configured with.
+  const [allowPlaintext, setAllowPlaintext] = useState(!!conn?.allowPlaintext)
+  const [noAuth, setNoAuth] = useState(!!(conn?.noAuth ?? pre?.noAuth ?? initial?.no_auth))
   const [drafts, setDrafts] = useState<Draft[]>(() => {
-    if (editing) return [draftOfEntry(editing)]
+    // Editing opens on the connection's own table: one row per model that key
+    // can already ask for, in the same shape the add flow uses. The rows are
+    // the account — there is no separate "single model" form to land in.
+    if (conn) return conn.members.map((m) => draftOfEntry(m.entry))
     // Extending a connection starts with one blank row: the table would
     // otherwise open empty and read as a broken form.
     if (pre) return [newDraft()]
     return [newDraft(initial?.default_model ?? '')]
   })
   const [remote, setRemote] = useState<ModelRoster | null>(null)
-  /** Rows to register on this connection *while* editing it. Editing is a
-   *  one-row form by design, but the second thing anyone does to a working
-   *  relay is "same endpoint, same key, one more id" — and that used to mean
-   *  closing the sheet and walking the add flow from the top. These rows are
-   *  the add sheet's own table, appended below the form. */
-  const [extra, setExtra] = useState<Draft[]>([])
   const [useAfter, setUseAfter] = useState(false)
-  const [tuneOpen, setTuneOpen] = useState(false)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const box = useRef<HTMLDivElement>(null)
   useModalFocus(box, true)
 
-  const d = drafts[0]
+  // A row's pencil opens the whole table, so the row the click came from is
+  // scrolled into view: the sheet is tall and its table starts below the key.
+  useEffect(() => {
+    if (!focus) return
+    box.current?.querySelector<HTMLElement>('.draft-row.focus')?.scrollIntoView({ block: 'center' })
+  }, [focus])
 
   /** The endpoint the row would be written with: what is typed, else the
    *  catalogue's own. */
@@ -860,57 +882,65 @@ function ModelSheet(props: {
     setAllowPlaintext(false)
     setRemote(null)
     setError('')
-    // A provider switch starts a new model. Carrying the previous one's key,
-    // alias, or overrides across would submit them to a different endpoint.
-    // While editing, the alias is the row's identity and must survive a
-    // vendor change — otherwise "edit" silently renames the config.
+    // A provider switch starts a new account. Carrying the previous one's key
+    // or overrides across would submit them to a different endpoint. While
+    // editing, the model ids and aliases are the rows' identity and must
+    // survive — otherwise "edit" silently renames every row — but the tuning
+    // belongs to the catalogue being left behind, so it resets.
     setApiKey('')
     setShowKey(false)
-    setTuneOpen(false)
-    if (editing) {
-      const cur = drafts[0]!
-      setDrafts([
-        {
-          ...cur,
-          model: p.default_model,
-          context: 0,
-          maxTokens: 0,
-          thinking: 'auto',
-          budget: 0,
-          retries: 0,
-          params: '',
-          headers: '',
-        },
-      ])
-    } else {
-      setDrafts([newDraft(p.default_model)])
-    }
-    // Drafts appended to the previous connection belong to its endpoint and
-    // key; carrying them onto the new vendor would POST model ids nobody
-    // asked for here.
-    setExtra([])
+    setDrafts((cur) =>
+      conn
+        ? cur.map((d) => ({
+            ...d,
+            context: 0,
+            maxTokens: 0,
+            thinking: 'auto',
+            budget: 0,
+            retries: 0,
+            params: '',
+            headers: '',
+          }))
+        : [newDraft(p.default_model)],
+    )
   }
 
   function patch(id: number, p: Partial<Draft>) {
     setDrafts((cur) => cur.map((x) => (x.id === id ? { ...x, ...p } : x)))
   }
 
-  function patchExtra(id: number, p: Partial<Draft>) {
-    setExtra((cur) => cur.map((x) => (x.id === id ? { ...x, ...p } : x)))
-  }
-
   /** Append a row and bring it into view. The sheet is already scrolled to the
    *  form's bottom, so a row added under the fold would otherwise arrive
    *  invisible — the click would look like it did nothing. */
-  function addExtraRow() {
-    setExtra((cur) => [...cur, newDraft()])
+  function addRow() {
+    setDrafts((cur) => [...cur, newDraft()])
     requestAnimationFrame(() => {
       const pane = box.current?.querySelector<HTMLElement>('.wizard-pane')
       if (pane) pane.scrollTop = pane.scrollHeight
     })
   }
 
-  function requestFor(draft: Draft, borrowFrom?: string): AddModelRequest {
+  /** The table's trash. A new row simply leaves the table; a row that exists
+   *  in the registry is marked for deletion instead of vanishing, because the
+   *  write happens on save and an accidental click must be reversible. */
+  function dropRow(d: Draft) {
+    setDrafts((cur) =>
+      d.src
+        ? cur.map((x) => (x.id === d.id ? { ...x, dropped: !x.dropped } : x))
+        : cur.filter((x) => x.id !== d.id),
+    )
+  }
+
+  // The row a new row borrows this connection's key from — the rule lives in
+  // model-connections.ts so it is pinned by node --test (see lenderOf).
+  function lender(saved?: Map<number, string>) {
+    return lenderOf(drafts, saved)
+  }
+
+  function requestFor(
+    draft: Draft,
+    borrowFrom?: { alias: string; key?: string },
+  ): AddModelRequest {
     const p = provider!
     const req: AddModelRequest = {
       provider: p.id,
@@ -942,13 +972,22 @@ function ModelSheet(props: {
     // the same vendor is registered twice. A vendor picked from the rail is a
     // different account, so the borrow only stands while the vendor does.
     if (!apiKey.trim() && vendorSame) {
-      if (pre?.keySet) req.reuse_from = pre.members[0]?.entry.alias
-      // A row appended in the edit sheet has no key of its own either: the row
-      // being edited holds it, and borrowing by alias is what makes "one more
-      // model on this account" a one-field job. Only a connection that has a
-      // key can lend one, and the alias named here is the one in effect after
-      // this save — a rename in the same submit lands before the POSTs.
-      else if (editing && editing.key_set) req.reuse_from = borrowFrom ?? editing.alias
+      const preRow = pre?.keySet ? pre.members[0]?.entry : undefined
+      if (preRow) {
+        req.reuse_from = preRow.alias
+        if (preRow.key_fingerprint) req.reuse_from_key = preRow.key_fingerprint
+      }
+      // A new row in the edit table has no key of its own either: a row of
+      // this connection holds it, and borrowing by alias is what makes "one
+      // more model on this account" a one-field job. The fingerprint names
+      // the account, because the alias is shared by both of them.
+      else if (conn) {
+        const borrow = borrowFrom ?? lender()
+        if (borrow) {
+          req.reuse_from = borrow.alias
+          if (borrow.key) req.reuse_from_key = borrow.key
+        }
+      }
     }
     const params = parseJSON(draft.params)
     if (params) req.params = params
@@ -963,14 +1002,15 @@ function ModelSheet(props: {
     setError('')
     try {
       const base = currentBase()
+      const probe = conn?.members.find((m) => m.entry.key_set)?.entry ?? conn?.members[0]?.entry
       const r = await api.fetchModels({
         provider: provider.id,
-        model: drafts[0]?.model || provider.default_model,
+        model: drafts.find((d) => d.model.trim())?.model || provider.default_model,
         api_key: apiKey.trim() || undefined,
         // Name the row being edited. Two accounts of one vendor share the
         // provider id, and without the alias the server borrows whichever key
         // it finds first — probing the wrong account and reporting its health.
-        alias: editing?.alias,
+        alias: probe?.alias,
         ...(base !== provider.base_url || provider.id === 'custom'
           ? { base_url: base, api_type: apiType }
           : {}),
@@ -998,7 +1038,7 @@ function ModelSheet(props: {
     ev.preventDefault()
     if (!provider || busy) return
     setError('')
-    if (editing) {
+    if (conn) {
       await saveEdit()
       return
     }
@@ -1046,144 +1086,208 @@ function ModelSheet(props: {
     }
   }
 
+  /** 编辑连接 = 一次改多行。已有行原址 PUT，新行 POST 到同一条连接，表里
+   *  划掉的行最后 DELETE —— 顺序是有意的：新行借的密钥还在，删除不会先把
+   *  借主拿走。 */
   async function saveEdit() {
-    const row = drafts[0]
-    const src = editing
-    if (!row || !src || !row.model.trim()) return
-    let params: Record<string, unknown> | undefined
-    let headers: Record<string, string> | undefined
-    // The drafts behind the appended rows. The requests are built after the
-    // PUT, because the alias in effect then is what a borrowed key is keyed
-    // by; this pass only validates the overrides before anything is written.
-    let picked: Draft[] = []
+    const kept = drafts.filter((d) => d.src && !d.dropped)
+    const gone = drafts.filter((d) => d.src && d.dropped)
+    const fresh = drafts.filter((d) => !d.src && d.picked && d.model.trim() !== '')
+    if (kept.some((d) => d.model.trim() === '')) {
+      setError(t('models.modelIdRequired'))
+      return
+    }
+    if (kept.length + fresh.length === 0) {
+      setError(t('models.noneSelected'))
+      return
+    }
+    // Validate every row's escape hatches before the first write: a typo in
+    // row five must not leave rows one to four rewritten with no way to tell.
+    const requests: AddModelRequest[] = []
     try {
-      params = parseJSON(row.params)
-      headers = parseJSON(row.headers) as Record<string, string> | undefined
-      picked = extra.filter((x) => x.picked && x.model.trim() !== '')
-      picked.forEach((x) => requestFor(x))
+      for (const d of kept) editRequestFor(d)
+      for (const d of fresh) requests.push(requestFor(d))
     } catch {
       setError(t('models.badJSON'))
       return
     }
+    if (gone.length) {
+      const ok = await confirmDialog({
+        title: t('models.remove'),
+        message: t('models.removeRowsConfirm', { n: gone.length }),
+        confirmLabel: t('models.remove'),
+      })
+      if (!ok) return
+    }
     setBusy('save')
+    const savedAlias = new Map<number, string>()
     try {
-      const req: AddModelRequest = {
-        provider: provider!.id,
-        model: row.model.trim(),
-        alias: row.alias.trim() || undefined,
-        api_key: apiKey.trim() || undefined,
-        thinking: row.thinking,
-        no_auth: noAuth,
+      for (const d of kept) {
+        const saved = await api.updateModel(d.src!.alias, editRequestFor(d), refOf(d.src!))
+        savedAlias.set(d.id, saved.alias)
+        // A rename moved the row: the response names its new address, and a
+        // retry after a later row fails must PUT there, not at the old alias
+        // (which is now a 404 that strands every remaining row).
+        setDrafts((cur) => cur.map((x) => (x.id === d.id ? { ...x, src: saved, alias: saved.alias, model: saved.model } : x)))
       }
-      const base = currentBase()
-      if (base !== src.base_url) {
-        req.base_url = base
-        req.api_type = apiType
-      } else if (apiType !== src.api_type) {
-        req.api_type = apiType
-      }
-      // Only a plain-http endpoint can carry the waiver; stating it otherwise
-      // would put a meaningless flag on a row that speaks https.
-      if (needsPlaintextConsent(base)) req.allow_plaintext = allowPlaintext
-      // 0 means "put it back on the catalogue's answer" — sending nothing
-      // would mean "leave what is stored", which is a different instruction.
-      if (row.context > 0) req.context_window = row.context
-      else if (!src.context_auto) req.context_window_reset = true
-      if (row.maxTokens > 0) req.max_tokens = row.maxTokens
-      else if (!src.max_tokens_auto) req.max_tokens_reset = true
-      if (row.budget > 0) req.thinking_budget = row.budget
-      else if ((src.thinking_budget ?? 0) > 0) req.thinking_budget_reset = true
-      if (row.retries !== 0) req.max_retries = row.retries
-      else if ((src.max_retries ?? 0) !== 0) req.max_retries_reset = true
-      if (params) req.params = params
-      if (headers) req.headers = headers
-      await api.updateModel(src.alias, req, refOf(src))
     } catch (err) {
+      // A PUT rewrites in place, so a retry cannot mint a second row: keep the
+      // table as it is and let the user fix the field that was refused.
       setError(err instanceof Error ? err.message : String(err))
       setBusy('')
       return
     }
-    // The edit is committed; the appended rows are a second write. A failure
-    // there must not be reported as "nothing was saved" — say how many landed.
-    // The alias in effect after the edit is what a borrowed key is keyed by:
-    // a rename in this submit lands before these POSTs.
-    const effectiveAlias = row.alias.trim() || src.alias
-    let created = 0
+    // Build the POSTs now, after the renames landed: a new row borrowing the
+    // connection's key must name the alias the server actually allocated.
+    let addRequests: AddModelRequest[] = []
     try {
-      for (const r of picked) {
-        await api.addModel(requestFor(r, effectiveAlias))
-        created++
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      // Drop the rows that landed from the drafts: a retry would POST them
-      // again, and the backend allocates a free alias instead of refusing a
-      // duplicate model id.
-      if (created > 0) {
-        const done = new Set(picked.slice(0, created))
-        setExtra((cur) => cur.filter((x) => !done.has(x)))
-      }
-      setError(created > 0 ? t('models.addPartial', { n: created, error: msg }) : msg)
+      addRequests = fresh.map((d) => requestFor(d, lender(savedAlias)))
+    } catch {
+      setError(t('models.badJSON'))
       setBusy('')
       return
     }
-    props.onDone({ edited: true, added: created })
+    let added = 0
+    try {
+      for (let i = 0; i < addRequests.length; i++) {
+        const entry = await api.addModel(addRequests[i]!)
+        added++
+        // Adopt the row the registry just created. It is a saved row from
+        // now on: a later failure (the deletes below, a retry after any
+        // error) must PUT it, never POST it again — the backend allocates a
+        // free alias instead of refusing a duplicate, so a second POST shows
+        // up as `fresh-2` in the list.
+        const draftID = fresh[i]!.id
+        setDrafts((cur) => cur.map((x) => (x.id === draftID ? { ...x, src: entry, alias: entry.alias, model: entry.model } : x)))
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      // Rows that landed were adopted above, so a retry rewrites them in
+      // place and only the failed one is still a new row.
+      setError(added > 0 ? t('models.addPartial', { n: added, error: msg }) : msg)
+      setBusy('')
+      return
+    }
+    let removed = 0
+    try {
+      for (const d of gone) {
+        await api.removeModel(d.src!.alias, refOf(d.src!))
+        removed++
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      // A deleted row cannot be deleted again: drop the ones that went so a
+      // retry only addresses what is left.
+      if (removed > 0) {
+        const done = new Set(gone.slice(0, removed).map((d) => d.id))
+        setDrafts((cur) => cur.filter((d) => !done.has(d.id)))
+      }
+      setError(msg)
+      setBusy('')
+      return
+    }
+    props.onDone({ edited: true, added, removed })
   }
 
-  // A key already on file — the vendor's, the connection's or the edited
-  // row's own — is not a missing one: leaving the field blank keeps it. But a
-  // key belongs to the account it was typed for: pointing the row at another
-  // vendor invalidates it, unless that vendor already has a key on file or the
-  // two are sibling plans of one host (Zen and Go are one key). Saying "已存
-  // 密钥" across a vendor switch would promise a save the backend refuses.
-  const srcProvider = editing?.provider ?? pre?.provider ?? ''
+  /** 一条已有行在这次保存里要写成什么：没动过的字段不发，动过的按三态规则
+   *  发（0 = 回到目录默认）。`model` 与 `alias` 是行的身份，总是重述。 */
+  function editRequestFor(d: Draft): AddModelRequest {
+    const src = d.src!
+    const req: AddModelRequest = {
+      provider: provider!.id,
+      model: d.model.trim(),
+      alias: d.alias.trim() || undefined,
+      api_key: apiKey.trim() || undefined,
+      thinking: d.thinking,
+      no_auth: noAuth,
+    }
+    const base = currentBase()
+    if (base !== src.base_url) {
+      req.base_url = base
+      req.api_type = apiType
+    } else if (apiType !== src.api_type) {
+      req.api_type = apiType
+    }
+    // Only a plain-http endpoint can carry the waiver; stating it otherwise
+    // would put a meaningless flag on a row that speaks https.
+    if (needsPlaintextConsent(base)) req.allow_plaintext = allowPlaintext
+    // 0 means "put it back on the catalogue's answer" — sending nothing
+    // would mean "leave what is stored", which is a different instruction.
+    if (d.context > 0) req.context_window = d.context
+    else if (!src.context_auto) req.context_window_reset = true
+    if (d.maxTokens > 0) req.max_tokens = d.maxTokens
+    else if (!src.max_tokens_auto) req.max_tokens_reset = true
+    if (d.budget > 0) req.thinking_budget = d.budget
+    else if ((src.thinking_budget ?? 0) > 0) req.thinking_budget_reset = true
+    if (d.retries !== 0) req.max_retries = d.retries
+    else if ((src.max_retries ?? 0) !== 0) req.max_retries_reset = true
+    const params = parseJSON(d.params)
+    if (params) req.params = params
+    const headers = parseJSON(d.headers)
+    if (headers) req.headers = headers as Record<string, string>
+    return req
+  }
+
+  // A key already on file — the vendor's, the connection's or a row's own —
+  // is not a missing one: leaving the field blank keeps it. But a key belongs
+  // to the account it was typed for: pointing the rows at another vendor
+  // invalidates it, unless that vendor already has a key on file or the two
+  // are sibling plans of one host (Zen and Go are one key). Saying "已存密钥"
+  // across a vendor switch would promise a save the backend refuses.
+  const srcProvider = conn?.provider ?? pre?.provider ?? ''
   const vendorSame = srcProvider === '' || provider?.id === srcProvider
+  /** The row whose credential the form is talking about: the first one with a
+   *  key, else the first that signs in some other way (a subscription login).
+   *  The connection groups by key, so every member carries the same one. */
+  const keyRow =
+    conn?.members.find((m) => m.entry.key_set)?.entry ??
+    conn?.members.find((m) => m.entry.auth)?.entry
   const sameHost =
-    editing !== null &&
-    hostOf(editing.base_url) !== '' &&
-    hostOf(editing.base_url) === hostOf(provider?.base_url ?? '')
-  const keyOnFile = editing
-    ? editing.key_set && (vendorSame || (provider?.key_saved ?? false) || sameHost)
+    keyRow !== undefined &&
+    hostOf(keyRow.base_url) !== '' &&
+    hostOf(keyRow.base_url) === hostOf(provider?.base_url ?? '')
+  const keyOnFile = conn
+    ? keyRow !== undefined && (vendorSame || (provider?.key_saved ?? false) || sameHost)
     : pre
       ? (pre.keySet && vendorSame) || (provider?.key_saved ?? false)
       : (provider?.key_saved ?? false)
   const needsKey = provider !== null && !provider.no_auth && !noAuth && !keyOnFile
   const keyReady = !needsKey || apiKey.trim() !== ''
-  const pickedCount = drafts.filter((x) => x.picked && x.model.trim() !== '').length
-  /** Appended rows that actually carry a model id — the count the button and
-   *  the toast both speak in. The tick is honoured here too: unticking a row
+  /** New rows that actually carry a model id — the count the button and the
+   *  toast both speak in. The tick is honoured here too: unticking a row
    *  means "not this one", which is the only reason the box exists. */
-  const extraCount = extra.filter((x) => x.picked && x.model.trim() !== '').length
+  const pickedCount = drafts.filter((x) => !x.src && x.picked && x.model.trim() !== '').length
+  const keptRows = drafts.filter((x) => x.src && !x.dropped)
+  const freshRows = drafts.filter((x) => !x.src && x.picked && x.model.trim() !== '')
   const baseReady = provider !== null && (provider.id !== 'custom' || currentBase() !== '')
-  const canSubmit = provider !== null && baseReady && keyReady && (editing ? drafts[0]!.model.trim() !== '' : pickedCount > 0)
+  const rowsReady = conn
+    ? keptRows.length + freshRows.length > 0 && keptRows.every((x) => x.model.trim() !== '')
+    : pickedCount > 0
+  const canSubmit = provider !== null && baseReady && keyReady && rowsReady
 
-  const title = editing
-    ? connEditing
-      ? t('models.editConnection')
-      : t('models.editModel')
+  const title = conn
+    ? t('models.editConnection')
     : pre
       ? t('models.addModelTitle')
       : t('models.addConnection')
-  const subtitle = editing
-    ? connEditing
-      ? `${connEditing.providerLabel || t('models.customProvider')} · ${connEditing.baseURL || t('models.customEndpoint')}`
-      : t('models.editModelSub')
+  const subtitle = conn
+    ? `${conn.providerLabel || t('models.customProvider')} · ${conn.baseURL || t('models.customEndpoint')}`
     : pre
       ? `${pre.providerLabel || t('models.customProvider')} · ${pre.baseURL || t('models.customEndpoint')}`
       : t('models.pickProviderShort')
 
-  const keyPlaceholder = editing
-    ? editing.auth
+  const keyPlaceholder = conn
+    ? keyRow?.auth
       ? t('models.authLogin')
       : keyOnFile
-        ? `${t('models.apiKeySet')} ${editing.key_hint ?? ''}`.trim()
+        ? `${t('models.apiKeySet')} ${keyRow?.key_hint ?? ''}`.trim()
         : 'sk-…'
     : pre?.keySet && vendorSame
       ? t('models.keyReuseConn')
       : provider?.key_saved
         ? t('models.keyReuseHint')
         : 'sk-…'
-  const keyHelp = editing
+  const keyHelp = conn
     ? keyOnFile
       ? t('models.keyEmptyKeep')
       : t('models.keyHelp')
@@ -1193,40 +1297,11 @@ function ModelSheet(props: {
         ? t('models.keyReuseHelp')
         : t('models.keyHelp')
 
-  const tuneCount = d
-    ? [
-        d.context > 0,
-        d.maxTokens > 0,
-        d.thinking !== 'auto',
-        d.budget > 0,
-        d.retries !== 0,
-        d.params.trim() !== '',
-        d.headers.trim() !== '',
-      ].filter(Boolean).length
-    : 0
-  const paramsState = jsonState(d?.params ?? '')
-  const headersState = jsonState(d?.headers ?? '')
-
+  const warned = conn?.members.find((m) => m.entry.warning_code === 'endpoint-owner')
   const ownerOffer =
-    editing?.warning_code === 'endpoint-owner'
-      ? props.providers.find((p) => p.id === editing.warning_arg && p.id !== provider?.id)
+    warned?.entry.warning_arg
+      ? props.providers.find((p) => p.id === warned.entry.warning_arg && p.id !== provider?.id)
       : undefined
-
-  /** The tuning block opens below the fold on a short sheet: bring it up so
-   *  the fields it just revealed are the ones in view. */
-  function toggleTune() {
-    const next = !tuneOpen
-    setTuneOpen(next)
-    if (!next) return
-    requestAnimationFrame(() => {
-      const pane = box.current?.querySelector<HTMLElement>('.wizard-pane')
-      const tune = box.current?.querySelector<HTMLElement>('.tune')
-      if (!pane || !tune) return
-      const outer = pane.getBoundingClientRect()
-      const inner = tune.getBoundingClientRect()
-      if (inner.bottom > outer.bottom) pane.scrollTop += inner.bottom - outer.bottom + 12
-    })
-  }
 
   // Only reachable when the catalogue itself is empty (a broken install):
   // every normal open lands on a provider, so the pane is never blank.
@@ -1250,7 +1325,7 @@ function ModelSheet(props: {
     <div class="modal-backdrop" onClick={(e) => e.target === e.currentTarget && props.onClose()}>
       <div
         ref={box}
-        class={`modal wizard-modal${editing ? '' : ' wizard-roomy'}`}
+        class="modal wizard-modal wizard-roomy"
         role="dialog"
         aria-modal="true"
         aria-labelledby="model-sheet-title"
@@ -1429,289 +1504,44 @@ function ModelSheet(props: {
                 </>
               )}
 
-              {editing && d ? (
-                <>
-                  <div class="wizard-field">
-                    <div class="wizard-label-row">
-                      <label for="ms-model">{t('models.col.model')}</label>
-                      <button
-                        type="button"
-                        class="wizard-fetch"
-                        disabled={busy !== ''}
-                        onClick={fetchRemote}
-                      >
-                        <Icon name="refresh" size={13} />
-                        {busy === 'fetch' ? t('models.fetching') : t('models.fetch')}
-                      </button>
-                    </div>
-                    <ModelPicker
-                      id="ms-model"
-                      value={d.model}
-                      onValue={(v) => patch(d.id, { model: v, alias: d.alias === d.model ? v : d.alias })}
-                      options={remote?.ids ?? []}
-                      owners={remote?.owners}
-                      placeholder={provider.default_model || 'model-id'}
-                      required
-                    />
-                    <p class="wizard-help">
-                      {remote
-                        ? t('models.fetched', { n: remote.ids.length })
-                        : t('models.modelHelp')}
-                    </p>
-                  </div>
+              <div class="models-table-head">
+                <div class="section-title">{t('models.list')}</div>
+                <div class="models-table-actions">
+                  <button
+                    type="button"
+                    class="btn small"
+                    disabled={busy !== ''}
+                    onClick={fetchRemote}
+                  >
+                    <Icon name="download" size={14} />
+                    {busy === 'fetch' ? t('models.fetching') : t('models.fetch')}
+                  </button>
+                  <button type="button" class="btn small" onClick={addRow}>
+                    <Icon name="plus" size={14} />
+                    {t('models.manualAdd')}
+                  </button>
+                </div>
+              </div>
+              {remote && <p class="hint">{t('models.fetched', { n: remote.ids.length })}</p>}
 
-                  <div class="wizard-grid solo">
-                    <div class="wizard-field">
-                      <label for="ms-alias">{t('models.col.alias')}</label>
-                      <input
-                        id="ms-alias"
-                        class="input mono"
-                        value={d.alias}
-                        onInput={(e) => patch(d.id, { alias: (e.target as HTMLInputElement).value })}
-                        placeholder={d.model || t('models.aliasAuto')}
-                      />
-                      <p class="wizard-help">{t('models.aliasHelp')}</p>
-                    </div>
-                  </div>
-
-                  <section class={`tune${tuneOpen ? ' open' : ''}`}>
-                    <button
-                      type="button"
-                      class="tune-head"
-                      aria-expanded={tuneOpen}
-                      aria-controls="ms-tune"
-                      onClick={toggleTune}
-                    >
-                      <span class="tune-chevron" aria-hidden="true">
-                        <Icon name="chevron-right" size={14} />
-                      </span>
-                      <span class="tune-head-text">
-                        <span class="tune-title">{t('models.advanced')}</span>
-                        <span class="tune-desc">{t('models.advancedHelp')}</span>
-                      </span>
-                      <span class={`tune-count${tuneCount > 0 ? ' dirty' : ''}`}>
-                        {tuneCount > 0
-                          ? t('models.tuneCount', { n: tuneCount })
-                          : t('models.tuneDefault')}
-                      </span>
-                    </button>
-
-                    {tuneOpen && (
-                      <div class="tune-body" id="ms-tune">
-                        <div class="tune-group">
-                          <div class="tune-group-title">{t('models.group.capacity')}</div>
-                          <div class="tune-grid">
-                            <div class="tune-field">
-                              <label class="tune-label" for="ms-max">
-                                {t('models.maxTokens')}
-                              </label>
-                              <LimitInput
-                                id="ms-max"
-                                value={d.maxTokens}
-                                autoValue={editing.auto_max_tokens}
-                                onChange={(v) => patch(d.id, { maxTokens: v })}
-                              />
-                            </div>
-                            <div class="tune-field">
-                              <label class="tune-label" for="ms-ctx">
-                                {t('models.contextWindow')}
-                              </label>
-                              <LimitInput
-                                id="ms-ctx"
-                                value={d.context}
-                                autoValue={editing.auto_context_window}
-                                onChange={(v) => patch(d.id, { context: v })}
-                              />
-                            </div>
-                          </div>
-                          <p class="tune-help">{t('models.capacityHelp')}</p>
-                        </div>
-
-                        <div class="tune-group">
-                          <div class="tune-group-title">{t('models.group.reasoning')}</div>
-                          <div class="tune-grid">
-                            <div class="tune-field">
-                              <span class="tune-label">{t('models.thinking')}</span>
-                              <div class="segmented" role="radiogroup" aria-label={t('models.thinking')}>
-                                {(['auto', 'on', 'off'] as const).map((v) => (
-                                  <button
-                                    key={v}
-                                    type="button"
-                                    role="radio"
-                                    aria-checked={d.thinking === v}
-                                    class={`seg${d.thinking === v ? ' on' : ''}`}
-                                    onClick={() => patch(d.id, { thinking: v })}
-                                  >
-                                    {t(`models.thinking.${v}`)}
-                                  </button>
-                                ))}
-                              </div>
-                            </div>
-                            <div class="tune-field">
-                              <label class="tune-label" for="ms-budget">
-                                {t('models.thinkingBudget')}
-                              </label>
-                              <LimitInput
-                                id="ms-budget"
-                                value={d.budget}
-                                onChange={(v) => patch(d.id, { budget: v })}
-                              />
-                              {d.thinking === 'off' && <p class="tune-help">{t('models.budgetOff')}</p>}
-                            </div>
-                          </div>
-                        </div>
-
-                        <div class="tune-group">
-                          <div class="tune-group-title">{t('models.group.request')}</div>
-                          <div class="tune-grid solo">
-                            <div class="tune-field">
-                              <label class="tune-label" for="ms-retries">
-                                {t('models.maxRetries')}
-                              </label>
-                              <input
-                                id="ms-retries"
-                                class="input"
-                                type="number"
-                                min={-1}
-                                value={d.retries !== 0 ? String(d.retries) : ''}
-                                placeholder="0"
-                                onInput={(e) =>
-                                  patch(d.id, {
-                                    retries: Number((e.target as HTMLInputElement).value) || 0,
-                                  })
-                                }
-                              />
-                              <p class="tune-help">{t('models.maxRetriesHelp')}</p>
-                            </div>
-                          </div>
-                        </div>
-
-                        <div class="tune-group">
-                          <div class="tune-group-title">{t('models.group.overrides')}</div>
-                          <div class="tune-field">
-                            <div class="tune-json-head">
-                              <label class="tune-label" for="ms-params">
-                                {t('models.params')}
-                              </label>
-                              <JsonState state={paramsState} />
-                            </div>
-                            <textarea
-                              id="ms-params"
-                              class="input mono tune-json"
-                              rows={2}
-                              value={d.params}
-                              aria-invalid={paramsState === 'bad'}
-                              onInput={(e) =>
-                                patch(d.id, { params: (e.target as HTMLTextAreaElement).value })
-                              }
-                              placeholder='{"temperature": 0.7}'
-                            />
-                            <p class="tune-help">{t('models.paramsHelp')}</p>
-                          </div>
-                          <div class="tune-field">
-                            <div class="tune-json-head">
-                              <label class="tune-label" for="ms-headers">
-                                {t('models.headers')}
-                              </label>
-                              <JsonState state={headersState} />
-                            </div>
-                            <textarea
-                              id="ms-headers"
-                              class="input mono tune-json"
-                              rows={2}
-                              value={d.headers}
-                              aria-invalid={headersState === 'bad'}
-                              onInput={(e) =>
-                                patch(d.id, { headers: (e.target as HTMLTextAreaElement).value })
-                              }
-                              placeholder='{"X-Tenant": "blue"}'
-                            />
-                            <p class="tune-help">{t('models.headersHelp')}</p>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                  </section>
-
-                  {/* The add sheet's table, appended to the edit form: same
-                      endpoint, same key, one more id is the second thing
-                      anyone does to a relay that works, and it used to mean
-                      closing this sheet and walking the add flow from the
-                      top. Rows here are POSTs on save; the row above is the
-                      PUT and keeps its alias. */}
-                  <div class="models-table-head">
-                    <div class="section-title">{t('models.moreOnConn')}</div>
-                    <div class="models-table-actions">
-                      <button type="button" class="btn small" onClick={addExtraRow}>
-                        <Icon name="plus" size={14} />
-                        {t('models.manualAdd')}
-                      </button>
-                    </div>
-                  </div>
-                  {extra.length === 0 ? (
-                    <p class="wizard-help">{t('models.moreOnConnHelp')}</p>
-                  ) : (
-                    <div class="models-table">
-                      {extra.length > 1 && <DraftHead />}
-                      {extra.map((draft) => (
-                        <DraftRow
-                          key={draft.id}
-                          d={draft}
-                          remote={remote}
-                          bare={extra.length > 1}
-                          onPatch={(p) => patchExtra(draft.id, p)}
-                          onDrop={() => setExtra((cur) => cur.filter((x) => x.id !== draft.id))}
-                        />
-                      ))}
-                    </div>
-                  )}
-                </>
-              ) : (
-                <>
-                  <div class="models-table-head">
-                    <div class="section-title">{t('models.list')}</div>
-                    <div class="models-table-actions">
-                      <button
-                        type="button"
-                        class="btn small"
-                        disabled={busy !== ''}
-                        onClick={fetchRemote}
-                      >
-                        <Icon name="download" size={14} />
-                        {busy === 'fetch' ? t('models.fetching') : t('models.fetch')}
-                      </button>
-                      <button
-                        type="button"
-                        class="btn small"
-                        onClick={() => setDrafts((cur) => [...cur, newDraft()])}
-                      >
-                        <Icon name="plus" size={14} />
-                        {t('models.manualAdd')}
-                      </button>
-                    </div>
-                  </div>
-                  {remote && (
-                    <p class="hint">{t('models.fetched', { n: remote.ids.length })}</p>
-                  )}
-
-                  <div class="models-table">
-                    {drafts.length > 1 && <DraftHead />}
-                    {drafts.map((draft) => (
-                      <DraftRow
-                        key={draft.id}
-                        d={draft}
-                        remote={remote}
-                        // One header above the table beats a header per row:
-                        // five fetched models were five copies of the same
-                        // four labels.
-                        bare={drafts.length > 1}
-                        onPatch={(p) => patch(draft.id, p)}
-                        onDrop={() => setDrafts((cur) => cur.filter((x) => x.id !== draft.id))}
-                      />
-                    ))}
-                  </div>
-                </>
-              )}
+              {/* 一张表就是一条连接：已有行原址改写，新行挂到同一把密钥下，
+                  划掉的行随保存删除。加一行不再需要猜它会落到哪张卡。 */}
+              <div class="models-table">
+                {drafts.length > 1 && <DraftHead />}
+                {drafts.map((draft) => (
+                  <DraftRow
+                    key={draft.id}
+                    d={draft}
+                    remote={remote}
+                    // One header above the table beats a header per row: five
+                    // fetched models were five copies of the same four labels.
+                    bare={drafts.length > 1}
+                    focus={!!draft.src && keyOf(draft.src) === focus}
+                    onPatch={(p) => patch(draft.id, p)}
+                    onDrop={() => dropRow(draft)}
+                  />
+                ))}
+              </div>
 
               {error && (
                 <p class="form-alert" role="alert">
@@ -1723,7 +1553,7 @@ function ModelSheet(props: {
           </div>
 
           <footer class="wizard-foot">
-            {editing ? (
+            {conn ? (
               <span class="wizard-foot-note">
                 {!busy && !keyReady ? t('models.keyRequired') : ''}
               </span>
@@ -1742,12 +1572,12 @@ function ModelSheet(props: {
             </button>
             <button type="submit" class="btn primary" disabled={!canSubmit || busy !== ''}>
               {busy === 'save'
-                ? editing
+                ? conn
                   ? '…'
                   : t('models.adding')
-                : editing
-                  ? extraCount > 0
-                    ? t('models.saveAndAdd', { n: extraCount })
+                : conn
+                  ? freshRows.length > 0
+                    ? t('models.saveAndAdd', { n: freshRows.length })
                     : t('common.save')
                   : pickedCount > 0
                     ? t('models.addConfirmN', { n: pickedCount })
@@ -1848,27 +1678,41 @@ function DraftHead() {
 }
 
 /** One draft as a row of the multi-model table: id, alias, context, thinking,
- *  and the tuning block behind a disclosure. */
+ *  and the tuning block behind a disclosure.
+ *
+ *  A row that already exists in the registry carries no tick — "register this
+ *  one" is meaningless for a row that is registered — and its trash marks it
+ *  for deletion instead of dropping it, because the delete happens with the
+ *  save. A row dropped that way stays visible, dimmed, with an undo. */
 function DraftRow(props: {
   d: Draft
   remote: ModelRoster | null
   /** The table above carries the column names; keep the labels for screen
    *  readers but out of the visual flow. */
   bare?: boolean
+  /** The row the sheet was opened from: scrolled to and ringed on open. */
+  focus?: boolean
   onPatch(p: Partial<Draft>): void
   onDrop(): void
 }) {
   const { d } = props
+  const locked = !!d.dropped
   return (
-    <div class={`draft-row${d.picked ? ' picked' : ''}${props.bare ? ' bare' : ''}`}>
+    <div
+      class={`draft-row${d.picked ? ' picked' : ''}${props.bare ? ' bare' : ''}${d.src ? ' existing' : ''}${locked ? ' dropped' : ''}${props.focus ? ' focus' : ''}`}
+    >
       <div class="draft-main">
-        <input
-          type="checkbox"
-          class="draft-check"
-          checked={d.picked}
-          aria-label={t('models.col.pick')}
-          onChange={(e) => props.onPatch({ picked: (e.target as HTMLInputElement).checked })}
-        />
+        {d.src ? (
+          <span class="draft-check-space" aria-hidden="true" />
+        ) : (
+          <input
+            type="checkbox"
+            class="draft-check"
+            checked={d.picked}
+            aria-label={t('models.col.pick')}
+            onChange={(e) => props.onPatch({ picked: (e.target as HTMLInputElement).checked })}
+          />
+        )}
         <div class="draft-fields">
           <div class="draft-fields-row">
             <div class="field-group">
@@ -1879,7 +1723,9 @@ function DraftRow(props: {
                 options={props.remote?.ids ?? []}
                 owners={props.remote?.owners}
                 placeholder="model-id"
+                disabled={locked}
               />
+              {locked && <p class="hint draft-drop-note">{t('models.removeOnSave')}</p>}
             </div>
             <div class="field-group">
               <label>{t('models.col.alias')}</label>
@@ -1887,12 +1733,18 @@ function DraftRow(props: {
                 class="input mono"
                 value={d.alias}
                 placeholder={d.model || t('models.aliasAuto')}
+                disabled={locked}
                 onInput={(e) => props.onPatch({ alias: (e.target as HTMLInputElement).value })}
               />
             </div>
             <div class="field-group narrow">
               <label>{t('models.col.context')}</label>
-              <LimitInput value={d.context} onChange={(v) => props.onPatch({ context: v })} />
+              <LimitInput
+                value={d.context}
+                autoValue={d.src?.auto_context_window}
+                disabled={locked}
+                onChange={(v) => props.onPatch({ context: v })}
+              />
             </div>
             <div class="field-group narrow">
               <label>{t('models.col.thinking')}</label>
@@ -1904,21 +1756,23 @@ function DraftRow(props: {
                 }))}
                 onChange={(v) => props.onPatch({ thinking: v as Draft['thinking'] })}
                 ariaLabel={t('models.col.thinking')}
+                disabled={locked}
               />
             </div>
             <button
               type="button"
               class="btn small ghost icon-btn"
-              aria-label={t('models.remove')}
-              title={t('models.remove')}
+              aria-label={locked ? t('models.undoRemove') : t('models.remove')}
+              title={locked ? t('models.undoRemove') : t('models.remove')}
               onClick={props.onDrop}
             >
-              <Icon name="trash" size={14} />
+              <Icon name={locked ? 'refresh' : 'trash'} size={14} />
             </button>
           </div>
           <button
             type="button"
             class="draft-advanced-toggle"
+            disabled={locked}
             onClick={() => props.onPatch({ open: !d.open })}
           >
             {d.open ? '▾' : '▸'} {t('models.advancedTuning')}
@@ -1928,12 +1782,21 @@ function DraftRow(props: {
               <div class="draft-grid cols-3">
                 <div class="field-group">
                   <label>{t('models.maxTokens')}</label>
-                  <LimitInput value={d.maxTokens} onChange={(v) => props.onPatch({ maxTokens: v })} />
+                  <LimitInput
+                    value={d.maxTokens}
+                    autoValue={d.src?.auto_max_tokens}
+                    disabled={locked}
+                    onChange={(v) => props.onPatch({ maxTokens: v })}
+                  />
                   <p class="hint">{t('models.maxTokensHelp')}</p>
                 </div>
                 <div class="field-group">
                   <label>{t('models.thinkingBudget')}</label>
-                  <LimitInput value={d.budget} onChange={(v) => props.onPatch({ budget: v })} />
+                  <LimitInput
+                    value={d.budget}
+                    disabled={locked}
+                    onChange={(v) => props.onPatch({ budget: v })}
+                  />
                 </div>
                 <div class="field-group">
                   <label>{t('models.maxRetries')}</label>
@@ -1943,6 +1806,7 @@ function DraftRow(props: {
                     min={-1}
                     value={d.retries !== 0 ? String(d.retries) : ''}
                     placeholder="0"
+                    disabled={locked}
                     onInput={(e) =>
                       props.onPatch({ retries: Number((e.target as HTMLInputElement).value) || 0 })
                     }
@@ -1957,6 +1821,7 @@ function DraftRow(props: {
                     class="input mono"
                     value={d.params}
                     placeholder='{"temperature":0.7}'
+                    disabled={locked}
                     onInput={(e) => props.onPatch({ params: (e.target as HTMLInputElement).value })}
                   />
                 </div>
@@ -1966,6 +1831,7 @@ function DraftRow(props: {
                     class="input mono"
                     value={d.headers}
                     placeholder='{"X-Tenant":"blue"}'
+                    disabled={locked}
                     onInput={(e) => props.onPatch({ headers: (e.target as HTMLInputElement).value })}
                   />
                 </div>
@@ -1985,6 +1851,7 @@ function LimitInput(props: {
   id?: string
   value: number
   autoValue?: number
+  disabled?: boolean
   onChange(v: number): void
 }) {
   return (
@@ -1993,35 +1860,13 @@ function LimitInput(props: {
       class="input"
       type="number"
       min={0}
+      disabled={props.disabled}
       value={props.value > 0 ? String(props.value) : ''}
       placeholder={
         props.autoValue ? t('models.autoPlaceholder', { value: fmtTokens(props.autoValue) }) : t('models.auto')
       }
       onInput={(e) => props.onChange(Number((e.target as HTMLInputElement).value) || 0)}
     />
-  )
-}
-
-/** Live JSON-object check for the two override fields: `empty` keeps the
- *  field quiet, `bad` is shown inline instead of only on submit. */
-function jsonState(v: string): 'empty' | 'ok' | 'bad' {
-  if (!v.trim()) return 'empty'
-  try {
-    const o = JSON.parse(v) as unknown
-    return typeof o === 'object' && o !== null && !Array.isArray(o) ? 'ok' : 'bad'
-  } catch {
-    return 'bad'
-  }
-}
-
-function JsonState(props: { state: 'empty' | 'ok' | 'bad' }) {
-  if (props.state === 'empty') return null
-  const ok = props.state === 'ok'
-  return (
-    <span class={`tune-status ${ok ? 'ok' : 'bad'}`}>
-      <Icon name={ok ? 'check' : 'alert'} size={12} />
-      {t(ok ? 'models.validJSON' : 'models.invalidJSON')}
-    </span>
   )
 }
 

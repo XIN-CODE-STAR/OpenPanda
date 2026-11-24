@@ -149,3 +149,67 @@ func TestUpdateModelSectionPersistsProviderAndName(t *testing.T) {
 		t.Errorf("model.max_tokens = %d, want 8192", cfg.Model.MaxTokens)
 	}
 }
+
+// TestUpdateModelSectionCarriesCredentialReferences: the live section is the
+// row the daemon dials, so a switch has to write the credential's form — and
+// clear the form it left behind. Writing only api_key kept A's key_env in the
+// file after switching to B (the YAML still named the account just left), and
+// dropped key_scheme from a Bearer row (the token came back on the dialect
+// default header and 401'd).
+func TestUpdateModelSectionCarriesCredentialReferences(t *testing.T) {
+	p := writeTemp(t, `node:
+  name: "n"
+`)
+	off := false
+	env := ModelConfig{
+		Name: "b", Provider: "custom", APIType: "anthropic",
+		BaseURL: "https://relay.example/v1", Model: "m", KeyEnv: "B_KEY",
+		KeyScheme: "bearer", AllowPlaintext: true, OfflineWait: &off,
+	}
+	if err := UpdateModelSection(p, env); err != nil {
+		t.Fatalf("UpdateModelSection: %v", err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Model.KeyEnv != "B_KEY" {
+		t.Errorf("model.key_env = %q, want B_KEY", cfg.Model.KeyEnv)
+	}
+	if cfg.Model.KeyScheme != "bearer" {
+		t.Errorf("model.key_scheme = %q, want bearer", cfg.Model.KeyScheme)
+	}
+	if !cfg.Model.AllowPlaintext {
+		t.Error("model.allow_plaintext was dropped")
+	}
+	if cfg.Model.OfflineWait == nil || *cfg.Model.OfflineWait {
+		t.Errorf("model.offline_wait = %v, want an explicit false", cfg.Model.OfflineWait)
+	}
+
+	// A literal-key row replaces the reference entirely: leaving key_env
+	// behind would keep the old account's variable in the live section.
+	inline := ModelConfig{
+		Name: "b", Provider: "custom", APIType: "anthropic",
+		BaseURL: "https://relay.example/v1", Model: "m", APIKey: "sk-b",
+		KeyScheme: "bearer",
+	}
+	if err := UpdateModelSection(p, inline); err != nil {
+		t.Fatalf("UpdateModelSection inline: %v", err)
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, gone := range []string{"key_env", "key_ref", "allow_plaintext", "offline_wait"} {
+		if strings.Contains(string(data), gone) {
+			t.Errorf("%s survived a switch to a literal key:/n%s", gone, data)
+		}
+	}
+	cfg, err = Load(p)
+	if err != nil {
+		t.Fatalf("Load inline: %v", err)
+	}
+	if cfg.Model.APIKey != "sk-b" || cfg.Model.KeyScheme != "bearer" {
+		t.Errorf("inline row = key %q scheme %q", cfg.Model.APIKey, cfg.Model.KeyScheme)
+	}
+}

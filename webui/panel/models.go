@@ -292,6 +292,12 @@ type addModelRequest struct {
 	// on file for this provider" is ambiguous — the caller says which row it
 	// is extending instead of letting the server guess.
 	ReuseFrom string `json:"reuse_from,omitempty"`
+	// ReuseFromKey narrows ReuseFrom the way the list addresses a row: the
+	// key_fingerprint of the account being extended. An alias alone resolves
+	// to the first row carrying it, so replacing B's models while A holds the
+	// same alias saved the new rows with A's credential. Empty keeps the old
+	// alias-only behaviour for an older console.
+	ReuseFromKey string `json:"reuse_from_key,omitempty"`
 	// Custom fields — used when provider == "custom": the catalogue carries
 	// no endpoint for it, so the caller supplies the wire shape explicitly.
 	// A known provider may carry them too: a self-hosted or relay endpoint
@@ -338,11 +344,16 @@ type addModelRequest struct {
 // first match duplicated the other one's credential — the copy then could not
 // authenticate. An empty key keeps the old first-match behaviour, which is
 // what an older console sends.
+//
+// The digest is over fingerprintSource, not APIKey: a key_ref/key_env row has
+// no literal key, and the list signs the reference it does carry. Hashing the
+// empty APIKey here made every valid fingerprint from those rows address
+// nothing.
 func (h *handler) modelByRef(alias, key string) (config.ModelConfig, bool) {
 	var out config.ModelConfig
 	found := false
 	match := func(m config.ModelConfig) bool {
-		return m.Alias() == alias && (key == "" || keyFingerprint(m.APIKey) == key)
+		return m.Alias() == alias && (key == "" || keyFingerprint(fingerprintSource(m)) == key)
 	}
 	h.readCfg(func(c *config.Config) {
 		for _, m := range c.Models {
@@ -360,10 +371,14 @@ func (h *handler) modelByRef(alias, key string) (config.ModelConfig, bool) {
 
 // modelFromRequest builds the ModelConfig a request describes. existingKey is
 // the key already stored on the row being rewritten (empty on create); the
-// request's own key wins over it. The returned config has no Name — callers
-// resolve the alias inside the mutation lock, where uniqueness can be
-// enforced against the live registry.
-func (h *handler) modelFromRequest(req addModelRequest, existingKey string) (config.ModelConfig, error) {
+// request's own key wins over it. credentialed says that row already
+// authenticates by reference (key_env / key_ref / auth): the required-key
+// check and the provider-wide lookup must treat it as credentialed, or an edit
+// that types no key borrows a *different account's* static key — which then
+// outranks the reference the row was actually configured with. The returned
+// config has no Name — callers resolve the alias inside the mutation lock,
+// where uniqueness can be enforced against the live registry.
+func (h *handler) modelFromRequest(req addModelRequest, existingKey string, credentialed bool) (config.ModelConfig, error) {
 	var mc config.ModelConfig
 	provider := strings.TrimSpace(req.Provider)
 	base := strings.TrimSpace(req.BaseURL)
@@ -371,6 +386,12 @@ func (h *handler) modelFromRequest(req addModelRequest, existingKey string) (con
 	if key == "" {
 		key = strings.TrimSpace(existingKey)
 	}
+	// The row this entry borrows its credential from. The credential is not
+	// always a literal key: a key_ref/key_env row lends the reference it
+	// carries, which is the only form the console can see (adoptCredential
+	// copies it once the entry is built).
+	var lender config.ModelConfig
+	hasLender := false
 
 	if provider == "custom" || (provider == "" && base != "") {
 		// The endpoint is persisted here and dialed later by the daemon, so
@@ -384,13 +405,15 @@ func (h *handler) modelFromRequest(req addModelRequest, existingKey string) (con
 		// entry persisted keyless (NoAuth: true) and the user lost the key that
 		// was already on file. The key is bound to its host, though: reusing
 		// it on another host would ship it to whoever owns that host.
-		if key == "" && req.ReuseFrom != "" {
-			if src, ok := h.modelByRef(req.ReuseFrom, ""); ok && !sameEndpointHost(base, src.BaseURL) {
-				return config.ModelConfig{}, fmt.Errorf(
-					"reuse_from %q belongs to %s; a key cannot be reused on %s",
-					req.ReuseFrom, endpointHost(src.BaseURL), endpointHost(base))
+		if key == "" {
+			src, ok, err := h.borrowFrom(req, base)
+			if err != nil {
+				return config.ModelConfig{}, err
 			}
-			key = h.keyForAlias(req.ReuseFrom)
+			if ok {
+				lender, hasLender = src, true
+				key = src.APIKey
+			}
 		}
 		mc = config.ModelConfig{
 			Provider:  "custom",
@@ -400,8 +423,9 @@ func (h *handler) modelFromRequest(req addModelRequest, existingKey string) (con
 			MaxTokens: req.MaxTokens,
 			APIKey:    key,
 			// A keyless relay is a local-style endpoint — the CLI's
-			// `model add custom` marks it no-auth for the same reason.
-			NoAuth: key == "",
+			// `model add custom` marks it no-auth for the same reason. A row
+			// that authenticates by reference is not keyless, though.
+			NoAuth: key == "" && !credentialed,
 			// The endpoint's own plaintext opt-in travels with the entry: it is
 			// the caller who knows whether this relay speaks https.
 			AllowPlaintext: req.AllowPlaintext != nil && *req.AllowPlaintext,
@@ -416,18 +440,23 @@ func (h *handler) modelFromRequest(req addModelRequest, existingKey string) (con
 		// named row says which key this model belongs to. If the request also
 		// names a different endpoint, the borrowed key would be sent there —
 		// same host rule as the custom branch above.
-		if key == "" && req.ReuseFrom != "" {
-			if src, ok := h.modelByRef(req.ReuseFrom, ""); ok && base != "" && !sameEndpointHost(base, src.BaseURL) {
-				return config.ModelConfig{}, fmt.Errorf(
-					"reuse_from %q belongs to %s; a key cannot be reused on %s",
-					req.ReuseFrom, endpointHost(src.BaseURL), endpointHost(base))
-			}
-			key = h.keyForAlias(req.ReuseFrom)
-		}
 		if key == "" {
+			src, ok, err := h.borrowFrom(req, base)
+			if err != nil {
+				return config.ModelConfig{}, err
+			}
+			if ok {
+				lender, hasLender = src, true
+				key = src.APIKey
+			}
+		}
+		if key == "" && !hasLender && !credentialed {
 			key = h.findProviderKey(p.ID) // reuse a key already on file for this provider
 		}
-		if key == "" && !p.NoAuth {
+		// A named lender with a reference (key_ref/key_env) or an explicit
+		// no-auth row has a credential even though it has no literal key; the
+		// reference is copied below.
+		if key == "" && !p.NoAuth && !credentialed && !(hasLender && lenderCredential(lender)) {
 			return config.ModelConfig{}, errors.New("api_key is required for this provider")
 		}
 		mc, _ = providers.ModelConfig(p.ID, strings.TrimSpace(req.Model), key)
@@ -442,6 +471,9 @@ func (h *handler) modelFromRequest(req addModelRequest, existingKey string) (con
 				mc.APIType = normalizeAPIType(t)
 			}
 		}
+	}
+	if hasLender {
+		adoptCredential(&mc, lender)
 	}
 
 	// This entry would dial a roster its provider does not serve — the
@@ -520,6 +552,75 @@ func (h *handler) modelFromRequest(req addModelRequest, existingKey string) (con
 	return mc, nil
 }
 
+// borrowFrom resolves the row a request names as its credential source and
+// checks that the credential may travel to base. ok is false when the request
+// named no row, or named one by alias only (an older console) and it is gone.
+// A digest that no longer matches anything is an error: the row was deleted or
+// its credential rotated since the page loaded, and falling through to
+// "whatever key this provider has" would bind the new row to another account.
+func (h *handler) borrowFrom(req addModelRequest, base string) (config.ModelConfig, bool, error) {
+	if req.ReuseFrom == "" {
+		return config.ModelConfig{}, false, nil
+	}
+	src, ok := h.modelByRef(req.ReuseFrom, req.ReuseFromKey)
+	if !ok {
+		if strings.TrimSpace(req.ReuseFromKey) != "" {
+			return config.ModelConfig{}, false, fmt.Errorf("reuse_from %q no longer exists — reload the model list and try again", req.ReuseFrom)
+		}
+		return config.ModelConfig{}, false, nil
+	}
+	if base != "" && !sameEndpointHost(base, src.BaseURL) {
+		return config.ModelConfig{}, false, fmt.Errorf(
+			"reuse_from %q belongs to %s; a key cannot be reused on %s",
+			req.ReuseFrom, endpointHost(src.BaseURL), endpointHost(base))
+	}
+	return src, true, nil
+}
+
+// lenderCredential reports whether a row carries anything a new row can
+// borrow: a literal key, a reference (key_ref / key_env), a subscription
+// binding, or an explicit no-auth declaration.
+func lenderCredential(m config.ModelConfig) bool {
+	return m.APIKey != "" || m.KeyRef != "" || m.KeyEnv != "" || m.Auth != "" || m.NoAuth
+}
+
+// hasCredentialRef reports whether a row authenticates without a literal
+// api_key: an environment variable, another application's credential store, or
+// a subscription login. The console never echoes any of them, so an edit that
+// types no key means "keep the reference" — not "this row has no credential".
+// NoAuth is deliberately absent: that flag says the endpoint takes none, which
+// is the opposite of a credential to carry.
+func hasCredentialRef(m config.ModelConfig) bool {
+	return strings.TrimSpace(m.KeyEnv) != "" || strings.TrimSpace(m.KeyRef) != "" || strings.TrimSpace(m.Auth) != ""
+}
+
+// adoptCredential copies the lender's credential shape onto mc when the
+// request brought no literal key. The panel never sees the secret, so a row
+// backed by key_ref or key_env lends the reference itself; copying only
+// APIKey left the new row keyless — a 400 under a provider that requires a
+// key, and a silently unauthenticated row under a custom relay. The wire
+// scheme travels either way: a Bearer token sent as x-api-key 401s on every
+// call, so it is part of the credential, not a cosmetic field.
+func adoptCredential(mc *config.ModelConfig, from config.ModelConfig) {
+	mc.KeyScheme = from.KeyScheme
+	if mc.APIKey != "" {
+		return
+	}
+	if from.APIKey != "" {
+		mc.APIKey = from.APIKey
+		return
+	}
+	mc.KeyRef = from.KeyRef
+	mc.KeyEnv = from.KeyEnv
+	mc.Auth = from.Auth
+	switch {
+	case mc.KeyRef != "" || mc.KeyEnv != "" || mc.Auth != "":
+		mc.NoAuth = false
+	case from.NoAuth:
+		mc.NoAuth = true
+	}
+}
+
 // defaultAlias is the name a row gets when the caller names none: the model
 // id, because a connection that holds several models must read as those
 // models ("kimi-k3", "deepseek-v4.1-flash"), not as five rows all called
@@ -574,15 +675,16 @@ func freeAliasIn(c *config.Config, want string, skip config.ModelConfig) string 
 // alias+model+endpoint then made two accounts of one vendor look like one row,
 // because those three fields are exactly what they share: both tiles were lit
 // as "in use", and a delete removed whichever row happened to come first. The
-// stored key is the only field the two never share, so it is part of the
-// identity — a config written before names were kept unique is still readable
-// row by row.
+// stored credential is the only field the two never share, so it is part of
+// the identity — fingerprintSource covers a literal key and the reference a
+// key_ref/key_env row reads it from, so two rows pointing at different
+// credentials stay two rows even when neither stores a secret.
 func sameEntry(a, b config.ModelConfig) bool {
 	return a.Alias() == b.Alias() &&
 		a.Model == b.Model &&
 		effectiveProviderID(a) == effectiveProviderID(b) &&
 		sameEndpoint(a.BaseURL, b.BaseURL) &&
-		a.APIKey == b.APIKey
+		fingerprintSource(a) == fingerprintSource(b)
 }
 
 // sameEndpoint compares two endpoints ignoring trailing slashes and case — one
@@ -610,7 +712,7 @@ func entryMatches(m config.ModelConfig, alias, model, base, key string) bool {
 	if base != "" && !sameEndpoint(m.BaseURL, base) {
 		return false
 	}
-	if key != "" && keyFingerprint(m.APIKey) != key {
+	if key != "" && keyFingerprint(fingerprintSource(m)) != key {
 		return false
 	}
 	return true
@@ -636,6 +738,24 @@ func onlyByAlias(models []config.ModelConfig, alias string) (config.ModelConfig,
 		}
 	}
 	return found, n == 1
+}
+
+// onlyByAliasKey is onlyByAlias narrowed by the caller's key digest. A
+// request that named an account (the fingerprint is what tells two rows with
+// one alias apart) must never land on the other one when the digest no longer
+// matches: on a delete that removed the sibling account, and on an edit that
+// rewrote the wrong row. A normalized endpoint is still recoverable — the
+// digest is over the row's credential source, which no renderer rewrites — so
+// the fallback survives for the sibling-plan case it was written for.
+func onlyByAliasKey(models []config.ModelConfig, alias, key string) (config.ModelConfig, bool) {
+	m, ok := onlyByAlias(models, alias)
+	if !ok {
+		return config.ModelConfig{}, false
+	}
+	if key != "" && keyFingerprint(fingerprintSource(m)) != key {
+		return config.ModelConfig{}, false
+	}
+	return m, true
 }
 
 // addModel serves POST /api/models — registers a *new* row in `models:`,
@@ -669,7 +789,17 @@ func (h *handler) addModel(w http.ResponseWriter, r *http.Request) {
 		}
 		copied = &from
 		if strings.TrimSpace(req.APIKey) == "" {
-			req.APIKey = from.APIKey
+			if from.APIKey != "" {
+				req.APIKey = from.APIKey
+			} else {
+				// The source's credential is a reference (key_ref/key_env) or
+				// a subscription binding. Borrow it through the same path as
+				// "extend this connection": otherwise the provider-wide
+				// fallback could substitute another row's literal key, and
+				// the copy would authenticate as a different account.
+				req.ReuseFrom = from.Alias()
+				req.ReuseFromKey = keyFingerprint(fingerprintSource(from))
+			}
 		}
 		if req.Params == nil {
 			req.Params = from.Params
@@ -683,15 +813,17 @@ func (h *handler) addModel(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	mc, err := h.modelFromRequest(req, "")
+	mc, err := h.modelFromRequest(req, "", false)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	// The OAuth binding has no request field: without it a copied
-	// subscription-backed entry would silently become a keyless one.
-	if copied != nil && mc.Auth == "" {
-		mc.Auth = copied.Auth
+	// The OAuth binding and any reference credential have no request field:
+	// without them a copied subscription- or key_ref-backed entry would
+	// silently become a keyless one. adoptCredential only fills what the
+	// request left empty, so a typed key still wins.
+	if copied != nil {
+		adoptCredential(&mc, *copied)
 	}
 	alias := strings.TrimSpace(req.Alias)
 	if alias == "" {
@@ -787,9 +919,13 @@ func (h *handler) updateModel(w http.ResponseWriter, r *http.Request) {
 		var live config.ModelConfig
 		haveLive := false
 		h.readCfg(func(c *config.Config) {
-			reg, haveReg = onlyByAlias(c.Models, name)
+			reg, haveReg = onlyByAliasKey(c.Models, name, keyQ)
 			live = c.Model
-			haveLive = c.Model.Alias() == name && (c.Model.Model != "" || c.Model.Provider != "")
+			// The live fallback obeys the same rule: a digest that no longer
+			// matches the live row addresses nothing, and rewriting it would
+			// edit the other account under a shared alias.
+			haveLive = entryMatches(c.Model, name, "", "", keyQ) &&
+				(c.Model.Model != "" || c.Model.Provider != "")
 		})
 		switch {
 		case haveReg:
@@ -824,6 +960,20 @@ func (h *handler) updateModel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	wantProviderChanged := wantProvider != "" && effectiveProviderID(old) != wantProvider
+	// The raw params/headers are not part of the entry JSON (see
+	// addModelRequest.CopyFrom), so the edit form cannot echo them back. An
+	// edit that omits them means "unchanged" — rebuilding the row without
+	// this carry-over wiped both fields on every save that only touched an
+	// unrelated control. A vendor switch is the one exception: the tuning
+	// belonged to the catalogue being left behind.
+	if !wantProviderChanged {
+		if req.Params == nil {
+			req.Params = old.Params
+		}
+		if req.Headers == nil {
+			req.Headers = old.Headers
+		}
+	}
 	existingKey := old.APIKey
 	if wantProviderChanged {
 		existingKey = h.keyAcrossVendorSwitch(old, wantProvider)
@@ -842,7 +992,7 @@ func (h *handler) updateModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mc, err := h.modelFromRequest(req, existingKey)
+	mc, err := h.modelFromRequest(req, existingKey, hasCredentialRef(old) && !wantProviderChanged)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
@@ -864,8 +1014,47 @@ func (h *handler) updateModel(w http.ResponseWriter, r *http.Request) {
 	} else {
 		mc.KeyEnv = ""
 	}
-	if mc.KeyEnv != "" || mc.APIKey != "" {
-		mc.NoAuth = old.NoAuth && mc.APIKey == "" && mc.KeyEnv == ""
+	// The same "an edit keeps what it does not restate" rule covers the row
+	// fields the console never paints. `source` is provenance (which importer
+	// reported the row) and `key_scheme` is the shape of its credential —
+	// rebuilding the row without them wiped both on every save, and a token
+	// that travels as `Authorization: Bearer` came back on the dialect default
+	// (x-api-key) and 401'd on the next call. `key_ref`/`auth` name a
+	// credential another application owns, so they follow key_env: a typed key
+	// replaces them, and a vendor switch drops them because they belong to the
+	// account being left behind.
+	mc.Source = old.Source
+	mc.OfflineWait = old.OfflineWait
+	if !wantProviderChanged {
+		mc.KeyScheme = old.KeyScheme
+		if strings.TrimSpace(req.APIKey) == "" {
+			mc.KeyRef = old.KeyRef
+			mc.Auth = old.Auth
+		}
+	}
+	// The wire dialect is the other half of what the form cannot restate: it
+	// only sends api_type when the user changed it or moved the endpoint, so an
+	// edit must keep the stored shape. Rebuilding without it defaulted every
+	// custom row to the Anthropic dialect, and an OpenAI-compatible relay then
+	// received an Anthropic body (a 400 that says nothing about the config that
+	// caused it). The one place the catalogue outranks the stored value is its
+	// own endpoint: an aggregator's roster spans several surfaces and the
+	// model, not the row, picks one — so a model change there re-derives it.
+	if !wantProviderChanged && strings.TrimSpace(req.APIType) == "" {
+		keep := old.APIType != ""
+		if keep && mc.Model != old.Model {
+			if p, ok := providers.Lookup(strings.TrimSpace(old.Provider)); ok && p.OwnsEndpoint(old.BaseURL) {
+				keep = false
+			}
+		}
+		if keep {
+			mc.APIType = old.APIType
+		}
+	}
+	// Any credential at all means the endpoint is not no-auth, whatever the
+	// form's switch says: that switch exists for local models that take no key.
+	if mc.KeyEnv != "" || mc.KeyRef != "" || mc.Auth != "" || mc.APIKey != "" {
+		mc.NoAuth = false
 	}
 	mc.Name = want
 	if _, err := entry.NewClient(mc); err != nil {
@@ -950,10 +1139,13 @@ func (h *handler) useModel(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		// An address whose endpoint came back normalized differently from the
-		// stored one — the sibling-plan case — still names a unique row.
-		if only, ok := onlyByAlias(c.Models, name); ok {
+		// stored one — the sibling-plan case — still names a unique row. The
+		// key digest, when the caller sent one, has to agree: switching to the
+		// other account of the same vendor dials a credential the request
+		// never named.
+		if only, ok := onlyByAliasKey(c.Models, name, keyQ); ok {
 			match = only
-		} else if c.Model.Alias() == name && (c.Model.Model != "" || c.Model.Provider != "") {
+		} else if entryMatches(c.Model, name, "", "", keyQ) && (c.Model.Model != "" || c.Model.Provider != "") {
 			match, isActive = c.Model, true
 		}
 	})
@@ -1006,7 +1198,12 @@ func (h *handler) removeModel(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if !found {
-			if only, ok := onlyByAlias(c.Models, name); ok {
+			// A keyed address that no longer matches anything is a retry of a
+			// delete that already happened, or a tab holding a fingerprint the
+			// row has since lost. The alias alone must not pick the surviving
+			// account of the same vendor — the second click of a lost-response
+			// retry used to remove the sibling it was never pointed at.
+			if only, ok := onlyByAliasKey(c.Models, name, keyQ); ok {
 				target, found, inRegistry = only, true, true
 			}
 		}
@@ -1500,31 +1697,6 @@ func (h *handler) testModel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "alias": mc.Alias(), "reply": answer})
 }
 
-// findProviderKey looks up an API key already configured for providerID —
-// the active model first, then the registry. Mirrors the REPL's helper.
-// keyForAlias returns the key stored on the entry with this alias — a row in
-// the registry or the live model. Empty when nothing matches.
-func (h *handler) keyForAlias(alias string) string {
-	name := strings.TrimSpace(alias)
-	if name == "" {
-		return ""
-	}
-	key := ""
-	h.readCfg(func(c *config.Config) {
-		if c.Model.Alias() == name && c.Model.APIKey != "" {
-			key = c.Model.APIKey
-			return
-		}
-		for _, m := range c.Models {
-			if m.Alias() == name && m.APIKey != "" {
-				key = m.APIKey
-				return
-			}
-		}
-	})
-	return key
-}
-
 // keyForEndpoint returns the key stored on an entry that dials exactly this
 // endpoint — the live model first, then the registry. The form can never show
 // a saved secret, so a fetch/test against an endpoint that is already on file
@@ -1551,6 +1723,8 @@ func (h *handler) keyForEndpoint(base string) string {
 	return key
 }
 
+// findProviderKey looks up an API key already configured for providerID —
+// the active model first, then the registry. Mirrors the REPL's helper.
 func (h *handler) findProviderKey(providerID string) string {
 	key := ""
 	h.readCfg(func(c *config.Config) {

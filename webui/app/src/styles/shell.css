@@ -636,6 +636,12 @@ a.sidebar-node:hover {
 .panda-lockup img {
   width: 100%;
   height: auto;
+  /* The lockups are furniture, not files: a press that turns one into a drag
+     ghost (and can end up dropped into the composer as an attachment) is a
+     bug, not a feature. `-webkit-user-drag` covers the engines that ignore
+     the `draggable` attribute on an inline image. */
+  -webkit-user-drag: none;
+  user-select: none;
 }
 .panda-lockup-night {
   display: none;

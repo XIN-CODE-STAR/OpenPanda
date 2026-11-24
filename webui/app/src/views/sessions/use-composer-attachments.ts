@@ -3,18 +3,25 @@
 import type { RefObject } from 'preact'
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { fetchBlob } from '../../api/client'
-import { isImageFile, splitFileRef } from '../../components/attach'
+import { imageBytesUrl, isImageFile, splitFileRef } from '../../components/attach'
 import { autoGrow, editorCaretOffset, editorClear, editorTextOf, range_or_append } from '../../components/composer-editor'
 import { t } from '../../i18n'
 import { makeChipNode, type PendingAttachment } from './attachment-pills'
 import { localMsgId } from './transcript-state'
 
 /** The composer's attachment queue, DOM pills and owned image URLs. Sending
- *  and resetting the session still decide when the queue is cleared. */
+ *  and resetting the session still decide when the queue is cleared.
+ *
+ *  `session` is the thread being composed into. A workspace reference is a
+ *  path as that thread means it — relative to its worktree — so the bytes
+ *  behind the pill must be asked for the same way the file panel asks:
+ *  `/api/fs/image` anchors a relative path at the session's own directory and
+ *  admits that worktree as a readable root only when the session is named. */
 export function useComposerAttachments(
   composer: RefObject<HTMLDivElement>,
   setInput: (value: string) => void,
   setCaret: (value: number) => void,
+  session: string | null,
 ) {
   // Files pasted, dropped or uploaded into the composer, waiting for send.
   const [pending, setPending] = useState<PendingAttachment[]>([])
@@ -133,7 +140,7 @@ export function useComposerAttachments(
     const bytes = p.file
       ? Promise.resolve(URL.createObjectURL(p.file))
       : p.ref
-        ? fetchBlob(`/api/fs/image?path=${encodeURIComponent(p.ref)}`).then((b) => URL.createObjectURL(b))
+        ? fetchBlob(imageBytesUrl(p.ref, session)).then((b) => URL.createObjectURL(b))
         : Promise.reject(new Error('no bytes'))
     const job = bytes.then((url) => {
       shots.current.set(p.key, url)

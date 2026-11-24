@@ -1194,7 +1194,12 @@ func (r *Router) execAgent(ctx context.Context, plan Plan, prompt string, cwd st
 		if !agentFallbackEligible(ar) && !providerFailure {
 			return res
 		}
-		res.NoProviderWork = ar.SessionID == "" && !ar.WorkObserved && ar.Tokens == 0 && (providerFailure || ar.ExitCode == 127)
+		// No provider work means no tokens and no observed work — not "no
+		// session id". Some CLIs (Claude among them) mint a session before
+		// they verify the login, so requiring an empty id here made an
+		// unauthenticated start look like interrupted work and kept the task
+		// from being handed to a healthy peer.
+		res.NoProviderWork = !ar.WorkObserved && ar.Tokens == 0 && (providerFailure || ar.ExitCode == 127)
 		// This run never got off the ground. Remember it so a supervisor
 		// retry or the next task does not hand the same locked-out CLI
 		// another 2.5-minute attempt.
@@ -1289,14 +1294,13 @@ func agentFallbackEligible(ar AgentResult) bool {
 	if ar.OK {
 		return false
 	}
-	if ar.ExitCode == 124 || ar.Tokens > 0 || ar.SessionID != "" || ar.WorkObserved {
+	// A minted session id is not evidence of work: a CLI that opens a session
+	// before checking its credential leaves one behind with zero tokens and
+	// nothing observed. Interrupted work is the signal that belongs to core
+	// recovery — timeouts, billed tokens, a touched workspace, a session the
+	// adapter itself declared dead.
+	if ar.ExitCode == 124 || ar.Tokens > 0 || ar.WorkObserved || ar.SessionDead {
 		return false // interrupted work belongs to core recovery, never fresh fallback
-	}
-	if ar.SessionDead {
-		return true
-	}
-	if ar.ExitCode == 124 {
-		return false
 	}
 	if ar.ExitCode == 126 || ar.ExitCode == 127 {
 		return true
@@ -1598,13 +1602,17 @@ func providerRescueEligible(adapter string, res AgentResult) bool {
 	// Claude emits a session id before its first provider response. Its
 	// api_retry failure envelope can precede any work. Tool activity, token
 	// usage and all ordinary checkpoints still forbid a full replay.
+	text := res.Result + " " + res.Stderr
 	if adapter == "opencode.py" && res.ProviderStartupFailure && res.Cost == 0 &&
 		(res.Usage == nil || *res.Usage == (UsageDetail{})) && strings.HasPrefix(res.Result, "provider failure: ") {
 		res.SessionID = ""
-	} else if adapter == "claude_code.py" && claudeProviderFailure(res) {
+	} else if adapter == "claude_code.py" && (claudeProviderFailure(res) ||
+		// The plain "not logged in" refusal is the other shape of a startup
+		// failure, and it does not carry the api_retry prefix. Zero tokens and
+		// no observed work mean the minted handle describes nothing.
+		(res.Tokens == 0 && !res.WorkObserved && (res.Usage == nil || *res.Usage == (UsageDetail{})) && IsAuthenticationSetupRequired(text))) {
 		res.SessionID = ""
 	}
-	text := res.Result + " " + res.Stderr
 	return replayableFailure(res) && !commanderKill(res) &&
 		(isProviderFailureOrAuth(text) || IsModelConfigFailure(text))
 }

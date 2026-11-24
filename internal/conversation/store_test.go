@@ -154,6 +154,167 @@ func TestPlanningRejectsStaleProposalProducer(t *testing.T) {
 	}
 }
 
+// A revision names the proposal it was written against. An old tab submitting
+// feedback must not retire the newer proposal it never saw: the request is
+// refused and the text stays confirmable.
+func TestStalePlanRevisionCannotRetireNewerProposal(t *testing.T) {
+	ctx := context.Background()
+	s := &Store{DB: testdb.Open(t)}
+	if err := s.SetPlanning(ctx, "session", true); err != nil {
+		t.Fatal(err)
+	}
+	one, err := s.SaveProposal(ctx, "session", "version one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := s.SaveProposal(ctx, "session", "version two")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = s.BeginPlanningRequest(ctx, "session", one); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale revision accepted: %v", err)
+	}
+	state, err := s.Get(ctx, "session")
+	if err != nil || state.Proposal != "version two" || state.ProposalVersion != two {
+		t.Fatalf("newer proposal retired: %+v, %v", state, err)
+	}
+	if version, _, err := s.BeginPlanningRequest(ctx, "session", two); err != nil || version != two {
+		t.Fatalf("current revision refused: version=%d err=%v", version, err)
+	}
+	state, _ = s.Get(ctx, "session")
+	if state.Proposal != "" {
+		t.Fatalf("current proposal not retired: %q", state.Proposal)
+	}
+}
+
+// Confirming does not bump the proposal version, so "the version still
+// matches" is not "the proposal is still revisable". After the user confirmed
+// v1 a revision naming v1 was accepted, and the engine re-entered planning for
+// a plan that was already being implemented.
+func TestConfirmedProposalCannotBeRevised(t *testing.T) {
+	ctx := context.Background()
+	s := &Store{DB: testdb.Open(t)}
+	if err := s.SetPlanning(ctx, "session", true); err != nil {
+		t.Fatal(err)
+	}
+	one, err := s.SaveProposal(ctx, "session", "version one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Confirm(ctx, "session", one); err != nil {
+		t.Fatal(err)
+	}
+	// The engine re-enters plan mode before it names the version it is
+	// revising, which retires the text but leaves proposal_version alone —
+	// exactly the state in which a version-only check passes.
+	if err := s.SetPlanning(ctx, "session", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.BeginPlanningRequest(ctx, "session", one); !errors.Is(err, ErrConflict) {
+		t.Fatalf("revision of a confirmed proposal accepted: %v", err)
+	}
+	state, err := s.Get(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.ConfirmedVersion != one || state.ProposalVersion != one {
+		t.Fatalf("a refused revision moved the versions: %+v", state)
+	}
+	// A fresh planning turn (one that names no version) still works: the
+	// refusal is about revising, not about planning again after a confirm.
+	if _, _, err := s.BeginPlanningRequest(ctx, "session"); err != nil {
+		t.Fatalf("new planning turn after a confirmation: %v", err)
+	}
+}
+
+// Retiring the text ends that revision: a second request naming the same
+// version has nothing left to revise. It used to pass — the version still
+// matched and nothing had been confirmed — and bumped the generation again.
+func TestRetiredProposalCannotBeRevisedTwice(t *testing.T) {
+	ctx := context.Background()
+	s := &Store{DB: testdb.Open(t)}
+	if err := s.SetPlanning(ctx, "session", true); err != nil {
+		t.Fatal(err)
+	}
+	one, err := s.SaveProposal(ctx, "session", "version one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.BeginPlanningRequest(ctx, "session", one); err != nil {
+		t.Fatalf("first revision: %v", err)
+	}
+	if _, _, err := s.BeginPlanningRequest(ctx, "session", one); !errors.Is(err, ErrConflict) {
+		t.Fatalf("second revision of retired text accepted: %v", err)
+	}
+	if _, _, err := s.BeginRevision(ctx, "session", one); !errors.Is(err, ErrConflict) {
+		t.Fatalf("re-entering for retired text accepted: %v", err)
+	}
+}
+
+// A revision that arrives while the lens is off enters planning and retires
+// the named proposal in one transaction. Split in two, a confirmation landing
+// between them left the session in planning mode with the proposal blanked
+// even though the revision was refused.
+func TestBeginRevisionEntersPlanningAtomically(t *testing.T) {
+	ctx := context.Background()
+	s := &Store{DB: testdb.Open(t)}
+	if err := s.SetPlanning(ctx, "session", true); err != nil {
+		t.Fatal(err)
+	}
+	one, err := s.SaveProposal(ctx, "session", "version one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetPlanning(ctx, "session", false); err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.Get(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, generation, err := s.BeginRevision(ctx, "session", one)
+	if err != nil {
+		t.Fatalf("revision from outside plan mode: %v", err)
+	}
+	if version != one {
+		t.Fatalf("revision version = %d, want %d", version, one)
+	}
+	state, err := s.Get(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Planning || state.Proposal != "" || state.ModeGeneration <= before.ModeGeneration || generation != state.ModeGeneration {
+		t.Fatalf("revision did not enter planning and retire the text: %+v (generation %d)", state, generation)
+	}
+
+	// The refusal path must leave everything as it was: this is the race the
+	// fused statement exists for.
+	if err := s.SetPlanning(ctx, "session", true); err != nil {
+		t.Fatal(err)
+	}
+	two, err := s.SaveProposal(ctx, "session", "version two")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Confirm(ctx, "session", two); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.BeginRevision(ctx, "session", two); !errors.Is(err, ErrConflict) {
+		t.Fatalf("revision of a confirmed proposal accepted: %v", err)
+	}
+	var planning bool
+	var raw string
+	if err := s.DB.QueryRow("SELECT planning,proposal FROM conversation_controls WHERE session_id='session'").Scan(&planning, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if planning {
+		t.Fatal("a refused revision switched the session back into planning")
+	}
+	if strings.TrimSpace(raw) == "" {
+		t.Fatal("a refused revision blanked the confirmed proposal")
+	}
+}
+
 func TestPlanVersionsAndGoalPause(t *testing.T) {
 	ctx := context.Background()
 	s := &Store{DB: testdb.Open(t)}

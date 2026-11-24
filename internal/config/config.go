@@ -2443,9 +2443,19 @@ func updateModelSection(path string, mc ModelConfig, allowClear bool) error {
 	}{
 		{"name", mc.Name},
 		{"provider", mc.Provider},
+		{"source", mc.Source},
 		{"api_type", mc.NormalizedAPIType()},
 		{"base_url", mc.BaseURL},
 		{"api_key", mc.APIKey},
+		// The credential's other forms travel with it. A row can read its key
+		// from an environment variable or another app's store, and the header
+		// it travels in is part of the credential: writing only api_key left a
+		// stale key_env/key_ref behind on a switch (the live section then
+		// still named the account that was just left) and dropped key_scheme
+		// (a Bearer token came back on the dialect default and 401'd).
+		{"key_env", mc.KeyEnv},
+		{"key_ref", mc.KeyRef},
+		{"key_scheme", mc.KeyScheme},
 		{"auth", mc.Auth},
 		{"model", mc.Model},
 	}
@@ -2460,6 +2470,9 @@ func updateModelSection(path string, mc ModelConfig, allowClear bool) error {
 	// so the positive-only writer would silently drop it and reload as the
 	// default budget.
 	setMapFieldIntSigned(model, "max_retries", mc.MaxRetries)
+	setMapFieldBool(model, "no_auth", mc.NoAuth)
+	setMapFieldBool(model, "allow_plaintext", mc.AllowPlaintext)
+	setMapFieldBoolPtr(model, "offline_wait", mc.OfflineWait)
 	setMapFieldAnyMap(model, "params", mc.Params)
 	setMapFieldStringMap(model, "headers", mc.Headers)
 
@@ -2854,6 +2867,59 @@ func setMapFieldInt(m *yaml.Node, key string, value int) {
 	m.Content = append(m.Content,
 		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
 		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: strconv.Itoa(value)},
+	)
+}
+
+// setMapFieldBool upserts key: true in mapping node m; false removes the key,
+// matching the field's omitempty reload semantics (false is the default).
+func setMapFieldBool(m *yaml.Node, key string, value bool) {
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			if !value {
+				m.Content = append(m.Content[:i], m.Content[i+2:]...)
+				return
+			}
+			m.Content[i+1].Value = "true"
+			m.Content[i+1].Tag = "!!bool"
+			return
+		}
+	}
+	if !value {
+		return
+	}
+	m.Content = append(m.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: "true"},
+	)
+}
+
+// setMapFieldBoolPtr is setMapFieldBool for a tri-state field: nil removes the
+// key (the documented default), a pointer writes the value it names — an
+// explicit false is a setting, not an omission.
+func setMapFieldBoolPtr(m *yaml.Node, key string, value *bool) {
+	if value == nil {
+		for i := 0; i+1 < len(m.Content); i += 2 {
+			if m.Content[i].Value == key {
+				m.Content = append(m.Content[:i], m.Content[i+2:]...)
+				return
+			}
+		}
+		return
+	}
+	text := "false"
+	if *value {
+		text = "true"
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			m.Content[i+1].Value = text
+			m.Content[i+1].Tag = "!!bool"
+			return
+		}
+	}
+	m.Content = append(m.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: text},
 	)
 }
 

@@ -41,3 +41,23 @@ test('a stored invalid token is removed and a subsequent sign-in persists', (t) 
   assert.equal(currentToken(), 'valid-token')
   assert.equal(values.get('openpanda.token'), 'valid-token')
 })
+
+test('an invalid connect-link token leaves the working sign-in alone', (t) => {
+  const values = new Map([['openpanda.token', 'working-token']])
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => values.set(key, value),
+    removeItem: (key: string) => values.delete(key),
+  } })
+  t.after(() => {
+    clearToken()
+    if (previous) Object.defineProperty(globalThis, 'localStorage', previous)
+    else Reflect.deleteProperty(globalThis, 'localStorage')
+  })
+  // Opening /?token=令牌 while signed in used to clear the stored token before
+  // a single request was made, sending the reader back to the gate.
+  setToken('令牌')
+  assert.equal(currentToken(), 'working-token')
+  assert.equal(values.get('openpanda.token'), 'working-token')
+})

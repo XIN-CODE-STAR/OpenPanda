@@ -8,6 +8,16 @@
 import { t } from '../i18n/index.ts'
 import { splitReportHead, type ReportHead } from './report-head.ts'
 
+/** The bytes behind an image the console shows: a path, plus the thread that
+ *  means it. A workspace path is the thread's own — relative to its worktree —
+ *  so /api/fs/image anchors it there and admits that worktree as a readable
+ *  root only when the session is named. Without one, "shot.png" resolves
+ *  against the node's work path and misses. */
+export function imageBytesUrl(path: string, session?: string | null): string {
+  const q = `path=${encodeURIComponent(path)}`
+  return `/api/fs/image?${q}${session ? `&session=${encodeURIComponent(session)}` : ''}`
+}
+
 /** The `@path` token under the caret: [start, caret) covers `@token`, where
  *  token may be a partial path the /api/fs/files endpoint filters on. */
 export function atQuery(

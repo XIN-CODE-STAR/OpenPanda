@@ -272,6 +272,7 @@
 .model-item-text {
   display: flex;
   flex-direction: column;
+  gap: 1px;
   flex: 1;
   min-width: 0;
 }
@@ -286,10 +287,7 @@
   font-weight: 600;
   color: var(--text);
 }
-/* The facts line: the id the request carries, and what the last test said.
-   It lives here rather than at the row's right edge, because that edge is
-   where the verbs land on hover — a verdict that vanishes the moment you
-   click "test" is a verdict nobody sees. */
+/* The facts line: the id the request carries. */
 .model-item-sub {
   display: flex;
   align-items: baseline;
@@ -306,10 +304,15 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.model-item-sep {
-  flex: none;
-  color: var(--text-disabled);
-  font-size: var(--text-xs);
+/* The state badges belong to the name's line, not to the row's centre. The
+   row is up to three lines tall once a verdict is on it, and a centred badge
+   landed between the id and the verdict — reading as if it were pressing the
+   verdict down. Pinned to the top they answer "which one is live" at a
+   glance and leave the verdict its own room. */
+.model-item-tag,
+.model-item-note {
+  align-self: flex-start;
+  margin-top: 1px;
 }
 .model-item-tag {
   flex: none;
@@ -327,13 +330,21 @@
   font-size: var(--text-xs);
   white-space: nowrap;
 }
+/* The verdict sits on its own line under the id: inline it stole the id's
+   room on a 220px card, and the id — the string a person copies into a bug
+   report — is the thing that must survive. Kept out of the hover verbs' edge
+   for the same reason as the id: a verdict that disappears when the pointer
+   moves is a verdict nobody reads. */
 .model-item-result {
   display: inline-flex;
   align-items: center;
+  align-self: flex-start;
   gap: 3px;
   flex: none;
+  margin-top: 4px;
   color: var(--text-tertiary);
   font-size: var(--text-xs);
+  line-height: 1.3;
   white-space: nowrap;
 }
 .model-item-result.ok {

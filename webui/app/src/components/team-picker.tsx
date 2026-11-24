@@ -38,7 +38,14 @@ export function AgentFace(props: {
   )
 }
 
-/** New conversations have room for a named trigger and a viewport-sized picker. */
+/** The trigger a new conversation carries in its header, left of the node
+ *  button: both answer how the first message will be dispatched (which
+ *  machine, which hands), so they stand in the same corner. It is a glyph,
+ *  not a chip — the header row is a row of glyphs, and the label lives in the
+ *  tooltip and the accessible name. A count rides the corner once a team is
+ *  picked, because "who did I hire" is state the glyph alone cannot show.
+ *  The picker behind it is viewport-sized — a dialog, not a popover squeezed
+ *  under a chip. */
 export function RosterPicker(props: {
   value: string[]
   onChange(names: string[]): void
@@ -56,11 +63,17 @@ export function RosterPicker(props: {
 
   return (
     <div class="roster-picker" data-tour-target="team">
-      <button type="button" class="roster-trigger" aria-haspopup="dialog" aria-expanded={expanded} onClick={open}>
-        <Icon name="users" size={15} />
-        <span>{t('sessions.pickTeam')}</span>
+      <button
+        type="button"
+        class="roster-trigger tip-down tip-right"
+        data-tip={t('sessions.pickTeam')}
+        aria-label={t('sessions.pickTeam')}
+        aria-haspopup="dialog"
+        aria-expanded={expanded}
+        onClick={open}
+      >
+        <Icon name="users" size={19} />
         {props.value.length > 0 && <span class="roster-count">{props.value.length}</span>}
-        <Icon name="chevron-down" size={12} />
       </button>
       <dialog ref={dialog} class="roster-dialog" aria-label={t('sessions.pickTeam')}
         onClose={() => setExpanded(false)}
@@ -73,12 +86,13 @@ export function RosterPicker(props: {
 
 /** Who works on this conversation — the roster card itself.
  *
- *  It used to be a chip in the composer's footer with its own trigger. The
- *  trigger now lives on the panda (see composer-pet.tsx) and the card opens
- *  above it, so this component is only the card: it loads the roster, draws
- *  each CLI as an employee (a face, a name, the job they are good at), and
- *  reports picks upward. Open state, outside-click and Escape belong to the
- *  pet, which owns both the trigger and this card.
+ *  It used to be a chip in the composer's footer with its own trigger. In a
+ *  thread the trigger now lives on the panda (see composer-pet.tsx); on a new
+ *  conversation it is the header button (RosterPicker above). Either way this
+ *  component is only the card: it loads the roster, draws each CLI as an
+ *  employee (a face, a name, the job they are good at), and reports picks
+ *  upward. Open state, outside-click and Escape belong to the trigger, which
+ *  owns both itself and this card.
  *
  *  Empty is a real answer and the default — it means "let the scheduler pick
  *  the best hand". It is the first row of the card, so clearing a team is one

@@ -28,6 +28,7 @@ import (
 	"net/http"
 
 	"github.com/Xustalis/OpenPanda/internal/config"
+	"github.com/Xustalis/OpenPanda/internal/sessions"
 )
 
 // maxViewBytes caps /api/fs/file. A viewer that streams a whole source file has
@@ -166,9 +167,10 @@ func (h *handler) sessionWorkDir(id string) string {
 }
 
 // sessionCwd returns the directory a thread actually works in: its own
-// worktree when the project is a git repository, the project's work dir
-// otherwise. "" means the thread has no directory of its own and the caller
-// should fall back to the node's work path.
+// worktree when the project is a git repository, the directory a board task
+// pinned (on the session, or on its linked task in an older build), or the
+// project's work dir after that. "" means the thread has no directory of its
+// own and the caller should fall back to the node's work path.
 //
 // This is the same ladder the ask path walks to pin a turn's cwd, so the file
 // panel and the transcript agree on what "here" means. Without the project
@@ -179,17 +181,79 @@ func (h *handler) sessionCwd(id string) string {
 		return wt
 	}
 	id = strings.TrimSpace(id)
-	if id == "" || h.sessions == nil || h.projectStore == nil {
+	if id == "" || h.sessions == nil {
 		return ""
 	}
 	sess, err := h.sessions.Get(id)
-	if err != nil || sess.Project == "" {
+	if err != nil {
 		return ""
 	}
-	if p, err := h.projectStore.Get(sess.Project); err == nil {
-		return p.UsableWorkDir()
+	// A board task's linked session pins the directory it was enqueued for.
+	// The executor has always honoured it (askengine's SessionWorkDir reads
+	// the same field); the file panel falling through to the project root
+	// showed a same-named file from the wrong tree.
+	if dir := strings.TrimSpace(sess.WorkDir); dir != "" && safeReadRoot(dir) {
+		return dir
 	}
-	return ""
+	// Older board sessions stored the directory only on the linked task, and
+	// the executor still recovers it from there. Without the same lookup the
+	// panel answered 200 with the project's — or work_path's — same-named
+	// file while the agent was reading and writing a different tree.
+	if dir := h.legacyTaskWorkDir(sess); dir != "" && safeReadRoot(dir) {
+		return dir
+	}
+	if sess.Project == "" {
+		return ""
+	}
+	return h.projectCwd(sess.Project)
+}
+
+// projectCwd returns a project's usable work dir, or "" when the name is
+// unknown or the directory no longer passes the breadth rule. A new chat has
+// no session yet, but it already knows the project it will be created in —
+// the composer anchors `@file` references there so the first send reads the
+// files the thread will actually work on, not work_path's namesakes.
+func (h *handler) projectCwd(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" || h.projectStore == nil {
+		return ""
+	}
+	p, err := h.projectStore.Get(name)
+	if err != nil {
+		return ""
+	}
+	return p.UsableWorkDir()
+}
+
+// legacyTaskWorkDir recovers the directory an older board session stored only
+// on its linked task row. The shape is the one askengine.SessionWorkDir
+// recognises: a plain first user turn, then the assistant's task report whose
+// idempotency key names that task. Returns "" when the session does not have
+// that shape or the row no longer matches — the caller then walks the normal
+// ladder (project work dir, then the node's work path).
+func (h *handler) legacyTaskWorkDir(sess *sessions.Session) string {
+	if h.db == nil || sess == nil || len(sess.Turns) < 2 {
+		return ""
+	}
+	first, report := sess.Turns[0], sess.Turns[1]
+	if first.Role != "user" || first.OperationID != "" {
+		return ""
+	}
+	if report.Role != "assistant" || report.Ref == "" {
+		return ""
+	}
+	if !strings.HasPrefix(report.IdempotencyKey, "session_summary:"+report.Ref+":") {
+		return ""
+	}
+	var dir string
+	err := h.db.QueryRow(
+		"SELECT work_dir FROM tasks WHERE task_id=? AND session_id=? AND intent=? AND isolate=0 AND remote=0",
+		report.Ref, sess.ID, first.Text,
+	).Scan(&dir)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(dir)
 }
 
 // resolveViewPath turns a request path into an absolute one and reports the

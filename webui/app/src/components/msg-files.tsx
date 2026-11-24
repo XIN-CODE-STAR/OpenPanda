@@ -33,15 +33,19 @@ function fetchable(path: string): boolean {
 const PREVIEWABLE = /\.(png|jpe?g|gif|webp|bmp|avif)$/i
 
 /** The attachments of one turn, as pills. Rendered inside the message's own
- *  paragraph, so the row reads the way the composer did while typing. */
-export function UserFiles({ files }: { files: string[] }) {
+ *  paragraph, so the row reads the way the composer did while typing.
+ *
+ *  `session` is the thread the turn belongs to: a workspace reference rides
+ *  the prompt as a path relative to that thread's worktree, and the bytes
+ *  behind its pill can only be resolved with the session named. */
+export function UserFiles({ files, session }: { files: string[]; session?: string | null }) {
   if (files.length === 0) return null
   return (
     <span class="msg-files">
       {files.map((f) => {
         const label = fileLabel(f)
         if (fetchable(f) && PREVIEWABLE.test(f)) {
-          return <ImagePill key={f} path={f} label={label} />
+          return <ImagePill key={f} path={f} label={label} session={session} />
         }
         // The glyph follows the extension even when the bytes are out of
         // reach: the pill is a name, and a picture named as a picture is

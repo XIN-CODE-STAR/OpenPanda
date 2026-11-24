@@ -184,3 +184,36 @@ func TestFirstDraftIsScopedAtomicAndReplayable(t *testing.T) {
 		t.Fatalf("runs: %s", n)
 	}
 }
+
+// Claiming a first draft advances the cloud task's revision. A client whose
+// response was lost replays the same request UUID with the revision it was
+// shown; that replay must return the receipt, not "authorization changed".
+func TestFirstDraftReplaySurvivesAdvancedTaskRevision(t *testing.T) {
+	s, _, src := requestService(t)
+	ctx := context.Background()
+	c, err := s.Get(ctx, "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.Exec("DELETE FROM task_policies"); err != nil {
+		t.Fatal(err)
+	}
+	consent := DraftConsent{AccountID: c.AccountID, AuthEpoch: "1", TaskRevision: src.task.TaskRevision}
+	id, _ := util.UUIDv7()
+	first, err := s.RequestFirstDraft(ctx, "c", src.task.Key, id, consent)
+	if err != nil {
+		t.Fatalf("first draft: %v", err)
+	}
+	// The claim that followed the first submission moved the task on.
+	src.task.TaskRevision = "advanced-by-claim"
+	again, err := s.RequestFirstDraft(ctx, "c", src.task.Key, id, consent)
+	if err != nil {
+		t.Fatalf("replay after revision advance: %v", err)
+	}
+	if !again.AlreadyStarted || again.RequestID != id || again.State != first.State {
+		t.Fatalf("replay = %+v, want the first receipt %+v", again, first)
+	}
+	if n := scalar(t, s.db, "SELECT count(*) FROM task_flow_runs"); n != "1" {
+		t.Fatalf("runs: %s", n)
+	}
+}

@@ -2595,30 +2595,69 @@
 .node-pick-btn.pinned:not(.open) {
   color: var(--accent);
 }
-/* Static, not relative: the popover form anchors to the chat head, so it hangs
-   under the bar's bottom edge rather than under this button. In the side dock
-   the same markup gets `.is-inline` and becomes a static page (dock.css). */
+/* The roster trigger rides this row on a new conversation, left of the node
+   button: both answer "how this turn is dispatched" — which machine, which
+   hands — so they stand together instead of one here and one over the input.
+   It is a glyph of the node mark's size and weight: the bar is a row of
+   glyphs, and a worded chip here outweighed every other tool in it. The name
+   lives in the tooltip and the accessible name; the one thing a glyph cannot
+   say — how many people were hired — rides the corner as a count. */
+.chat-head-tools .roster-picker {
+  display: flex;
+  align-items: center;
+  flex: none;
+}
+.chat-head-tools .roster-trigger {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--head-tool);
+  height: var(--head-tool);
+  padding: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-secondary);
+}
+.chat-head-tools .roster-trigger svg {
+  width: 19px;
+  height: 19px;
+}
+.chat-head-tools .roster-trigger:hover,
+.chat-head-tools .roster-trigger[aria-expanded="true"] {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+/* The chip's count shrinks to a corner badge: a 36px square has no room for
+   the 16px pill it used to be, and hanging off the corner is where a count
+   on a glyph belongs. */
+.chat-head-tools .roster-trigger .roster-count {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  min-width: 14px;
+  height: 14px;
+  padding-inline: 3px;
+  border-radius: 7px;
+  font-size: 10px;
+}
+/* The trigger stays in the header; the card it opens is the roster's twin —
+   a right-edge sheet with its own scrim, its own head and the same row rhythm
+   (`.node-dialog`, below). It used to be a popover hanging under the bar,
+   which made the third header pick the only one that behaved like a menu. In
+   the side dock the same markup gets `.is-inline` and becomes a static page
+   (dock.css). */
 .node-picker {
   display: flex;
 }
+/* The body: head, list, hint. The sheet around it — position, size, scrim,
+   animation — belongs to `.node-dialog`; this is only the column. */
 .node-panel {
-  position: absolute;
-  top: calc(100% + 8px);
-  /* The same right edge as the orchestration card: the two share one slot on
-     the bar, so switching between them must not slide the popover sideways. */
-  right: var(--sp-5);
-  z-index: 20;
-  /* 360px, the orchestration card's width, so the two are interchangeable
-     without the popover changing size. The `min()` is for a phone: below
-     ~400px of pane the card gives up its width rather than hanging off the
-     left edge. */
-  width: min(360px, calc(100% - 40px));
-  padding: 6px;
-  background: var(--bg-raised);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-pop);
-  animation: node-panel-in var(--dur-fast) var(--ease-enter);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 12px;
+  color: var(--text);
 }
 @keyframes node-panel-in {
   from {
@@ -3509,55 +3548,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* The cross takes the glyph's slot rather than standing beside the name: the
-   chip is one line of small print and a second control on its right would
-   push a long folder name into the clamp. It is a sibling of the open button
-   pinned over the glyph — same 8px inset as the chip's padding-left, so the
-   two never move and the swap is a dissolve, not a jump. */
-.workdir-btn .workdir-clear {
-  position: absolute;
-  left: 8px;
-  top: 50%;
-  transform: translateY(-50%);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 13px;
-  height: 13px;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--text);
-  cursor: pointer;
-  /* Hidden, not removed: a target that appears under the pointer must not
-     change the chip's box, or the pointer would fall off the control it is
-     aiming at. */
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity var(--dur-fast) var(--ease);
-}
-.workdir-btn.can-clear:hover .workdir-glyph,
-.workdir-btn.can-clear:focus-within .workdir-glyph {
-  opacity: 0;
-}
-.workdir-btn.can-clear:hover .workdir-clear,
-.workdir-btn.can-clear:focus-within .workdir-clear {
-  opacity: 1;
-  pointer-events: auto;
-}
-/* No hover to borrow the swap from: a finger never gets the preview, so the
-   cross has to be on the chip from the start. The glyph keeps its space (only
-   its ink goes) — the name must not slide under the cross it is next to. */
-@media (hover: none) {
-  .workdir-btn.has-value .workdir-glyph {
-    opacity: 0;
-  }
-  .workdir-btn.has-value .workdir-clear {
-    opacity: 1;
-    pointer-events: auto;
-  }
-}
 /* The bubble carries the path the label no longer does, and it opens to the
    RIGHT of the button rather than above it. Up is where the composer still
    lives — the attach menu and the authorize toggle sit exactly where a tip
@@ -3566,14 +3556,11 @@
    the box is ever touched, and the tip grows along the empty half of a row
    that only holds a keyboard legend. Left-anchored (not centred) because the
    pick is the leftmost thing in the column, so the bubble can only run
-   rightwards without leaving the pane.
-
-   A path on its own is a readout; the second line says the chip can be
-   undone, because the cross is the one control in the footer that is
-   invisible until the pointer is already on it. */
+   rightwards without leaving the pane. One line now: the second said the
+   chip could be undone, and the cross it described is gone. */
 .workdir-btn[data-tip]:hover::after,
 .workdir-btn[data-tip]:focus-visible::after {
-  content: attr(data-tip) '\A' attr(data-tip-hint);
+  content: attr(data-tip);
   white-space: pre-line;
   left: calc(100% + 10px);
   /* Bottom-anchored at the button's midline, then pulled down by half its own
@@ -3620,23 +3607,16 @@
   flex: none;
   opacity: 0.55;
 }
+/* The card's body. The sheet around it — position, size, scrim, animation —
+   belongs to `.wd-dialog` (below); this is only the column: head, search,
+   list, hint, footer. It used to be the popover itself, which is why the
+   rules for that shape are gone rather than overridden. */
 .wd-panel {
-  position: absolute;
-  left: 0;
-  bottom: calc(100% + 8px);
-  /* Above the model switch's card: both hang off this footer and the one on
-     top is the one that was just opened. */
-  z-index: 30;
   display: flex;
   flex-direction: column;
-  width: min(340px, calc(100vw - 48px));
-  max-height: min(46vh, 420px);
-  padding: 6px;
-  background: var(--bg-raised);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-pop);
-  animation: wd-panel-in var(--dur-fast) var(--ease-enter);
+  min-height: 0;
+  padding: 12px;
+  color: var(--text);
 }
 @keyframes wd-panel-in {
   from {
@@ -3667,6 +3647,34 @@
   height: 34px;
   padding-left: 30px;
 }
+/* The card's head is the roster's head: the name in card-title type, the
+   list's size beside it, and the one way out in the corner. It used to be an
+   uppercase micro-label over a bare search field, which read as a menu — the
+   card is a place you browse, and it now says so the same way the roster
+   does. */
+.wd-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex: none;
+  padding: 0 4px 10px;
+}
+.wd-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  color: var(--text);
+}
+.wd-count {
+  font-size: var(--text-xs);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+}
 .wd-list {
   display: flex;
   flex-direction: column;
@@ -3676,6 +3684,7 @@
   overscroll-behavior: contain;
 }
 .wd-row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 9px;
@@ -3692,6 +3701,27 @@
 }
 .wd-row:hover {
   background: var(--bg-hover);
+}
+/* The card's three bands. A head is a label, not a row: it takes no hover, no
+   click and no keyboard stop — the arrows walk the folders only. */
+.wd-group-head {
+  flex: none;
+  margin: 0;
+  padding: 7px 8px 2px;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+}
+.wd-list > .wd-group-head:first-child { padding-top: 2px; }
+/* The keyboard's row. Arrows and the pointer say the same thing, so they paint
+   the same; a chosen row keeps its wash and its tick, one step deeper while
+   the cursor is on it. */
+.wd-row.active {
+  background: var(--bg-hover);
+}
+.wd-dialog .wd-row.sel.active {
+  background: color-mix(in srgb, var(--task-blue) 16%, var(--bg-raised));
 }
 /* The current directory is marked, not tinted: the tick is the answer, and a
    filled row in a column of grey ones would read as the hovered one — which is
@@ -3724,6 +3754,139 @@
 .wd-row-path {
   font-size: var(--text-xs);
   color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Name and stamp on one line: when the directory was last used is a property
+   of the row, not a third paragraph. */
+.wd-row-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.wd-row-top .wd-row-name {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* The tick centres on the headline it marks, not on the row's own box. */
+.wd-row-top .wd-row-check {
+  align-self: center;
+}
+.wd-row-when {
+  flex: none;
+  /* 21px is the name's line box: the stamp starts at the row's top edge with
+     the name, so the two baselines land together without being in the same
+     flex line. */
+  line-height: 21px;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+/* The right column: stamp over star, both against the same edge, so the star
+   sits directly under the time. Top-aligned with the name rather than centred
+   in the row — a three-line row would otherwise push the stamp down to the
+   path. */
+.wd-row-side {
+  position: relative;
+  flex: none;
+  align-self: flex-start;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  min-width: 22px;
+}
+/* The row's own buttons take the stamp's slot: they are what you reach for
+   while the pointer is on the row, and the stamp is the thing you can afford
+   to lose for those two seconds. */
+.wd-row-acts {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: flex;
+  gap: 1px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+.wd-row:hover .wd-row-acts,
+.wd-row:focus-within .wd-row-acts {
+  opacity: 1;
+  pointer-events: auto;
+}
+.wd-row:hover .wd-row-when,
+.wd-row:focus-within .wd-row-when {
+  opacity: 0;
+}
+.wd-act {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: var(--bg-raised);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.wd-act:hover {
+  background: var(--bg-active);
+  color: var(--text);
+}
+/* The star is a state, not a hover affordance: it is always in the row, faint
+   until you look at the row or until it is on. A filled glyph in ink, the same
+   way the tick says "chosen" — this console keeps colour for meaning, not for
+   decoration. */
+.wd-star {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-tertiary);
+  opacity: 0.35;
+  cursor: pointer;
+  transition: opacity var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.wd-row:hover .wd-star,
+.wd-star:focus-visible {
+  opacity: 1;
+}
+.wd-star:hover {
+  color: var(--text);
+}
+.wd-star.on {
+  opacity: 1;
+  color: var(--text);
+}
+.wd-star.on svg {
+  fill: currentColor;
+}
+/* "This folder does not exist yet": a row that makes it, marked as an action
+   rather than a place by the plus and the dashed edge. */
+.wd-row.create .wd-row-name {
+  color: var(--text-secondary);
+}
+.wd-row.create .wd-row-icon {
+  color: var(--text-tertiary);
+}
+/* What the project says about itself, when it says anything. One line, cut:
+   the row already carries two, and a paragraph here would turn a list you
+   scan into one you read. */
+.wd-row-desc {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -6413,38 +6576,65 @@
 .new-chat-pane {
   overflow-y: auto;
   --composer-measure: 760px;
+  /* The two washes behind the box are the page's only colour, so they carry
+     the whole mood of an empty console: wide enough to reach the edges of a
+     laptop pane, and mixed here rather than taken straight from `--glow-*`
+     — those are tuned for small cards, and at this size they read as a faint
+     smudge. Alpha carries the depth; the hues stay the tokens' own. */
+  --hero-wash-blue: light-dark(rgb(126 168 232 / 32%), rgb(96 142 208 / 22%));
+  --hero-wash-violet: light-dark(rgb(192 158 219 / 28%), rgb(158 118 184 / 20%));
   background:
-    radial-gradient(ellipse min(44vw, 520px) 190px at 32% 55%, var(--glow-blue), transparent),
-    radial-gradient(ellipse min(42vw, 490px) 185px at 70% 57%, var(--glow-violet), transparent),
+    radial-gradient(ellipse min(44vw, 560px) 200px at 33% 57%, var(--hero-wash-blue), transparent),
+    radial-gradient(ellipse min(42vw, 530px) 195px at 70% 59%, var(--hero-wash-violet), transparent),
     var(--bg);
   caret-color: var(--text);
 }
 .new-chat-pane .chat-log { display: none; }
 .new-chat-pane .composer {
+  /* Centred, then lifted. Dead centre was right when the page was one short
+     greeting and a box; with the wordmark above it the block is tall enough
+     that centre puts the composer low on a laptop window. The auto margins
+     split what is left over, so the lift is doubled into the bottom padding —
+     `--hero-lift` is the number to turn. */
+  --hero-lift: 98px;
   margin-block: auto;
-  padding-block: 24px;
+  padding-block: 24px calc(24px + var(--hero-lift) * 2);
 }
+/* The hero: the wordmark in the lettering the product ships, with the pet
+   standing where the "O" was (see `HeroLockup` — the panda is part of the
+   artwork now, so there is no second element to place or align). It replaces
+   the greeting line and the plate the pet used to stand on: the page's top
+   half had nothing in it once the prompts left, and the lockup is the one
+   thing here that can be large without repeating what the composer says. */
 .new-chat-intro {
   display: flex;
-  align-items: center;
-  gap: 14px;
-  margin-bottom: 24px;
-}
-.new-chat-intro .composer-panda {
-  align-items: center;
   justify-content: center;
-  margin: 0;
-  padding: 3px;
-  border-radius: 12px;
-  background: var(--bg-chrome);
-  box-shadow: inset 0 0 0 1px var(--border-soft);
+  /* The gap is what puts the composer on the page's glow band: the form is
+     centred, so every px added here lifts the wordmark by half a px and drops
+     the box by half — `--hero-lift` above is set two-for-one against it to
+     keep the wordmark where it is while the box travels the whole distance. */
+  margin-bottom: 127px;
 }
-.new-chat-heading {
-  margin: 0;
-  font-size: clamp(24px, 2.6vw, 35px);
-  font-weight: 600;
-  letter-spacing: -.045em;
-  line-height: 1.2;
+/* The pet's face in the wordmark: a cut from the brand sheet laid over the gap
+   the O left. Its box is a percentage of the lockup, so it follows the wordmark
+   at any width; the numbers are the O's slot measured against the 240.15×35
+   cut, with the portrait 22% taller than the caps and its chin a little under
+   the baseline — the proportions the artwork itself uses. */
+.hero-lockup { position: relative; }
+.panda-lockup .hero-pet {
+  position: absolute;
+  left: 0.7%;
+  top: 13.15%;
+  width: 16.4%;
+  aspect-ratio: 166 / 150;
+  pointer-events: none;
+}
+/* The cut is ink on transparent. On night the ink has to become the page's
+   light and the face its dark, which is exactly what inverting does to a
+   black-on-transparent bitmap — no second asset to keep in step. */
+[data-theme='dark'] .panda-lockup .hero-pet { filter: invert(1); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .panda-lockup .hero-pet { filter: invert(1); }
 }
 .new-chat-pane .composer-box {
   padding-top: 12px;
@@ -6457,23 +6647,70 @@
   border-color: color-mix(in srgb, var(--task-blue) 58%, var(--border));
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--task-blue) 12%, transparent);
 }
-.new-chat-pane .composer-head {
-  position: static;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 8px 8px;
-  pointer-events: auto;
-}
-.new-chat-pane .workdir-pick { max-width: 56%; }
-.new-chat-pane .workdir-btn, .roster-trigger {
+/* The directory pick left the box: it is a header glyph now, left of the
+   roster. The composer's top row went with it, so the box is just a field
+   again — and the height that row used to take is handed to the field itself
+   (`.new-chat-pane .composer-input` below), because a shorter box reads as a
+   smaller composer rather than as a tidier one. */
+.roster-trigger {
   border: 0;
   border-radius: 8px;
   background: var(--surface-alpha-sm);
   color: var(--text-secondary);
   font-size: var(--text-sm);
 }
-.new-chat-pane .workdir-open { min-height: 28px; }
+/* The field takes back the 44px the header row used to occupy (36px control +
+   its 8px gap), so the new-chat composer keeps the height it had: the space
+   is now room to write in instead of a strip of controls above the text. */
+.new-chat-pane .composer-input { min-height: 96px; }
+/* The directory pick is a header glyph on this page, left of the roster: one
+   square at the bar's tool size, no pill and no name — the path lives in the
+   bubble and the accessible name. It stands with the other two answers a
+   first message needs: who works on it, and which machine runs it. */
+.chat-head-tools .workdir-pick {
+  display: flex;
+  align-items: center;
+  flex: none;
+}
+.chat-head-tools .workdir-btn.icon-only {
+  width: var(--head-tool);
+  height: var(--head-tool);
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  justify-content: center;
+}
+.chat-head-tools .workdir-btn.icon-only .workdir-open {
+  width: 100%;
+  height: 100%;
+  justify-content: center;
+  color: var(--text-secondary);
+}
+.chat-head-tools .workdir-btn.icon-only:hover:not(.is-disabled) {
+  background: var(--bg-hover);
+  border-color: transparent;
+}
+.chat-head-tools .workdir-btn.icon-only:hover:not(.is-disabled) .workdir-open,
+.chat-head-tools .workdir-btn.icon-only .workdir-open[aria-expanded="true"] {
+  color: var(--text);
+}
+/* The clear affordance is gone: the card's own first row ("自动（跟随项目）")
+   is where a pick is dropped now, and a cross that appears under the pointer
+   over the very glyph that opens the picker was one mis-aimed click away from
+   erasing the folder instead of changing it. */
+.chat-head-tools .workdir-pick:has(.workdir-open[aria-expanded="true"]) .workdir-btn.icon-only { background: var(--bg-hover); }
+/* The chip's bubble opened sideways, which in this bar would have run over the
+   roster and node marks. Header tools explain themselves below, right-aligned
+   to the bar's edge. */
+.chat-head-tools .workdir-btn[data-tip]:hover::after,
+.chat-head-tools .workdir-btn[data-tip]:focus-visible::after {
+  left: auto;
+  right: 0;
+  bottom: auto;
+  top: calc(100% + 6px);
+  transform: none;
+}
 .roster-trigger {
   display: inline-flex;
   align-items: center;
@@ -6493,18 +6730,57 @@
   font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
 }
-.new-chat-pane .wd-panel {
-  top: calc(100% + 6px);
-  bottom: auto;
-  width: min(340px, calc(100vw - 88px));
-  max-height: min(38dvh, 360px);
+/* The card hangs off a button that lives at the tools row's right end now, so
+   it opens upward (that row is the box's last line) and to the left — anchored
+   left it would walk off the pane on a narrow window. */
+.composer-actions .wd-panel {
+  left: auto;
+  right: 0;
+  width: min(360px, calc(100vw - 48px));
+}
+/* The directory card is the roster's twin: the same right-edge sheet, the
+   same head, the same row rhythm, the same scrim. Both picks stand in the
+   header, one beside the other, so opening either should feel like the same
+   gesture — the popover shape the directory had only made sense while its
+   trigger sat in the composer's footer.
+   It is a column, not a postcard: narrower than the roster, and tall enough
+   to hold a list that grows — two directories today, a dozen later, with the
+   footer staying at the bottom where the hand expects it. */
+.wd-dialog {
+  /* The three header picks hang under the bar they were opened from, not in
+     the middle of the window: the gesture starts at a glyph up there, and a
+     sheet that lands at the vertical centre reads as a dialog from nowhere.
+     64px = the bar's 56 plus 8 of air; all three share this edge. */
+  inset: 64px 12px auto auto;
+  margin: 0;
+  width: min(300px, calc(100vw - 24px));
+  height: min(66dvh, 560px);
+  padding: 0;
+  max-height: calc(100dvh - 76px);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--bg-raised);
+  color: var(--text);
+  box-shadow: var(--shadow-pop);
+}
+.wd-dialog::backdrop { background: rgb(0 0 0 / 14%); }
+/* The panel fills the sheet; the list takes whatever the head, the search,
+   the hint and the footer leave, so the empty half of a short list is space
+   the list will use rather than a gap under it. */
+.wd-dialog .wd-panel {
+  height: 100%;
+  max-height: none;
+}
+.wd-dialog .wd-list {
+  flex: 1 1 auto;
 }
 .roster-dialog {
-  inset: 0 12px 0 auto;
-  margin: auto 0;
+  /* Same top edge as the other two header picks (see `.wd-dialog`). */
+  inset: 64px 12px auto auto;
+  margin: 0;
   width: min(336px, calc(100vw - 24px));
   padding: 0;
-  max-height: calc(100dvh - 24px);
+  max-height: calc(100dvh - 76px);
   border: 1px solid var(--border);
   border-radius: 18px;
   background: var(--bg-raised);
@@ -6515,7 +6791,7 @@
 .roster-dialog .team-panel {
   position: static;
   width: 100%;
-  max-height: min(580px, calc(100dvh - 28px));
+  max-height: min(580px, calc(100dvh - 78px));
   padding: 12px;
   box-shadow: none;
   border: 0;
@@ -6529,12 +6805,77 @@
 
 .roster-dialog .team-duty-dot { background: var(--text-secondary); }
 .roster-dialog .team-hint, .roster-dialog .team-foot { flex: none; }
-@media (min-width: 1100px) {
-  .new-chat-pane:has(.roster-dialog[open]) .composer { margin-right: 348px; }
+/* The node sheet is the roster's twin: the same top and right edges, the same
+   width band, the same head and the same 42px rows with a blue tick. The three
+   glyphs — folder, people, node — stand in one row in the header, so opening
+   any of them must feel like the same gesture. Auto height rather than the
+   directory's fixed column: the list is as long as the fleet, and a sheet
+   padded down to 560px would be mostly air. */
+.node-dialog {
+  inset: 64px 12px auto auto;
+  margin: 0;
+  width: min(336px, calc(100vw - 24px));
+  padding: 0;
+  max-height: calc(100dvh - 76px);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--bg-raised);
+  color: var(--text);
+  box-shadow: var(--shadow-pop);
 }
-@media (max-width: 1099px) {
-  .roster-dialog { inset: 0; margin: auto; }
+.node-dialog::backdrop { background: rgb(0 0 0 / 14%); }
+.node-dialog .node-panel {
+  max-height: min(580px, calc(100dvh - 78px));
 }
+.node-dialog .node-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex: none;
+  padding: 0 4px 10px;
+}
+.node-dialog .node-panel-title {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  color: var(--text);
+}
+.node-dialog .node-panel-list {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.node-dialog .node-row {
+  min-height: 42px;
+  flex-shrink: 0;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+}
+.node-dialog .node-row.on { background: color-mix(in srgb, var(--task-blue) 10%, var(--bg-raised)); }
+.node-dialog .node-row.on .node-row-ico { color: var(--task-blue); }
+.node-dialog .node-row-check { color: var(--task-blue); }
+/* The hint is the roster's small print, not a footer bar: the card has no
+   action below it, so a hairline over the last line would read as a cut-off
+   footer rather than as the end of the list. */
+.node-dialog .node-panel-hint {
+  margin: 6px 4px 2px;
+  padding: 0;
+  border-top: 0;
+  line-height: 1.45;
+}
+/* The card is a modal with its own backdrop, so it paints over the page
+   rather than squeezing it. The composer used to slide left by the card's
+   width while it was up (`margin-right`), which moved the greeting and the
+   box you were reading away from under the pointer for a card that closes on
+   one click. It stays put now; the card simply sits on top of the right
+   edge. */
+/* No centred stop on the way down: above the phone breakpoint the sheet hangs
+   from the header's corner — top edge pinned under the bar, right edge pinned
+   to the window — and only ≤600 turns it into a bottom sheet. Centring it
+   between 1100 and 600 made the same card jump to the middle of the window on
+   a laptop — which is exactly the size this console runs at — and it read as a
+   dialog that had lost its anchor rather than as the same drawer, narrower. */
 @media (max-width: 600px) {
   .roster-dialog {
     inset: auto 0 0;
@@ -6547,7 +6888,36 @@
     max-height: min(72dvh, 580px);
     padding-bottom: max(12px, env(safe-area-inset-bottom));
   }
+  .wd-dialog {
+    inset: auto 0 0;
+    margin: 0;
+    width: 100%;
+    max-width: none;
+    height: min(72dvh, 560px);
+    border-radius: 20px 20px 0 0;
+  }
+  .wd-dialog .wd-panel {
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+  }
+  .node-dialog {
+    inset: auto 0 0;
+    margin: 0;
+    width: 100%;
+    max-width: none;
+    border-radius: 20px 20px 0 0;
+  }
+  .node-dialog .node-panel {
+    max-height: min(72dvh, 580px);
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+  }
 }
+/* Selected rows say the same thing in both cards: a wash of the task blue
+   and a blue tick. The directory list used to answer in ink alone, but the
+   two sheets now open from the same corner and must not disagree about what
+   "chosen" looks like. */
+.wd-dialog .wd-row { min-height: 42px; flex-shrink: 0; }
+.wd-dialog .wd-row.sel { background: color-mix(in srgb, var(--task-blue) 10%, var(--bg-raised)); }
+.wd-dialog .wd-row-check { color: var(--task-blue); }
 .wd-hint {
   margin: 4px 8px;
   font-size: var(--text-xs);
@@ -6572,52 +6942,7 @@
   font-weight: 450;
   color: var(--text-secondary);
 }
-.new-chat-suggestions { padding-top: 12px; min-height: 64px; }
 .chat-starter .starter-icon { display: none; }
-.new-chat-suggestions .chat-starters {
-  margin: 0;
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-}
-.new-chat-suggestions .chat-starter {
-  --task-tint: var(--task-blue);
-  gap: 10px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  text-align: start;
-  background: color-mix(in srgb, var(--task-tint) 3%, var(--bg-raised));
-  border-color: color-mix(in srgb, var(--task-tint) 14%, var(--border-soft));
-  box-shadow: inset 0 1px var(--composer-highlight);
-}
-.new-chat-suggestions .starter-icon {
-  display: grid;
-  place-items: center;
-  flex: none;
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--task-tint) 14%, var(--bg-raised));
-  color: var(--task-tint);
-}
-.new-chat-suggestions .chat-starter:nth-child(2) { --task-tint: var(--task-violet); }
-.new-chat-suggestions .chat-starter:nth-child(3) { --task-tint: var(--task-amber); }
-@media (hover: hover) {
-  .new-chat-suggestions .chat-starter:hover {
-    background: color-mix(in srgb, var(--task-tint) 8%, var(--bg-raised));
-    border-color: color-mix(in srgb, var(--task-tint) 36%, var(--border));
-  }
-}
-.new-chat-suggestions .starter-icon svg { color: inherit; }
-.new-chat-suggestions .chat-starter > svg { margin-inline-start: auto; flex: none; }
-@media (max-width: 600px) {
-  .new-chat-suggestions .chat-starters { grid-template-columns: 1fr; gap: 4px; }
-  .new-chat-suggestions .chat-starter { padding: 6px 10px; }
-}
-.new-chat-suggestions[inert] {
-  visibility: hidden;
-  opacity: 0;
-}
 @media (prefers-reduced-motion: no-preference) {
   .roster-dialog {
     --roster-offset: translateX(14px);
@@ -6641,16 +6966,58 @@
     .roster-dialog[open]::backdrop { opacity: 0; }
   }
   .roster-dialog .team-check, .roster-count { animation: roster-select 145ms ease-out; }
-  .new-chat-pane .composer { transition: margin-right 220ms cubic-bezier(.2,.7,.2,1); }
-  .new-chat-suggestions { transition: opacity 140ms ease-out, visibility 140ms; }
-  .roster-trigger > svg:last-child { transition: rotate 160ms ease-out; }
-  .roster-trigger[aria-expanded="true"] > svg:last-child { rotate: 180deg; }
-}
-@media (max-width: 1099px) and (prefers-reduced-motion: no-preference) {
-  .roster-dialog { --roster-offset: translateY(8px); }
+  /* Same entrance as the roster, because they are the same sheet. */
+  .wd-dialog {
+    --wd-offset: translateX(14px);
+    opacity: 0;
+    transform: var(--wd-offset);
+    transition: opacity 140ms ease-in, transform 160ms ease-in,
+      overlay 160ms allow-discrete, display 160ms allow-discrete;
+  }
+  .wd-dialog[open] {
+    opacity: 1;
+    transform: none;
+    transition: opacity 160ms ease-out, transform 220ms cubic-bezier(.2,.7,.2,1);
+  }
+  .wd-dialog::backdrop {
+    opacity: 0;
+    transition: opacity 160ms ease, display 160ms allow-discrete, overlay 160ms allow-discrete;
+  }
+  .wd-dialog[open]::backdrop { opacity: 1; }
+  @starting-style {
+    .wd-dialog[open] { opacity: 0; transform: var(--wd-offset); }
+    .wd-dialog[open]::backdrop { opacity: 0; }
+  }
+  .wd-dialog .wd-row-check { animation: roster-select 145ms ease-out; }
+  /* The third sheet, the third entrance: the header's three picks open in one
+     motion so they read as one row of controls, not three widgets. */
+  .node-dialog {
+    --node-offset: translateX(14px);
+    opacity: 0;
+    transform: var(--node-offset);
+    transition: opacity 140ms ease-in, transform 160ms ease-in,
+      overlay 160ms allow-discrete, display 160ms allow-discrete;
+  }
+  .node-dialog[open] {
+    opacity: 1;
+    transform: none;
+    transition: opacity 160ms ease-out, transform 220ms cubic-bezier(.2,.7,.2,1);
+  }
+  .node-dialog::backdrop {
+    opacity: 0;
+    transition: opacity 160ms ease, display 160ms allow-discrete, overlay 160ms allow-discrete;
+  }
+  .node-dialog[open]::backdrop { opacity: 1; }
+  @starting-style {
+    .node-dialog[open] { opacity: 0; transform: var(--node-offset); }
+    .node-dialog[open]::backdrop { opacity: 0; }
+  }
+  .node-dialog .node-row-check { animation: roster-select 145ms ease-out; }
 }
 @media (max-width: 600px) and (prefers-reduced-motion: no-preference) {
   .roster-dialog { --roster-offset: translateY(20px); }
+  .wd-dialog { --wd-offset: translateY(20px); }
+  .node-dialog { --node-offset: translateY(20px); }
 }
 @keyframes roster-select {
   from { opacity: 0; transform: scale(.88); }
@@ -6769,15 +7136,32 @@
 .session-round-fold[open] > summary .session-round-chevron { transform: rotate(90deg); }
 .session-round-parallel { font-size: var(--text-xs); font-weight: 600; color: var(--accent-2); }
 .session-round-body { width: 100%; min-width: 0; padding-block: 8px 12px; }
-.session-round-fold.is-message[open] > summary .session-round-row { border-radius: 8px 8px 0 0; }
+/* An opened task is one card, not a pill with a page hung under it. The row
+   and the body used to disagree about width: the summary hugged its title
+   (~270px) while the body took `width: 100%` of the transcript column, so four
+   short lines sat in a 900px grey slab with two thirds of it empty.
+   Open, the fold takes the reply measure — the same 620px a bubble stops at
+   (see `.msg-bubble`), so the card lines up with the answers above and below
+   it instead of floating as a narrow box in the middle of the column; the
+   summary stretches to the card rather than the card to the summary. Closed,
+   it stays the compact pill: a task that is just a line of text should not
+   wear a 620px bar. */
+.session-round-fold.is-message[open] { width: min(100%, var(--msg-measure, 620px)); }
+.session-round-fold.is-message[open] > summary .session-round-row { width: 100%; border-radius: 8px 8px 0 0; }
 .session-round-fold.is-message > .session-round-body {
   box-sizing: border-box;
+  width: 100%;
   background: color-mix(in srgb, var(--text) 2%, var(--bg));
   border: 1px solid var(--border-soft);
   border-top: 0;
   border-radius: 0 0 8px 8px;
   padding: 12px;
 }
+/* Inside the card the log is one more row, not a section of its own: the
+   waiting line and the attribution sat 30px apart, which read as a hole in the
+   content rather than as rhythm. */
+.session-round-body .task-turn-log { padding-block: 4px 0; }
+.session-round-body .task-turn-log > :is(.task-run-empty, .task-execution-meta) { margin-block: 0; }
 .session-round-job .task-approval { margin-block: 4px 12px; }
 .session-round-warning { color: var(--text-secondary); margin: 4px 8px 8px; }
 .session-round-document {

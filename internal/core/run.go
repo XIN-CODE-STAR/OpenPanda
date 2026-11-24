@@ -1522,6 +1522,11 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 	// separate from baseIntent so a context-overflow retry can compress
 	// the accretion (compactRunNotes) without touching the spec itself.
 	var intentSteers, intentNotes []string
+	// pendingSteers are the directives folded into the prompt that have not
+	// been stamped read yet. A round cancelled before delivery keeps its note
+	// here, so the round that finally carries it stamps every note in its
+	// prompt — not only the one it just peeked.
+	var pendingSteers []*steerNote
 	var deliveredSteers, deliveredNotes int
 	var deliveredStatic, deliveredSession, deliveredAdapter, deliveredRules string
 	fullIntent := func() string {
@@ -1649,8 +1654,16 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 		// User inject (steer.go): a message sent in "inject" mode leads this
 		// round's intent — ahead of the task spec and any folded notes — so
 		// the user's directive sets the course instead of reading as context.
-		if steer, label := c.takeRoundSteer(execCtx, taskID, boardSeen); steer != "" {
-			intentSteers = append([]string{label + "\n" + steer}, intentSteers...)
+		// Delivery is stamped only once the prompt reaches the adapter below;
+		// a crash in between must not make the note look read. The notes
+		// accumulate across rounds: a round can be cancelled before its
+		// adapter ever takes the prompt (a user inject aborts it), and the
+		// note then rides the *next* round's prompt. Stamping only the newest
+		// note left the earlier one pending forever even though the delivered
+		// prompt contained it.
+		if steer := c.peekRoundSteer(execCtx, taskID, boardSeen); steer != nil {
+			intentSteers = append([]string{steer.label + "\n" + steer.body}, intentSteers...)
+			pendingSteers = append(pendingSteers, steer)
 		}
 		// The agent can spawn children itself (a CLI `task add
 		// --parent-id $PANDA_TASK_ID`), which the episode's opening snapshot
@@ -1863,6 +1876,11 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 		interrupted := false
 		overflowRetried := false
 		resumeRetried := false
+		// steersStamped flips the first time a run of this round reports that
+		// the adapter took the prompt. It is deliberately not set before the
+		// run: a launch refusal must leave the note pending, and the flag is
+		// what keeps an overflow/resume retry from stamping twice.
+		steersStamped := false
 		var extraTokens int
 		var extraCost float64
 		for {
@@ -1883,6 +1901,12 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 				runCtx = commander.WithIncrementalPrompt(runCtx, prompt, delta, deliveredSession, deliveredAdapter)
 			}
 			runCtx = commander.WithPromptObserver(runCtx, func(adapter, mode string, bytes, fullBytes int) {
+				// This callback fires before the adapter is called, so it
+				// cannot be the proof that the prompt was delivered — a launch
+				// failure (no script, no interpreter, a sandbox refusal) still
+				// reaches here. The steer notes are stamped from the delivery
+				// announcement the adapter layer makes once the prompt is
+				// actually handed over; see WithPromptDelivered below.
 				usedSkills = preparedSkills
 				if mode == "delta" {
 					usedSkills = nil
@@ -1913,6 +1937,24 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 			// budget the round is not steerable: an inject then waits for the
 			// natural boundary (delivered at the next round, or as a durable
 			// note if the task ends first).
+			// The adapter announces the hand-off itself (a successful spawn or
+			// a session turn on its stdin); the observer above fires too early
+			// to be that proof. Stamping here is what keeps the console from
+			// offering to edit a directive that is already executing, and a
+			// launch refusal never calls it at all.
+			runCtx = commander.WithPromptDelivered(runCtx, func() {
+				if steersStamped {
+					return
+				}
+				steersStamped = true
+				for _, note := range pendingSteers {
+					c.markSteerDelivered(context.WithoutCancel(execCtx), taskID, note)
+				}
+				// Every note in the prompt is stamped now; the next round
+				// starts a fresh list (the strings stay in intentSteers, which
+				// is what the prompt is assembled from).
+				pendingSteers = nil
+			})
 			roundCtx := runCtx
 			var roundCancel context.CancelFunc
 			steerable := steerRounds < maxSteerRounds
@@ -2506,7 +2548,12 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 		}
 
 		if !res.OK {
-			if allowPeer && res.NoProviderWork && round == 0 && sessionID == "" && task.AgentSessionID == "" && beforeOK && !filesTruncated && len(lastChanged) == 0 && len(w.checks) == 0 && execCtx.Err() == nil {
+			// The gate is "no provider work", not "no session id": an adapter
+			// can mint a handle before it refuses the login, and that handle
+			// describes nothing. The evidence checks below (no changed files,
+			// no checks, no prior checkpoint) are what prove the workspace is
+			// untouched, so the handoff does not need an empty local session.
+			if allowPeer && res.NoProviderWork && round == 0 && task.AgentSessionID == "" && beforeOK && !filesTruncated && len(lastChanged) == 0 && len(w.checks) == 0 && execCtx.Err() == nil {
 				if handoff := c.providerFallbackPeer(ctx, task, res.Stderr); handoff != nil {
 					return roundOutcome{}, handoff
 				}

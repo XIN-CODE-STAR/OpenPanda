@@ -174,7 +174,12 @@ func (h *handler) listDirectories(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var dirs []dirEntry
+	// Allocated, not declared: an empty directory must answer `[]`, not
+	// `null`. The console filters this list as soon as it arrives, and a null
+	// there threw before the card could paint — an empty folder then read as
+	// "the path does not exist or is unreadable" and the typed path could not
+	// be created from the search field.
+	dirs := make([]dirEntry, 0, len(entries))
 	for _, e := range entries {
 		// Only list directories, skip hidden ones by default
 		if !e.IsDir() {

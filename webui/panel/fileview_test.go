@@ -3,8 +3,12 @@
 package panel
 
 import (
+	"bytes"
+	"database/sql"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +24,15 @@ import (
 // newFileViewPanel builds a panel whose work_path and session store are both
 // throwaway, so a worktree outside work_path is still a legal base.
 func newFileViewPanel(t *testing.T) (http.Handler, string, *sessions.Store) {
+	t.Helper()
+	h, tmp, store, _ := newFileViewPanelWithDB(t)
+	return h, tmp, store
+}
+
+// newFileViewPanelWithDB is newFileViewPanel plus the database the handler
+// reads, for fixtures that have to seed a row the panel joins on (a board
+// session's legacy task directory).
+func newFileViewPanelWithDB(t *testing.T) (http.Handler, string, *sessions.Store, *sql.DB) {
 	t.Helper()
 	tmp := t.TempDir()
 	cfg := config.Default()
@@ -52,7 +65,7 @@ func newFileViewPanel(t *testing.T) (http.Handler, string, *sessions.Store) {
 		Token:      testToken,
 		Sessions:   store,
 	})
-	return h, tmp, store
+	return h, tmp, store, db
 }
 
 // numOf reads a numeric field out of a decoded JSON object.
@@ -107,6 +120,48 @@ func TestViewFileResolvesAgainstSessionWorktree(t *testing.T) {
 	code, _ = doJSON(t, h, authedReq(http.MethodGet, "/api/fs/file?path=src/main.go", nil))
 	if code == http.StatusOK {
 		t.Error("a worktree path resolved without its session")
+	}
+}
+
+// TestFsImageResolvesAgainstSessionWorktree: the file panel reads a picture's
+// header with /api/fs/file and then asks /api/fs/image for the pixels of the
+// very same path. Both have to walk one ladder — the thread's worktree as the
+// base for a relative path and as a readable root — or the pane 403s on the
+// bytes of a file it has just named.
+func TestFsImageResolvesAgainstSessionWorktree(t *testing.T) {
+	h, tmp, store := newFileViewPanel(t)
+
+	worktree := filepath.Join(tmp, "repo", ".openpanda", "worktrees", "s1")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw := pngBytes(t)
+	if err := os.WriteFile(filepath.Join(worktree, "shot.png"), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := store.Create("thread")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetWorktree(sess.ID, worktree, "feat"); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, authedReq(http.MethodGet, "/api/fs/image?session="+sess.ID+"&path=shot.png", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("session-relative image: %d %s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Equal(rr.Body.Bytes(), raw) {
+		t.Error("body is not the file's own bytes")
+	}
+
+	// Without the session the same relative path misses: the endpoint must
+	// not guess which worktree "shot.png" meant.
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, authedReq(http.MethodGet, "/api/fs/image?path=shot.png", nil))
+	if rr.Code == http.StatusOK {
+		t.Error("a worktree image resolved without its session")
 	}
 }
 
@@ -413,5 +468,143 @@ func TestListFilesRootsAtSessionWorkspace(t *testing.T) {
 	}
 	if out["current"] != resolved(work) {
 		t.Errorf("sessionless current = %v, want %s", out["current"], work)
+	}
+}
+
+// A board task's linked session pins the directory it runs in. The executor
+// honours that pin, so the file panel must too: falling back to the project or
+// node root showed a same-named file from the wrong tree with a 200.
+func TestViewFileResolvesAgainstPinnedSessionDir(t *testing.T) {
+	h, tmp, store := newFileViewPanel(t)
+	pinned := filepath.Join(tmp, "elsewhere")
+	if err := os.MkdirAll(pinned, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pinned, "note.md"), []byte("pinned copy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(tmp, "project-root")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "note.md"), []byte("root copy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := store.CreateInDir("board task", "", pinned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, out := doJSON(t, h, authedReq(http.MethodGet,
+		"/api/fs/file?session="+sess.ID+"&path=note.md", nil))
+	if code != http.StatusOK {
+		t.Fatalf("pinned-dir read: %d %v", code, out)
+	}
+	if out["content"] != "pinned copy" {
+		t.Fatalf("content = %q, want the pinned directory's copy", out["content"])
+	}
+}
+
+// TestReadFileResolvesAgainstSessionWorktree: the composer's `@same.txt` and
+// the files pane beside it must read one file. /api/fs/read anchored every
+// relative path at work_path, so a thread's attachment carried the node's
+// same-named copy into the prompt; an absolute path inside the worktree was
+// refused outright because the worktree was not a readable root.
+func TestReadFileResolvesAgainstSessionWorktree(t *testing.T) {
+	h, tmp, store := newFileViewPanel(t)
+
+	worktree := filepath.Join(tmp, "repo", "wt")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pinned := filepath.Join(worktree, "same.txt")
+	if err := os.WriteFile(pinned, []byte("PINNED"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nodeCopy := filepath.Join(tmp, "work", "same.txt")
+	if err := os.WriteFile(nodeCopy, []byte("NODE DEFAULT"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := store.Create("thread")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetWorktree(sess.ID, worktree, "feat"); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out := doJSON(t, h, authedReq(http.MethodGet,
+		"/api/fs/read?session="+sess.ID+"&path=same.txt", nil))
+	if code != http.StatusOK {
+		t.Fatalf("session-relative read: %d %v", code, out)
+	}
+	if out["content"] != "PINNED" {
+		t.Fatalf("content = %q, want the thread's copy", out["content"])
+	}
+
+	// Without the session the relative path still means the node's tree —
+	// that is the fallback a thread must not fall into.
+	code, out = doJSON(t, h, authedReq(http.MethodGet, "/api/fs/read?path=same.txt", nil))
+	if code != http.StatusOK || out["content"] != "NODE DEFAULT" {
+		t.Fatalf("session-less read = %d %q, want the node's copy", code, out["content"])
+	}
+
+	// An absolute path in the worktree is readable only when the thread is
+	// named: the worktree is not under work_path, so it is not a root by
+	// default.
+	escaped := url.QueryEscape(pinned)
+	code, out = doJSON(t, h, authedReq(http.MethodGet,
+		"/api/fs/read?session="+sess.ID+"&path="+escaped, nil))
+	if code != http.StatusOK || out["content"] != "PINNED" {
+		t.Fatalf("absolute worktree read = %d %q", code, out["content"])
+	}
+	code, _ = doJSON(t, h, authedReq(http.MethodGet, "/api/fs/read?path="+escaped, nil))
+	if code != http.StatusForbidden {
+		t.Fatalf("absolute worktree read without a session = %d, want 403", code)
+	}
+}
+
+// TestSessionCwdRecoversALegacyBoardTaskDirectory: an older board session
+// stored the directory only on its linked task. The executor still recovers it
+// from there, so the file panel must walk the same ladder — otherwise it
+// answered 200 with the project's (or work_path's) same-named file while the
+// agent was working in the pinned tree.
+func TestSessionCwdRecoversALegacyBoardTaskDirectory(t *testing.T) {
+	h, tmp, store, db := newFileViewPanelWithDB(t)
+
+	pinned := filepath.Join(tmp, "pinned")
+	if err := os.MkdirAll(pinned, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pinned, "same.txt"), []byte("PINNED"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "work", "same.txt"), []byte("NODE DEFAULT"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sess, err := store.Create("board task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendTurns(sess.ID,
+		sessions.Turn{Role: "user", Text: "first"},
+		sessions.Turn{Role: "assistant", Ref: "task", IdempotencyKey: "session_summary:task:attempt"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(
+		"INSERT INTO tasks(task_id, session_id, work_dir, intent, state, owner_node, attempt_id) VALUES('task', ?, ?, 'first', 'done', 'local', 'attempt')",
+		sess.ID, pinned,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out := doJSON(t, h, authedReq(http.MethodGet,
+		"/api/fs/file?session="+sess.ID+"&path=same.txt", nil))
+	if code != http.StatusOK {
+		t.Fatalf("legacy board read: %d %v", code, out)
+	}
+	if out["content"] != "PINNED" {
+		t.Fatalf("content = %q, want the task's pinned directory", out["content"])
 	}
 }

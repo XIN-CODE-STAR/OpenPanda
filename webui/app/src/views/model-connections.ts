@@ -73,6 +73,39 @@ export function connRefs(c: Conn): ModelRefWire[] {
   return c.members.map((m) => ({ alias: m.entry.alias, ...refOf(m.entry) }))
 }
 
+/** The shape a lender lookup needs from a draft: the registry row behind it,
+ *  the name typed into the table, and whether the trash has marked it. */
+export interface LenderDraft {
+  id: number
+  alias: string
+  dropped?: boolean
+  src?: ModelEntry
+}
+
+/** The row a new model borrows this connection's key from.
+ *
+ *  A kept row is renamed by its PUT before the POSTs, so `saved` (the alias the
+ *  server allocated) is the name in effect; borrowing the typed name after a
+ *  collision would point at a row that does not exist. A dropped row is never
+ *  PUT, so its stored name is the only one the registry answers to until the
+ *  DELETE lands — and it can still lend, because the POSTs run first.
+ *
+ *  The fingerprint travels with the alias because the alias alone does not name
+ *  an account: two rows of one vendor share it, and the server's alias-only
+ *  lookup handed the new row the other account's credential. */
+export function lenderOf(
+  drafts: LenderDraft[],
+  saved?: Map<number, string>,
+): { alias: string; key?: string } | undefined {
+  const rows = drafts.filter((d) => d.src?.key_set)
+  const row = rows.find((d) => !d.dropped) ?? rows[0]
+  if (!row) return undefined
+  const alias = row.dropped
+    ? row.src!.alias
+    : (saved?.get(row.id) ?? (row.alias.trim() || row.src!.alias))
+  return { alias, key: row.src!.key_fingerprint }
+}
+
 export function labelOf(providers: ProviderInfo[], id?: string): string {
   if (!id) return ''
   return providers.find((p) => p.id === id)?.label ?? id

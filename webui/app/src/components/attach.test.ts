@@ -9,6 +9,7 @@ import {
   expandFileRefs,
   exportMarkdown,
   exportFilename,
+  imageBytesUrl,
   isBinaryRef,
   isImageFile,
   splitFileRef,
@@ -34,6 +35,17 @@ test('fenceLang maps extensions, unknown → empty', () => {
   assert.equal(fenceLang('x.TSX'), 'typescript')
   assert.equal(fenceLang('notes.md'), 'markdown')
   assert.equal(fenceLang('noext'), '')
+})
+
+test('an image URL names the thread that means the path', () => {
+  // A workspace reference is relative to the thread's worktree, so the
+  // endpoint needs the session to resolve it and to admit the worktree.
+  assert.equal(
+    imageBytesUrl('shots/a b.png', 's1'),
+    '/api/fs/image?path=shots%2Fa%20b.png&session=s1',
+  )
+  assert.equal(imageBytesUrl('D:/x/a.png'), '/api/fs/image?path=D%3A%2Fx%2Fa.png')
+  assert.equal(imageBytesUrl('a.png', null), '/api/fs/image?path=a.png')
 })
 
 const reader =

@@ -38,6 +38,10 @@ export interface DockChangesProps {
   onRevert?(): void
   merging?: boolean
   reverting?: boolean
+  /** Another thread's merge/revert is running. The two operations share the
+   *  base checkout and cannot run at once, so this panel's buttons are
+   *  disabled instead of accepting a click the handler has to drop. */
+  blocked?: boolean
   error?: string
 }
 
@@ -364,7 +368,8 @@ export function DockChanges(props: DockChangesProps) {
               <button
                 type="button"
                 class="btn small danger"
-                disabled={props.merging || props.reverting}
+                disabled={props.merging || props.reverting || props.blocked}
+                title={props.blocked ? t('sessions.changesBusy') : undefined}
                 onClick={props.onRevert}
               >
                 {props.reverting ? t('sessions.reverting') : t('sessions.revert')}
@@ -375,7 +380,8 @@ export function DockChanges(props: DockChangesProps) {
               <button
                 type="button"
                 class="btn small primary"
-                disabled={props.merging || props.reverting}
+                disabled={props.merging || props.reverting || props.blocked}
+                title={props.blocked ? t('sessions.changesBusy') : undefined}
                 onClick={props.onMerge}
               >
                 {props.merging ? t('sessions.merging') : t('sessions.merge')}

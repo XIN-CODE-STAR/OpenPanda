@@ -101,14 +101,14 @@ func (s *TaskStore) AskRoundProgress(ctx context.Context, sessionID, roundID str
   UNION
   SELECT t.task_id FROM tasks t JOIN members m ON t.parent_id=m.id
 )
-SELECT t.task_id,t.state,`+withdrawnPlanStageSQL+` FROM tasks t JOIN members ON t.task_id=members.id ORDER BY t.task_id`, roundID)
+SELECT t.task_id,t.state,COALESCE(t.parent_id,''),`+withdrawnPlanStageSQL+` FROM tasks t JOIN members ON t.task_id=members.id ORDER BY t.task_id`, roundID)
 	if err != nil {
 		return r, err
 	}
 	for rows.Next() {
 		var t Task
 		var withdrawn bool
-		if err := rows.Scan(&t.TaskID, &t.State, &withdrawn); err != nil {
+		if err := rows.Scan(&t.TaskID, &t.State, &t.ParentID, &withdrawn); err != nil {
 			rows.Close()
 			return r, err
 		}

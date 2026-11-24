@@ -1018,6 +1018,70 @@ func TestConfirmedPlanWaitsForMembersAndStoresFailure(t *testing.T) {
 	check("failed", "error")
 }
 
+// A stage may spawn a helper and absorb its failure. The delivery transcript
+// is written from the plan board, so the run's status must use the same
+// verdict: counting the helper made a delivered plan settle as failed.
+func TestPlanRunIgnoresFailedHelperChild(t *testing.T) {
+	e, tasks, ctx := newStageTestEngine(t)
+	e.queueTasks = true
+	st := sessions.NewStore(t.TempDir())
+	sess, err := st.Create("helper absorbed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &ConversationService{engine: e, store: &conversation.Store{DB: e.db}, sessions: st}
+	if err := s.SetPlanning(ctx, sess.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	version, err := s.store.SaveProposal(ctx, sess.ID, "Audit, then verify")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ConfirmPlan(ctx, sess.ID, version); err != nil {
+		t.Fatal(err)
+	}
+	const round = "helper-round"
+	if err := tasks.BeginAskRound(ctx, round, sess.ID, "en"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.db.Exec("UPDATE conversation_plan_runs SET status='running',round_id=? WHERE session_id=?", round, sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.StartOperation(sess.ID, sessions.Operation{ID: round, Status: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	stage, err := tasks.Create(core.WithAskRound(ctx, round), "", "", "verify", "test-node", []string{"test-node"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.db.Exec("UPDATE tasks SET plan_id='plan-helper',stage_id='verify',state='done' WHERE task_id=?", stage.TaskID); err != nil {
+		t.Fatal(err)
+	}
+	helper, err := tasks.Create(ctx, stage.TaskID, "", "absorbed helper", "test-node", []string{"test-node"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tasks.ForceFail(ctx, helper.TaskID, "absorbed by the stage"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tasks.CloseAskRound(ctx, round, "closed"); err != nil {
+		t.Fatal(err)
+	}
+	s.sweepPlans(ctx)
+	var run, op string
+	if err := e.db.QueryRow("SELECT status FROM conversation_plan_runs WHERE session_id=?", sess.ID).Scan(&run); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := st.Get(sess.ID)
+	if err != nil || snapshot.Operation == nil {
+		t.Fatalf("session operation missing: %+v, %v", snapshot, err)
+	}
+	op = snapshot.Operation.Status
+	if run != "done" || op != "done" {
+		t.Fatalf("run=%q operation=%q, want done/done beside a delivered stage", run, op)
+	}
+}
+
 func TestConfirmedStructuredProposalDispatchesReviewedGraphWithoutReclassification(t *testing.T) {
 	e, store, ctx := newStageTestEngine(t) // No entry model is installed.
 	e.queueTasks = true
@@ -1070,6 +1134,71 @@ func TestConfirmedStructuredProposalDispatchesReviewedGraphWithoutReclassificati
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("confirmed graph did not dispatch into its session round with the reviewed edge")
+}
+
+// A restart between the confirmation turn and the first dispatched task used
+// to re-enter the entry model: the confirmation's presence was read as "the
+// round already started", the reviewed graph was dropped, and a node with no
+// entry model answered "model not configured" with zero stages. The saved
+// graph is the contract; the turn alone proves nothing ran.
+func TestConfirmedStructuredPlanRestartDispatchesSavedGraph(t *testing.T) {
+	e, tasks, ctx := newStageTestEngine(t) // No entry model is installed.
+	e.queueTasks = true
+	st := sessions.NewStore(t.TempDir())
+	sess, err := st.Create("restart before dispatch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := e.Conversations(st)
+	service.Close()
+	if err = service.store.SetPlanning(ctx, sess.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{"goal":"ship","stages":[{"id":"inspect","intent":"inspect source"},{"id":"ship","intent":"verify result","needs":["inspect"]}]}`
+	version, err := service.store.SaveProposal(ctx, sess.ID, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.store.Confirm(ctx, sess.ID, version); err != nil {
+		t.Fatal(err)
+	}
+	// The durable trace of a run that died right after writing the
+	// confirmation: a dead round and that turn, no task, no assistant turn.
+	const round = "crashed-before-dispatch"
+	if err = tasks.BeginAskRound(ctx, round, sess.ID, "en"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = e.db.Exec("UPDATE ask_rounds SET lease_until=0 WHERE round_id=?", round); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = st.AppendTurn(sess.ID, sessions.PlanConfirmationTurn(round, version, planInstruction(version, raw))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = e.db.Exec("UPDATE conversation_plan_runs SET status='running',round_id=? WHERE session_id=?", round, sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	// A fresh process, exactly as a restart would build it.
+	e.conversationMu.Lock()
+	e.conversation = nil
+	e.conversationMu.Unlock()
+	restarted := e.Conversations(st)
+	t.Cleanup(restarted.Close)
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		var stages int
+		if err = e.db.QueryRow("SELECT COUNT(*) FROM tasks WHERE session_id=? AND COALESCE(plan_id,'')!=''", sess.ID).Scan(&stages); err == nil && stages == 3 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	var stages int
+	_ = e.db.QueryRow("SELECT COUNT(*) FROM tasks WHERE session_id=? AND COALESCE(plan_id,'')!=''", sess.ID).Scan(&stages)
+	persisted, _ := st.Get(sess.ID)
+	var tail string
+	if persisted != nil && len(persisted.Turns) > 0 {
+		tail = persisted.Turns[len(persisted.Turns)-1].Text
+	}
+	t.Fatalf("recovered stages=%d, want the reviewed graph's 3 (last turn %q)", stages, tail)
 }
 
 func TestInvalidConfirmedGraphFailsWithoutCreatingTasks(t *testing.T) {

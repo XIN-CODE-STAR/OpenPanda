@@ -191,20 +191,78 @@ WHERE session_id=?`, enabled, enabled, enabled, sid); err != nil {
 
 // BeginPlanningRequest retires the previous proposal as soon as a new turn
 // starts. Versions remain monotonic and saved proposals stay in the archive.
-func (s *Store) BeginPlanningRequest(ctx context.Context, sid string) (version, generation int64, err error) {
+//
+// A revision may name the version it is revising. When it does, the proposal
+// is only retired if that is still the current one, still unconfirmed *and*
+// still on file: a tab that missed a newer proposal must not blank it with
+// feedback about text nobody is reviewing; because confirming does not bump
+// the version, a revision naming a confirmed proposal must not re-open a plan
+// that is already being implemented; and a version whose text was already
+// retired is not something to revise a second time. All three facts are
+// checked in the same statement that retires the text, so the answer cannot go
+// stale between the check and the write.
+func (s *Store) BeginPlanningRequest(ctx context.Context, sid string, expected ...int64) (version, generation int64, err error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, 0, err
 	}
 	defer tx.Rollback()
-	err = tx.QueryRowContext(ctx, `UPDATE conversation_controls
+	query := `UPDATE conversation_controls
 SET mode_generation=mode_generation+1,proposal=''
-WHERE session_id=? AND planning=1 AND deleted=0
-RETURNING proposal_version,mode_generation`, sid).Scan(&version, &generation)
+WHERE session_id=? AND planning=1 AND deleted=0`
+	args := []any{sid}
+	if len(expected) > 0 && expected[0] > 0 {
+		query += " AND proposal_version=? AND confirmed_version<? AND proposal!=''"
+		args = append(args, expected[0], expected[0])
+	}
+	err = tx.QueryRowContext(ctx, query+" RETURNING proposal_version,mode_generation", args...).Scan(&version, &generation)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, 0, ErrConflict
 	}
 	if err != nil {
+		return 0, 0, err
+	}
+	if err = event(ctx, tx, sid, "plan_invalidated", version); err != nil {
+		return 0, 0, err
+	}
+	return version, generation, tx.Commit()
+}
+
+// BeginRevision enters planning mode and retires the named proposal in one
+// transaction. A revision that arrives while the lens is off used to be two
+// statements — SetPlanning(true), then BeginPlanningRequest — and a
+// confirmation landing between them left the session in planning mode with the
+// proposal blanked even though the revision was refused. Here the conditional
+// UPDATE is the whole decision: if the proposal is no longer current, has been
+// confirmed, or is already retired, nothing changes at all.
+func (s *Store) BeginRevision(ctx context.Context, sid string, expected int64) (version, generation int64, err error) {
+	if expected <= 0 {
+		return 0, 0, ErrInvalid
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback()
+	if err = ensure(ctx, tx, sid); err != nil {
+		return 0, 0, err
+	}
+	err = tx.QueryRowContext(ctx, `UPDATE conversation_controls
+SET planning=1, mode_generation=mode_generation+1, proposal=''
+WHERE session_id=? AND deleted=0 AND proposal_version=? AND confirmed_version<? AND proposal!=''
+RETURNING proposal_version,mode_generation`, sid, expected, expected).Scan(&version, &generation)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, ErrConflict
+	}
+	if err != nil {
+		return 0, 0, err
+	}
+	// Entering planning pauses the running goal, exactly as SetPlanning(true)
+	// does: the plan is about to replace the objective's course.
+	if _, err = tx.ExecContext(ctx, "UPDATE conversation_goals SET status='paused',paused_by_plan=1,updated_at=? WHERE session_id=? AND status='active'", time.Now().UnixMilli(), sid); err != nil {
+		return 0, 0, err
+	}
+	if err = event(ctx, tx, sid, "mode", map[string]bool{"planning": true}); err != nil {
 		return 0, 0, err
 	}
 	if err = event(ctx, tx, sid, "plan_invalidated", version); err != nil {

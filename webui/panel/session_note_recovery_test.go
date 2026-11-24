@@ -87,15 +87,19 @@ func TestSessionAskRestoresNotesAfterRoundFailure(t *testing.T) {
 
 type noteFailureWriter struct {
 	*httptest.ResponseRecorder
-	onOperation func()
+	// onFlush runs once, when the stream's headers are flushed. That is the
+	// last moment before the handler persists the operation and the user turn;
+	// making the session file unavailable here exercises the write failure
+	// without depending on which frame happens to be written first.
+	onFlush func()
 }
 
-func (w *noteFailureWriter) Write(p []byte) (int, error) {
-	if strings.HasPrefix(string(p), "event: operation\n") && w.onOperation != nil {
-		w.onOperation()
-		w.onOperation = nil
+func (w *noteFailureWriter) Flush() {
+	if w.onFlush != nil {
+		w.onFlush()
+		w.onFlush = nil
 	}
-	return w.ResponseRecorder.Write(p)
+	w.ResponseRecorder.Flush()
 }
 
 func TestSessionAskRestoresNotesAfterOperationFailure(t *testing.T) {
@@ -107,7 +111,7 @@ func TestSessionAskRestoresNotesAfterOperationFailure(t *testing.T) {
 	f.h.parkLeftovers(f.sessionID, nil)
 	path := filepath.Join(f.root, f.sessionID+".json")
 	backup := path + ".unavailable"
-	w := &noteFailureWriter{ResponseRecorder: httptest.NewRecorder(), onOperation: func() {
+	w := &noteFailureWriter{ResponseRecorder: httptest.NewRecorder(), onFlush: func() {
 		if err := os.Rename(path, backup); err != nil {
 			t.Fatal(err)
 		}

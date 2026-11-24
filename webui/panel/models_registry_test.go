@@ -384,6 +384,188 @@ func TestUpdateModelRewritesOneRowInPlace(t *testing.T) {
 	}
 }
 
+// The edit form paints the model, not the row's provenance or the shape of its
+// credential. Editing a connection rewrites every kept row, so a field the form
+// cannot echo must survive that rewrite: an isolated edit that only fixed the
+// context window came back with `source` and `key_scheme` cleared, and a row
+// whose token rides `Authorization: Bearer` then 401'd on every later call.
+func TestUpdateModelKeepsFieldsTheFormNeverShows(t *testing.T) {
+	noWait := false
+	row := config.ModelConfig{
+		Name: "claude", Provider: "custom", Source: "claude",
+		APIType: config.APITypeOpenAI, BaseURL: "https://relay.example/v1",
+		Model: "claude-sonnet", APIKey: "sk-x", KeyScheme: "bearer",
+		ContextWindow: 200000, OfflineWait: &noWait,
+	}
+	h, path := newModelPanel(t, func(c *config.Config) {
+		c.Model = row
+		c.Models = []config.ModelConfig{row}
+	})
+
+	code, out := doJSON(t, h, jsonReq(http.MethodPut,
+		entryURL("claude", "claude-sonnet", "https://relay.example/v1"),
+		`{"context_window":123456}`))
+	if code != http.StatusOK {
+		t.Fatalf("update = %d %v", code, out)
+	}
+	cfg := readConfig(t, path)
+	if len(cfg.Models) != 1 {
+		t.Fatalf("registry after edit = %+v", cfg.Models)
+	}
+	got := cfg.Models[0]
+	if got.Source != "claude" {
+		t.Fatalf("source lost on edit: %q", got.Source)
+	}
+	if got.KeyScheme != "bearer" {
+		t.Fatalf("key_scheme lost on edit: %q", got.KeyScheme)
+	}
+	// The console only restates api_type when the user changed it, so an edit
+	// that keeps the model must keep the dialect: rebuilding without it sent
+	// an Anthropic body to an OpenAI-compatible relay.
+	if got.APIType != config.APITypeOpenAI {
+		t.Fatalf("api_type flipped on edit: %q", got.APIType)
+	}
+	if got.OfflineWait == nil || *got.OfflineWait {
+		t.Fatalf("offline_wait lost on edit: %v", got.OfflineWait)
+	}
+	if got.ContextWindow != 123456 {
+		t.Fatalf("edited limit did not land: %d", got.ContextWindow)
+	}
+}
+
+// A row whose credential another application owns (an env reference or a
+// subscription login) carries no api_key, so the rebuilt entry would come back
+// keyless unless the reference rides the edit. A typed key replaces it.
+func TestUpdateModelKeepsACredentialReference(t *testing.T) {
+	row := config.ModelConfig{
+		Name: "work", Provider: "custom", APIType: config.APITypeAnthropic,
+		BaseURL: "https://relay.example/v1", Model: "claude-sonnet",
+		KeyRef: "ccswitch:claude:work", Auth: "anthropic",
+	}
+	h, path := newModelPanel(t, func(c *config.Config) {
+		c.Model = row
+		c.Models = []config.ModelConfig{row}
+	})
+
+	code, out := doJSON(t, h, jsonReq(http.MethodPut,
+		entryURL("work", "claude-sonnet", "https://relay.example/v1"),
+		`{"max_tokens":4096}`))
+	if code != http.StatusOK {
+		t.Fatalf("update = %d %v", code, out)
+	}
+	cfg := readConfig(t, path)
+	if got := cfg.Models[0]; got.KeyRef != "ccswitch:claude:work" || got.Auth != "anthropic" {
+		t.Fatalf("credential reference lost on edit: %+v", got)
+	}
+	if cfg.Models[0].NoAuth {
+		t.Fatal("a row with a credential reference must not read as no-auth")
+	}
+
+	// A key typed into the form is the row's credential from then on.
+	code, out = doJSON(t, h, jsonReq(http.MethodPut,
+		entryURL("work", "claude-sonnet", "https://relay.example/v1"),
+		`{"api_key":"sk-new"}`))
+	if code != http.StatusOK {
+		t.Fatalf("update with a key = %d %v", code, out)
+	}
+	cfg = readConfig(t, path)
+	if got := cfg.Models[0]; got.KeyRef != "" || got.Auth != "" || got.APIKey != "sk-new" {
+		t.Fatalf("typed key did not replace the reference: %+v", got)
+	}
+}
+
+// A row whose credential is a reference — an env var, another app's store, a
+// subscription login — has no api_key to echo. An edit that types none must
+// keep the reference: the required-key check used to answer 400, and when a
+// second account of the same vendor existed it borrowed that account's static
+// key instead, which then outranked the reference the row was configured with.
+func TestUpdateModelKeepsAReferenceCredential(t *testing.T) {
+	row := config.ModelConfig{
+		Name: "work", Provider: "deepseek", APIType: config.APITypeAnthropic,
+		BaseURL: "https://api.deepseek.com/anthropic", Model: "deepseek-flash",
+		KeyEnv: "OPENPANDA_TEST_DEEPSEEK_KEY", ContextWindow: 64000,
+	}
+	h, path := newModelPanel(t, func(c *config.Config) {
+		c.Model = row
+		c.Models = []config.ModelConfig{row}
+	})
+
+	code, out := doJSON(t, h, jsonReq(http.MethodPut,
+		entryURL("work", "deepseek-flash", "https://api.deepseek.com/anthropic"),
+		`{"max_tokens":4096}`))
+	if code != http.StatusOK {
+		t.Fatalf("update = %d %v", code, out)
+	}
+	got := readConfig(t, path).Models[0]
+	if got.KeyEnv != "OPENPANDA_TEST_DEEPSEEK_KEY" {
+		t.Fatalf("key_env lost on edit: %q", got.KeyEnv)
+	}
+	if got.APIKey != "" {
+		t.Fatalf("a reference row picked up a literal key: %q", got.APIKey)
+	}
+	if got.MaxTokens != 4096 {
+		t.Fatalf("edited limit did not land: %d", got.MaxTokens)
+	}
+}
+
+// The provider-wide lookup must not hand a reference row the key of a second
+// account under the same vendor: that key would be written into the row and
+// sent instead of the credential it was configured with.
+func TestUpdateModelDoesNotBorrowAnotherAccountsKeyForAReferenceRow(t *testing.T) {
+	ref := config.ModelConfig{
+		Name: "ref", Provider: "deepseek", APIType: config.APITypeAnthropic,
+		BaseURL: "https://api.deepseek.com/anthropic", Model: "deepseek-flash",
+		KeyRef: "ccswitch:claude:work",
+	}
+	other := config.ModelConfig{
+		Name: "other", Provider: "deepseek", APIType: config.APITypeAnthropic,
+		BaseURL: "https://api.deepseek.com/anthropic", Model: "deepseek-pro",
+		APIKey: "sk-other-account",
+	}
+	h, path := newModelPanel(t, func(c *config.Config) {
+		c.Model = ref
+		c.Models = []config.ModelConfig{ref, other}
+	})
+
+	code, out := doJSON(t, h, jsonReq(http.MethodPut,
+		entryURL("ref", "deepseek-flash", "https://api.deepseek.com/anthropic"),
+		`{"max_tokens":2048}`))
+	if code != http.StatusOK {
+		t.Fatalf("update = %d %v", code, out)
+	}
+	got := readConfig(t, path).Models[0]
+	if got.KeyRef != "ccswitch:claude:work" || got.APIKey != "" {
+		t.Fatalf("reference row borrowed another account: key_ref=%q api_key=%q", got.KeyRef, got.APIKey)
+	}
+}
+
+// A custom relay keeps the dialect it was configured with even when the model
+// id changes: the id is the vendor's, the wire shape is the endpoint's, and
+// the console never restates api_type for an untouched switch.
+func TestUpdateModelKeepsTheDialectWhenOnlyTheModelChanges(t *testing.T) {
+	row := config.ModelConfig{
+		Name: "relay", Provider: "custom", APIType: config.APITypeOpenAI,
+		BaseURL: "https://relay.example/v1", Model: "gpt-4o", APIKey: "sk-x",
+	}
+	h, path := newModelPanel(t, func(c *config.Config) {
+		c.Model = row
+		c.Models = []config.ModelConfig{row}
+	})
+
+	code, out := doJSON(t, h, jsonReq(http.MethodPut,
+		entryURL("relay", "gpt-4o", "https://relay.example/v1"), `{"model":"gpt-5"}`))
+	if code != http.StatusOK {
+		t.Fatalf("update = %d %v", code, out)
+	}
+	got := readConfig(t, path).Models[0]
+	if got.Model != "gpt-5" {
+		t.Fatalf("model id did not change: %q", got.Model)
+	}
+	if got.APIType != config.APITypeOpenAI {
+		t.Fatalf("dialect flipped with the model id: %q", got.APIType)
+	}
+}
+
 // Re-setting a limit to auto is a distinct instruction from "leave it alone" —
 // without the reset flag a value could be typed once and never cleared.
 func TestUpdateModelCanReturnALimitToAuto(t *testing.T) {
@@ -1024,5 +1206,292 @@ func TestModelEntryCarriesTheImportSource(t *testing.T) {
 	}, config.ModelConfig{})
 	if handWritten.Source != "" {
 		t.Fatalf("hand-written row got source %q", handWritten.Source)
+	}
+}
+
+// TestRemoveModelRetryDoesNotFallBackToTheSiblingAccount: a delete retried
+// after its response was lost carries a key digest that no longer matches
+// anything — the row it named is gone. The alias alone must not pick the
+// surviving account of the same vendor; the second click used to remove the
+// sibling the request was never pointed at.
+func TestRemoveModelRetryDoesNotFallBackToTheSiblingAccount(t *testing.T) {
+	accountA := config.ModelConfig{
+		Name: "shared", Provider: "custom", APIType: config.APITypeOpenAI,
+		BaseURL: "https://relay.example/v1", Model: "m-a", APIKey: "ka",
+	}
+	accountB := config.ModelConfig{
+		Name: "shared", Provider: "custom", APIType: config.APITypeOpenAI,
+		BaseURL: "https://relay.example/v1", Model: "m-b", APIKey: "kb",
+	}
+	h, path := newModelPanel(t, func(c *config.Config) {
+		c.Model = accountA
+		c.Models = []config.ModelConfig{accountA, accountB}
+	})
+
+	q := url.Values{}
+	q.Set("model", "m-b")
+	q.Set("base_url", "https://relay.example/v1")
+	q.Set("key", keyFingerprint("kb"))
+	target := "/api/models/shared?" + q.Encode()
+
+	code, out := doJSON(t, h, authedReq(http.MethodDelete, target, nil))
+	if code != http.StatusOK {
+		t.Fatalf("first delete = %d %v", code, out)
+	}
+	// The retry is the same request: B is already gone, so its digest matches
+	// nothing. A is the only row left under the alias and must survive.
+	code, out = doJSON(t, h, authedReq(http.MethodDelete, target, nil))
+	if code != http.StatusNotFound {
+		t.Fatalf("retry with a stale digest = %d %v, want 404", code, out)
+	}
+	cfg := readConfig(t, path)
+	if len(cfg.Models) != 1 || cfg.Models[0].APIKey != "ka" {
+		t.Fatalf("registry after the retry = %+v, want the other account untouched", cfg.Models)
+	}
+}
+
+// TestAddModelBorrowsTheKeyOfTheAccountItNames: two rows of one vendor share
+// the alias, so "extend this connection" has to say which account it means.
+// An alias-only lookup handed the new row the first row's credential — the
+// other account's — and the replacement then failed to authenticate.
+func TestAddModelBorrowsTheKeyOfTheAccountItNames(t *testing.T) {
+	accountA := config.ModelConfig{
+		Name: "shared", Provider: "custom", APIType: config.APITypeOpenAI,
+		BaseURL: "https://relay.example/v1", Model: "m-a", APIKey: "ka",
+	}
+	accountB := config.ModelConfig{
+		Name: "shared", Provider: "custom", APIType: config.APITypeOpenAI,
+		BaseURL: "https://relay.example/v1", Model: "m-b", APIKey: "kb",
+		KeyScheme: "bearer",
+	}
+	h, path := newModelPanel(t, func(c *config.Config) {
+		c.Model = accountA
+		c.Models = []config.ModelConfig{accountA, accountB}
+	})
+
+	body := `{"provider":"custom","base_url":"https://relay.example/v1","api_type":"openai",` +
+		`"model":"m-new","alias":"shared","reuse_from":"shared","reuse_from_key":"` + keyFingerprint("kb") + `"}`
+	code, out := doJSON(t, h, jsonReq(http.MethodPost, "/api/models", body))
+	if code != http.StatusOK {
+		t.Fatalf("add borrowing B's key = %d %v", code, out)
+	}
+	var added config.ModelConfig
+	for _, m := range readConfig(t, path).Models {
+		if m.Model == "m-new" {
+			added = m
+		}
+	}
+	if added.APIKey != "kb" {
+		t.Fatalf("new row key = %q, want B's key", added.APIKey)
+	}
+	if added.KeyScheme != "bearer" {
+		t.Fatalf("new row key_scheme = %q, want B's bearer", added.KeyScheme)
+	}
+
+	// A digest that names no row must refuse rather than fall through to
+	// "whatever key this provider has" — that is how A's credential was
+	// silently bound to a replacement for B.
+	body = `{"provider":"custom","base_url":"https://relay.example/v1","api_type":"openai",` +
+		`"model":"m-lost","alias":"shared","reuse_from":"shared","reuse_from_key":"deadbeef"}`
+	code, out = doJSON(t, h, jsonReq(http.MethodPost, "/api/models", body))
+	if code != http.StatusBadRequest {
+		t.Fatalf("add naming a vanished account = %d %v, want 400", code, out)
+	}
+	if n := len(readConfig(t, path).Models); n != 3 {
+		t.Fatalf("a refused add wrote a row: %d rows", n)
+	}
+}
+
+// TestKeyReferenceFingerprintsAddressTheirRows: the list signs whatever the
+// row's credential is — a literal key, a CC Switch reference, or an env var
+// name — but the addressing paths digested APIKey alone. Every valid
+// fingerprint from a key_ref/key_env row therefore matched nothing: a PUT
+// answered 404 and a borrow answered 400.
+func TestKeyReferenceFingerprintsAddressTheirRows(t *testing.T) {
+	ref := config.ModelConfig{
+		Name: "shared", Provider: "custom", APIType: config.APITypeOpenAI,
+		BaseURL: "https://relay.example/v1", Model: "m-ref", KeyRef: "ccswitch:claude:p-1",
+	}
+	env := config.ModelConfig{
+		Name: "shared", Provider: "custom", APIType: config.APITypeOpenAI,
+		BaseURL: "https://relay.example/v1", Model: "m-env", KeyEnv: "OPENPANDA_TEST_KEY",
+	}
+	t.Setenv("OPENPANDA_TEST_KEY", "sk-from-env")
+	h, path := newModelPanel(t, func(c *config.Config) {
+		c.Model = ref
+		c.Models = []config.ModelConfig{ref, env}
+	})
+
+	// A PUT addressed by the reference's own digest rewrites that row.
+	q := url.Values{}
+	q.Set("model", "m-ref")
+	q.Set("base_url", "https://relay.example/v1")
+	q.Set("key", keyFingerprint(fingerprintSource(ref)))
+	body := `{"provider":"custom","base_url":"https://relay.example/v1","api_type":"openai",` +
+		`"model":"m-ref","alias":"shared","context_window":64000}`
+	code, out := doJSON(t, h, jsonReq(http.MethodPut, "/api/models/shared?"+q.Encode(), body))
+	if code != http.StatusOK {
+		t.Fatalf("update a key_ref row by its fingerprint = %d %v", code, out)
+	}
+	cfg := readConfig(t, path)
+	var gotRef config.ModelConfig
+	for _, m := range cfg.Models {
+		if m.Model == "m-ref" {
+			gotRef = m
+		}
+	}
+	if gotRef.KeyRef != ref.KeyRef {
+		t.Fatalf("key_ref after update = %q, want %q", gotRef.KeyRef, ref.KeyRef)
+	}
+	if gotRef.ContextWindow != 64000 {
+		t.Fatalf("the update did not land: context_window = %d", gotRef.ContextWindow)
+	}
+
+	// The same address works for a key_env row.
+	q.Set("model", "m-env")
+	q.Set("key", keyFingerprint(fingerprintSource(env)))
+	body = `{"provider":"custom","base_url":"https://relay.example/v1","api_type":"openai",` +
+		`"model":"m-env","alias":"shared","context_window":32000}`
+	code, out = doJSON(t, h, jsonReq(http.MethodPut, "/api/models/shared?"+q.Encode(), body))
+	if code != http.StatusOK {
+		t.Fatalf("update a key_env row by its fingerprint = %d %v", code, out)
+	}
+	cfg = readConfig(t, path)
+	var gotEnv config.ModelConfig
+	for _, m := range cfg.Models {
+		if m.Model == "m-env" {
+			gotEnv = m
+		}
+	}
+	if gotEnv.KeyEnv != env.KeyEnv {
+		t.Fatalf("key_env after update = %q, want %q", gotEnv.KeyEnv, env.KeyEnv)
+	}
+
+	// The same digest addresses a delete: the row carrying the reference goes,
+	// its sibling stays.
+	code, out = doJSON(t, h, authedReq(http.MethodDelete, "/api/models/shared?"+q.Encode(), nil))
+	if code != http.StatusOK {
+		t.Fatalf("delete a key_env row by its fingerprint = %d %v", code, out)
+	}
+	cfg = readConfig(t, path)
+	if len(cfg.Models) != 1 || cfg.Models[0].Model != "m-ref" {
+		t.Fatalf("registry after the delete = %+v, want only the key_ref row", cfg.Models)
+	}
+}
+
+// TestAddModelBorrowsAReferenceCredential: "extend this connection" on a row
+// that stores no secret has to carry the reference. The provider-wide lookup
+// must not stand in for it — with two accounts under one alias, that is how a
+// replacement row was saved with the other account's literal key.
+func TestAddModelBorrowsAReferenceCredential(t *testing.T) {
+	inline := config.ModelConfig{
+		Name: "shared", Provider: "deepseek", APIType: config.APITypeOpenAI,
+		BaseURL: "https://api.deepseek.com", Model: "deepseek-chat", APIKey: "sk-a",
+	}
+	ref := config.ModelConfig{
+		Name: "shared", Provider: "deepseek", APIType: config.APITypeOpenAI,
+		BaseURL: "https://api.deepseek.com", Model: "deepseek-reasoner",
+		KeyRef: "ccswitch:claude:p-1", KeyScheme: "bearer",
+	}
+	h, path := newModelPanel(t, func(c *config.Config) {
+		c.Model = inline
+		c.Models = []config.ModelConfig{inline, ref}
+	})
+
+	body := `{"provider":"deepseek","model":"deepseek-chat","alias":"shared",` +
+		`"reuse_from":"shared","reuse_from_key":"` + keyFingerprint(fingerprintSource(ref)) + `"}`
+	code, out := doJSON(t, h, jsonReq(http.MethodPost, "/api/models", body))
+	if code != http.StatusOK {
+		t.Fatalf("add borrowing a key_ref credential = %d %v", code, out)
+	}
+	var added config.ModelConfig
+	for _, m := range readConfig(t, path).Models {
+		if m.Model == "deepseek-chat" && m.Name != inline.Name {
+			added = m
+		}
+	}
+	if added.KeyRef != ref.KeyRef {
+		t.Fatalf("new row key_ref = %q, want %q", added.KeyRef, ref.KeyRef)
+	}
+	if added.APIKey != "" {
+		t.Fatalf("new row borrowed the other account's literal key %q", added.APIKey)
+	}
+	if added.KeyScheme != "bearer" {
+		t.Fatalf("new row key_scheme = %q, want the lender's bearer", added.KeyScheme)
+	}
+}
+
+// TestCopyModelCarriesAReferenceCredential: a copy is the same rule — the
+// panel never sees the secret, so the reference is what travels.
+func TestCopyModelCarriesAReferenceCredential(t *testing.T) {
+	src := config.ModelConfig{
+		Name: "ref", Provider: "custom", APIType: config.APITypeOpenAI,
+		BaseURL: "https://relay.example/v1", Model: "m-1", KeyRef: "ccswitch:claude:p-1",
+		KeyScheme: "bearer",
+	}
+	h, path := newModelPanel(t, func(c *config.Config) {
+		c.Model = src
+		c.Models = []config.ModelConfig{src}
+	})
+
+	body := `{"provider":"custom","base_url":"https://relay.example/v1","api_type":"openai",` +
+		`"model":"m-1","alias":"ref-copy","copy_from":"ref","copy_from_key":"` +
+		keyFingerprint(fingerprintSource(src)) + `"}`
+	code, out := doJSON(t, h, jsonReq(http.MethodPost, "/api/models", body))
+	if code != http.StatusOK {
+		t.Fatalf("copy a key_ref row = %d %v", code, out)
+	}
+	var copied config.ModelConfig
+	for _, m := range readConfig(t, path).Models {
+		if m.Alias() == "ref-copy" {
+			copied = m
+		}
+	}
+	if copied.KeyRef != src.KeyRef || copied.APIKey != "" {
+		t.Fatalf("copy credential = ref %q key %q, want ref %q and no literal key", copied.KeyRef, copied.APIKey, src.KeyRef)
+	}
+	if copied.KeyScheme != "bearer" {
+		t.Fatalf("copy key_scheme = %q, want the source's bearer", copied.KeyScheme)
+	}
+}
+
+// TestUseModelWritesTheCredentialForm: switching the live account rewrites the
+// whole credential, not just api_key. Writing only the literal key left A's
+// key_env in `model:` after switching to B — the interface said B, the file
+// still named A — and dropped B's key_scheme, so a Bearer token came back on
+// the dialect's default header.
+func TestUseModelWritesTheCredentialForm(t *testing.T) {
+	t.Setenv("A_KEY", "sk-a")
+	a := config.ModelConfig{
+		Name: "shared", Provider: "custom", APIType: config.APITypeAnthropic,
+		BaseURL: "https://relay.example/v1", Model: "m-a", KeyEnv: "A_KEY",
+	}
+	b := config.ModelConfig{
+		Name: "shared", Provider: "custom", APIType: config.APITypeAnthropic,
+		BaseURL: "https://relay.example/v1", Model: "m-b",
+		KeyRef: "ccswitch:claude:p-1", KeyScheme: "bearer",
+	}
+	h, path := newModelPanel(t, func(c *config.Config) {
+		c.Model = a
+		c.Models = []config.ModelConfig{a, b}
+	})
+
+	q := url.Values{}
+	q.Set("model", "m-b")
+	q.Set("base_url", "https://relay.example/v1")
+	q.Set("key", keyFingerprint(fingerprintSource(b)))
+	code, out := doJSON(t, h, jsonReq(http.MethodPost, "/api/models/shared/use?"+q.Encode(), ""))
+	if code != http.StatusOK {
+		t.Fatalf("switch to the key_ref account = %d %v", code, out)
+	}
+	cfg := readConfig(t, path)
+	if cfg.Model.KeyEnv != "" {
+		t.Fatalf("model.key_env = %q, want it cleared", cfg.Model.KeyEnv)
+	}
+	if cfg.Model.KeyRef != b.KeyRef {
+		t.Fatalf("model.key_ref = %q, want %q", cfg.Model.KeyRef, b.KeyRef)
+	}
+	if cfg.Model.KeyScheme != "bearer" {
+		t.Fatalf("model.key_scheme = %q, want bearer", cfg.Model.KeyScheme)
 	}
 }

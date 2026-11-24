@@ -10,7 +10,8 @@
 //     file it has somewhere to go: the file beside it. Rather than fork the
 //     parser, relative links and images are rewritten to `#file:` / `#image:`
 //     anchors (the only href shapes the chat renderer already accepts) and the
-//     viewer handles the click.
+//     viewer handles the click. Which files are documents, and which are
+//     pictures, is decided here too — both are name-only questions.
 //  2. A small, stateful line colouriser. A source window is at most 600 lines;
 //     a full grammar would be a dependency and a maintenance tax. This one
 //     recognises comments, strings, numbers, keywords, keys, tags and Markdown
@@ -76,6 +77,18 @@ export function baseName(path: string): string {
 export function isDocFile(path: string): boolean {
   const ext = extOf(path)
   return ext === 'md' || ext === 'markdown'
+}
+
+// The formats /api/fs/image serves — the same table as panel/extras.go, and
+// the same reason SVG is absent: it is a script-bearing document, so the
+// endpoint answers 415 and the file stays readable as source instead.
+const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'avif'])
+
+/** Whether the viewer should show the file as pixels rather than lines.
+ *  Decided by name, not by the bytes: `/api/fs/file` reports a picture as
+ *  "binary" and stops there, which is exactly the state this replaces. */
+export function isImageFile(path: string): boolean {
+  return IMAGE_EXTS.has(extOf(path))
 }
 
 export function sourceLangOf(path: string): SourceLang {

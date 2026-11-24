@@ -10,6 +10,10 @@
 // The Markdown itself goes through the chat's vnode renderer, so the panel
 // gets the same parser, copy buttons and zero-HTML policy as a reply.
 //
+// A picture is the third case: /api/fs/file can only report "binary", so the
+// pixels come from /api/fs/image and are fitted to the pane, one click from
+// the app-wide lightbox.
+//
 // The view stays read-only on purpose. Editing belongs to `panda edit`, and a
 // console that can write to a worktree while an agent is working in it is a
 // merge conflict with a text box.
@@ -24,12 +28,15 @@ import {
   extOf,
   highlightLines,
   isDocFile,
+  isImageFile,
   prepareDocText,
   resolveDocPath,
   slugOf,
   sourceLangOf,
 } from './dock-file-format'
+import { imageBytesUrl } from './attach'
 import { Icon } from './icons'
+import { Lightbox } from './image-preview'
 
 /** Lines of context the panel asks for on either side of a focus line, and how
  *  much of the file it shows when the reader is just looking. */
@@ -206,7 +213,10 @@ export function DockFiles(props: DockFilesProps) {
             onClick={() => setFile({ path: e.path, line: 0 })}
             title={e.path}
           >
-            <Icon name={isDocFile(e.path) ? 'file-text' : 'code'} size={15} />
+            <Icon
+              name={isDocFile(e.path) ? 'file-text' : isImageFile(e.path) ? 'image' : 'code'}
+              size={15}
+            />
             <span class="df-name">{e.name}</span>
             {isDocFile(e.path) && <span class="df-kind mono">MD</span>}
             {typeof e.size === 'number' && <span class="df-size mono">{bytesOf(e.size)}</span>}
@@ -219,10 +229,12 @@ export function DockFiles(props: DockFilesProps) {
 
 type ViewMode = 'preview' | 'source'
 
-interface Lightbox {
+/** A picture linked from the document being read, held as its object URL
+ *  until the lightbox closes. */
+interface DocImage {
   url: string
-  name: string
-  alt: string
+  path: string
+  label: string
 }
 
 function DockFileView(props: {
@@ -235,6 +247,7 @@ function DockFileView(props: {
   onInsert?: (ref: string) => void
 }) {
   const doc = isDocFile(props.path)
+  const image = isImageFile(props.path)
   const lang = useMemo(() => sourceLangOf(props.path), [props.path])
   const ext = extOf(props.path)
   const [mode, setMode] = useState<ViewMode>(() => (doc && props.line === 0 ? 'preview' : 'source'))
@@ -242,10 +255,38 @@ function DockFileView(props: {
   const [view, setView] = useState<FsFileResult | null>(null)
   const [err, setErr] = useState('')
   const [copied, setCopied] = useState(false)
-  const [lightbox, setLightbox] = useState<Lightbox | null>(null)
+  const [lightbox, setLightbox] = useState<DocImage | null>(null)
   const [imageError, setImageError] = useState(false)
+  // The file's own pixels (a picture opened in the viewer), kept apart from
+  // `lightbox` below: that one is a picture *linked from* a Markdown document.
+  const [shot, setShot] = useState('')
+  const [shotError, setShotError] = useState(false)
+  const [shotZoom, setShotZoom] = useState(false)
   const bodyRef = useRef<HTMLDivElement>(null)
   const lightboxUrl = useRef<string | null>(null)
+  // The document on screen right now, for the async image callbacks. A click
+  // starts a fetch, and the reader is free to open another file before its
+  // bytes arrive — including coming back to the same path. A path comparison
+  // would let the first visit's response through on the return trip, so each
+  // change of the pane's identity (thread + path + line) bumps a sequence and
+  // a pending callback is valid only for the navigation that started it.
+  const viewKey = `${props.session ?? ''}\u0000${props.path}\u0000${props.line}`
+  const viewSeq = useRef(0)
+  const viewKeyRef = useRef(viewKey)
+  if (viewKeyRef.current !== viewKey) {
+    viewKeyRef.current = viewKey
+    viewSeq.current += 1
+  }
+  // False once the pane is gone (a thread switch closes it). A fetch that
+  // lands after that must neither open a lightbox nor leak the object URL it
+  // just minted.
+  const alive = useRef(true)
+  useEffect(
+    () => () => {
+      alive.current = false
+    },
+    [],
+  )
 
   // A new file starts in its natural mode. A mode the reader picked is kept
   // while they stay on the same file (this effect does not depend on mode).
@@ -253,6 +294,8 @@ function DockFileView(props: {
     setMode(doc && props.line === 0 ? 'preview' : 'source')
     setLightbox(null)
     setImageError(false)
+    setShotError(false)
+    setShotZoom(false)
   }, [doc, props.path, props.line, props.session])
 
   // A rendered document needs the whole window, not the ±80 lines a transcript
@@ -288,6 +331,34 @@ function DockFileView(props: {
     if (el && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'center' })
   }, [view, mode])
 
+  // A picture has no lines to show. /api/fs/file stops at "binary" and is good
+  // for exactly one thing here — the absolute path a relative request resolved
+  // to — so the pixels come from /api/fs/image. Bytes move through fetchBlob
+  // because an <img src> cannot carry the Bearer token.
+  useEffect(() => {
+    if (!image || !view?.path) return
+    let live = true
+    let made = ''
+    setShot('')
+    setShotError(false)
+    fetchBlob(imageBytesUrl(view.path, props.session))
+      .then((blob) => {
+        made = URL.createObjectURL(blob)
+        if (!live) {
+          URL.revokeObjectURL(made)
+          return
+        }
+        setShot(made)
+      })
+      .catch(() => {
+        if (live) setShotError(true)
+      })
+    return () => {
+      live = false
+      if (made) URL.revokeObjectURL(made)
+    }
+  }, [image, props.path, view?.path])
+
   // Object URLs are ours to release, both when the image changes and when the
   // panel unmounts with one open.
   useEffect(() => {
@@ -305,11 +376,11 @@ function DockFileView(props: {
   const display = view?.rel || view?.path || props.path
   const focus = props.line > 0 ? props.line : 0
   const lines = useMemo(() => {
-    if (!view?.content) return []
+    if (!view?.content || image) return []
     const raw = view.content.split('\n').map((l) => l.replace(/\r$/, ''))
     if (!view.truncated && raw.length > 1 && raw[raw.length - 1] === '') raw.pop()
     return raw
-  }, [view])
+  }, [view, image])
   const highlighted = useMemo(() => highlightLines(lines, lang), [lines, lang])
   const docText = useMemo(() => prepareDocText(view?.content ?? ''), [view])
   const headings = useMemo(() => docHeadings(view?.content ?? ''), [view])
@@ -335,11 +406,24 @@ function DockFileView(props: {
     setImageError(false)
     const ref = resolveDocPath(view?.path || props.path, target)
     if (!ref) return
+    // The lightbox belongs to the visit that asked for it. A slow response
+    // arriving after the reader opened B — or left A and came back — must not
+    // pop A's picture over the document now on screen.
+    const at = viewSeq.current
     try {
-      const blob = await fetchBlob(`/api/fs/image?path=${encodeURIComponent(ref.path)}`)
-      setLightbox({ url: URL.createObjectURL(blob), name: baseName(ref.path), alt: label })
+      const blob = await fetchBlob(imageBytesUrl(ref.path, props.session))
+      const url = URL.createObjectURL(blob)
+      if (!alive.current || viewSeq.current !== at) {
+        URL.revokeObjectURL(url)
+        return
+      }
+      setLightbox({
+        url,
+        path: ref.path,
+        label: label || baseName(ref.path),
+      })
     } catch {
-      setImageError(true)
+      if (alive.current && viewSeq.current === at) setImageError(true)
     }
   }
 
@@ -384,6 +468,20 @@ function DockFileView(props: {
         </div>
         <span class="df-badge mono">{ext ? ext.toUpperCase() : 'TXT'}</span>
         <div class="fv-actions">
+          {/* A picture is fitted to the column, which is narrower than most
+              screenshots — the header keeps the way out. Clicking the picture
+              itself does the same; this is the control a reader looks for. */}
+          {image && (
+            <button
+              type="button"
+              class="fv-btn"
+              onClick={() => setShotZoom(true)}
+              title={t('events.imageOpen')}
+            >
+              <Icon name="search" size={14} />
+              <span class="fv-btn-label">{t('events.imageOpen')}</span>
+            </button>
+          )}
           <button type="button" class="fv-btn" onClick={copy} title={t('fileView.copy')}>
             <Icon name={copied ? 'check' : 'copy'} size={14} />
             <span class="fv-btn-label">{copied ? `✓ ${t('md.copied')}` : t('fileView.copy')}</span>
@@ -444,7 +542,25 @@ function DockFileView(props: {
 
       {err !== '' && <p class="df-note is-error">{err}</p>}
       {imageError && <p class="df-note is-error">{t('fileView.imageError')}</p>}
-      {view?.binary && <p class="df-note">{t('fileView.binary')}</p>}
+      {view?.binary && !image && <p class="df-note">{t('fileView.binary')}</p>}
+
+      {image && !err && (
+        <div class="df-body is-image">
+          {shotError && <p class="df-note is-error">{t('fileView.imageError')}</p>}
+          {!shot && !shotError && <div class="df-image-skel" aria-hidden="true" />}
+          {shot && (
+            <button
+              type="button"
+              class="df-image-btn"
+              title={t('events.imageOpen')}
+              aria-label={`${t('events.imageOpen')}: ${baseName(display)}`}
+              onClick={() => setShotZoom(true)}
+            >
+              <img src={shot} alt={baseName(display)} />
+            </button>
+          )}
+        </div>
+      )}
 
       {view && !view.binary && lines.length > 0 && mode === 'preview' && doc && (
         <div class="df-body is-doc" ref={bodyRef} onClick={onDocClick}>
@@ -476,7 +592,7 @@ function DockFileView(props: {
         </div>
       )}
 
-      {view && !view.binary && lines.length > 0 && (mode === 'source' || !doc) && (
+      {view && !view.binary && lines.length > 0 && (mode === 'source' || !doc) && !image && (
         <div class={`df-body${wrap ? ' is-wrap' : ''}`} ref={bodyRef}>
           <pre class="df-code" data-kind={lang.kind}>
             {lines.map((text, i) => {
@@ -501,8 +617,14 @@ function DockFileView(props: {
         </div>
       )}
 
-      {view && !view.binary && lines.length === 0 && err === '' && (
+      {view && !view.binary && lines.length === 0 && err === '' && !image && (
         <p class="df-note">{t('fileView.empty')}</p>
+      )}
+
+      {image && view && (
+        <footer class="df-foot">
+          <span class="mono">{bytesOf(view.size)}</span>
+        </footer>
       )}
 
       {view && (view.truncated || view.total_lines > 0) && (
@@ -519,23 +641,21 @@ function DockFileView(props: {
       )}
 
       {lightbox && (
-        <div class="df-lightbox" role="presentation" onClick={() => setLightbox(null)}>
-          <div class="df-lightbox-card" onClick={(e) => e.stopPropagation()}>
-            <div class="df-lightbox-head">
-              <span class="mono">{lightbox.name}</span>
-              <button
-                type="button"
-                class="icon-btn"
-                title={t('fileView.close')}
-                aria-label={t('fileView.close')}
-                onClick={() => setLightbox(null)}
-              >
-                <Icon name="x" size={15} />
-              </button>
-            </div>
-            <img src={lightbox.url} alt={lightbox.alt} />
-          </div>
-        </div>
+        <Lightbox
+          src={lightbox.url}
+          path={lightbox.path}
+          label={lightbox.label}
+          onClose={() => setLightbox(null)}
+        />
+      )}
+
+      {shotZoom && shot && (
+        <Lightbox
+          src={shot}
+          path={view?.path ?? props.path}
+          label={baseName(display)}
+          onClose={() => setShotZoom(false)}
+        />
       )}
     </div>
   )

@@ -20,6 +20,7 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/activity"
 	"github.com/Xustalis/OpenPanda/internal/askengine"
 	"github.com/Xustalis/OpenPanda/internal/config"
+	"github.com/Xustalis/OpenPanda/internal/conversation"
 	"github.com/Xustalis/OpenPanda/internal/core"
 	"github.com/Xustalis/OpenPanda/internal/defense"
 	"github.com/Xustalis/OpenPanda/internal/entry"
@@ -1294,6 +1295,10 @@ type sessionAskRequest struct {
 	Authorize bool   `json:"authorize"`
 	// Mode selects the prompt's planning lens without changing permissions.
 	Mode string `json:"mode,omitempty"`
+	// PlanVersion is the proposal version a plan revision was written against.
+	// Absent (0) is a fresh plan request; a revision that names a version the
+	// store has already replaced is refused instead of retiring the newer text.
+	PlanVersion int64 `json:"plan_version,omitempty"`
 	// Node is the composer's environment pick: the preferred executor node
 	// (id or name) for any task this ask spawns. Empty lets the scheduler
 	// route by capability, which is also the right behavior for plans.
@@ -1559,6 +1564,29 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A plan revision names the proposal it was written against, and that
+	// proposal must still be revisable. Refuse anything else before the stream
+	// starts: after these headers are flushed a conflict can only be painted as
+	// a failed turn, and the newer proposal would already be the thing on
+	// screen. Comparing the version alone was not enough — confirming does not
+	// bump it, so a tab could revise a plan the user had already approved and
+	// the engine would re-enter planning for it. The store re-checks the same
+	// facts in the statement that retires the text; this one exists so the
+	// answer is a clean 409 instead of an error event mid-turn.
+	if req.PlanVersion > 0 {
+		state, stateErr := eng.Conversations(h.sessions).State(r.Context(), sess.ID)
+		if stateErr != nil {
+			writeErr(w, http.StatusInternalServerError, stateErr)
+			return
+		}
+		if state.ProposalVersion != req.PlanVersion ||
+			state.ConfirmedVersion >= req.PlanVersion ||
+			strings.TrimSpace(state.Proposal) == "" {
+			writeErr(w, http.StatusConflict, conversation.ErrConflict)
+			return
+		}
+	}
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -1794,10 +1822,6 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 			send("queued_turn", map[string]any{"text": text, "count": count})
 		})
 	}
-	if !send("operation", map[string]string{"operation_id": op.operationID}) {
-		// The operation remains detached from the failed response writer and
-		// continues to persist its final task/session result.
-	}
 	if side {
 		if err := h.sessions.StartSideOperationFor(sess.ID, sideChatID, sessions.Operation{
 			ID: op.operationID, Status: core.StateRunning, StartedAt: askStarted,
@@ -1859,6 +1883,14 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.settlePendingNotes(noteClaim, true)
+	}
+	// Announce the operation only after the user's turn is durable. The console
+	// treats this frame as "the message was accepted" — it is what dismisses a
+	// completed goal — so sending it first made a failed turn write look like a
+	// delivered message: the goal disappeared with no bubble to replace it.
+	if !send("operation", map[string]string{"operation_id": op.operationID}) {
+		// The operation remains detached from the failed response writer and
+		// continues to persist its final task/session result.
 	}
 
 	// Persist a bounded-cadence display checkpoint while the HTTP stream is
@@ -1971,6 +2003,7 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 	eng.Conversations(h.sessions)
 	out, err := eng.AskTurnsScoped(execCtx, history, req.Prompt, askengine.AskScope{
 		Mode:           req.Mode,
+		PlanVersion:    req.PlanVersion,
 		PersonalMemory: true,
 		RoundID:        roundID,
 		Project:        sess.Project,

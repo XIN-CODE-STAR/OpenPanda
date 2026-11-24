@@ -68,6 +68,7 @@ export function PandaLockup({ width = 240 }: { width?: number }) {
   return (
     <span class="panda-lockup" style={{ width: `${width}px` }}>
       <img
+        draggable={false}
         class="panda-lockup-paper"
         src="/logo/lockup-horizontal-paper.svg"
         width={width}
@@ -75,12 +76,55 @@ export function PandaLockup({ width = 240 }: { width?: number }) {
         alt="OpenPanda"
       />
       <img
+        draggable={false}
         class="panda-lockup-night"
         src="/logo/lockup-horizontal-night.svg"
         width={width}
         height={height}
         alt="OpenPanda"
       />
+    </span>
+  )
+}
+
+/* The `?v=` on these three files is a cache key, not decoration: /logo is not
+   content-hashed like everything under /assets/, and the service worker serves
+   static assets cache-first, so a browser that fetched an earlier cut keeps it
+   forever — the first deploy of this hero showed the old star over the new
+   panda for exactly that reason. Bump the number whenever the artwork changes;
+   it is the only way to retire a cached copy. */
+
+/** The same lockup with the pet's face standing where the "O" was — the
+ *  new-chat page's hero. The artwork is a variant of the shipped lockup: the O
+ *  glyph is removed from the two files in /logo and the mascot's own portrait
+ *  (a cut from the brand sheet, keyed out of its paper background) is laid
+ *  over the gap, so the wordmark reads as one word. The cut is a raster, which
+ *  is why it is an `<img>` over the SVG rather than a glyph inside it; on night
+ *  it is inverted, because its lines are ink and the page is not. */
+export function HeroLockup({ width = 520 }: { width?: number }) {
+  /* 183.15 × 40, not the official 240×54: the hero cut carries no tagline and
+     no star — the pet is the mark here — and the box is cropped to what is
+     left, so the composer is not pushed down by empty canvas. */
+  const height = Math.round((width * 40) / 183.15)
+  return (
+    <span class="panda-lockup hero-lockup" style={{ width: `${width}px` }}>
+      <img
+        draggable={false}
+        class="panda-lockup-paper"
+        src="/logo/lockup-hero-paper.svg?v=2"
+        width={width}
+        height={height}
+        alt="OpenPanda"
+      />
+      <img
+        draggable={false}
+        class="panda-lockup-night"
+        src="/logo/lockup-hero-night.svg?v=2"
+        width={width}
+        height={height}
+        alt="OpenPanda"
+      />
+      <img class="hero-pet" src="/logo/hero-pet.png?v=1" alt="" aria-hidden="true" draggable={false} />
     </span>
   )
 }

@@ -57,7 +57,7 @@ import {
 } from '../components/permission-picker'
 import { NodePicker } from '../components/node-picker'
 import { RosterPicker } from '../components/team-picker'
-import { ComposerPanda } from '../components/composer-panda'
+import { HeroLockup } from '../brand/panda'
 import { ComposerPet } from '../components/composer-pet'
 import { OrchestrateCard } from '../components/orchestrate'
 import { DirButton } from '../components/dir-picker'
@@ -87,7 +87,7 @@ import { PlanProposalDock, PlanRunningDock } from './sessions/plan-proposal-dock
 import { PlanPane } from './sessions/plan-pane'
 import { shortcutFor, useBindings } from '../shortcuts'
 import { projectForDir, waitDevReady } from './sessions/session-project'
-import { ChatEmpty, ChatStarters, ChatSkeleton, ChatTurn, reportFallbackRefs, RunSummaryRow, useSessionTasks } from './sessions/transcript'
+import { ChatEmpty, ChatSkeleton, ChatTurn, reportFallbackRefs, RunSummaryRow, useSessionTasks } from './sessions/transcript'
 import { hydrateTurns, localMsgId, statusNote, type ChatMsg } from './sessions/transcript-state'
 
 export {
@@ -229,7 +229,14 @@ export function SessionsView({
       if (action !== 'dock' && action !== 'files' && action !== 'changes' && action !== 'side') return
       event.preventDefault()
       if (action === 'dock') setDockOpen(open => !open)
-      else { setDockTab(action); setDockOpen(true) }
+      else {
+        setDockTab(action)
+        setDockOpen(true)
+        // The change list is a worktree snapshot, and the shortcut is a way
+        // into the pane just like the mouse entry — which re-reads it. Without
+        // this the keyboard opened whatever the last refresh left behind.
+        if (action === 'changes') void refreshDiff(activeId)
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -556,6 +563,16 @@ export function SessionsView({
   // Still parsed so a hand-typed `/goal …` keeps its menu suppressed and its
   // send routed; the chip no longer mirrors it.
   const shownGoal: ComposerGoal | undefined = goal?.phase === 'cancelled' ? undefined : goal
+  // Hiding the trigger is not enough once the pane is already open: it keeps
+  // rendering the completion readout beside a turn that has moved on. The
+  // dismissal happens when a new message is accepted, so close the pane with
+  // it — the transcript is the story from that point.
+  useEffect(() => {
+    if (completionDismissed && dockTab === 'goal') {
+      setDockOpen(false)
+      setDockTab('')
+    }
+  }, [completionDismissed, dockTab])
   // The pre-execution question the running turn is parked on. Cleared when the
   // browser answers, when the turn ends, or when the user cancels it.
   const [clarify, setClarify] = useState<{
@@ -635,9 +652,16 @@ export function SessionsView({
   // its shape instead of an empty box (or worse, the "new chat" hero).
   const [loading, setLoading] = useState(false)
   const [diff, setDiff] = useState<SessionDiff | null>(null)
+  /** The thread `diff` was read for. The panel paints the list only while this
+   *  matches the thread on screen — see refreshDiff. */
+  const [diffFor, setDiffFor] = useState<string | null>(null)
   const [diffError, setDiffError] = useState('')
-  const [merging, setMerging] = useState(false)
-  const [reverting, setReverting] = useState(false)
+  // The thread a merge/revert is running for, or null. Carrying the id (not a
+  // bare bool) keeps the spinner on the panel that started it: switching
+  // threads mid-merge must not paint "merging" over a list the operation never
+  // touched.
+  const [merging, setMerging] = useState<string | null>(null)
+  const [reverting, setReverting] = useState<string | null>(null)
   const scroller = useRef<HTMLDivElement>(null)
   const composer = useRef<HTMLDivElement>(null)
   // The in-flight ask, so the stop button can abort it.
@@ -703,7 +727,7 @@ export function SessionsView({
     pending, setPending, peek, shot, setShot,
     addFiles, addFileRef, removePending, syncPending, clearPending,
     peekPill, unpeek, zoomPill,
-  } = useComposerAttachments(composer, setInput, setCaret)
+  } = useComposerAttachments(composer, setInput, setCaret, activeId)
   // Filesystem rows for the @file completion menu (debounced query).
   const [atFiles, setAtFiles] = useState<FsFileEntry[]>([])
   // Whether the transcript is parked at the bottom. Autoscrolling on every
@@ -1230,42 +1254,80 @@ export function SessionsView({
   }
 
   // Load the session's worktree changes (badge count + drawer contents).
+  //
+  // Reads are generation-guarded. A request for A that was still in flight
+  // when the reader switched to B used to land last and paint A's files under
+  // B — and the merge button beside them acts on the thread on screen, so the
+  // click merged B while the list said A. Only the newest read may write, and
+  // the list remembers which thread it belongs to (diffFor) so the render can
+  // refuse a stale one even before the clear effect runs.
+  const diffSeq = useRef(0)
   async function refreshDiff(id: string | null) {
+    const seq = ++diffSeq.current
     if (!id) {
       setDiff(null)
+      setDiffFor(null)
+      setDiffError('')
       return
     }
     try {
-      setDiff(await api.sessionDiff(id))
+      const next = await api.sessionDiff(id)
+      if (seq !== diffSeq.current) return
+      setDiff(next)
+      setDiffFor(id)
       setDiffError('')
     } catch (e) {
+      if (seq !== diffSeq.current) return
       // No worktree yet (no prompt run) — that is normal, not an error.
       setDiff(null)
+      setDiffFor(id)
       setDiffError('')
     }
   }
 
+  // A thread switch starts the changes panel over: the previous thread's list
+  // must not sit under the new one while its read is in flight.
+  useEffect(() => {
+    setDiff(null)
+    setDiffFor(null)
+    setDiffError('')
+  }, [activeId])
+
   // Refresh the change badge whenever a reply finishes or the thread changes.
   useEffect(() => {
-    refreshDiff(activeId)
+    void refreshDiff(activeId)
   }, [activeId, busy])
 
   async function mergeChanges() {
-    if (!activeId || merging) return
-    setMerging(true)
+    // The button belongs to the list on screen. If the reader switched between
+    // the paint and the click, that list is not the current thread's — and
+    // merging the thread on screen would merge a worktree the button never
+    // described.
+    const id = diffFor === activeId ? activeId : null
+    if (!id || merging !== null || reverting !== null) return
+    setMerging(id)
     setDiffError('')
     try {
-      await api.sessionMerge(activeId)
-      await refreshDiff(activeId)
+      await api.sessionMerge(id)
+      // The reader may have left this thread while git worked. Its list is no
+      // longer on screen; refreshing it would overwrite the thread now shown
+      // (diffFor) and cancel that thread's own in-flight read. The switch back
+      // refetches through the activeId effect.
+      if (activeIdRef.current === id) await refreshDiff(id)
     } catch (e) {
-      setDiffError(e instanceof Error ? e.message : String(e))
+      const msg = e instanceof Error ? e.message : String(e)
+      // The panel on screen is not the one that failed; a toast names the
+      // failure without painting it under another thread's list.
+      if (activeIdRef.current === id) setDiffError(msg)
+      else toastError(msg)
     } finally {
-      setMerging(false)
+      setMerging(null)
     }
   }
 
   async function revertMerge() {
-    if (!activeId || reverting) return
+    const id = diffFor === activeId ? activeId : null
+    if (!id || reverting !== null || merging !== null) return
     // Destructive — a merge at HEAD resets the checkout; ask first, like
     // the task revert on the detail page already does.
     const ok = await confirmDialog({
@@ -1274,15 +1336,17 @@ export function SessionsView({
       confirmLabel: t('sessions.revert'),
     })
     if (!ok) return
-    setReverting(true)
+    setReverting(id)
     setDiffError('')
     try {
-      await api.sessionRevert(activeId)
-      await refreshDiff(activeId)
+      await api.sessionRevert(id)
+      if (activeIdRef.current === id) await refreshDiff(id)
     } catch (e) {
-      setDiffError(e instanceof Error ? e.message : String(e))
+      const msg = e instanceof Error ? e.message : String(e)
+      if (activeIdRef.current === id) setDiffError(msg)
+      else toastError(msg)
     } finally {
-      setReverting(false)
+      setReverting(null)
     }
   }
 
@@ -1587,7 +1651,7 @@ export function SessionsView({
     }
   }
 
-  async function send(e?: Event, queued?: string, intoSid?: string, revision = false, sidebarObjective?: string) {
+  async function send(e?: Event, queued?: string, intoSid?: string, revision = false, sidebarObjective?: string, planVersion?: number) {
     e?.preventDefault()
     // A continuation turn carries its own prompt: the words came from the
     // notes the last turn never read, not from the composer. The draft and the
@@ -1697,6 +1761,12 @@ export function SessionsView({
      *  somewhere to render instead of needing a toast. */
     let announced = false
     let streamFailed = false
+    // The optimistic bubbles' keys live out here so the catch can drop them
+    // when the server refused the turn before writing anything (a stale plan
+    // revision is the case that matters: no error bubble belongs in a
+    // transcript that never received the message).
+    let userKey = ''
+    let replyKey = ''
     // Deltas arrive per chunk — dozens a second — and each one re-rendered
     // the whole transcript, re-parsing the growing reply every time. They
     // are coalesced into one update per frame; nothing is lost, because the
@@ -1743,54 +1813,15 @@ export function SessionsView({
         if (dropScope) navigate({ view: 'sessions', id: created.id })
         else onOpenSession(created.id)
       }
-      // Uploads land in the session's own uploads directory, so a brand-new
-      // chat with attachments needs its thread up front — the same create the
-      // send below would have made anyway, one step earlier.
-      // Only byte attachments need a thread before the send: a workspace
-      // reference resolves from the prompt after the thread exists anyway.
+      // The thread exists before the prompt is assembled. Its worktree is what
+      // the turn will read — a git project's worktree is HEAD, while the
+      // project directory can carry uncommitted edits — and the server fills
+      // in the active project when this composer has not loaded it yet. Both
+      // halves are why `@file` has to resolve against the session, not the
+      // project (or work_path). Uploads need the thread first anyway.
       const uploads = tray.filter((p) => p.file)
-      if (uploads.length > 0 && !id) {
-        const s = await api.createSession((raw || uploads[0]?.name || '').slice(0, 48), threadProject, team)
-        id = s.id
-        openCreatedThread(s)
-      }
-      // One multipart round-trip for the tray's real uploads, then the
-      // mentions ride the prompt as @paths: text files arrive as fenced
-      // blocks, images stay paths for the agent to open (see expandFileRefs).
-      let mentions: string[] = []
-      if (uploads.length > 0) {
-        const up = await api.uploadSessionFiles(id!, uploads.flatMap((p) => (p.file ? [p.file] : [])))
-        mentions = up.files.map((f) => f.mention)
-      }
-      // The files dock's 插入 inserts a pill for a workspace path rather than
-      // uploading bytes. Hand that path to the same @file expansion, so the
-      // model sees the file's contents instead of just a filename.
-      const refs = tray.flatMap((p) => (p.ref ? [p.ref] : []))
-      // @file references become inline fenced blocks before the prompt
-      // leaves the composer — "explain @main.go" works without pasting the
-      // file. Inside try so a rejected expansion still clears inflight.
-      const expanded = sidebarObjective !== undefined ? { prompt: raw, attached: [] } : await expandFileRefs(
-        withAttachments(raw, [...mentions, ...refs]),
-        (p) => api.fsRead(p),
-      )
-      prompt = expanded.prompt
-      // The bubble lists what rode along, under paths the panel can resolve:
-      // an upload's mention (its stamped name keeps the author's name at the
-      // tail — see msg-files.tsx) and a reference pill's workspace path. The
-      // tray's display names are not used: a bare name is not a path, so the
-      // bubble could not draw a pasted picture with it. Both groups are
-      // dropped from the expanded list, or every file would show twice.
-      const trayMentions = new Set([...mentions, ...refs])
-      attached = [
-        ...new Set([
-          ...expanded.attached.filter((a) => !trayMentions.has(a)),
-          ...mentions,
-          ...refs,
-        ]),
-      ]
-      // No thread yet: create one titled after the first prompt.
       if (!id) {
-        const s = await api.createSession(prompt.slice(0, 48), threadProject, team)
+        const s = await api.createSession((raw || uploads[0]?.name || '').slice(0, 48), threadProject, team)
         id = s.id
         // A mode picked before the first send has no row to live on until
         // now; persist it so reopening the thread does not silently widen it.
@@ -1809,6 +1840,43 @@ export function SessionsView({
         }
         openCreatedThread(s)
       }
+      // One multipart round-trip for the tray's real uploads, then the
+      // mentions ride the prompt as @paths: text files arrive as fenced
+      // blocks, images stay paths for the agent to open (see expandFileRefs).
+      let mentions: string[] = []
+      if (uploads.length > 0) {
+        const up = await api.uploadSessionFiles(id!, uploads.flatMap((p) => (p.file ? [p.file] : [])))
+        mentions = up.files.map((f) => f.mention)
+      }
+      // The files dock's 插入 inserts a pill for a workspace path rather than
+      // uploading bytes. Hand that path to the same @file expansion, so the
+      // model sees the file's contents instead of just a filename.
+      const refs = tray.flatMap((p) => (p.ref ? [p.ref] : []))
+      // @file references become inline fenced blocks before the prompt
+      // leaves the composer — "explain @main.go" works without pasting the
+      // file. Inside try so a rejected expansion still clears inflight. The
+      // thread is named so a relative path resolves against its worktree, the
+      // same base the files pane shows; without it the expansion read the
+      // same-named file from the node's default tree.
+      const expanded = sidebarObjective !== undefined ? { prompt: raw, attached: [] } : await expandFileRefs(
+        withAttachments(raw, [...mentions, ...refs]),
+        (p) => api.fsRead(p, id ?? undefined),
+      )
+      prompt = expanded.prompt
+      // The bubble lists what rode along, under paths the panel can resolve:
+      // an upload's mention (its stamped name keeps the author's name at the
+      // tail — see msg-files.tsx) and a reference pill's workspace path. The
+      // tray's display names are not used: a bare name is not a path, so the
+      // bubble could not draw a pasted picture with it. Both groups are
+      // dropped from the expanded list, or every file would show twice.
+      const trayMentions = new Set([...mentions, ...refs])
+      attached = [
+        ...new Set([
+          ...expanded.attached.filter((a) => !trayMentions.has(a)),
+          ...mentions,
+          ...refs,
+        ]),
+      ]
       // Race guard: snapshot the thread this reply belongs to. Every write
       // below checks it — if the user switched threads mid-turn the writes
       // are silently dropped. That is safe because the panel persists every
@@ -1835,8 +1903,8 @@ export function SessionsView({
         await refreshControl(sid)
         return
       }
-      const userKey = localMsgId()
-      const replyKey = localMsgId()
+      userKey = localMsgId()
+      replyKey = localMsgId()
       if (live()) {
         setBusy(true)
         // A continuation has no composer draft behind it: the text came from
@@ -2027,6 +2095,9 @@ export function SessionsView({
         // input, so the prompt above is display only and cannot double-post.
         queued !== undefined && !revision,
         planText !== null ? 'plan' : undefined,
+        // Only a revision names the version it is revising: a stale tab must
+        // not retire a proposal it never saw.
+        revision ? planVersion : undefined,
       )
       flushStream()
       patch((m) => ({ ...m, streaming: false, status: undefined }))
@@ -2035,6 +2106,15 @@ export function SessionsView({
     } catch (err) {
       // Whatever streamed before the failure is the user's only copy of it.
       flushStream()
+      // A stale plan revision is a state conflict, not a turn that failed: the
+      // newer proposal stands and this tab should re-read it. Nothing was
+      // saved server-side, so the optimistic bubbles go with the refusal.
+      if (revision && err instanceof ApiError && err.status === 409) {
+        setMsgs((ms) => ms.filter((m) => m.k !== userKey && m.k !== replyKey))
+        toast(t('sessions.plan.changed'), 'info')
+        if (id) void refreshControl(id).catch(() => {})
+        return false
+      }
       if (!announced) {
         // Nothing left the composer yet — the failure was in the upload or the
         // @ref expansion, and there is no bubble to carry the reason. Say it
@@ -2311,8 +2391,10 @@ export function SessionsView({
 
   async function adjustPlan(note: string): Promise<boolean> {
     if (!activeId || activeId !== activeIdRef.current || !proposal || busy || inflight.current) return false
-    // A queued continuation drains parked notes. A revision submits its own text.
-    return (await send(undefined, note, activeId, true)) === true
+    // A queued continuation drains parked notes. A revision submits its own text
+    // and names the version on screen, so a tab that missed a newer proposal
+    // cannot retire it.
+    return (await send(undefined, note, activeId, true, undefined, proposal.version)) === true
   }
 
   /** Stop a plan round that is already implementing. The round id is also its
@@ -2681,6 +2763,12 @@ export function SessionsView({
     return hit?.work_dir || name
   })()
 
+  // What the changes surfaces may paint: only a list read for the thread on
+  // screen. `diff` can still hold the previous thread's reply for the moment
+  // between the switch and the clear effect, and painting it would offer a
+  // merge of the wrong worktree.
+  const shownDiff = diffFor === activeId ? diff : null
+
   // What the dock's start pane says before anything is picked: where this
   // thread runs, how much window the last request carried, and how many files
   // it changed. The worktree is the real path the transcript's file links
@@ -2696,11 +2784,11 @@ export function SessionsView({
     model: contextAgent || modelName,
     contextAgent,
     contextAgents,
-    changes: diff
+    changes: shownDiff
       ? {
-          files: diff.changes.length,
-          insertions: diff.stat?.insertions ?? 0,
-          deletions: diff.stat?.deletions ?? 0,
+          files: shownDiff.changes.length,
+          insertions: shownDiff.stat?.insertions ?? 0,
+          deletions: shownDiff.stat?.deletions ?? 0,
         }
       : undefined,
   }
@@ -2823,13 +2911,15 @@ export function SessionsView({
               盖住右上角，点外面就收起，所以 log、输入框和跳转箭头不会长期
               被挡。超长的改动文字仍先在条内的小框里滚动。导出、节点和编排
               卡都搬进了栏的头部，所以这条 bar 不再重复它们。新对话页反过来：
-              那一页没有栏，也没有线程可概览，唯一要答的问题是"在哪台机器上
-              跑"，所以这里站的是节点按钮本身 —— 设备不再锁在栏的工具页后面，
-              也没有一个点了会打开空栏的折叠按钮。 */}
+              那一页没有栏，也没有线程可概览，要答的是两个问题——"在哪台机器上
+              跑"和"谁来干"，所以这里站的是节点按钮和员工选择本身：设备不再锁
+              在栏的工具页后面，也没有一个点了会打开空栏的折叠按钮。员工选择
+              原本在输入框上方，和目录按钮挤在一行；它和节点按钮是同一类决定
+              （这一轮怎么派），搬过来并排，输入框那一行就只剩目录。 */}
           <div class="chat-head-tools">
             {showRail && (
               <SessionRail
-                diff={diff}
+                diff={shownDiff}
                 tasks={sessionTasks ?? []}
                 nodes={nodes}
                 contextTokens={contextTokens}
@@ -2845,7 +2935,29 @@ export function SessionsView({
               />
             )}
             {newChatPage ? (
-              <NodePicker nodes={nodes} value={nodePref} onPick={setNodePref} />
+              <>
+                {/* The three things a first message has to settle sit in one
+                    row, left to right: where it runs in (folder), who works on
+                    it (people), which machine runs it (node). All glyphs —
+                    the composer's top row went with them, so the box is just
+                    a field again. */}
+                <DirButton
+                  tourTarget="workdir"
+                  iconOnly
+                  /* The pick, not the resolved folder: with a project open the
+                     two differ, and the card must show "自动（跟随项目）" ticked
+                     while nothing has been picked by hand. `draftDir` stays the
+                     answer to "where does this run" — the label reads it. */
+                  value={pickedDir}
+                  tip={draftDir}
+                  label={draftDir ? t('sessions.chooseDir') : draftProject || t('sessions.optionalDir')}
+                  onChange={setPickedDir}
+                  hint={t('sessions.hint')}
+                  disabled={busy}
+                />
+                <RosterPicker value={team} onChange={pickTeam} onManage={tourActive ? undefined : () => navigateView('settings:agents')} />
+                <NodePicker nodes={nodes} value={nodePref} onPick={setNodePref} />
+              </>
             ) : (
               /* Open, the column carries the fold control in its own head, so
                  this one steps aside: two `panel-right` glyphs on the same row
@@ -2898,6 +3010,7 @@ export function SessionsView({
                 msg={m}
                 tasksById={tasksById}
                 fallbackRef={reportRefs.get(m.k)}
+                session={activeId}
                 /* The local measurement wins while it is there (it is the only
                    one that exists between the reply landing and the transcript
                    being re-fetched); the panel's `duration_ms` is what survives
@@ -3072,8 +3185,7 @@ export function SessionsView({
             underneath it — the focus ring belongs to the whole thing. */}
         <form class="composer" onSubmit={send}>
           {newChatPage && <div class="new-chat-intro">
-            <ComposerPanda working={false} />
-            <h2 class="new-chat-heading">{t('sessions.hello')}</h2>
+            <HeroLockup width={400} />
           </div>}
           <div
             class={`composer-box${busy ? ' composer-running' : ''}${dropping ? ' composer-dropping' : ''}`}
@@ -3097,25 +3209,16 @@ export function SessionsView({
               addFiles([...(e.dataTransfer?.files ?? [])])
             }}
           >
-            <div class="composer-head">
-              {newChatPage && (
-                <DirButton
-                  tourTarget="workdir"
-                  value={draftDir}
-                  label={draftDir ? t('sessions.chooseDir') : draftProject || t('sessions.optionalDir')}
-                  onChange={setPickedDir}
-                  allowClear={!!pickedDir}
-                  clearLabel={draftProject ? t('sessions.resetDir') : undefined}
-                  hint={t('sessions.hint')}
-                  disabled={busy}
-                />
-              )}
-              {newChatPage ? (
-                <RosterPicker value={team} onChange={pickTeam} onManage={tourActive ? undefined : () => navigateView('settings:agents')} />
-              ) : (
+            {/* The pet lives above the box; the working directory used to sit
+                up here too, as a lone chip in an otherwise empty header. It
+                rides the tools row now, beside the model switch, where the
+                answer to "where does this run" sits with the answer to "who
+                answers it". */}
+            {!newChatPage && (
+              <div class="composer-head">
                 <ComposerPet working={busy} team={team} onTeam={pickTeam} onManage={() => navigateView('settings:agents')} />
-              )}
-            </div>
+              </div>
+            )}
             {dropping && <div class="attach-drop-hint">{t('sessions.attachDrop')}</div>}
             <ComposerInput
               composer={composer}
@@ -3190,11 +3293,11 @@ export function SessionsView({
             </div>
 
           </div>
-          {newChatPage ? (
-            <div class="new-chat-suggestions" inert={!!input.trim() || pending.length > 0}>
-              <ChatStarters onPick={useStarter} />
-            </div>
-          ) : (
+          {/* The new-chat page ends at the composer. Three example prompts
+              used to sit under the box; they read as a second toolbar under
+              the one control the page is asking you to use, so the greeting
+              above the box is the only invitation now. */}
+          {!newChatPage && (
             <div class="composer-foot">
               {/* Display, not a control: a thread's directory is fixed by its
                   project row, so the pick is disabled and shows where this
@@ -3238,7 +3341,7 @@ export function SessionsView({
         tab={dockTab}
         width={dockW}
         env={dockEnv}
-        badges={{ changes: diff?.changes.length ?? 0 }}
+        badges={{ changes: shownDiff?.changes.length ?? 0 }}
         tools={
           <>
             {selectedReport && <button type="button" class={`icon-btn tip-down${reportShown ? ' open' : ''}`}
@@ -3427,10 +3530,14 @@ export function SessionsView({
           <div class="dock-pane" hidden={dockTab !== 'changes'}>
             <DockChanges
               session={session?.id ?? null}
-              diff={diff}
+              diff={shownDiff}
               error={diffError}
-              merging={merging}
-              reverting={reverting}
+              merging={merging === activeId}
+              reverting={reverting === activeId}
+              blocked={
+                (merging !== null && merging !== activeId) ||
+                (reverting !== null && reverting !== activeId)
+              }
               onRefresh={() => refreshDiff(activeId)}
               onMerge={mergeChanges}
               onRevert={revertMerge}

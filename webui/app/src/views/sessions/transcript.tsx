@@ -280,8 +280,11 @@ function ChatBubble(props: {
    *  finalizer stamped `ref` have no id of their own; the closest single
    *  dispatch in the round is the best evidence for the process fold. */
   fallbackRef?: string
+  /** The thread this turn belongs to — a user turn's attachment pills are
+   *  workspace paths relative to it. */
+  session?: string | null
 }) {
-  const { msg, onOpenTask, onPreviewTask, elapsedMs, liveFrom = 0, plan = null, batch = [], tasksById, fallbackRef } = props
+  const { msg, onOpenTask, onPreviewTask, elapsedMs, liveFrom = 0, plan = null, batch = [], tasksById, fallbackRef, session } = props
 
   const report = msg.kind === 'error' ? null : splitReportHead(msg.text ?? '')
   const speaker = speakerOf(msg, report)
@@ -371,7 +374,7 @@ function ChatBubble(props: {
             // to, never a block of its own.
             (msg.text || msg.files) && (
               <p class="msg-text">
-                {msg.files && <UserFiles files={msg.files} />}
+                {msg.files && <UserFiles files={msg.files} session={session} />}
                 {msg.text}
               </p>
             )
@@ -583,6 +586,9 @@ export function ChatTurn(props: {
    *  lands) falls back to its own read. */
   tasksById?: Map<string, Task>
   fallbackRef?: string
+  /** The thread this turn belongs to; a user turn's attachment pills are
+   *  paths relative to it. */
+  session?: string | null
 }) {
   const { msg } = props
   const plan = usePlanBrief(msg.kind === 'plan' ? msg.ref : undefined)

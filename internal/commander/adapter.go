@@ -1617,7 +1617,16 @@ func runAdapterProcess(ctx context.Context, name string, prompt string, cwd stri
 	}
 
 	emitExecutionProfile(ctx, adapterExecutionProfile(ctx, name, req, cmd.Env, "one_shot"))
-	if err := cmd.Run(); err != nil {
+	// Start and Wait rather than Run: the successful spawn is the moment the
+	// prompt is handed over, and only the caller knows what that moment means
+	// (the round stamps its steer notes read). A run that never starts must not
+	// announce a delivery — no script, no interpreter, no process.
+	err = cmd.Start()
+	if err == nil {
+		PromptDelivered(ctx)
+		err = cmd.Wait()
+	}
+	if err != nil {
 		actMu.Lock()
 		wasStalled := stalled
 		wasStartup := startupStall
@@ -1885,6 +1894,11 @@ func (p *AgentSessions) turn(ctx context.Context, key, adapter string, req Adapt
 	s.turnSeen.Store(false)
 	s.lastAct.Store(time.Now().UnixNano())
 	defer s.inTurn.Store(false)
+	if fresh {
+		// Turn 0's prompt rode inside the launch request, so a session that
+		// came up carrying it is the hand-off.
+		PromptDelivered(ctx)
+	}
 	if !fresh {
 		if s.isDead() {
 			// A dead session's agent conversation still exists on the CLI's
@@ -1901,6 +1915,8 @@ func (p *AgentSessions) turn(ctx context.Context, key, adapter string, req Adapt
 			p.mu.Unlock()
 			return AgentResult{}, false
 		}
+		// The follow-up line is on the adapter's stdin: it has the prompt.
+		PromptDelivered(ctx)
 	}
 	if !fresh {
 		// Follow-up messages do not reconfigure a running CLI. Report the

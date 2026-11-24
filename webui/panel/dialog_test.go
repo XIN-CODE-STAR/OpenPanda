@@ -52,6 +52,26 @@ func TestListDirectories(t *testing.T) {
 	}
 }
 
+// An empty folder must answer `[]`, not `null`: the picker filters the list the
+// moment it arrives, and a null there threw before the card could paint — the
+// empty directory then read as "does not exist or is unreadable", and the typed
+// path could not be created from the search field.
+func TestListDirectoriesEmptyIsAnEmptyList(t *testing.T) {
+	dir := t.TempDir()
+	h := &handler{}
+	req := httptest.NewRequest("GET", "/api/fs/directories?path="+dir, nil)
+	w := httptest.NewRecorder()
+
+	h.listDirectories(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+	}
+	if body := w.Body.String(); !strings.Contains(body, `"directories":[]`) {
+		t.Fatalf("empty listing answered %s, want \"directories\":[]", body)
+	}
+}
+
 // stubDirDialog replaces the native chooser for the duration of a test: the
 // real one blocks on a modal OS window that no test may raise.
 func stubDirDialog(t *testing.T, fn func(initial, title string) (string, bool, error)) {

@@ -144,10 +144,11 @@ func underRoot(root, abs string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// resolveFsPath normalizes a request path for the fs endpoints: ~ expands,
-// and a relative path anchors at work_path — the composer's @token is typed
-// relative to the workspace, and the panel's own cwd is wherever the daemon
-// happened to start.
+// resolveFsPath normalizes a request path for the fs endpoints that carry no
+// thread context: ~ expands, and a relative path anchors at work_path — the
+// node's own data tree. A thread's @token does not come through here; it is
+// resolved against sessionCwd (see readFile), because "src" in a chat means
+// the thread's workspace, not the tree the daemon happens to serve.
 func (h *handler) resolveFsPath(reqPath string) (string, error) {
 	return h.resolveFsPathIn(reqPath, "")
 }
@@ -280,15 +281,25 @@ func (h *handler) listFiles(w http.ResponseWriter, r *http.Request) {
 // (a prompt is a context window, not a pipe).
 const maxReadBytes = 32 * 1024
 
-// readFile serves GET /api/fs/read?path= — the web /read: file content under
-// an allowed root, capped at maxReadBytes with a truncation flag.
+// readFile serves GET /api/fs/read?path=&session= — the web /read: file content
+// under an allowed root, capped at maxReadBytes with a truncation flag.
+//
+// `session` anchors a relative path at the thread's own workspace and admits
+// that workspace as a readable root, exactly like /api/fs/file and
+// /api/fs/image. Without it the composer's `@same.txt` expanded the same-named
+// file from work_path — the node's data tree — while the file panel beside it
+// was reading the thread's copy, so the model received a different document
+// than the one on screen. An absolute path inside a session worktree was
+// refused with 403 for the same missing root.
 func (h *handler) readFile(w http.ResponseWriter, r *http.Request) {
-	reqPath := strings.TrimSpace(r.URL.Query().Get("path"))
+	q := r.URL.Query()
+	reqPath := strings.TrimSpace(q.Get("path"))
 	if reqPath == "" {
 		writeErr(w, http.StatusBadRequest, errors.New("path is required"))
 		return
 	}
-	absPath, err := h.resolveFsPath(reqPath)
+	workDir := h.sessionCwd(q.Get("session"))
+	absPath, err := h.resolveFsPathIn(reqPath, workDir)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, errors.New("invalid path"))
 		return
@@ -299,7 +310,7 @@ func (h *handler) readFile(w http.ResponseWriter, r *http.Request) {
 	if real, err := filepath.EvalSymlinks(absPath); err == nil {
 		absPath = real
 	}
-	f, st, err := h.openReadPath(absPath)
+	f, st, err := h.openReadPath(absPath, workDir)
 	if err != nil {
 		writeReadError(w, err)
 		return
@@ -356,12 +367,19 @@ var imageTypes = map[string]string{
 // X-Content-Type-Options: nosniff, so a text file renamed .png cannot be
 // talked into executing as HTML.
 func (h *handler) getImage(w http.ResponseWriter, r *http.Request) {
-	reqPath := strings.TrimSpace(r.URL.Query().Get("path"))
+	q := r.URL.Query()
+	reqPath := strings.TrimSpace(q.Get("path"))
 	if reqPath == "" {
 		writeErr(w, http.StatusBadRequest, errors.New("path is required"))
 		return
 	}
-	absPath, err := h.resolveFsPath(reqPath)
+	// The file panel opens a picture by the path the viewer resolved, and a
+	// thread's files live in its worktree — the same base and the same extra
+	// root viewFile uses. Without them a preview 403s on a file whose header
+	// the panel just read: relative paths would anchor at work_path, and a
+	// worktree outside it would not be a readable root.
+	workDir := h.sessionCwd(q.Get("session"))
+	absPath, err := h.resolveFsPathIn(reqPath, workDir)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, errors.New("invalid path"))
 		return
@@ -376,7 +394,7 @@ func (h *handler) getImage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnsupportedMediaType, errors.New("not a previewable image type"))
 		return
 	}
-	f, st, err := h.openReadPath(absPath, os.TempDir())
+	f, st, err := h.openReadPath(absPath, os.TempDir(), workDir)
 	if err != nil {
 		writeReadError(w, err)
 		return
@@ -414,6 +432,53 @@ var openInFileManager = func(dir string) error {
 		cmd = exec.Command("xdg-open", dir)
 	}
 	return cmd.Start()
+}
+
+// mkdir serves POST /api/fs/mkdir — "create this folder" from the working
+// directory picker. Picking a folder already creates a project (and its tree)
+// on the first send, through projects.Create's MkdirAll; this is that same step
+// taken up front, so the folder exists while the card is still open and the
+// user can see what they made. One level only: the parent has to be there,
+// which is also what makes the breadth rule meaningful.
+func (h *handler) mkdir(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, errors.New("invalid JSON body"))
+		return
+	}
+	raw := strings.TrimSpace(req.Path)
+	if raw == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("path is required"))
+		return
+	}
+	abs, err := filepath.Abs(raw)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, errors.New("invalid path"))
+		return
+	}
+	// The projects' own breadth rule: no volume roots, no home or its
+	// ancestors, no system trees. A folder picker that can mint directories is
+	// a write surface, and "C:\" is not a project.
+	if err := projects.ValidateWorkDir(abs); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	parent := filepath.Dir(abs)
+	if st, err := os.Stat(parent); err != nil || !st.IsDir() {
+		writeErr(w, http.StatusBadRequest, errors.New("the parent folder does not exist"))
+		return
+	}
+	if st, err := os.Stat(abs); err == nil && st.IsDir() {
+		writeJSON(w, map[string]any{"ok": true, "path": abs})
+		return
+	}
+	if err := os.Mkdir(abs, 0o755); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "path": abs})
 }
 
 // revealPath serves POST /api/fs/reveal — "open this folder" from the

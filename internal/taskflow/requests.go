@@ -43,6 +43,27 @@ func (s *Service) RequestFirstDraft(ctx context.Context, connection string, key 
 	return s.requestExecution(ctx, connection, key, requestID, &consent)
 }
 
+// executionReceipt finds the run a repeated request already created. The
+// predicate is the same identity the in-transaction replay check uses: one
+// request UUID, one connection generation, one content/assignment revision.
+// TaskRevision is deliberately absent — claiming the work is what advances it,
+// and that is exactly the replay this has to recognise.
+func (s *Service) executionReceipt(ctx context.Context, c Connection, key taskproviders.Key, requestID string, live taskproviders.Snapshot) (RequestedExecution, bool, error) {
+	var state string
+	err := s.db.QueryRowContext(ctx, `SELECT state FROM task_flow_runs
+ WHERE request_id=? AND connection_id=? AND account_id=? AND task_key=? AND auth_epoch=?
+ AND connection_generation=? AND input_revision=? AND assignment_revision=? AND automation_generation=?`,
+		requestID, c.ID, c.AccountID, key.String(), c.AuthEpoch, c.Generation,
+		live.InputRevision, live.AssignmentRevision, live.AutomationGeneration).Scan(&state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RequestedExecution{}, false, nil
+	}
+	if err != nil {
+		return RequestedExecution{}, false, err
+	}
+	return RequestedExecution{RequestID: requestID, AlreadyStarted: true, State: state}, true, nil
+}
+
 func (s *Service) requestExecution(ctx context.Context, connection string, key taskproviders.Key, requestID string, consent *DraftConsent) (RequestedExecution, error) {
 	if _, err := uuid.Parse(requestID); err != nil {
 		return RequestedExecution{}, taskproviders.ErrPrecondition
@@ -62,6 +83,16 @@ func (s *Service) requestExecution(ctx context.Context, connection string, key t
 			return RequestedExecution{}, err
 		}
 	} else {
+		// A lost response is retried with the same request UUID. The first
+		// attempt may have advanced the task's revision while claiming it, so
+		// the receipt has to be found before the consent revision is checked —
+		// otherwise the retry is refused as an authorization change and the
+		// caller never learns the work already started.
+		if run, ok, receiptErr := s.executionReceipt(ctx, c, key, requestID, live); receiptErr != nil {
+			return RequestedExecution{}, receiptErr
+		} else if ok {
+			return run, nil
+		}
 		if c.AccountID != consent.AccountID || c.AuthEpoch != consent.AuthEpoch || live.Key != key || live.TaskRevision != consent.TaskRevision {
 			return RequestedExecution{}, taskproviders.ErrAuthorizationChanged
 		}

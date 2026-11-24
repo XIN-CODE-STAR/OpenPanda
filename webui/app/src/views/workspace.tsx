@@ -1321,17 +1321,22 @@ function WorkspaceComposer(props: {
           toastError(err)
         }
       }
-      // @file references expand to fenced blocks before the prompt leaves —
-      // the same rule the thread composer applies.
-      const expanded = await expandFileRefs(raw, (p) => api.fsRead(p))
-      const prompt = expanded.prompt
+      // The thread — and in a git project its worktree — exists before the
+      // prompt is assembled. That tree is what the turn will read: the project
+      // directory can carry uncommitted edits the worktree (cut from HEAD)
+      // does not, and the server fills in the active project when this view
+      // has not loaded it yet.
       const target =
-        props.picked ?? (await api.createSession(prompt.slice(0, 48), threadProject))
+        props.picked ?? (await api.createSession(raw.slice(0, 48), threadProject))
       if (permission !== 'auto' && !props.picked) {
         // Persist the pick on the thread this send just created; the ask
         // below also carries it, so a failed patch costs the memory only.
         api.patchSession(target.id, { permission_mode: permission }).catch(() => {})
       }
+      // @file references expand to fenced blocks before the prompt leaves —
+      // the same rule the thread composer applies, against the same tree.
+      const expanded = await expandFileRefs(raw, (p) => api.fsRead(p, target.id))
+      const prompt = expanded.prompt
       void askSessionStream(
         target.id,
         prompt,
