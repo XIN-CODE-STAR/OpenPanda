@@ -5,6 +5,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -280,6 +281,67 @@ func TestAdvancePlanPropagatesFailure(t *testing.T) {
 	}
 	if g3.State != StateCancelled || !strings.Contains(g3.ResultJSON, `"blocked_by":"st2"`) {
 		t.Fatalf("st3 = %s: %s", g3.State, g3.ResultJSON)
+	}
+}
+
+func TestAdvancePlanSettlesRemovedDependencyAndReleasesIndependentBranch(t *testing.T) {
+	for _, retention := range []bool{false, true} {
+		t.Run(fmt.Sprint(retention), func(t *testing.T) {
+			ctx := context.Background()
+			c := newCore(t, "deleted-plan-stage")
+			p := plan.Plan{Goal: "two independent branches", Stages: []plan.Stage{
+				{ID: "producer", Intent: "produce the first input"},
+				{ID: "consumer", Intent: "use the first input", Needs: []string{"producer"}},
+				{ID: "independent", Intent: "produce the other input"},
+				{ID: "independent-next", Intent: "use the other input", Needs: []string{"independent"}},
+			}}
+			id, err := c.StartPlan(ctx, p, DefaultQueueSpec())
+			if err != nil {
+				t.Fatal(err)
+			}
+			stages, err := c.store.PlanStages(ctx, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			producer := stageByID(t, stages, "producer")
+			independent := stageByID(t, stages, "independent")
+			if retention {
+				if err = c.store.ForceFail(ctx, producer.TaskID, "failed before retention"); err != nil {
+					t.Fatal(err)
+				}
+				if n, err := c.store.DeleteSettledBefore(ctx, time.Now().Unix()+60); err != nil || n != 0 {
+					t.Fatalf("retention removed an input of active work: %d, %v", n, err)
+				}
+			} else if _, err := c.store.Delete(ctx, producer.TaskID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = c.db.Exec("UPDATE tasks SET state='done',output_artifact='fixture-output' WHERE task_id=?", independent.TaskID); err != nil {
+				t.Fatal(err)
+			}
+			if err = c.AdvancePlan(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+			stages, err = c.store.PlanStages(ctx, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			consumer := stageByID(t, stages, "consumer")
+			next := stageByID(t, stages, "independent-next")
+			if consumer.State != StateCancelled || !strings.Contains(consumer.ResultJSON, "producer") || next.State != StateQueued {
+				t.Fatalf("consumer=%s (%s), independent successor=%s", consumer.State, consumer.ResultJSON, next.State)
+			}
+			// The queued consumer's signed artifact grant still needs its
+			// producer's row at fetch time.
+			if _, err := c.store.Delete(ctx, independent.TaskID); !errors.Is(err, ErrPlanDependency) {
+				t.Fatalf("delete producer of queued stage: %v", err)
+			}
+			if err := c.store.Cancel(ctx, next.TaskID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := c.store.Delete(ctx, independent.TaskID); err != nil {
+				t.Fatalf("delete producer of settled stage: %v", err)
+			}
+		})
 	}
 }
 

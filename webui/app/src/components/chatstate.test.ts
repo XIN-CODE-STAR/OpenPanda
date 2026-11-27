@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { composerIntent, reconcileTranscript, runningOperation, threadBusy, mergeTailTurn, patchStreaming, slashAtCaret, slashWords, planArgument } from './chatstate.ts'
+import { composerIntent, reconcileTranscript, runningOperation, threadBusy, mergeTailTurn, patchStreaming, slashAtCaret, slashWords, planArgument, planCommand } from './chatstate.ts'
 import { rankWords } from './fuzzy.ts'
 
 interface Msg {
@@ -82,6 +82,17 @@ test('planArgument recognizes plan drafts without consuming navigation or ordina
   for (const text of ['/plans', '/planet', '/pl', 'explain /plan', '']) {
     assert.equal(planArgument(text), null, text)
   }
+})
+
+test('typed plan commands require an exact positive version and allow literal descriptions', () => {
+  assert.deepEqual(planCommand('SHOW'), { action: 'show' })
+  assert.deepEqual(planCommand('ConFiRm\t1'), { action: 'confirm', version: 1 })
+  for (const invalid of ['confirm', 'confirm +1', 'confirm 0', 'confirm 1.0', 'confirm 1 extra', 'confirm 9007199254740992']) {
+    assert.equal(planCommand(invalid).action, 'invalid', invalid)
+  }
+  assert.deepEqual(planCommand('-- confirm the fixture'), { action: 'ask', prompt: 'confirm the fixture' })
+  assert.deepEqual(planCommand('show both approaches'), { action: 'ask', prompt: 'show both approaches' })
+  assert.equal(planCommand('--').action, 'invalid')
 })
 
 // --- the `/` menu: a bare command keeps its list ---------------------------

@@ -192,6 +192,17 @@ func substituteGenericArg(arg string, optional map[string]string, prompt string)
 // interpreter can still serve as an execution endpoint for arbitrary CLIs,
 // drivers and platform tools. The request's own timeout drives the context
 // deadline; the run rides the same sandbox policy as a Python adapter.
+// waitResult normalizes the one Wait error that is not a failure. WaitDelay
+// expiring after a clean exit means a detached grandchild still holds a pipe;
+// the command itself finished, and reporting that as a spawn failure sends the
+// task to another agent, side effects and all.
+func waitResult(cmd *exec.Cmd, err error) error {
+	if err != nil && errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
+		return nil
+	}
+	return err
+}
+
 func runGenericNative(ctx context.Context, agentName, prompt, cwd string, env []string) AgentResult {
 	// buildAdapterRequest is shared with the script path: it enforces the
 	// restricted-mode refusal (adapter: "generic" declares no read-only
@@ -236,13 +247,15 @@ func runGenericNative(ctx context.Context, agentName, prompt, cwd string, env []
 		return AgentResult{ExitCode: 127, Result: security.Redact(err.Error())}
 	}
 	emitExecutionProfile(ctx, adapterExecutionProfile(ctx, agents.GenericNativeAdapter, req, cmd.Env, "native_generic"))
-	// Start and Wait rather than Run, for the same reason as the script path:
-	// the successful spawn is the hand-off the round stamps its notes on, and
-	// a command that never launched must not claim one.
+	// Arbitrary native templates have no receipt protocol. Their hand-off
+	// boundary is launching the configured child with the expanded request.
+	if err := beginPromptHandoff(ctx); err != nil {
+		return AgentResult{ExitCode: 1, Result: err.Error()}
+	}
 	err := cmd.Start()
 	if err == nil {
 		PromptDelivered(ctx)
-		err = cmd.Wait()
+		err = waitResult(cmd, cmd.Wait())
 	}
 	res := AgentResult{ExitCode: 0}
 	res.Result = strings.TrimSpace(stdout.String())

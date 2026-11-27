@@ -14,6 +14,7 @@ func init() {
 		"conversation.status.complete":       "complete",
 
 		"conversation.planOn":       "Planning active (read-only).",
+		"conversation.noProposal":   "There is no proposal to review.",
 		"conversation.planOff":      "Planning exited. Goal remains paused.",
 		"conversation.goalHelp":     "/goal <objective> | edit <objective> | pause | resume | stop | clear",
 		"conversation.confirm":      "Start implementation:",
@@ -33,6 +34,7 @@ func init() {
 		"conversation.status.complete":       "完成",
 
 		"conversation.planOn":       "规划已开启（只读）。",
+		"conversation.noProposal":   "当前没有可审阅的提案。",
 		"conversation.planOff":      "已退出规划，目标仍保持暂停。",
 		"conversation.goalHelp":     "/goal <目标> | edit <目标> | pause | resume | stop | clear",
 		"conversation.confirm":      "开始实施：",
@@ -52,6 +54,7 @@ func init() {
 		"conversation.status.complete":       "完了",
 
 		"conversation.planOn":       "計画中（読み取り専用）。",
+		"conversation.noProposal":   "確認できる提案がありません。",
 		"conversation.planOff":      "計画を終了しました。目標は一時停止中です。",
 		"conversation.goalHelp":     "/goal <目標> | edit <目標> | pause | resume | stop | clear",
 		"conversation.confirm":      "実装を開始：",
@@ -71,6 +74,7 @@ func init() {
 		"conversation.status.complete":       "completo",
 
 		"conversation.planOn":       "Planificación activa (solo lectura).",
+		"conversation.noProposal":   "No hay ninguna propuesta para revisar.",
 		"conversation.planOff":      "Planificación desactivada. El objetivo sigue pausado.",
 		"conversation.goalHelp":     "/goal <objetivo> | edit <objetivo> | pause | resume | stop | clear",
 		"conversation.confirm":      "Iniciar implementación:",
@@ -90,6 +94,7 @@ func init() {
 		"conversation.status.complete":       "abgeschlossen",
 
 		"conversation.planOn":       "Planung aktiv (nur lesend).",
+		"conversation.noProposal":   "Es gibt keinen Vorschlag zur Prüfung.",
 		"conversation.planOff":      "Planung beendet. Das Ziel bleibt pausiert.",
 		"conversation.goalHelp":     "/goal <Ziel> | edit <Ziel> | pause | resume | stop | clear",
 		"conversation.confirm":      "Umsetzung starten:",

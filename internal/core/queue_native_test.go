@@ -78,6 +78,20 @@ func TestQueueNativeCommand(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+	case "append":
+		if len(args) != 1 {
+			t.Fatal("append fixture requires a path")
+		}
+		f, err := os.OpenFile(args[0], os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fmt.Fprintln(f, "executed"); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
 	default:
 		t.Fatalf("unknown queue fixture command %q", os.Args[i+2])
 	}

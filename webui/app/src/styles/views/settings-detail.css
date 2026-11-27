@@ -147,7 +147,10 @@
 }
 /* The two verbs live in a real footer, outside the scrollport. A sticky bar
    inside the body covered whichever row scrolled under it and left the last
-   rows unreadable; a footer is always reachable and never overlaps content. */
+   rows unreadable; a footer is always reachable and never overlaps content.
+   It belongs to the sheet, not to one section: every tab shows it, and a tab
+   with nothing pending leaves the verbs disabled rather than making the bar
+   appear and disappear as you browse the rail. */
 .settings-pane-footer {
   flex: none;
   padding: 12px 28px 14px;
@@ -155,7 +158,7 @@
   background: var(--bg-raised);
   box-shadow: 0 -8px 18px color-mix(in srgb, var(--bg) 82%, transparent);
 }
-.settings-pane-footer .execution-save-bar {
+.settings-pane-footer .settings-save-bar {
   position: static;
   margin: 0;
   padding: 0;
@@ -163,9 +166,9 @@
   background: transparent;
   box-shadow: none;
 }
-.settings-pane-footer .execution-save-bar > .hint {
+.settings-pane-footer .settings-save-bar > .hint {
   margin: 0 0 8px;
 }
-.settings-pane-footer .execution-save-bar .policy-actions-bar {
+.settings-pane-footer .settings-save-bar .policy-actions-bar {
   gap: 8px;
 }

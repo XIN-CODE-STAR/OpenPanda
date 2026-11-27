@@ -1201,6 +1201,183 @@ func TestConfirmedStructuredPlanRestartDispatchesSavedGraph(t *testing.T) {
 	t.Fatalf("recovered stages=%d, want the reviewed graph's 3 (last turn %q)", stages, tail)
 }
 
+func TestConfirmedStructuredPlanRestartSettlesExistingDispatch(t *testing.T) {
+	e, tasks, ctx := newStageTestEngine(t)
+	e.queueTasks = true
+	st := sessions.NewStore(t.TempDir())
+	sess, err := st.Create("restart after dispatch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := e.Conversations(st)
+	service.Close()
+	if err := service.store.SetPlanning(ctx, sess.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	const raw = `{"goal":"ship","stages":[{"id":"inspect","intent":"inspect source"},{"id":"ship","intent":"verify result","needs":["inspect"]}]}`
+	version, err := service.store.SaveProposal(ctx, sess.ID, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.store.Confirm(ctx, sess.ID, version); err != nil {
+		t.Fatal(err)
+	}
+	const round = "crashed-after-dispatch"
+	if err := tasks.BeginAskRound(ctx, round, sess.ID, "en"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.db.Exec("UPDATE conversation_plan_runs SET status='running',round_id=? WHERE session_id=?", round, sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.StartOperation(sess.ID, sessions.Operation{ID: round, Status: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	prompt := planInstruction(version, raw)
+	if _, err := st.AppendTurn(sess.ID, sessions.PlanConfirmationTurn(round, version, prompt)); err != nil {
+		t.Fatal(err)
+	}
+	var spec entry.PlanSpec
+	if err := json.Unmarshal([]byte(raw), &spec); err != nil {
+		t.Fatal(err)
+	}
+	out, err := e.AskTurnsScoped(ctx, nil, prompt, AskScope{
+		SessionID: sess.ID, RoundID: round, confirmedImplementation: true, reviewedPlan: &spec,
+	}, false, StreamCallbacks{})
+	if err != nil || out == nil || out.PlanID == "" || len(out.PlanStages) != 3 {
+		t.Fatalf("initial dispatch: %+v, %v", out, err)
+	}
+	if _, err := e.db.Exec("UPDATE ask_rounds SET lease_until=0 WHERE round_id=?", round); err != nil {
+		t.Fatal(err)
+	}
+	// Restart the sweeper with the actual queued graph, an expired lease and
+	// only the confirmation turn. A root still running must hold the run.
+	restarted := &ConversationService{engine: e, store: service.store, sessions: st, ctx: ctx}
+	restarted.sweepPlans(ctx)
+	var status, activeRound string
+	readRun := func() {
+		t.Helper()
+		if err := e.db.QueryRow("SELECT status,round_id FROM conversation_plan_runs WHERE session_id=?", sess.ID).Scan(&status, &activeRound); err != nil {
+			t.Fatal(err)
+		}
+	}
+	readRun()
+	if status != "running" || activeRound != round {
+		t.Fatalf("run before stages settle = %q/%q", status, activeRound)
+	}
+	if _, err := e.db.Exec(`UPDATE tasks SET state='done', result_json='{"stdout":"delivery from the original graph"}' WHERE plan_id=?`, out.PlanID); err != nil {
+		t.Fatal(err)
+	}
+	restarted.sweepPlans(ctx)
+	readRun()
+	if status != "done" || activeRound != round {
+		t.Fatalf("run after original stages settle = %q/%q, want done on the original round", status, activeRound)
+	}
+	restarted.sweepPlans(ctx)
+	var count, distinct int
+	if err := e.db.QueryRow("SELECT COUNT(*), COUNT(DISTINCT plan_id) FROM tasks WHERE session_id=?", sess.ID).Scan(&count, &distinct); err != nil || count != 3 || distinct != 1 {
+		t.Fatalf("recovery created work: stages=%d graphs=%d err=%v", count, distinct, err)
+	}
+	persisted, err := st.Get(sess.ID)
+	if err != nil || persisted.Operation == nil || persisted.Operation.Status != "done" {
+		t.Fatalf("recovery did not settle the original session operation: %+v %v", persisted, err)
+	}
+	var deliveries int
+	for _, turn := range persisted.Turns {
+		if turn.IdempotencyKey == "plan:delivery:"+round+":"+out.PlanID && strings.Contains(turn.Text, "delivery from the original graph") {
+			deliveries++
+		}
+	}
+	if deliveries != 1 {
+		t.Fatalf("recovered delivery count = %d, want 1", deliveries)
+	}
+}
+
+func TestInterruptedPlanRecoveryKeepsDispatchHistory(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		lostRound    bool
+		taskCleared  bool
+		legacyDelete bool
+		want         string
+	}{
+		{name: "previous controller cleared the round pointer", lostRound: true, want: "done"},
+		{name: "completed task cleared from the board", taskCleared: true, want: "done"},
+		{name: "both the round pointer and task were cleared", lostRound: true, taskCleared: true, want: "done"},
+		{name: "old database without a surviving verdict", taskCleared: true, legacyDelete: true, want: "failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, tasks, ctx := newStageTestEngine(t)
+			st := sessions.NewStore(t.TempDir())
+			sess, err := st.Create(tc.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			service := e.Conversations(st)
+			service.Close()
+			const proposal = "Audit, then verify"
+			if err := service.store.SetPlanning(ctx, sess.ID, true); err != nil {
+				t.Fatal(err)
+			}
+			version, err := service.store.SaveProposal(ctx, sess.ID, proposal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := service.store.Confirm(ctx, sess.ID, version); err != nil {
+				t.Fatal(err)
+			}
+			const round = "interrupted"
+			if err := tasks.BeginAskRound(ctx, round, sess.ID, "en"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.AppendTurn(sess.ID, sessions.PlanConfirmationTurn(round, version, planInstruction(version, proposal))); err != nil {
+				t.Fatal(err)
+			}
+			task, err := tasks.Create(core.WithAskRound(ctx, round), "", "", "verify", "test-node", []string{"test-node"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			driveStage(t, tasks, ctx, task.TaskID, "test-node")
+			if tc.taskCleared {
+				if err := tasks.DeleteTerminal(ctx, task.TaskID); err != nil {
+					t.Fatal(err)
+				}
+				if tc.legacyDelete {
+					if _, err := e.db.Exec("DELETE FROM ask_round_removed_tasks WHERE task_id=?", task.TaskID); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if err := tasks.CloseAskRound(ctx, round, "interrupted"); err != nil {
+				t.Fatal(err)
+			}
+			if !tc.lostRound {
+				if _, err := e.db.Exec("UPDATE conversation_plan_runs SET status='running',round_id=? WHERE session_id=?", round, sess.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			restartCtx, cancel := context.WithCancel(ctx)
+			restarted := &ConversationService{
+				engine: e, store: service.store, sessions: st, ctx: restartCtx, cancel: cancel,
+				running: make(map[string]context.CancelFunc),
+			}
+			defer restarted.Close()
+			restarted.sweepPlans(ctx)
+			readRun := func(want string) {
+				t.Helper()
+				var status, gotRound string
+				if err := e.db.QueryRow("SELECT status,round_id FROM conversation_plan_runs WHERE session_id=?", sess.ID).Scan(&status, &gotRound); err != nil || status != want || gotRound != round {
+					t.Fatalf("run=%q/%q want %q on the original round, err=%v", status, gotRound, want, err)
+				}
+			}
+			if tc.lostRound {
+				readRun("running")
+				restarted.sweepPlans(ctx)
+			}
+			readRun(tc.want)
+		})
+	}
+}
+
 func TestInvalidConfirmedGraphFailsWithoutCreatingTasks(t *testing.T) {
 	e, _, ctx := newStageTestEngine(t)
 	st := sessions.NewStore(t.TempDir())

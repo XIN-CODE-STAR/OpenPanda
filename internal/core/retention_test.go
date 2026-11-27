@@ -59,8 +59,8 @@ func TestDeleteSettledBeforeAgesOutOnlySettled(t *testing.T) {
 }
 
 // TestDeleteSettledBeforeTakesSatellites proves the sweep removes the event
-// timeline and pending outbox rows along with the task — a settled row must
-// not leave deliveries replaying for a task that no longer exists.
+// timeline and task deliveries along with the task. An undelivered cancel
+// survives because only the remote copy still needs it.
 func TestDeleteSettledBeforeTakesSatellites(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -99,6 +99,11 @@ func TestDeleteSettledBeforeTakesSatellites(t *testing.T) {
 		if n != 0 {
 			t.Fatalf("%s still holds %d row(s) for swept task", table, n)
 		}
+	}
+	var cancels int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM cancel_outbox WHERE task_id = ?`, tk.TaskID).Scan(&cancels); err != nil || cancels != 1 {
+		t.Fatalf("undelivered cancellation count = %d, err = %v; want 1, nil", cancels, err)
 	}
 }
 

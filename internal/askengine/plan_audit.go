@@ -58,20 +58,30 @@ func RenderPlanAudit(ctx context.Context, loc i18n.Locale, store *core.TaskStore
 }
 
 // Prepare the final transcript before taking the run settlement's write lock.
-func (s *ConversationService) planDeliveryTurns(ctx context.Context, sid, round string) ([]sessions.Turn, error) {
-	rows, err := s.store.DB.QueryContext(ctx, `SELECT DISTINCT t.plan_id FROM ask_round_tasks a JOIN tasks t ON t.task_id=a.task_id
- WHERE a.round_id=? AND t.session_id=? AND t.plan_id!='' AND t.parent_id='' ORDER BY t.plan_id`, round, sid)
+func (s *ConversationService) planDeliveryTurns(ctx context.Context, sid, round string, successful bool, withdrawn map[string]bool) ([]sessions.Turn, error) {
+	rows, err := s.store.DB.QueryContext(ctx, `SELECT t.plan_id,t.stage_id,t.task_id,t.state,COALESCE(t.spec_json,''),COALESCE(t.result_json,'')
+ FROM ask_round_tasks a JOIN tasks t ON t.task_id=a.task_id
+ WHERE a.round_id=?1 AND t.session_id=?2 AND t.plan_id!='' AND t.parent_id=''
+ UNION ALL
+ SELECT m.plan_id,m.stage_id,m.task_id,m.state,CASE WHEN m.plan_final THEN '{"plan_final":true}' ELSE '{}' END,m.result_json
+ FROM ask_round_removed_tasks m WHERE m.round_id=?1 AND m.plan_id!='' AND m.parent_id=''
+ AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.task_id=m.task_id)
+ ORDER BY 1,2,3`, round, sid)
 	if err != nil {
 		return nil, err
 	}
 	var ids []string
+	boards := make(map[string][]core.Task)
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var task core.Task
+		if err := rows.Scan(&task.PlanID, &task.StageID, &task.TaskID, &task.State, &task.SpecJSON, &task.ResultJSON); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		ids = append(ids, id)
+		if len(boards[task.PlanID]) == 0 {
+			ids = append(ids, task.PlanID)
+		}
+		boards[task.PlanID] = append(boards[task.PlanID], task)
 	}
 	err = rows.Err()
 	rows.Close()
@@ -88,14 +98,19 @@ func (s *ConversationService) planDeliveryTurns(ctx context.Context, sid, round 
 	}
 	var turns []sessions.Turn
 	store := s.engine.TaskStore()
+	if withdrawn == nil {
+		withdrawn = map[string]bool{}
+	}
 	for _, id := range ids {
-		stages, err := store.PlanStages(ctx, id)
-		if err != nil {
+		outcome := &Result{PlanID: id, OK: true}
+		if err := s.engine.planBoardVerdictWithWithdrawn(ctx, store, outcome, boards[id], withdrawn); err != nil {
 			return nil, err
 		}
-		outcome := &Result{PlanID: id, OK: true}
-		if err := s.engine.planBoardVerdict(ctx, store, outcome, stages); err != nil {
-			return nil, err
+		// The live board may no longer contain a failed stage whose verdict
+		// is still recorded in the round. Don't report its partial result as
+		// a successful implementation.
+		if outcome.OK && !successful {
+			continue
 		}
 		text := outcome.Answer
 		kind := "answer"

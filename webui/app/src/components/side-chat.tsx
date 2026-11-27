@@ -25,9 +25,10 @@
 // The pane's `+` clears the server-side conversation and cancels a running
 // side ask.
 
-import { useEffect, useRef, useState } from 'preact/hooks'
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
 import {
   api,
+  ApiError,
   askSideStream,
   isAbort,
   type AskStatusEvent,
@@ -45,7 +46,6 @@ import { MessageCopyButton } from './copy'
 import { ClarifyCard } from './clarify-card'
 import { confirmDialog } from './confirm'
 import { ModelSelect } from './model-select'
-import { toastError } from './toast'
 import { ReplyActivity } from './execution-steps-view'
 import { upsertActivity } from './execution-steps'
 
@@ -141,17 +141,21 @@ export function SideChat(props: SideChatProps) {
   // one, and picking a row swaps the transcript without touching the thread.
   const [chats, setChats] = useState<SideChatSummary[]>([])
   const [activeId, setActiveId] = useState('')
+  const activeRef = useRef('')
   // The history is a popover opened from the dock's 对话 tab, not a bar over
   // the transcript: it is a place you go on purpose, not a permanent row.
   const [historyOpen, setHistoryOpen] = useState(false)
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
+  const [stopping, setStopping] = useState(false)
+  const [stopError, setStopError] = useState('')
   // attached: this pane holds the live SSE stream. When false and busy is
   // true, the answer is being produced in the background and the pane polls.
   const [attached, setAttached] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [status, setStatus] = useState('')
   const [err, setErr] = useState('')
+  const [retryPrompt, setRetryPrompt] = useState('')
   const [clarify, setClarify] = useState<{ spec: ClarifySpec; operationID: string } | null>(null)
   const live = useRef('')
   const abort = useRef<AbortController | null>(null)
@@ -163,20 +167,29 @@ export function SideChat(props: SideChatProps) {
   // clearing the pane) bumps it, so callbacks from an aborted ask cannot
   // append their late deltas to the conversation now on screen.
   const run = useRef(0)
+  const selection = useRef(0)
+  const selecting = useRef(false)
+  const reading = useRef<number | null>(null)
   // The side operation this pane is following, from the live stream or from the
   // stored operation on load. Stop names it to the cancel endpoint.
   const opID = useRef('')
+  const stopPending = useRef<'waiting' | 'sending' | null>(null)
   // The reload effect must not read stale render state: while an answer is
   // streaming (or being followed in the background) the pane's lines are
   // newer than the stored transcript, so a re-read would erase them.
   const liveState = useRef({ busy: false, attached: false, loaded: false })
   liveState.current = { busy, attached, loaded }
 
+  function showChat(id: string) {
+    activeRef.current = id
+    setActiveId(id)
+  }
+
   const applyConversation = (conv: SideConversation) => {
     setChats(conv.chats ?? [])
     // `chat` names the transcript in this payload; `active` is the stored
     // pointer, which a read for a specific chat deliberately does not move.
-    setActiveId(conv.chat ?? conv.active ?? '')
+    showChat(conv.chat ?? conv.active ?? '')
     const stored: Line[] = (conv.turns ?? []).map((turn, index) => ({
       operationID: turn.operation_id || String(turn.ts ?? 0) + ":" + index,
       id: ++seq,
@@ -193,6 +206,9 @@ export function SideChat(props: SideChatProps) {
     if (op?.status === 'running') stored.push({ operationID: op.id, id: -1, role: 'assistant', text: op.text ?? '', thought: op.thought, activities: op.activities, live: true })
     setLines(stored)
     opID.current = op?.status === 'running' ? op.id : ''
+    const failed = op?.status === 'failed' || op?.status === 'cancelled'
+    setRetryPrompt(failed ? stored.filter((line) => line.role === 'user').at(-1)?.text ?? '' : '')
+    setErr(failed ? op.error ?? '' : '')
     if (op?.status === 'running') {
       setBusy(true)
       setAttached(false)
@@ -201,17 +217,65 @@ export function SideChat(props: SideChatProps) {
       setBusy(false)
       setAttached(false)
       setStatus('')
-      setErr(op && (op.status === 'failed' || op.status === 'cancelled') ? (op.error ?? '') : '')
+      setClarify(null)
     }
-    setLoaded(true)
   }
 
-  const loadSide = async (id: string, chatID?: string) => {
+  // Poll one snapshot at a time per conversation. A slow read from the
+  // conversation being left must not block or replace its successor.
+  async function readConversation(id: string) {
+    const generation = run.current
+    if (selecting.current || reading.current === generation) return
+    reading.current = generation
+    const current = () => run.current === generation && !selecting.current
     try {
-      applyConversation(await api.sideConversation(id, chatID))
+      const conversation = await api.sideConversation(id, activeRef.current || undefined)
+      if (!current()) return
+      applyConversation(conversation)
     } catch (e) {
+      if (!current()) return
       setErr(e instanceof Error ? e.message : String(e))
-      setLoaded(true)
+    } finally {
+      if (reading.current === generation) reading.current = null
+    }
+  }
+
+  function detachConversation() {
+    run.current++
+    abort.current?.abort()
+    abort.current = null
+    opID.current = ''
+    stopPending.current = null
+    setStopping(false)
+    setStopError('')
+    setBusy(false)
+    setAttached(false)
+    setStatus('')
+    setErr('')
+    setRetryPrompt('')
+    setClarify(null)
+  }
+
+  // Keep reading the current chat until its replacement actually exists. If
+  // a history row was deleted elsewhere, its failed selection leaves the
+  // current stream or polling intact.
+  async function selectConversation(read: () => Promise<SideConversation>, clearDraft: boolean) {
+    const ticket = ++selection.current
+    selecting.current = true
+    setLoaded(false)
+    try {
+      const conversation = await read()
+      if (selection.current !== ticket) return
+      detachConversation()
+      if (clearDraft) setInput('')
+      applyConversation(conversation)
+    } catch (e) {
+      if (selection.current === ticket) setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      if (selection.current === ticket) {
+        selecting.current = false
+        setLoaded(true)
+      }
     }
   }
 
@@ -219,10 +283,12 @@ export function SideChat(props: SideChatProps) {
   // newer than the stored one while an answer streams, so a full re-read here
   // would erase the reply the reader is watching.
   const refreshList = async (id: string) => {
+    const generation = run.current
     try {
       const conv = await api.sideConversation(id)
+      if (run.current !== generation) return
       setChats(conv.chats ?? [])
-      setActiveId((cur) => cur || conv.chat || conv.active || '')
+      if (!activeRef.current) showChat(conv.chat ?? conv.active ?? '')
     } catch {
       /* the list is an index; a failed read must not disturb the transcript */
     }
@@ -239,57 +305,45 @@ export function SideChat(props: SideChatProps) {
   // mount flag is the only way to tell "new" from "reopen". Consumed once,
   // so a later thread switch still loads that thread's stored conversation.
   const freshOnMount = useRef(props.freshStart === true)
-  useEffect(() => {
+  useLayoutEffect(() => {
     const before = seen.current
     seen.current = { session: props.sessionId, reset: props.resetSignal }
     const sameThread = before?.session === props.sessionId
     const reset = freshOnMount.current || (sameThread && before?.reset !== props.resetSignal)
     freshOnMount.current = false
-    run.current++
-    abort.current?.abort()
-    abort.current = null
-    opID.current = ''
-    setInput('')
-    setBusy(false)
-    setAttached(false)
-    setStatus('')
-    setErr('')
-    setClarify(null)
-    // A thread switch or a fresh conversation is not the history of the one
-    // that was on screen.
     setHistoryOpen(false)
-    if (!props.sessionId) {
+    if (!sameThread) {
+      selection.current++
+      selecting.current = false
+      detachConversation()
+      setInput('')
       setLines([])
+      showChat('')
       setChats([])
-      setActiveId('')
+    }
+    if (!props.sessionId) {
+      selecting.current = false
       setLoaded(true)
       return
     }
+    const id = props.sessionId
     if (reset) {
       // `+` opens another conversation rather than discarding the one on
       // screen: the transcript stays in the history list, one click away.
-      setLines([])
-      setLoaded(true)
-      setHistoryOpen(false)
       // A fresh, empty conversation looks exactly like the empty one it
       // replaced. Put the caret in the composer so the click always has a
       // visible answer, even on a thread whose last side chat was blank.
       inputRef.current?.focus()
-      void api.newSideChat(props.sessionId)
-        .then(applyConversation)
-        .catch((e) => setErr(e instanceof Error ? e.message : String(e)))
+      void selectConversation(() => api.newSideChat(id), true)
       return
     }
-    setLoaded(false)
-    void loadSide(props.sessionId)
+    void selectConversation(() => api.sideConversation(id), false)
   }, [props.sessionId, props.resetSignal])
 
   // Coming back to the 对话 tab shows the conversation the pane was reading —
   // its stored transcript, not a fresh one. `+` (resetSignal) is the only thing
   // that starts a new side chat. Never interrupt a live answer.
   const seenReload = useRef(props.reloadSignal)
-  const activeRef = useRef('')
-  activeRef.current = activeId
   useEffect(() => {
     const n = props.reloadSignal
     if (n === undefined || n === seenReload.current) return
@@ -298,8 +352,9 @@ export function SideChat(props: SideChatProps) {
     // the popover is a detour, and it should not still be hanging there.
     setHistoryOpen(false)
     const s = liveState.current
-    if (!props.sessionId || !s.loaded || s.busy || s.attached) return
-    void loadSide(props.sessionId, activeRef.current || undefined)
+    const id = props.sessionId
+    if (!id || selecting.current || !s.loaded || s.busy || s.attached) return
+    void readConversation(id)
   }, [props.reloadSignal, props.sessionId])
 
   // A second click on the lit 对话 tab toggles the history. That tab is the
@@ -344,7 +399,7 @@ export function SideChat(props: SideChatProps) {
     if (!props.sessionId || !busy || attached) return
     const id = props.sessionId
     const timer = window.setInterval(() => {
-      void loadSide(id)
+      if (seen.current?.session === id && !liveState.current.attached) void readConversation(id)
     }, 1500)
     return () => window.clearInterval(timer)
   }, [props.sessionId, busy, attached])
@@ -353,7 +408,11 @@ export function SideChat(props: SideChatProps) {
   // opened, but a session switch or an unmount should not leave a stream
   // feeding a component that is gone. The server keeps the ask (it runs under
   // the panel's lifetime), so the answer is waiting on the next load.
-  useEffect(() => () => abort.current?.abort(), [])
+  useLayoutEffect(() => () => {
+    selection.current++
+    run.current++
+    abort.current?.abort()
+  }, [])
 
   // Follow the answer as it arrives; a reader who scrolled up stays where they
   // are (the distance check is the same contract the transcript keeps).
@@ -420,23 +479,45 @@ export function SideChat(props: SideChatProps) {
 
   async function ask(prompt: string) {
     const id = props.sessionId
-    if (!id) return
-    setInput('')
+    if (!id || selecting.current || busy || abort.current) return
+    const submitted = input.trim() === prompt ? input : prompt
+    if (input.trim() === prompt) setInput('')
     setErr('')
+    setRetryPrompt('')
     setStatus('')
     setClarify(null)
+    stopPending.current = null
+    setStopping(false)
+    setStopError('')
     live.current = ''
     setBusy(true)
     setAttached(true)
+    const userLine = ++seq
+    const answerLine = ++seq
     setLines((prev) => [
       ...prev,
-      { id: ++seq, role: 'user', text: prompt },
-      { id: ++seq, role: 'assistant', text: '', live: true },
+      { id: userLine, role: 'user', text: prompt },
+      { id: answerLine, role: 'assistant', text: '', live: true },
     ])
     const ctrl = new AbortController()
     abort.current = ctrl
     const runId = ++run.current
     const current = () => run.current === runId
+    let accepted = false
+    let settled = false
+    function failed(message: string | undefined, rejected: boolean) {
+      if (!current()) return
+      if (message) {
+        setErr(message)
+        setRetryPrompt(prompt)
+      }
+      if (accepted || !rejected) {
+        patchLast(live.current, true)
+      } else {
+        setLines((prev) => prev.filter((line) => line.id !== userLine && line.id !== answerLine))
+        setInput((draft) => draft || submitted)
+      }
+    }
     try {
       await askSideStream(
         id,
@@ -474,10 +555,13 @@ export function SideChat(props: SideChatProps) {
             }
             setStatus(sideStatusNote(text, ev))
           },
-          onOperation: (operationID) => {
-            if (current()) {
+          onOperation: (operationID, chatID) => {
+            if (current() && operationID) {
+              accepted = true
               opID.current = operationID
+              if (chatID) showChat(chatID)
               setLines(prev => prev.map(line => line.live ? { ...line, operationID } : line))
+              if (stopPending.current === 'waiting') void stop()
             }
           },
           onTask: (taskID) => {
@@ -490,6 +574,8 @@ export function SideChat(props: SideChatProps) {
           },
           onResult: (r) => {
             if (!current()) return
+            accepted = true
+            settled = true
             const text = r.answer || live.current
             // A dispatch or plan has no prose answer of its own; name what it
             // started so the live turn is not an empty bubble.
@@ -502,28 +588,37 @@ export function SideChat(props: SideChatProps) {
             if (r.task_id) setLastTask(r.task_id)
           },
           onError: (message) => {
-            if (!current()) return
-            setErr(message)
-            patchLast(live.current, true)
+            settled = true
+            failed(message, true)
           },
         },
         ctrl.signal,
       )
     } catch (e) {
-      if (current()) {
-        if (!isAbort(e)) setErr(e instanceof Error ? e.message : String(e))
-        patchLast(live.current, true)
-      }
+      // A broken connection doesn't tell us whether the server filed the
+      // question. Keep the transcript unless the server actually refused it.
+      const message = isAbort(e) ? undefined : e instanceof Error ? e.message : String(e)
+      if (!accepted && !settled) failed(message, e instanceof ApiError && e.status > 0)
     } finally {
       if (current()) {
-        setBusy(false)
         setAttached(false)
-        setStatus('')
         abort.current = null
-        // The answer changed this chat's row (title, turn count, clock) and a
-        // first question may have created it; re-read the index so the history
-        // matches what is on screen.
-        void refreshList(id)
+        if (stopPending.current === 'waiting') {
+          stopPending.current = null
+          setStopping(false)
+        }
+        if (accepted && !settled) {
+          // EOF can be a lost connection, even when fetch reports it as a
+          // clean end. Continue tracking the accepted operation on the node.
+          setStatus(t('side.background'))
+          void readConversation(id)
+        } else {
+          setBusy(false)
+          setStatus('')
+          setClarify(null)
+          opID.current = ''
+          void refreshList(id)
+        }
       }
     }
   }
@@ -534,21 +629,8 @@ export function SideChat(props: SideChatProps) {
   function pick(chatID: string) {
     setHistoryOpen(false)
     const id = props.sessionId
-    if (!id || chatID === activeId) return
-    run.current++
-    abort.current?.abort()
-    abort.current = null
-    opID.current = ''
-    setBusy(false)
-    setAttached(false)
-    setStatus('')
-    setErr('')
-    setClarify(null)
-    setInput('')
-    setLines([])
-    void api.selectSideChat(id, chatID)
-      .then(applyConversation)
-      .catch((e) => setErr(e instanceof Error ? e.message : String(e)))
+    if (!id || (chatID === activeId && !selecting.current)) return
+    void selectConversation(() => api.selectSideChat(id, chatID), true)
   }
 
   // remove drops one conversation. Deleting the one on screen falls back to
@@ -556,67 +638,64 @@ export function SideChat(props: SideChatProps) {
   async function remove(chatID: string) {
     const id = props.sessionId
     if (!id) return
+    const generation = run.current
     const ok = await confirmDialog({
       title: t('side.deleteChat'),
       message: t('side.deleteChatBody'),
       confirmLabel: t('side.deleteChat'),
     })
-    if (!ok) return
-    run.current++
-    abort.current?.abort()
-    abort.current = null
-    opID.current = ''
-    setBusy(false)
-    setAttached(false)
-    setStatus('')
-    try {
-      applyConversation(await api.deleteSideChat(id, chatID))
-    } catch (e) {
-      toastError(e)
-    }
+    if (!ok || generation !== run.current) return
+    await selectConversation(() => api.deleteSideChat(id, chatID), false)
   }
 
   function send() {
     const prompt = input.trim()
-    if (!prompt || !props.sessionId || busy) return
+    if (!prompt) return
     void ask(prompt)
   }
 
-  // Retry asks the same question again. The failed attempt stays in the
-  // transcript (the server owns it); the retry is a new turn, which is the
-  // honest record of what happened.
-  function retry() {
-    if (busy || !props.sessionId) return
-    for (let i = lines.length - 1; i >= 0; i--) {
-      if (lines[i]!.role === 'user') {
-        void ask(lines[i]!.text)
-        return
+  async function stop() {
+    const id = props.sessionId
+    if (!id || stopPending.current === 'sending') return
+    setStopping(true)
+    setStopError('')
+    const operationID = opID.current
+    if (!operationID) {
+      // The user can request Stop while the first response is still on its
+      // way. Wait for the operation ID so the cancellation has an owner.
+      stopPending.current = 'waiting'
+      return
+    }
+    stopPending.current = 'sending'
+    const generation = run.current
+    try {
+      const result = await api.cancelSession(id, operationID)
+      if (run.current !== generation) return
+      if (result.cancelled && abort.current) abort.current.abort()
+      if (!abort.current) void readConversation(id)
+    } catch (e) {
+      if (run.current === generation) setStopError(e instanceof Error ? e.message : String(e))
+    } finally {
+      if (run.current === generation) {
+        stopPending.current = null
+        setStopping(false)
       }
     }
-  }
-
-  function stop() {
-    const id = props.sessionId
-    if (id && opID.current) {
-      void api.cancelSession(id, opID.current).catch(() => {})
-    }
-    abort.current?.abort()
-    abort.current = null
-    opID.current = ''
-    setBusy(false)
-    setAttached(false)
-    setClarify(null)
-    setStatus('')
   }
 
   function answerClarify(answers: ClarifyAnswer[]) {
     const pending = clarify
     if (!pending || !props.sessionId) return
+    const generation = run.current
     // Keep the card until the answer lands: a failed POST must not leave the
     // turn parked behind a card the pane already threw away.
     void api.answerSessionClarify(props.sessionId, pending.operationID, answers)
-      .then(() => setClarify(null))
-      .catch((e) => setErr(e instanceof Error ? e.message : String(e)))
+      .then(() => {
+        if (run.current === generation) setClarify(null)
+      })
+      .catch((e) => {
+        if (run.current === generation) setErr(e instanceof Error ? e.message : String(e))
+      })
   }
 
   return (
@@ -798,9 +877,11 @@ export function SideChat(props: SideChatProps) {
         {err !== '' && (
           <div class="side-error">
             <p class="side-err">{err}</p>
-            <button type="button" class="link-btn" onClick={retry} disabled={busy}>
-              {t('side.retry')}
-            </button>
+            {retryPrompt && (
+              <button type="button" class="link-btn" onClick={() => void ask(retryPrompt)} disabled={busy || !loaded}>
+                {t('side.retry')}
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -810,6 +891,7 @@ export function SideChat(props: SideChatProps) {
           <ClarifyCard spec={clarify.spec} onSubmit={answerClarify} onCancel={stop} />
         </div>
       )}
+      {stopError && <p class="side-err" role="alert">{stopError}</p>}
 
       <form
         class="side-compose"
@@ -846,7 +928,7 @@ export function SideChat(props: SideChatProps) {
                 side channel answers with whatever the thread is using. */}
             <ModelSelect portal disabled={!props.sessionId || busy} />
             {busy ? (
-              <button type="button" class="btn small side-stop" onClick={stop}>
+              <button type="button" class="btn small side-stop" onClick={stop} disabled={stopping}>
                 {t('common.stop')}
               </button>
             ) : (
@@ -855,7 +937,7 @@ export function SideChat(props: SideChatProps) {
                 class="btn small primary side-send"
                 aria-label={t('sessions.send')}
                 title={t('sessions.send')}
-                disabled={!input.trim() || !props.sessionId}
+                disabled={!input.trim() || !props.sessionId || !loaded}
               >
                 <Icon name="send" size={16} />
               </button>

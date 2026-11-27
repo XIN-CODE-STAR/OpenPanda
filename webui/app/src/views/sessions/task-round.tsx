@@ -176,9 +176,15 @@ function RoundJobProgress({ job, onOpenTask, onPreview }: { job: RoundJob; onOpe
       {task?.state === 'running' && <LiveRoundSteps key={task.attempt_id} task={task} />}
     </>}>
       {task && terminal.has(task.state) ? <JobReport job={job} onOpenTask={onOpenTask} onPreview={onPreview} /> : <>
-        <div class="session-round-report-links">
+        {/* One control row above the log: the way into the task, the way to
+            talk to it, and the way out. The send composer is a block of its
+            own (see `.task-send`), so it takes the row under these links
+            instead of pushing 取消任务 onto a third line; cancel keeps the far
+            end, away from the two controls a thumb reaches for. */}
+        <div class="session-round-job-acts">
           <TaskLink id={job.id} onOpenTask={onOpenTask} />
-          {task && <><TaskQuickSend taskId={job.id} hint={task} /><TaskCancel task={task} /></>}
+          {task && <TaskQuickSend taskId={job.id} hint={task} />}
+          {task && <TaskCancel task={task} />}
         </div>
         {task && <TaskProcessBody key={task.attempt_id} taskId={job.id} task={task} />}
       </>}

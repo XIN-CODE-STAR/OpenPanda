@@ -425,6 +425,17 @@ func (c *Core) AdvancePlan(ctx context.Context, planID string) error {
 		}
 	}
 	p := planFromStages(stages)
+	// A removed producer leaves a reference in its consumers. Represent it as
+	// a failed predecessor so a sweep cancels those consumers and can still
+	// advance independent branches of the graph.
+	for _, t := range stages {
+		for _, need := range t.Needs {
+			if _, present := byStage[need]; !present && !failed[need] {
+				p.Stages = append(p.Stages, plan.Stage{ID: need})
+				failed[need] = true
+			}
+		}
+	}
 	released := 0
 	var firstErr error
 	// Propagate failures in dependency order even when a consumer sorts
@@ -445,6 +456,9 @@ func (c *Core) AdvancePlan(ctx context.Context, planID string) error {
 			if failed[need] {
 				blockedBy = need
 				inputErr = fmt.Errorf("dependency %s did not complete", need)
+				if _, present := byStage[need]; !present {
+					inputErr = fmt.Errorf("dependency %s was removed", need)
+				}
 				break
 			}
 			if !done[need] {

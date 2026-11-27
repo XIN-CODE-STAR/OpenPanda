@@ -5,6 +5,7 @@ package commander
 import (
 	"context"
 	"strings"
+	"sync"
 
 	"github.com/Xustalis/OpenPanda/internal/agents"
 )
@@ -85,14 +86,28 @@ func WithPromptObserver(ctx context.Context, fn PromptObserver) context.Context 
 // promptDeliveredKey carries the callback a run announces its hand-off on.
 // The observer above fires before the adapter is called, which is too early to
 // claim delivery — a run whose script or interpreter is missing still reaches
-// it. The executors (one-shot spawn, native generic, session turn) call
-// PromptDelivered at the moment the prompt is actually handed over.
+// it. Python adapters can acknowledge a request after parsing it, and
+// native generic reports the hand-off to the configured process.
 type promptDeliveredKey struct{}
 
+type promptHandoffKey struct{}
+
+// WithPromptHandoff runs a final check before sending a prompt to a process.
+// The check may refuse a prompt whose pending user notes changed after it was built.
+func WithPromptHandoff(ctx context.Context, check func() error) context.Context {
+	return context.WithValue(ctx, promptHandoffKey{}, sync.OnceValue(check))
+}
+
+func beginPromptHandoff(ctx context.Context) error {
+	if check, ok := ctx.Value(promptHandoffKey{}).(func() error); ok {
+		return check()
+	}
+	return nil
+}
+
 // WithPromptDelivered registers the callback that fires once the adapter has
-// taken this round's prompt. It is called at most once per adapter process
-// start; callers that must be idempotent (a retry, a session turn after a
-// one-shot) guard themselves.
+// taken this round's prompt. When orchestration retries a round, the caller
+// may use the same callback for several adapter attempts.
 func WithPromptDelivered(ctx context.Context, fn func()) context.Context {
 	return context.WithValue(ctx, promptDeliveredKey{}, fn)
 }
@@ -101,6 +116,9 @@ func WithPromptDelivered(ctx context.Context, fn func()) context.Context {
 // Nil-safe and idempotent by convention: the registered callback owns the
 // "already announced" flag.
 func PromptDelivered(ctx context.Context) {
+	if beginPromptHandoff(ctx) != nil {
+		return
+	}
 	if fn, ok := ctx.Value(promptDeliveredKey{}).(func()); ok && fn != nil {
 		fn()
 	}

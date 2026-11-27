@@ -2444,6 +2444,20 @@ func TestNeedsFollowup(t *testing.T) {
 	if cur.NeedsFollowup() {
 		t.Fatal("non-review row must not read as follow-up even with the flag")
 	}
+	// A park for changed input can carry the same marker in its result — the
+	// failed-agent path writes needs_followup beside needs_changed_input — but
+	// continuing it would fail the requeue CAS. The predicate must agree with
+	// the disposition the CAS reads, or the console advertises a dead action.
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE tasks SET state=?, approval_disposition=?, result_json=? WHERE task_id=?`,
+		StateReview, string(ApprovalNeedsChangedInput),
+		`{"needs_followup":true,"verdict":"blocked"}`, tk.TaskID); err != nil {
+		t.Fatalf("park for changed input: %v", err)
+	}
+	cur, _ = s.Get(ctx, tk.TaskID)
+	if cur.NeedsFollowup() {
+		t.Fatal("changed-input park must not read as follow-up even with the flag")
+	}
 }
 
 // TestRequeueForContinue pins the CAS: review+accept_work+expected owner
@@ -2456,10 +2470,12 @@ func TestRequeueForContinue(t *testing.T) {
 	tk := createTask(t, s, "", "continue me", "node")
 	parkForFollowup(t, s, tk, "node")
 
-	if err := s.RequeueForContinue(ctx, tk.TaskID, "other-node"); !errors.Is(err, ErrConflict) {
+	other := tk
+	other.OwnerNode = "other-node"
+	if err := s.RequeueForContinue(ctx, other, "wrong node"); !errors.Is(err, ErrConflict) {
 		t.Fatalf("foreign owner must conflict, got %v", err)
 	}
-	if err := s.RequeueForContinue(ctx, tk.TaskID, "node"); err != nil {
+	if err := s.RequeueForContinue(ctx, tk, "continue"); err != nil {
 		t.Fatalf("requeue: %v", err)
 	}
 	cur, err := s.Get(ctx, tk.TaskID)
@@ -2476,7 +2492,7 @@ func TestRequeueForContinue(t *testing.T) {
 	if scheduled != 1 {
 		t.Fatal("requeue must stamp scheduled=1 for ListReady")
 	}
-	if err := s.RequeueForContinue(ctx, tk.TaskID, "node"); !errors.Is(err, ErrConflict) {
+	if err := s.RequeueForContinue(ctx, tk, "continue"); !errors.Is(err, ErrConflict) {
 		t.Fatalf("second continue must conflict, got %v", err)
 	}
 	// A non-accept_work review (consent park) is not a follow-up continue.
@@ -2486,8 +2502,12 @@ func TestRequeueForContinue(t *testing.T) {
 		StateReview, "node", string(ApprovalResumeExecution), tk2.TaskID); err != nil {
 		t.Fatalf("park consent: %v", err)
 	}
-	if err := s.RequeueForContinue(ctx, tk2.TaskID, "node"); !errors.Is(err, ErrConflict) {
+	if err := s.RequeueForContinue(ctx, tk2, "continue"); !errors.Is(err, ErrConflict) {
 		t.Fatalf("consent disposition must conflict, got %v", err)
+	} else if !strings.Contains(err.Error(), "continue requires accept_work") {
+		// The empty CAS is a disposition mismatch, not a race: saying
+		// "claimed concurrently" hides the only fix the operator has.
+		t.Fatalf("consent park must name the disposition, got %v", err)
 	}
 }
 
@@ -2542,6 +2562,30 @@ func TestContinueReviewedRequeues(t *testing.T) {
 	}
 	if _, err := c.ContinueReviewed(ctx, remote.TaskID, ""); err == nil {
 		t.Fatal("remote-dispatched task must refuse local continue")
+	}
+
+	// Flip the disposition after the read. A losing requeue leaves no note.
+	raced := createTask(t, s, "", "raced continue", "node")
+	parkForFollowup(t, s, raced, "node")
+	var flipOnce sync.Once
+	s.preTxHook = func() {
+		flipOnce.Do(func() {
+			if _, err := s.db.ExecContext(context.Background(),
+				`UPDATE tasks SET approval_disposition=? WHERE task_id=?`,
+				string(ApprovalNeedsChangedInput), raced.TaskID); err != nil {
+				t.Errorf("flip disposition: %v", err)
+			}
+		})
+	}
+	_, err = c.ContinueReviewed(ctx, raced.TaskID, "keep going")
+	s.preTxHook = nil
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("changed-input park must refuse continue, got %v", err)
+	}
+	if notes, nerr := s.UserNotes(ctx, raced.TaskID); nerr != nil {
+		t.Fatalf("notes: %v", nerr)
+	} else if len(notes) != 0 {
+		t.Fatalf("failed continue must retract its note, got %+v", notes)
 	}
 }
 
@@ -2938,5 +2982,51 @@ func TestListReadySummariesToleratesNullWorkDir(t *testing.T) {
 	}
 	if ready[0].WorkDir != "" {
 		t.Fatalf("WorkDir = %q, want empty", ready[0].WorkDir)
+	}
+}
+
+func TestContinueReviewedPublishesOnlyWinningDirective(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	c := &Core{store: s, nodeID: "node", logger: testLogger(),
+		loop: defense.NewLoopDetector(2), checkpointLoop: defense.NewLoopDetector(2)}
+	task := createTask(t, s, "", "continued task", "node")
+	parkForFollowup(t, s, task, "node")
+	var directive *steerNote
+	entered := false
+	s.preTxHook = func() {
+		// Skip the old, separately committed message trace. Race the two
+		// requests at the point where the losing request tries to claim.
+		if !entered {
+			entered = true
+			notes, err := s.UserNotes(ctx, task.TaskID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(notes) != 0 {
+				return
+			}
+		}
+		s.preTxHook = nil
+		if _, err := c.ContinueReviewed(ctx, task.TaskID, "winning directive"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.ClaimLocal(ctx, task.TaskID, "node"); err != nil {
+			t.Fatal(err)
+		}
+		directive = c.peekRoundSteer(ctx, task.TaskID, msgSeen{})
+		c.markSteerDelivered(ctx, task.TaskID, directive, "")
+	}
+	_, err := c.ContinueReviewed(ctx, task.TaskID, "losing directive")
+	s.preTxHook = nil
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("second claim should conflict: %v", err)
+	}
+	if directive == nil || directive.body != "winning directive" {
+		t.Fatalf("first round received %+v, want winning directive", directive)
+	}
+	messages, err := s.TaskMessages(ctx, "task:"+task.TaskID)
+	if err != nil || len(messages) != 1 || messages[0].ConsumedAt == 0 {
+		t.Fatalf("expected only the delivered directive: %+v, %v", messages, err)
 	}
 }

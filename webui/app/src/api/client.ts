@@ -687,7 +687,7 @@ export interface TaskBoardMessage {
 }
 
 /** One row of the composer's pending strip — a note typed mid-turn that no
- *  round has folded yet. `key` is what edit/drop/promote address. */
+ *  round has folded yet. Board note keys are local to their `task_id`. */
 export interface SessionNote {
   key: string
   task_id?: string
@@ -698,6 +698,11 @@ export interface SessionNote {
   at: number
   /** True for a board row (durable across reloads and restarts). */
   durable?: boolean
+}
+
+function sessionNotePath(id: string, key: string, taskID?: string, suffix = ''): string {
+  const path = `/api/sessions/${encodeURIComponent(id)}/notes/${encodeURIComponent(key)}${suffix}`
+  return taskID ? `${path}?task_id=${encodeURIComponent(taskID)}` : path
 }
 
 /** Outcome of an edit/drop/promote on a pending note. `warning` carries the
@@ -1067,6 +1072,7 @@ export interface PeerEntry {
   status?: string
   online: boolean
   last_seen?: string
+  offline_id?: string
 }
 
 /** GET /api/peers — the dial list the add-device card manages. HasSecret says
@@ -1193,7 +1199,7 @@ export interface ExecutionSettings {
   }
 }
 
-/** GET/PUT /api/settings/app — the app policy groups (C1). */
+/** GET/PUT/PATCH /api/settings/app — the app policy groups (C1). */
 export interface AppSettings {
   injection_model: 'auto' | 'always' | 'never'
   preferred_agents: string[]
@@ -1210,6 +1216,11 @@ export interface AppSettings {
    *  configured mode alone. The server re-installs the process-wide policy, so
    *  no restart is involved. */
   sandbox_mode?: string
+}
+
+/** Changes only the named policy fields. Each memory limit is independent. */
+export type AppSettingsPatch = Partial<Omit<AppSettings, 'memory_limits' | 'sandbox'>> & {
+  memory_limits?: Partial<AppSettings['memory_limits']>
 }
 
 /** One topics/*.md (or daily/*.md) file in GET /api/memory. */
@@ -1436,23 +1447,23 @@ export const api = {
 
   /** Rewrite a pending note before a round reads it. Refused with 409 once the
    *  round has consumed it — the board must not disagree with the prompt. */
-  editSessionNote(id: string, key: string, text: string, attachments: string[] = []): Promise<NoteResult> {
-    return request('PATCH', `/api/sessions/${encodeURIComponent(id)}/notes/${encodeURIComponent(key)}`, {
+  editSessionNote(id: string, key: string, text: string, attachments: string[] = [], taskID?: string): Promise<NoteResult> {
+    return request('PATCH', sessionNotePath(id, key, taskID), {
       text,
       attachments,
     })
   },
 
   /** Take a pending note back out of the queue. */
-  deleteSessionNote(id: string, key: string): Promise<NoteResult> {
-    return request('DELETE', `/api/sessions/${encodeURIComponent(id)}/notes/${encodeURIComponent(key)}`)
+  deleteSessionNote(id: string, key: string, taskID?: string): Promise<NoteResult> {
+    return request('DELETE', sessionNotePath(id, key, taskID))
   },
 
   /** Escalate a queued note to an inject in place — no second row, so the
    *  round reads the same words once. Reports "interrupted" only when this
    *  console's engine actually aborted the running round. */
-  promoteSessionNote(id: string, key: string): Promise<NoteResult> {
-    return request('POST', `/api/sessions/${encodeURIComponent(id)}/notes/${encodeURIComponent(key)}/promote`)
+  promoteSessionNote(id: string, key: string, taskID?: string): Promise<NoteResult> {
+    return request('POST', sessionNotePath(id, key, taskID, '/promote'))
   },
 
   /** Persist a drag: ids arrive top-to-bottom and get seq 1..n. */
@@ -1837,6 +1848,10 @@ export const api = {
 
   putAppSettings(s: AppSettings): Promise<AppSettings> {
     return request('PUT', '/api/settings/app', s)
+  },
+
+  patchAppSettings(patch: AppSettingsPatch): Promise<AppSettings> {
+    return request('PATCH', '/api/settings/app', patch)
   },
 
   // ---- Model settings ----
@@ -2247,22 +2262,24 @@ export const api = {
    *  configs plus any inference server answering on loopback. Read-only — the
    *  panel probes, it does not write. The scan runs the OpenCode CLI, so the
    *  deadline is longer than a normal call's. */
-  discoverModels(): Promise<{ sources: DiscoverSource[] }> {
-    return request('GET', '/api/models/discover', undefined, { timeoutMs: 90_000 })
+  async discoverModels(): Promise<{ sources: DiscoverSource[] }> {
+    const { sources } = await request<{ sources: DiscoverSource[] }>('GET', '/api/models/discover', undefined, { timeoutMs: 90_000 })
+    return { sources: sources.map((source) => ({ ...source, candidates: source.candidates ?? [] })) }
   },
 
   /** CC Switch's four app rosters, each as its own group. A separate call from
    *  discovery because the console shows it behind its own button and one
    *  roster at a time. */
-  ccswitchGroups(): Promise<{ groups: DiscoverSource[] }> {
-    return request('GET', '/api/models/ccswitch', undefined, { timeoutMs: 60_000 })
+  async ccswitchGroups(): Promise<{ groups: DiscoverSource[] }> {
+    const { groups } = await request<{ groups: DiscoverSource[] }>('GET', '/api/models/ccswitch', undefined, { timeoutMs: 60_000 })
+    return { groups: groups.map((group) => ({ ...group, candidates: group.candidates ?? [] })) }
   },
 
   /** Register the ticked candidates in one write. Items carry a credential
    *  *reference* (`env:NAME`, `codex:<provider>`), never a key: the server
    *  resolves it, so a console session never sees a secret. */
-  importModels(items: ModelImportItem[]): Promise<{ added: number; aliases: string[]; skipped?: string[] }> {
-    return request('POST', '/api/models/import', { items })
+  importModels(items: ModelImportItem[]): Promise<ModelImportResult> {
+    return request('POST', '/api/models/import', { items }, { timeoutMs: 80_000 })
   },
 
   // ---- Plans (TUI /plans parity) ----
@@ -2434,6 +2451,11 @@ export interface ModelEntry {
    *  "opencode", "local". Empty for a hand-written row. The console names a
    *  connection after it instead of showing a relay's loopback address. */
   source?: string
+  /** The console's own name for the connection this row belongs to. A
+   *  connection has no record of its own — it is the rows sharing a provider,
+   *  endpoint, dialect and key — so the name travels on every one of them and
+   *  the card paints the first one it sees. Empty = name it from the vendor. */
+  conn_name?: string
   api_type: string
   base_url: string
   model: string
@@ -2511,6 +2533,11 @@ export interface DiscoveredModel {
   /** False for a model with no endpoint this build can dial — shown greyed. */
   importable: boolean
   note?: string
+  /** The section this row belongs to when one source reports several
+   *  endpoints — CC Switch's per-client provider lists. The console draws one
+   *  heading per group; both fields are absent for a flat source. */
+  group?: string
+  group_label?: string
   /** The endpoint answered for this model during the scan. Only loopback rows
    *  are checked — a remote catalogue of forty rows is not worth a minute of
    *  network — so false means "not checked", never "broken". */
@@ -2535,6 +2562,7 @@ export interface DiscoverSource {
 }
 
 export interface ModelImportItem {
+  candidate_id?: string
   provider: string
   model: string
   base_url?: string
@@ -2546,11 +2574,24 @@ export interface ModelImportItem {
   alias?: string
 }
 
+export interface ModelImportResult {
+  added: number
+  aliases: string[]
+  labeled?: number
+  completed_ids?: string[]
+  skipped?: string[]
+  activation_failed?: boolean
+}
+
 export interface AddModelRequest {
   provider: string
   model?: string
   api_key?: string
   alias?: string
+  /** Display name for the connection this row joins. Omitted = keep the
+   *  stored one (an edit that does not touch the name); "" = go back to the
+   *  vendor's own name. Every row of the connection carries the same value. */
+  conn_name?: string
   /** Alias of the entry whose key this one borrows — says *which* account of
    *  a vendor is being extended when one vendor is registered twice. */
   reuse_from?: string
@@ -3049,15 +3090,12 @@ export type GoalStatus = 'active' | 'paused' | 'blocked' | 'usage_limited' | 'bu
 export interface ServerGoal {
   id: string; session_id: string; objective: string; status: GoalStatus
   reason?: string; round_id?: string; generation: number; rounds: number
-  tokens: number; token_budget?: number; paused_by_plan: boolean; waiting_for?: string
+  tokens: number; token_budget?: number; paused_by_plan: boolean; waiting_for?: string; waiting_round?: string
 }
 export interface ConversationState {
   planning: boolean; proposal_version: number; proposal?: string
   confirmed_version: number; goal?: ServerGoal
-  /** Present only while a confirmed proposal is executing in the background.
-   *  That round has no SSE response of its own, so this — refreshed by the
-   *  once-a-second state poll — is what keeps the console from looking
-   *  stuck between "confirm" and the first transcript line. */
+  /** Progress for an unsettled confirmed proposal, including a pending answer. */
   implementation?: {
     round: string; phase: string; detail?: string; task_id?: string
   }
@@ -3326,7 +3364,7 @@ export interface AskStreamHandlers {
    *  rather than the provider's own count. */
   onUsage?(input: number, output: number, estimated?: boolean): void
   onStatus(text: string, ev?: AskStatusEvent): void
-  onOperation(operationID: string): void
+  onOperation(operationID: string, sideChatID?: string): void
   /** A task row this turn dispatched, sent the moment the row exists — well
    *  before `onResult`, because the turn keeps running until the task
    *  settles. It is the console's handle on the work while it executes. */
@@ -3374,9 +3412,8 @@ export async function askSessionStream(
    *  flip, so this only covers a send that races the PATCH. */
   permissionMode?: string,
   /** Marks this ask as the automatic continuation of notes a finished turn
-   *  never read. The server drains its parked notes as this turn's input, so
-   *  `prompt` may be the same words purely for display — the parked copy is
-   *  the authority and is consumed exactly once. */
+   *  never read. The server drains its parked notes as this turn's input.
+   *  Send an empty `prompt` and read the accepted text from the session. */
   resumeQueued?: boolean,
   /** The current prompt's interaction mode, independent of its permissions. */
   mode?: 'plan',
@@ -3384,6 +3421,7 @@ export async function askSessionStream(
    *  names a version the store has already replaced is refused instead of
    *  retiring the newer proposal. */
   planVersion?: number,
+  replyTo?: string,
 ): Promise<void> {
   await openSSE(`/api/sessions/${encodeURIComponent(id)}/ask`, {
     method: 'POST',
@@ -3396,6 +3434,7 @@ export async function askSessionStream(
       resume_queued: resumeQueued || undefined,
       mode,
       plan_version: planVersion || undefined,
+      reply_to: replyTo || undefined,
       // Server-written prose for this round (its closing summary) is read
       // back here, so the round records the console's language instead of
       // the engine's.
@@ -3425,7 +3464,8 @@ function dispatchAskEvent(event: string, data: string, h: AskStreamHandlers): vo
   else if (event === 'usage')
     h.onUsage?.(payload.input ?? 0, payload.output ?? 0, Boolean(payload.estimated))
   else if (event === 'status') h.onStatus(payload.text ?? '', payload as AskStatusEvent)
-  else if (event === 'operation') h.onOperation(payload.operation_id ?? '')
+  else if (event === 'operation')
+    h.onOperation(payload.operation_id ?? '', typeof payload.side_chat === 'string' ? payload.side_chat : undefined)
   else if (event === 'task') {
     const taskID = typeof payload.task_id === 'string' ? payload.task_id : ''
     if (taskID) h.onTask?.(taskID)

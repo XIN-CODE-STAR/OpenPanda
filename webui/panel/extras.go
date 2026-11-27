@@ -298,8 +298,9 @@ func (h *handler) readFile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, errors.New("path is required"))
 		return
 	}
-	workDir := h.sessionCwd(q.Get("session"))
-	absPath, err := h.resolveFsPathIn(reqPath, workDir)
+	id := q.Get("session")
+	workDir := h.sessionCwd(id)
+	absPath, err := h.resolveFsPathIn(h.resolveLegacyUpload(id, workDir, reqPath), workDir)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, errors.New("invalid path"))
 		return
@@ -378,8 +379,9 @@ func (h *handler) getImage(w http.ResponseWriter, r *http.Request) {
 	// root viewFile uses. Without them a preview 403s on a file whose header
 	// the panel just read: relative paths would anchor at work_path, and a
 	// worktree outside it would not be a readable root.
-	workDir := h.sessionCwd(q.Get("session"))
-	absPath, err := h.resolveFsPathIn(reqPath, workDir)
+	id := q.Get("session")
+	workDir := h.sessionCwd(id)
+	absPath, err := h.resolveFsPathIn(h.resolveLegacyUpload(id, workDir, reqPath), workDir)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, errors.New("invalid path"))
 		return
@@ -453,10 +455,26 @@ func (h *handler) mkdir(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, errors.New("path is required"))
 		return
 	}
-	abs, err := filepath.Abs(raw)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, errors.New("invalid path"))
+	// A relative path is resolved against the daemon's own working directory,
+	// which is not the directory the person is looking at — a service started
+	// from C:\Windows\System32 would mint the folder there. The picker only
+	// ever names a folder by the absolute path its listing returned.
+	if strings.HasPrefix(raw, "~") {
+		if home, err := os.UserHomeDir(); err == nil {
+			raw = filepath.Join(home, strings.TrimPrefix(raw, "~"))
+		}
+	}
+	if !filepath.IsAbs(raw) {
+		writeErr(w, http.StatusBadRequest, errors.New("path must be absolute"))
 		return
+	}
+	abs := filepath.Clean(raw)
+	// Resolve the parent before the breadth rule: a junction or symlink is a
+	// perfectly ordinary parent, and the check has to see where the folder
+	// will actually land. The leaf itself cannot exist yet, so it is not
+	// resolved.
+	if real, err := filepath.EvalSymlinks(filepath.Dir(abs)); err == nil {
+		abs = filepath.Join(real, filepath.Base(abs))
 	}
 	// The projects' own breadth rule: no volume roots, no home or its
 	// ancestors, no system trees. A folder picker that can mint directories is

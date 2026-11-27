@@ -1393,10 +1393,20 @@ type ModelConfig struct {
 	// the console uses it to name a connection after the tool it was imported
 	// from instead of painting a relay as "custom base_url" plus a loopback
 	// port. Empty means hand-written.
-	Source  string `yaml:"source,omitempty"`
-	APIType string `yaml:"api_type"` // "anthropic" | "openai" | "responses" | "google" (default anthropic)
-	BaseURL string `yaml:"base_url"` // e.g. https://api.deepseek.com/anthropic
-	APIKey  string `yaml:"api_key"`  // secret; prefer env OPENPANDA_MODEL_API_KEY
+	Source string `yaml:"source,omitempty"`
+	// ConnName is the console's name for the connection this row belongs to.
+	// A connection has no record of its own — it is the rows that share a
+	// provider, an endpoint, a dialect and a key — so the name is repeated on
+	// each of them the way BaseURL already is, and the console paints the
+	// first one it sees. It exists because the derived heading cannot tell two
+	// relays apart: both are "custom base_url" on a loopback port, and a page
+	// of identical cards is a page nobody can pick from. Empty means "name it
+	// from the vendor", which is what every row written before this field
+	// existed says. Display only: nothing in the request path reads it.
+	ConnName string `yaml:"conn_name,omitempty"`
+	APIType  string `yaml:"api_type"` // "anthropic" | "openai" | "responses" | "google" (default anthropic)
+	BaseURL  string `yaml:"base_url"` // e.g. https://api.deepseek.com/anthropic
+	APIKey   string `yaml:"api_key"`  // secret; prefer env OPENPANDA_MODEL_API_KEY
 	// KeyEnv names an environment variable to read this row's key from at call
 	// time instead of storing it here. It exists because a registry row is a
 	// copy: importing a model from another tool's config would otherwise copy
@@ -2400,6 +2410,16 @@ func ClearModelSection(path string) error {
 }
 
 func updateModelSection(path string, mc ModelConfig, allowClear bool) error {
+	return updateModelSections(path, &mc, nil, allowClear)
+}
+
+// UpdateModelAndModelsSections persists an edit to the active model and its
+// registry row in one file replacement.
+func UpdateModelAndModelsSections(path string, mc ModelConfig, models []ModelConfig) error {
+	return updateModelSections(path, &mc, &models, false)
+}
+
+func updateModelSections(path string, mc *ModelConfig, models *[]ModelConfig, allowClear bool) error {
 	var root yaml.Node
 	data, err := os.ReadFile(path)
 	switch {
@@ -2412,12 +2432,17 @@ func updateModelSection(path string, mc ModelConfig, allowClear bool) error {
 		}
 	case os.IsNotExist(err):
 		doc := Default()
-		doc.Model = mc
+		if mc != nil {
+			doc.Model = *mc
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				return err
+			}
+		}
+		if models != nil {
+			doc.Models = *models
+		}
 		out, err := yaml.Marshal(doc)
 		if err != nil {
-			return err
-		}
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return err
 		}
 		return writeConfigFile(path, out)
@@ -2425,7 +2450,31 @@ func updateModelSection(path string, mc ModelConfig, allowClear bool) error {
 		return fmt.Errorf("read config %s: %w", path, err)
 	}
 	top := root.Content[0]
+	if mc != nil {
+		if err := setModelSection(top, path, *mc); err != nil {
+			return err
+		}
+	}
+	if models != nil {
+		setModelsSection(top, *models)
+	}
+	out, err := marshalYAML(&root)
+	if err != nil {
+		return err
+	}
+	if allowClear {
+		err = writeConfigFileAllowingClear(path, out)
+	} else {
+		err = writeConfigFile(path, out)
+	}
+	if err != nil {
+		return err
+	}
+	hardenSecretPerms(path, out)
+	return nil
+}
 
+func setModelSection(top *yaml.Node, path string, mc ModelConfig) error {
 	// Locate or create the model mapping.
 	model := mappingValue(top, "model")
 	if model == nil {
@@ -2442,6 +2491,11 @@ func updateModelSection(path string, mc ModelConfig, allowClear bool) error {
 		value string
 	}{
 		{"name", mc.Name},
+		// The console's name for the connection this row belongs to. It is
+		// display metadata — nothing on the request path reads it — but the
+		// live section is rewritten field by field here, so a name that is not
+		// in this list is lost on the next restart.
+		{"conn_name", mc.ConnName},
 		{"provider", mc.Provider},
 		{"source", mc.Source},
 		{"api_type", mc.NormalizedAPIType()},
@@ -2476,19 +2530,6 @@ func updateModelSection(path string, mc ModelConfig, allowClear bool) error {
 	setMapFieldAnyMap(model, "params", mc.Params)
 	setMapFieldStringMap(model, "headers", mc.Headers)
 
-	out, err := marshalYAML(&root)
-	if err != nil {
-		return err
-	}
-	if allowClear {
-		err = writeConfigFileAllowingClear(path, out)
-	} else {
-		err = writeConfigFile(path, out)
-	}
-	if err != nil {
-		return err
-	}
-	hardenSecretPerms(path, out)
 	return nil
 }
 
@@ -2502,30 +2543,10 @@ func updateModelSection(path string, mc ModelConfig, allowClear bool) error {
 // callers switch it with UpdateModelSection, keeping the two concerns
 // separate so an add/remove never silently re-selects a model.
 func UpdateModelsSection(path string, models []ModelConfig) error {
-	var root yaml.Node
-	data, err := os.ReadFile(path)
-	switch {
-	case err == nil:
-		if err := yaml.Unmarshal(data, &root); err != nil {
-			return fmt.Errorf("parse config %s: %w", path, err)
-		}
-		if len(root.Content) == 0 || root.Content[0].Kind != yaml.MappingNode {
-			return fmt.Errorf("config %s: not a YAML mapping", path)
-		}
-	case os.IsNotExist(err):
-		doc := Default()
-		doc.Models = models
-		out, err := yaml.Marshal(doc)
-		if err != nil {
-			return err
-		}
-		return writeConfigFile(path, out)
-	default:
-		return fmt.Errorf("read config %s: %w", path, err)
-	}
-	top := root.Content[0]
+	return updateModelSections(path, nil, &models, false)
+}
 
-	replaced := false
+func setModelsSection(top *yaml.Node, models []ModelConfig) {
 	for i := 0; i+1 < len(top.Content); i += 2 {
 		if top.Content[i].Value != "models" {
 			continue
@@ -2535,25 +2556,14 @@ func UpdateModelsSection(path string, models []ModelConfig) error {
 		} else {
 			top.Content[i+1] = modelsSeqNode(models)
 		}
-		replaced = true
-		break
+		return
 	}
-	if !replaced && len(models) > 0 {
+	if len(models) > 0 {
 		top.Content = append(top.Content,
 			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "models"},
 			modelsSeqNode(models),
 		)
 	}
-
-	out, err := marshalYAML(&root)
-	if err != nil {
-		return err
-	}
-	if err := writeConfigFile(path, out); err != nil {
-		return err
-	}
-	hardenSecretPerms(path, out)
-	return nil
 }
 
 // modelsSeqNode builds a block-style sequence of model mappings, one per

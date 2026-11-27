@@ -386,6 +386,36 @@ func TestValidateWorkDir(t *testing.T) {
 			t.Errorf("ValidateWorkDir(%q) = %v, want ErrWorkDirTooBroad", dir, err)
 		}
 	}
+	// A tree *inside* a system directory is the same statement as the tree
+	// itself: the folder picker's mkdir could otherwise mint directories under
+	// C:\Windows\Temp or /etc/cron.d. The separators are the platform's, so the
+	// list is built per platform.
+	var inside []string
+	if runtime.GOOS == "windows" {
+		inside = []string{
+			`C:\Windows\Temp\x`,
+			`C:\Windows\System32\drivers\etc\y`,
+			`C:\ProgramData\x`,
+			`C:\Program Files\Common Files\z`,
+		}
+	} else {
+		inside = []string{
+			"/etc/cron.d/x",
+			"/usr/local/lib/y",
+			"/Library/Preferences/z",
+		}
+	}
+	for _, dir := range inside {
+		if err := ValidateWorkDir(dir); !errors.Is(err, ErrWorkDirTooBroad) {
+			t.Errorf("ValidateWorkDir(%q) = %v, want ErrWorkDirTooBroad", dir, err)
+		}
+	}
+	// A name that merely shares the prefix is a different directory.
+	if runtime.GOOS != "windows" {
+		if err := ValidateWorkDir(filepath.Join(t.TempDir(), "etcetera")); err != nil {
+			t.Errorf("prefix-sharing name rejected: %v", err)
+		}
+	}
 	// A normal project tree passes, and so does one that does not exist yet:
 	// a project may be created before its directory.
 	if err := ValidateWorkDir(t.TempDir()); err != nil {

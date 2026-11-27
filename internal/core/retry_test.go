@@ -5,11 +5,14 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Xustalis/OpenPanda/internal/commander"
+	"github.com/Xustalis/OpenPanda/internal/pyexec"
 )
 
 // TestRetryThenReview verifies a task that keeps failing is retried up to the
@@ -44,6 +47,46 @@ func TestRetryThenReview(t *testing.T) {
 	}
 	if result.OK {
 		t.Fatalf("result should be not-ok for a reviewed task")
+	}
+}
+
+func TestTaskDoesNotRetryAnAcknowledgedPromptWithNoResult(t *testing.T) {
+	if !pyexec.Available() {
+		t.Skip("adapter transport requires Python")
+	}
+	adapters := t.TempDir()
+	t.Setenv("OPENPANDA_ADAPTER_DIR", adapters)
+	const script = `
+import json, sys
+json.loads(sys.stdin.readline())
+with open("executions", "a") as f:
+    f.write("ran\n")
+print('{"type":"prompt_delivered","stage":"agent"}', file=sys.stderr, flush=True)
+print("503 Service unavailable", file=sys.stderr, flush=True)
+sys.exit(1)
+`
+	if err := os.WriteFile(filepath.Join(adapters, "claude_code.py"), []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	c := newCoreWithAgent(t, "lost-agent-result")
+	c.sleep = func(time.Duration) {}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	task, result, err := c.SubmitLocal(ctx, TaskInput{
+		Title: "write once", Intent: "write once", WorkDir: workspace,
+		ContextType: "command", Requires: []string{"agent:claude_code"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	log, err := os.ReadFile(filepath.Join(workspace, "executions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.State != StateFailed || !result.NoRetry || !strings.Contains(result.Stderr, "503 Service unavailable") ||
+		strings.TrimSpace(string(log)) != "ran" {
+		t.Fatalf("task=%s result=%+v executions=%q", task.State, result, log)
 	}
 }
 

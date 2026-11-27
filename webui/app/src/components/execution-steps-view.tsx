@@ -10,6 +10,7 @@ import { useModalFocus } from './modal-focus'
 import { operationSteps, rowExpanded, type ExecutionStep } from './execution-steps'
 import { expansion, rememberExpansion } from './execution-expansion'
 import { readableOutput } from './output-text'
+import { SessionScope } from './session-scope'
 
 interface ExecutionStepsProps {
  steps: ExecutionStep[]
@@ -17,6 +18,9 @@ interface ExecutionStepsProps {
  scope?: string
  compact?: boolean
  hideTitle?: boolean
+ /** The thread these steps belong to. Relative image paths inside a tool row
+  *  resolve against its worktree, and /api/fs/image needs the id to allow it. */
+ session?: string | null
 }
 
 export function ReplyActivity({ thought, activities, scope }: {
@@ -27,11 +31,17 @@ export function ReplyActivity({ thought, activities, scope }: {
  return <ExecutionSteps steps={steps} scope={scope} compact />
 }
 
-export function ExecutionSteps({ steps, className = '', scope, compact = false, hideTitle }: ExecutionStepsProps) {
+export function ExecutionSteps({ steps, className = '', scope, compact = false, hideTitle, session }: ExecutionStepsProps) {
  const [expanded, setExpanded] = useState(false)
  const contentId = useId()
  if (steps.length === 0) return null
- if (!compact) return <ExecutionList steps={steps} scope={scope} className={className} hideTitle={hideTitle} />
+ if (!compact) {
+  return (
+   <SessionScope.Provider value={session ?? null}>
+    <ExecutionList steps={steps} scope={scope} className={className} hideTitle={hideTitle} />
+   </SessionScope.Provider>
+  )
+ }
 
  const failed = steps.filter(step => step.status === 'failed' || step.status === 'refused').length
  return <div class={'execution-fold ' + className}>
@@ -43,7 +53,11 @@ export function ExecutionSteps({ steps, className = '', scope, compact = false, 
    <Icon name={expanded ? 'chevron-down' : 'chevron-right'} size={14} class="execution-fold-caret" />
   </button>
   <div id={contentId} hidden={!expanded}>
-   {expanded && <ExecutionList steps={steps} scope={scope} hideTitle />}
+   {expanded && (
+    <SessionScope.Provider value={session ?? null}>
+     <ExecutionList steps={steps} scope={scope} hideTitle />
+    </SessionScope.Provider>
+   )}
   </div>
  </div>
 }

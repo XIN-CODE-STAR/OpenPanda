@@ -155,17 +155,60 @@
   white-space: nowrap;
 }
 
-/* In-thread quick send (task card in the conversation): input takes the
-   row, the two small mode buttons keep natural width. */
-.task-quick-send {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-  flex-wrap: wrap;
+/* In-thread send into a running task.
+   Closed it is a quiet link in the card's control row (`chain-toggle`, the
+   same weight as 执行过程 and 查看任务 beside it); open it is a composer of its
+   own. It used to be one flex row holding a native `<input type=file>` between
+   the text field and the two mode buttons: the picker's own chrome ("选择文件
+   未选择任何文件", ~250px wide, not stylable) split the row into three wrapped
+   fragments, and nothing on screen said what 排队 and 注入 actually differ in. */
+.task-send {
+  display: grid;
+  flex: 1 1 100%;
+  gap: 7px;
+  box-sizing: border-box;
   width: 100%;
+  padding: 9px 11px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  transition: border-color var(--dur-fast) var(--ease);
 }
-
-.task-quick-send .input {
-  flex: 1 1 200px;
-  min-width: 0;
+.task-send:focus-within { border-color: var(--border-strong); }
+.task-send-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 22px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-md);
+  line-height: 1.55;
+  resize: none;
+  outline: none;
 }
+.task-send-input::placeholder { color: var(--text-tertiary); }
+.task-send-input:disabled { opacity: 0.55; }
+.task-send-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.task-send-tools { display: flex; align-items: center; flex-wrap: wrap; flex: 1 1 auto; gap: 5px; min-width: 0; }
+.task-send-attach { width: 26px; height: 26px; margin-inline-start: -4px; }
+.task-send-chip {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  gap: 3px;
+  max-width: 150px;
+  padding: 2px 3px 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-alpha-md);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+}
+.task-send-chip-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-send-chip-x { display: grid; place-items: center; flex: none; width: 17px; height: 17px; border-radius: 50%; color: var(--text-tertiary); }
+.task-send-chip-x:hover { background: var(--bg-hover); color: var(--text); }
+.task-send-actions { display: flex; align-items: center; gap: 6px; margin-inline-start: auto; }
+.task-send-close { width: 26px; height: 26px; margin-inline-end: -3px; color: var(--text-tertiary); }
+.task-send-hint { margin: 0; font-size: var(--text-xs); line-height: 1.5; color: var(--text-tertiary); }

@@ -26,6 +26,7 @@ package localmodels
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,6 +37,7 @@ import (
 	"time"
 
 	"github.com/Xustalis/OpenPanda/internal/config"
+	"github.com/Xustalis/OpenPanda/internal/security"
 )
 
 // Source ids. They are stable wire values — the console keys its sections and
@@ -112,6 +114,12 @@ type Candidate struct {
 	// information the person may want.
 	Importable bool   `json:"importable"`
 	Note       string `json:"note,omitempty"`
+	// Group and GroupLabel split a source that reports several endpoints into
+	// sections: CC Switch keeps a provider list per client, and the console
+	// renders one heading per provider instead of a single wall of models.
+	// Both are empty for the collectors that report one flat list.
+	Group      string `json:"group,omitempty"`
+	GroupLabel string `json:"group_label,omitempty"`
 	// Verified says the endpoint itself answered for this model during the
 	// scan. Only loopback rows are checked: a local proxy answers in a second
 	// and costs nothing, while probing thirty-six catalogue rows would turn one
@@ -159,6 +167,9 @@ type Options struct {
 	// Probe turns the loopback HTTP probes off; the CLI does that when the
 	// caller only wants the file-based half.
 	NoProbe bool
+	// SkipVerification leaves model-list discovery on but skips completion
+	// probes. The importer verifies only the rows the user selected.
+	SkipVerification bool
 	// ProbeTimeout bounds one HTTP probe. The console shows a spinner while
 	// this runs, so it is deliberately short.
 	ProbeTimeout time.Duration
@@ -218,7 +229,7 @@ func Discover(ctx context.Context, opt Options) []Source {
 		}
 	}
 	out = dedupe(out)
-	if !opt.NoProbe {
+	if !opt.NoProbe && !opt.SkipVerification {
 		verifyCandidates(ctx, out, opt)
 	}
 	return out
@@ -246,7 +257,7 @@ func verifyCandidates(ctx context.Context, sources []Source, opt Options) {
 			}
 			mc, err := cand.Row(opt)
 			if err != nil {
-				cand.Check = err.Error()
+				cand.Check = security.Redact(err.Error())
 				continue
 			}
 			jobs = append(jobs, job{cand, mc})
@@ -264,29 +275,27 @@ func verifyCandidates(ctx context.Context, sources []Source, opt Options) {
 	// timeout. Three keeps the pass short without starving anything, and a call
 	// that hangs is capped by whatever is left of the budget — one slow model
 	// must not hold the whole sheet.
-	deadline := time.Now().Add(12 * time.Second)
+	checkCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
 	sem := make(chan struct{}, 3)
 	var wg sync.WaitGroup
+schedule:
 	for i := range jobs {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			break
+		select {
+		case <-checkCtx.Done():
+			break schedule
+		case sem <- struct{}{}:
 		}
 		wg.Add(1)
-		sem <- struct{}{}
-		per := 10 * time.Second
-		if remaining < per {
-			per = remaining
-		}
-		go func(j job, timeout time.Duration) {
+		go func(j job) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if err := Answer(ctx, j.mc, timeout); err != nil {
-				j.cand.Check = err.Error()
+			if err := Answer(checkCtx, j.mc, 10*time.Second); err != nil {
+				j.cand.Check = security.Redact(err.Error())
 				return
 			}
 			j.cand.Verified = true
-		}(jobs[i], per)
+		}(jobs[i])
 	}
 	wg.Wait()
 }
@@ -303,7 +312,7 @@ func safe(id string, fn func() Source) (s Source) {
 	return fn()
 }
 
-// dedupe drops a candidate whose (endpoint, model) pair another source already
+// dedupe drops a candidate whose (endpoint, protocol, model) another source already
 // reported — the same proxy reached through both Codex and Claude Code is the
 // normal case on a machine with one local gateway.
 //
@@ -316,14 +325,15 @@ func dedupe(sources []Source) []Source {
 	// source that reported it. Merging in place would need pointers into slices
 	// that are still growing, which is how a "keep the key" rule silently
 	// updates a copy nobody reads.
-	type key struct{ base, model string }
+	type key struct{ base, apiType, model string }
 	pos := make(map[key]int, len(sources)*4)
 	flat := make([]Candidate, 0, len(sources)*4)
 	owner := make([]int, 0, len(sources)*4)
 	for si := range sources {
 		for _, c := range sources[si].Candidates {
 			c.ID = candidateID(c)
-			k := key{strings.ToLower(strings.TrimRight(c.BaseURL, "/")), c.Model}
+			target := c.RegistryTarget()
+			k := key{EndpointIdentity(target.BaseURL), target.NormalizedAPIType(), target.Model}
 			if i, ok := pos[k]; ok {
 				first := &flat[i]
 				// A loopback probe outranks a config file: it is the only
@@ -331,15 +341,19 @@ func dedupe(sources []Source) []Source {
 				// comes from the server rather than from a hand-written alias.
 				// This mirrors the reference implementation, which drops an
 				// earlier custom entry when a local port now serves the same id.
-				if c.Source == SourceLocal && first.Source != SourceLocal {
+				if c.Importable && (!first.Importable || (c.Source == SourceLocal && first.Source != SourceLocal)) {
+					c.ContextWindow = max(c.ContextWindow, first.ContextWindow)
 					*first = c
 					owner[i] = si
 					continue
 				}
-				if first.KeyRef == "" && c.KeyRef != "" && first.Importable {
+				if first.KeyRef == "" && first.Auth == "" && c.KeyRef != "" && c.Importable && first.Importable {
 					first.KeyRef = c.KeyRef
 					first.NoAuth = c.NoAuth
+					first.Bearer = c.Bearer
+					first.Placeholder = c.Placeholder
 				}
+				first.Suggested = first.Suggested || c.Suggested
 				if c.ContextWindow > first.ContextWindow {
 					first.ContextWindow = c.ContextWindow
 				}
@@ -364,7 +378,21 @@ func dedupe(sources []Source) []Source {
 }
 
 func candidateID(c Candidate) string {
-	return strings.Join([]string{c.Source, c.Provider, c.Model, strings.ToLower(strings.TrimRight(c.BaseURL, "/"))}, "|")
+	return strings.Join([]string{c.Source, c.Provider, c.Model, c.RegistryTarget().NormalizedAPIType(), EndpointIdentity(c.BaseURL)}, "|")
+}
+
+// EndpointIdentity folds the case-insensitive URL components while retaining
+// the spelling of paths and queries, which can address different routes.
+func EndpointIdentity(raw string) string {
+	raw = strings.TrimSpace(raw)
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return strings.TrimRight(raw, "/")
+	}
+	u.Host = strings.ToLower(u.Host)
+	u.Path = strings.TrimRight(u.Path, "/")
+	u.RawPath = strings.TrimRight(u.RawPath, "/")
+	return u.String()
 }
 
 // cleanModelID trims the decorations a CLI prints around an id and rejects

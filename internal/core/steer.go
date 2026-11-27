@@ -26,7 +26,10 @@ package core
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -78,21 +81,13 @@ func (c *Core) PromoteUserNote(ctx context.Context, taskID, sender string) (stri
 	if c == nil || c.store == nil {
 		return "", fmt.Errorf("task messages require a task store")
 	}
-	old, err := c.store.userNote(ctx, taskID, sender)
+	msg, err := c.store.rewriteUserNote(ctx, taskID, sender, c.nodeID, func(msg *TaskMessage) {
+		msg.Grade = MsgGradeSteer
+	})
 	if err != nil {
 		return "", err
 	}
-	if old.ConsumedAt != 0 {
-		return "", fmt.Errorf("note %q was already read by the round — send a new one", sender)
-	}
-	msg := old
-	msg.Grade = MsgGradeSteer
-	msg.SenderSeq = old.SenderSeq + 1
-	msg.SentAt = time.Now().Unix()
-	if err := c.store.PutTaskMessage(ctx, msg); err != nil {
-		return "", fmt.Errorf("promote user message: %w", err)
-	}
-	c.EvTrace(ctx, taskID, EvUserMsg, map[string]any{"mode": "inject", "text": old.Body})
+	c.EvTrace(ctx, taskID, EvUserMsg, map[string]any{"mode": "inject", "text": msg.Body})
 	return c.interrupt(taskID), nil
 }
 
@@ -127,10 +122,9 @@ func (c *Core) userMessage(ctx context.Context, taskID, text string, attachments
 }
 
 // PostUserMessage lands a user message on the task's own board scope. The
-// state guard refuses terminal tasks; the board's per-sender slot keeps the
-// newest message, so a user who sends twice carries the second one — the
-// same semantics as every other board sender. This is the scheduler-less
-// delivery path too: a note needs the store, not the execution core.
+// state guard refuses terminal tasks. Each user note has its own slot.
+// This is also the scheduler-less delivery path: a note needs the store,
+// not the execution core.
 //
 // localNodeID is the runtime identity of the node this store belongs to; it
 // backs the owner guard — a task dispatched to another node reads ITS
@@ -152,35 +146,52 @@ func (s *TaskStore) PostUserNote(ctx context.Context, taskID, text string, attac
 	if s == nil {
 		return TaskMessage{}, fmt.Errorf("task messages require a task store")
 	}
-	text = strings.TrimSpace(text)
-	if text == "" {
+	body := noteBody(text, attachments)
+	if body == "" {
 		return TaskMessage{}, fmt.Errorf("message text must not be empty")
 	}
-	t, err := s.Get(ctx, taskID)
+	var msg TaskMessage
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		t, err := s.scanTask(tx.QueryRowContext(ctx, `SELECT `+taskColumns+` FROM tasks WHERE task_id=?`, taskID))
+		if err != nil {
+			return err
+		}
+		if terminalState(t.State) {
+			return fmt.Errorf("task %s is %s — messages reach running or queued work only", taskID, t.State)
+		}
+		if localNodeID != "" && t.OwnerNode != "" &&
+			!scheduler.SameRuntimeIdentity(t.OwnerNode, localNodeID) {
+			return fmt.Errorf("task %s runs on %s — messages deliver to the executor's own store", taskID, t.OwnerNode)
+		}
+		msg, err = postUserNoteTx(ctx, tx, taskID, body, attachments, grade)
+		return err
+	})
 	if err != nil {
 		return TaskMessage{}, err
 	}
-	if terminalState(t.State) {
-		return TaskMessage{}, fmt.Errorf("task %s is %s — messages reach running or queued work only", taskID, t.State)
-	}
-	if localNodeID != "" && t.OwnerNode != "" &&
-		!scheduler.SameRuntimeIdentity(t.OwnerNode, localNodeID) {
-		return TaskMessage{}, fmt.Errorf("task %s runs on %s — messages deliver to the executor's own store", taskID, t.OwnerNode)
-	}
+	return msg, nil
+}
+
+// postUserNoteTx assigns a board slot under the same write transaction that
+// inserts the note. Keep the high-water mark after deletion so an in-flight
+// delivery receipt can never match a different note.
+func postUserNoteTx(ctx context.Context, tx *sql.Tx, taskID, body string, attachments []string, grade string) (TaskMessage, error) {
 	// The board's slot key is (scope, sender, rcpt) with newest-wins per
 	// slot — right for status notes, wrong for user messages, where every
 	// send must survive. A per-message sender id (`user:<seq>`) gives each
 	// its own slot; SenderLabel keeps the rendered line reading "user". The
-	// seq is the max across every user sender on the scope (NextMsgSeq's
-	// exact-sender match would miss the prefixed ids and restart at 1).
+	// high-water mark also accounts for notes written before this counter
+	// existed, including edits which bump an individual slot's sender_seq.
 	scope := "task:" + taskID
 	var seq int64
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT COALESCE(MAX(sender_seq),0) FROM task_messages WHERE scope=? AND (sender=? OR sender LIKE ?)`,
-		scope, "user", userSenderPrefix+"%").Scan(&seq); err != nil {
+	if err := tx.QueryRowContext(ctx,
+		`UPDATE tasks SET user_note_seq = MAX(user_note_seq, (
+			SELECT COALESCE(MAX(sender_seq), 0) FROM task_messages
+			WHERE scope=? AND (sender=? OR sender LIKE ?)
+		)) + 1 WHERE task_id=? RETURNING user_note_seq`,
+		scope, "user", userSenderPrefix+"%", taskID).Scan(&seq); err != nil {
 		return TaskMessage{}, fmt.Errorf("user message seq: %w", err)
 	}
-	seq++
 	msg := TaskMessage{
 		Scope:       scope,
 		Sender:      fmt.Sprintf("%s%d", userSenderPrefix, seq),
@@ -188,13 +199,13 @@ func (s *TaskStore) PostUserNote(ctx context.Context, taskID, text string, attac
 		Rcpt:        taskID,
 		SenderSeq:   seq,
 		Grade:       grade,
-		Body:        noteBody(text, attachments),
+		Body:        body,
 		Attachments: attachments,
 		// SentAt went unset once and every user note rendered as "~57 years
 		// ago" on `panda task board` — the store writes m.SentAt verbatim.
 		SentAt: time.Now().Unix(),
 	}
-	if err := s.PutTaskMessage(ctx, msg); err != nil {
+	if err := putTaskMessage(ctx, tx, msg); err != nil {
 		return TaskMessage{}, fmt.Errorf("post user message: %w", err)
 	}
 	return msg, nil
@@ -275,61 +286,134 @@ func (s *TaskStore) UserNotes(ctx context.Context, taskID string) ([]TaskMessage
 // A note the round already read is refused: rewriting history would leave the
 // agent's prompt and the board disagreeing about what was said.
 func (s *TaskStore) EditUserNote(ctx context.Context, taskID, sender, text string, attachments []string, localNodeID string) (TaskMessage, error) {
-	text = strings.TrimSpace(text)
-	if text == "" && len(attachments) == 0 {
+	body := noteBody(text, attachments)
+	if body == "" {
 		return TaskMessage{}, fmt.Errorf("message text must not be empty")
 	}
-	old, err := s.userNote(ctx, taskID, sender)
+	return s.rewriteUserNote(ctx, taskID, sender, localNodeID, func(msg *TaskMessage) {
+		msg.Body = body
+		msg.Attachments = attachments
+	})
+}
+
+func (s *TaskStore) editableUserNote(ctx context.Context, tx *sql.Tx, taskID, sender string) (TaskMessage, error) {
+	msg := TaskMessage{Scope: "task:" + taskID, Sender: sender, SenderLabel: "user", Rcpt: taskID}
+	if !isUserSender(sender) || sender == "user" {
+		return msg, fmt.Errorf("no such note %q", sender)
+	}
+	var attached sql.NullString
+	var sending bool
+	err := tx.QueryRowContext(ctx, `SELECT sender_seq,grade,body,attachments,consumed_at,
+		handoff_id<>'' AND EXISTS (SELECT 1 FROM tasks WHERE task_id=?
+			AND substr(task_messages.handoff_id,1,length(attempt_id)+1)=attempt_id||'/'
+			AND state IN ('dispatched','running','waiting_context'))
+		FROM task_messages WHERE scope=? AND sender=? AND rcpt=? AND expires_at>?`,
+		taskID, msg.Scope, sender, taskID, time.Now().Unix()).
+		Scan(&msg.SenderSeq, &msg.Grade, &msg.Body, &attached, &msg.ConsumedAt, &sending)
+	if errors.Is(err, sql.ErrNoRows) {
+		return msg, fmt.Errorf("no such note %q", sender)
+	}
 	if err != nil {
-		return TaskMessage{}, err
+		return msg, err
 	}
-	if old.ConsumedAt != 0 {
-		return TaskMessage{}, fmt.Errorf("note %q was already read by the round — send a new one", sender)
+	if msg.ConsumedAt != 0 {
+		return msg, fmt.Errorf("note %q was already read by the round — send a new one", sender)
 	}
-	t, err := s.Get(ctx, taskID)
-	if err != nil {
-		return TaskMessage{}, err
+	if sending {
+		return msg, fmt.Errorf("%w: note %q is being delivered", ErrConflict, sender)
 	}
-	if terminalState(t.State) {
-		return TaskMessage{}, fmt.Errorf("task %s is %s — messages reach running or queued work only", taskID, t.State)
-	}
-	if localNodeID != "" && t.OwnerNode != "" && !scheduler.SameRuntimeIdentity(t.OwnerNode, localNodeID) {
-		return TaskMessage{}, fmt.Errorf("task %s runs on %s — messages deliver to the executor's own store", taskID, t.OwnerNode)
-	}
-	msg := TaskMessage{
-		Scope:       old.Scope,
-		Sender:      old.Sender,
-		SenderLabel: "user",
-		Rcpt:        taskID,
-		SenderSeq:   old.SenderSeq + 1,
-		Grade:       old.Grade,
-		Body:        noteBody(text, attachments),
-		Attachments: attachments,
-		SentAt:      time.Now().Unix(),
-	}
-	if err := s.PutTaskMessage(ctx, msg); err != nil {
-		return TaskMessage{}, fmt.Errorf("edit user message: %w", err)
-	}
+	msg.Attachments = decodeAttachments(attached.String)
 	return msg, nil
+}
+
+func (s *TaskStore) rewriteUserNote(ctx context.Context, taskID, sender, localNodeID string, rewrite func(*TaskMessage)) (TaskMessage, error) {
+	var msg TaskMessage
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		task, err := s.scanTask(tx.QueryRowContext(ctx, `SELECT `+taskColumns+` FROM tasks WHERE task_id=?`, taskID))
+		if err != nil {
+			return err
+		}
+		if terminalState(task.State) {
+			return fmt.Errorf("task %s is %s — messages reach running or queued work only", taskID, task.State)
+		}
+		if localNodeID != "" && task.OwnerNode != "" && !scheduler.SameRuntimeIdentity(task.OwnerNode, localNodeID) {
+			return fmt.Errorf("task %s runs on %s — messages deliver to the executor's own store", taskID, task.OwnerNode)
+		}
+		msg, err = s.editableUserNote(ctx, tx, taskID, sender)
+		if err != nil {
+			return err
+		}
+		rewrite(&msg)
+		msg.SenderSeq++
+		msg.SentAt = time.Now().Unix()
+		return putTaskMessage(ctx, tx, msg)
+	})
+	return msg, err
 }
 
 // DeleteUserNote drops a pending note from the board. Guarded by the same
 // "already read" rule as Edit: a note the round consumed is part of the
 // transcript's history, and removing the row would only make the board lie.
 func (s *TaskStore) DeleteUserNote(ctx context.Context, taskID, sender string) error {
-	old, err := s.userNote(ctx, taskID, sender)
-	if err != nil {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		note, err := s.editableUserNote(ctx, tx, taskID, sender)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `DELETE FROM task_messages WHERE scope=? AND sender=? AND rcpt=?`,
+			note.Scope, note.Sender, note.Rcpt)
 		return err
+	})
+}
+
+// errPromptNotesChanged asks the local round loop to rebuild before it sends.
+var errPromptNotesChanged = errors.New("pending user notes changed before prompt delivery")
+
+func (s *TaskStore) reservePromptNotes(ctx context.Context, taskID, attemptID string, notes []TaskMessage) (string, error) {
+	nonce, err := newUUID()
+	if err != nil {
+		return "", err
 	}
-	if old.ConsumedAt != 0 {
-		return fmt.Errorf("note %q was already read by the round — nothing left to drop", sender)
+	// A recovered run can keep the same task attempt. Receipt and cleanup
+	// still belong to one specific prompt, not every handoff in that attempt.
+	handoffID := attemptID + "/" + nonce
+	err = s.withTx(ctx, func(tx *sql.Tx) error {
+		var current bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (
+			SELECT 1 FROM tasks WHERE task_id=? AND attempt_id=? AND state='running')`,
+			taskID, attemptID).Scan(&current); err != nil {
+			return err
+		}
+		if !current {
+			return ErrCancelled
+		}
+		for _, note := range notes {
+			res, err := tx.ExecContext(ctx, `UPDATE task_messages SET handoff_id=?
+				WHERE scope=? AND sender=? AND rcpt=? AND sender_seq=? AND consumed_at=0 AND expires_at>?`,
+				handoffID, note.Scope, note.Sender, note.Rcpt, note.SenderSeq, time.Now().Unix())
+			if err != nil {
+				return err
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if n != 1 {
+				return errPromptNotesChanged
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
 	}
-	if _, err := s.db.ExecContext(ctx,
-		`DELETE FROM task_messages WHERE scope=? AND sender=? AND consumed_at=0`,
-		old.Scope, old.Sender); err != nil {
-		return fmt.Errorf("delete user message: %w", err)
-	}
-	return nil
+	return handoffID, nil
+}
+
+func (s *TaskStore) releasePromptNotes(ctx context.Context, taskID, handoffID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE task_messages SET handoff_id=''
+		WHERE scope=? AND rcpt=? AND handoff_id=?`, "task:"+taskID, taskID, handoffID)
+	return err
 }
 
 // userSenderPrefix marks the sender ids of user messages (steer.go): each
@@ -357,11 +441,11 @@ func (c *Core) takeSteer(ctx context.Context, taskID string, seen msgSeen) strin
 // consumed_at and the audit event wait until the executor has actually been
 // handed the prompt.
 type steerNote struct {
-	scope, sender string
-	seq           int64
-	body          string
-	label         string
-	planDecision  string
+	msg          TaskMessage
+	slot         string
+	body         string
+	label        string
+	planDecision string
 }
 
 func (c *Core) takeRoundSteer(ctx context.Context, taskID string, seen msgSeen) (string, string) {
@@ -369,7 +453,7 @@ func (c *Core) takeRoundSteer(ctx context.Context, taskID string, seen msgSeen) 
 	if note == nil {
 		return "", ""
 	}
-	c.markSteerDelivered(ctx, taskID, note)
+	c.markSteerDelivered(ctx, taskID, note, "")
 	return note.body, note.label
 }
 
@@ -379,52 +463,126 @@ func (c *Core) takeRoundSteer(ctx context.Context, taskID string, seen msgSeen) 
 // that window must still find the note, especially a plan adjustment, whose
 // pending test is consumed_at==0.
 func (c *Core) peekRoundSteer(ctx context.Context, taskID string, seen msgSeen) *steerNote {
+	if notes := c.refreshRoundSteers(ctx, taskID, seen, nil); len(notes) > 0 {
+		return notes[0]
+	}
+	return nil
+}
+
+// refreshRoundSteers keeps the still-current directives from aborted attempts
+// and prepends the next unseen directive. An edit or deletion can invalidate
+// a snapshot while it is waiting for the adapter's delivery receipt.
+func (c *Core) refreshRoundSteers(ctx context.Context, taskID string, seen msgSeen, pending []*steerNote) []*steerNote {
 	if c == nil || c.store == nil {
-		return nil
+		return pending
 	}
 	msgs, err := c.store.TaskMessages(ctx, "task:"+taskID)
 	if err != nil {
-		return nil
+		return pending
+	}
+	if len(pending) > 0 {
+		current := make(map[string]TaskMessage, len(msgs))
+		for _, m := range msgs {
+			if m.Grade == MsgGradeSteer && m.ConsumedAt == 0 {
+				current[msgSlotKey(m)] = m
+			}
+		}
+		pending = slices.DeleteFunc(pending, func(note *steerNote) bool {
+			_, exists := current[note.slot]
+			return !exists
+		})
+		for i, note := range pending {
+			if m := current[note.slot]; m.SenderSeq > note.msg.SenderSeq {
+				pending[i] = newSteerNote(m)
+				seen[note.slot] = m.SenderSeq
+			}
+		}
 	}
 	for _, m := range msgs {
-		if !pendingRoundSteer(m, taskID, seen) {
-			continue
+		if pendingRoundSteer(m, taskID, seen) {
+			next := newSteerNote(m)
+			seen[next.slot] = next.msg.SenderSeq
+			return slices.Insert(pending, 0, next)
 		}
-		k := msgSlotKey(m)
-		seen[k] = m.SenderSeq
-		note := &steerNote{
-			scope: m.Scope, sender: m.Sender, seq: m.SenderSeq,
-			body: strings.TrimSpace(m.Body),
-		}
-		if strings.HasPrefix(m.Sender, planSenderPrefix) {
-			note.label = "[Panda plan adjustment]"
-			note.planDecision = strings.TrimPrefix(m.Sender, planSenderPrefix)
-		} else {
-			note.label = "[user directive]"
-		}
-		return note
 	}
-	return nil
+	return pending
+}
+
+func newSteerNote(m TaskMessage) *steerNote {
+	note := &steerNote{
+		msg: m, slot: msgSlotKey(m),
+		body: strings.TrimSpace(m.Body), label: "[user directive]",
+	}
+	if strings.HasPrefix(m.Sender, planSenderPrefix) {
+		note.label = "[Panda plan adjustment]"
+		note.planDecision = strings.TrimPrefix(m.Sender, planSenderPrefix)
+	}
+	return note
 }
 
 // markSteerDelivered records that the executor received the note: the row is
 // stamped consumed (the console's "read at round N" badge) and the audit event
 // lands. Called after the prompt was handed to the adapter, never at drain
 // time — a crash before the hand-off must leave the note deliverable.
-func (c *Core) markSteerDelivered(ctx context.Context, taskID string, note *steerNote) {
+func (c *Core) markSteerDelivered(ctx context.Context, taskID string, note *steerNote, handoffID string) {
 	if c == nil || c.store == nil || note == nil {
 		return
 	}
-	if err := c.store.MarkTaskMessageConsumed(ctx, note.scope, note.sender, note.seq); err != nil && c.logger != nil {
-		c.logger.Debug("mark steer consumed", "task", taskID, "err", err)
-	}
 	if note.planDecision != "" {
-		c.EvTrace(ctx, taskID, EvPlanAdjustmentRead, map[string]any{"decision_id": note.planDecision, "instruction": note.body})
+		if c.markPromptNoteDelivered(ctx, taskID, note.msg, "") {
+			c.EvTrace(ctx, taskID, EvPlanAdjustmentRead, map[string]any{"decision_id": note.planDecision, "instruction": note.body})
+		}
 		return
 	}
-	c.EvTrace(ctx, taskID, EvUserMsgConsumed, map[string]any{
-		"mode": "inject", "seq": note.seq, "text": note.body,
-	})
+	c.markPromptNoteDelivered(ctx, taskID, note.msg, handoffID)
+}
+
+func (c *Core) markPromptNoteDelivered(ctx context.Context, taskID string, note TaskMessage, handoffID string) bool {
+	updated, err := c.store.markTaskMessageConsumed(ctx, note.Scope, note.Sender, note.SenderSeq, handoffID)
+	if err != nil && c.logger != nil {
+		c.logger.Debug("stamp note delivery", "task", taskID, "err", err)
+	}
+	if updated && isUserSender(note.Sender) {
+		mode := "queue"
+		if note.Grade == MsgGradeSteer {
+			mode = "inject"
+		}
+		c.EvTrace(ctx, taskID, EvUserMsgConsumed, map[string]any{"mode": mode, "seq": note.SenderSeq, "text": note.Body})
+	}
+	return updated
+}
+
+func (c *Core) pendingQueuedNotes(ctx context.Context, taskID string) []TaskMessage {
+	notes, err := c.store.UserNotes(ctx, taskID)
+	if err != nil {
+		c.logger.Debug("read queued user notes", "task", taskID, "err", err)
+		return nil
+	}
+	return slices.DeleteFunc(notes, func(note TaskMessage) bool { return note.Grade == MsgGradeSteer })
+}
+
+func (c *Core) promptSteerWithdrawn(ctx context.Context, taskID string, picked []TaskMessage) bool {
+	var current []TaskMessage
+	loaded := false
+	for _, note := range picked {
+		if note.Grade != MsgGradeSteer {
+			continue
+		}
+		if !loaded {
+			var err error
+			current, err = c.store.TaskMessages(ctx, "task:"+taskID)
+			if err != nil {
+				return false
+			}
+			loaded = true
+		}
+		if !slices.ContainsFunc(current, func(m TaskMessage) bool {
+			return m.Sender == note.Sender && m.Rcpt == note.Rcpt && m.SenderSeq == note.SenderSeq
+		}) {
+			return true
+		}
+	}
+	return false
 }
 
 func pendingRoundSteer(m TaskMessage, taskID string, seen msgSeen) bool {
@@ -454,7 +612,7 @@ func (c *Core) steerUnseen(ctx context.Context, taskID string, seen msgSeen) boo
 }
 
 // watchRoundSteer wakes the executor when another local process posts a directive.
-func (c *Core) watchRoundSteer(ctx context.Context, taskID string, seen msgSeen, cancel context.CancelFunc, done chan<- struct{}) {
+func (c *Core) watchRoundSteer(ctx context.Context, taskID string, seen msgSeen, cancel context.CancelFunc, done chan<- struct{}, changed func() bool) {
 	defer close(done)
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -463,7 +621,7 @@ func (c *Core) watchRoundSteer(ctx context.Context, taskID string, seen msgSeen,
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if c.steerUnseen(ctx, taskID, seen) {
+			if (changed != nil && changed()) || c.steerUnseen(ctx, taskID, seen) {
 				cancel()
 				return
 			}

@@ -68,7 +68,7 @@ func (s *ConversationService) State(ctx context.Context, sid string) (conversati
 	// "confirmed" and the first transcript line, and the console already polls
 	// this state once a second — so it rides here rather than on an event
 	// stream that nothing would subscribe to.
-	if err != nil || (state.Implementation != nil && state.Implementation.Round == "") {
+	if err != nil || (state.Implementation != nil && state.Implementation.Phase != "running") {
 		return state, err
 	}
 	st := s.sessionStore()
@@ -99,30 +99,27 @@ func (s *ConversationService) Create(ctx context.Context, sid, text string, budg
 	if _, err := s.sessionStore().Get(sid); err != nil {
 		return nil, err
 	}
-	// Replacement revokes the old generation before cancelling its work.
-	old, err := s.State(ctx, sid)
-	if err != nil {
-		return nil, err
-	}
-	g, err := s.store.Create(ctx, sid, text, budget)
-	if err == nil && old.Goal != nil {
-		s.cancelRound(ctx, old.Goal)
-		s.cancelRevokedPlans(ctx, sid)
+	g, previous, err := s.store.ReplaceGoal(ctx, sid, text, budget)
+	if err == nil && previous != nil {
+		finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		s.cancelRound(finishCtx, previous)
+		s.cancelRevokedPlans(finishCtx, sid)
 	}
 	return g, err
 }
 
 func (s *ConversationService) Control(ctx context.Context, sid, id, action, text string, budget *int64) error {
-	state, err := s.State(ctx, sid)
+	return s.controlGoal(ctx, sid, id, action, text, budget, "")
+}
+
+func (s *ConversationService) controlGoal(ctx context.Context, sid, id, action, text string, budget *int64, expectedRound string) error {
+	previous, err := s.store.ControlGoal(ctx, sid, id, action, text, budget, expectedRound)
 	if err != nil {
 		return err
 	}
-	if state.Goal == nil || state.Goal.ID != id {
-		return conversation.ErrConflict
-	}
-	if err = s.store.Control(ctx, sid, id, action, text, budget); err != nil {
-		return err
-	}
+	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 	switch action {
 	case "pause":
 		// Pausing is an interruption, not just a status flag: a round that is
@@ -133,10 +130,10 @@ func (s *ConversationService) Control(ctx context.Context, sid, id, action, text
 		// paused, and the next resume claims a fresh round from the transcript.
 		// Plan implementation rounds keep running — a paused-by-plan goal has
 		// no round of its own to cancel.
-		s.interruptRound(ctx, state.Goal)
+		s.interruptRound(finishCtx, previous)
 	case "clear", "stop", "edit":
-		s.cancelRound(ctx, state.Goal)
-		s.cancelRevokedPlans(ctx, sid)
+		s.cancelRound(finishCtx, previous)
+		s.cancelRevokedPlans(finishCtx, sid)
 	}
 	return nil
 }
@@ -164,10 +161,10 @@ func (s *ConversationService) StopOperation(ctx context.Context, sid, round stri
 		return false, err
 	}
 	if state.Goal != nil && state.Goal.RoundID == round {
-		return true, s.Control(ctx, sid, state.Goal.ID, "stop", "", nil)
+		return true, s.controlGoal(ctx, sid, state.Goal.ID, "stop", "", nil, round)
 	}
 	var linked string
-	err = s.store.DB.QueryRowContext(ctx, "SELECT goal_id FROM conversation_plan_runs WHERE session_id=? AND round_id=? AND status='running'", sid, round).Scan(&linked)
+	err = s.store.DB.QueryRowContext(ctx, "SELECT goal_id FROM conversation_plan_runs WHERE session_id=? AND round_id=? AND status IN ('running','waiting_input')", sid, round).Scan(&linked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -175,15 +172,22 @@ func (s *ConversationService) StopOperation(ctx context.Context, sid, round stri
 		return false, err
 	}
 	if state.Goal != nil && state.Goal.ID == linked {
-		return true, s.Control(ctx, sid, linked, "stop", "", nil)
+		return true, s.controlGoal(ctx, sid, linked, "stop", "", nil, round)
 	}
-	result, err := s.store.DB.ExecContext(ctx, "UPDATE conversation_plan_runs SET status='cancelled' WHERE session_id=? AND round_id=? AND status='running'", sid, round)
+	result, err := s.store.DB.ExecContext(ctx, "UPDATE conversation_plan_runs SET status='cancelled' WHERE session_id=? AND round_id=? AND status IN ('running','waiting_input')", sid, round)
 	if err != nil {
 		return true, err
 	}
-	if n, _ := result.RowsAffected(); n == 1 {
-		s.cancelRound(ctx, &conversation.Goal{SessionID: sid, RoundID: round})
+	n, err := result.RowsAffected()
+	if err != nil {
+		return true, err
 	}
+	if n != 1 {
+		return true, conversation.ErrConflict
+	}
+	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	s.cancelRound(finishCtx, &conversation.Goal{SessionID: sid, RoundID: round})
 	return true, nil
 }
 
@@ -250,14 +254,14 @@ func (s *ConversationService) cancelRound(ctx context.Context, g *conversation.G
 	}
 }
 
-// ConfirmPlan validates the displayed proposal. The returned prompt is then
-// sent through the same ordinary ask path, preserving the session's permissions.
+// ConfirmPlan validates the displayed version and queues it for the session's
+// implementation runner, which uses the original session permissions.
 func (s *ConversationService) ConfirmPlan(ctx context.Context, sid string, version int64) (string, error) {
 	proposal, err := s.store.Confirm(ctx, sid, version)
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("Implement the user-confirmed proposal version %d in this session. Preserve all requirements and verify the result.\n\n%s", version, proposal), nil
+	return planInstruction(version, proposal), nil
 }
 
 func goalTaskSettled(state string) bool {
@@ -384,7 +388,12 @@ func (s *ConversationService) reconcile(ctx context.Context, g *conversation.Goa
 		if n, _ := result.RowsAffected(); n != 1 {
 			return
 		}
-		round.Status = "interrupted"
+		// Dispatch may have committed while recovery waited for the writer.
+		// Read the sealed round again before deciding its tasks have settled.
+		round, err = s.engine.TaskStore().AskRoundProgress(ctx, g.SessionID, g.RoundID)
+		if err != nil {
+			return
+		}
 	}
 	for _, task := range round.Tasks {
 		if !goalTaskSettled(task.State) || round.PendingRecovery[task.TaskID] {
@@ -425,13 +434,22 @@ func (s *ConversationService) finishCancelledRound(ctx, finishCtx context.Contex
 // The conversation transcript can contain only a dispatch acknowledgement.
 // Give the next round the settled task receipts before it chooses more work.
 func (s *ConversationService) goalReceipts(ctx context.Context, g *conversation.Goal) string {
-	rows, err := s.store.DB.QueryContext(ctx, `WITH RECURSIVE members(id) AS (
- SELECT m.task_id FROM conversation_goal_rounds r JOIN ask_round_tasks m ON m.round_id=r.round_id
- WHERE r.goal_id=? AND r.generation=? AND r.settled=1
- UNION SELECT t.task_id FROM tasks t JOIN members m ON t.parent_id=m.id)
- SELECT t.task_id,t.state,substr(t.title,1,150),substr(CASE WHEN json_valid(t.result_json) THEN
- COALESCE(NULLIF(json_extract(t.result_json,'$.verdict_reason'),''),NULLIF(json_extract(t.result_json,'$.stderr'),''),json_extract(t.result_json,'$.stdout'),'') ELSE '' END,1,600)
- FROM tasks t JOIN members m ON t.task_id=m.id ORDER BY t.updated_at DESC LIMIT 8`, g.ID, g.Generation)
+	rows, err := s.store.DB.QueryContext(ctx, `WITH RECURSIVE settled_rounds(id) AS (
+ SELECT round_id FROM conversation_goal_rounds WHERE goal_id=? AND generation=? AND settled=1
+ ), removed AS (
+ SELECT m.task_id,m.state,m.title,m.result_json,m.updated_at FROM ask_round_removed_tasks m JOIN settled_rounds r ON r.id=m.round_id
+ WHERE NOT EXISTS(SELECT 1 FROM tasks t WHERE t.task_id=m.task_id)
+ ), members(id) AS (
+ SELECT m.task_id FROM ask_round_tasks m JOIN settled_rounds r ON r.id=m.round_id
+ UNION SELECT t.task_id FROM tasks t JOIN removed m ON t.parent_id=m.task_id
+ UNION SELECT t.task_id FROM tasks t JOIN members m ON t.parent_id=m.id
+ ), evidence AS (
+ SELECT t.task_id,t.state,t.title,t.result_json,t.updated_at FROM tasks t JOIN members m ON t.task_id=m.id
+ UNION SELECT task_id,state,title,result_json,updated_at FROM removed
+ )
+ SELECT task_id,state,substr(title,1,150),substr(CASE WHEN json_valid(result_json) THEN
+ COALESCE(NULLIF(json_extract(result_json,'$.verdict_reason'),''),NULLIF(json_extract(result_json,'$.stderr'),''),json_extract(result_json,'$.stdout'),'') ELSE '' END,1,600)
+ FROM evidence ORDER BY updated_at DESC,task_id DESC LIMIT 8`, g.ID, g.Generation)
 	if err != nil {
 		return ""
 	}
@@ -508,7 +526,7 @@ func (s *ConversationService) run(g *conversation.Goal) {
 		prompt = g.Objective
 		_, _ = st.AppendTurn(sess.ID, sessions.Turn{Role: "user", Text: g.Objective, RoundID: g.RoundID, IdempotencyKey: "goal:user:" + g.RoundID})
 	}
-	out, askErr := s.engine.AskTurnsScoped(ctx, history, prompt, AskScope{SessionID: sess.ID, RoundID: g.RoundID, WorkDir: workDir, Project: sess.Project, Agents: sess.Team, PermissionMode: sess.PermissionMode, PersonalMemory: true}, false, StreamCallbacks{})
+	out, askErr := s.engine.AskTurnsScoped(ctx, history, prompt, AskScope{goalRound: true, SessionID: sess.ID, RoundID: g.RoundID, WorkDir: workDir, Project: sess.Project, Agents: sess.Team, PermissionMode: sess.PermissionMode, PersonalMemory: true}, false, StreamCallbacks{})
 	finishCtx, finishCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer finishCancel()
 	if s.finishCancelledRound(ctx, finishCtx, st, sess.ID, op) {
@@ -526,7 +544,7 @@ func (s *ConversationService) run(g *conversation.Goal) {
 	// A provider can disconnect on the optional prose turn after update_goal
 	// already committed its audit. Preserve the successful audit in that case.
 	// Settle still waits for the task tree and owns the final status transition.
-	if askErr != nil || out == nil || out.EmptyResponse {
+	if askErr != nil || out == nil || out.EmptyResponse || out.incompleteAnswer {
 		var audit string
 		if s.store.DB.QueryRowContext(finishCtx, "SELECT reason FROM conversation_goals WHERE id=? AND generation=? AND round_id=? AND status='active' AND completion_requested=1", g.ID, g.Generation, g.RoundID).Scan(&audit) == nil {
 			askErr = nil
@@ -535,6 +553,7 @@ func (s *ConversationService) run(g *conversation.Goal) {
 				out = &Result{}
 			}
 			out.Answer, out.EmptyResponse = audit, false
+			out.incompleteAnswer = false
 		}
 	}
 
@@ -546,6 +565,13 @@ func (s *ConversationService) run(g *conversation.Goal) {
 			state = "usage_limited"
 		}
 		_ = s.store.Hold(finishCtx, g, state, askErr.Error(), false)
+	} else if out != nil && out.incompleteAnswer {
+		turn.Kind = "error"
+		reason := out.Warning
+		if reason == "" {
+			reason = "incomplete model response"
+		}
+		_ = s.store.Hold(finishCtx, g, "paused", reason, false)
 	} else if out == nil || out.EmptyResponse || (strings.TrimSpace(out.Answer) == "" && out.TaskID == "" && out.PlanID == "" && len(out.Dispatched) == 0) {
 		state := "active"
 		if g.EmptyStreak >= 1 {
@@ -553,7 +579,22 @@ func (s *ConversationService) run(g *conversation.Goal) {
 		}
 		_ = s.store.Hold(finishCtx, g, state, "empty model response", true)
 	} else if out.NeedsClarification {
-		_, _ = s.store.DB.ExecContext(finishCtx, "UPDATE conversation_goals SET waiting_for='input',reason='waiting for user input' WHERE id=? AND generation=? AND round_id=?", g.ID, g.Generation, g.RoundID)
+		err = s.store.PublishGoalQuestion(finishCtx, g, func() error {
+			_, _, err := st.PersistTurns(sess.ID, turn)
+			return err
+		})
+		if err == nil {
+			op.Status = "done"
+			_, _ = st.FinishRunningOperation(sess.ID, op)
+			_ = st.Checkpoint(finishCtx, sess.ID)
+			return
+		}
+		if errors.Is(err, conversation.ErrConflict) {
+			return
+		}
+		turn.Kind, turn.Text = "error", err.Error()
+		askErr = err
+		_ = s.store.Hold(finishCtx, g, "paused", err.Error(), false)
 	} else if out.NeedsApproval {
 		// The review task keeps this round un-settled until the user decides.
 
@@ -562,7 +603,7 @@ func (s *ConversationService) run(g *conversation.Goal) {
 	}
 	op.Status = "done"
 	op.UpdatedAt = time.Now()
-	if askErr != nil {
+	if askErr != nil || (out != nil && out.incompleteAnswer) {
 		op.Status = "error"
 	}
 	_, _ = st.AppendTurn(sess.ID, turn)

@@ -256,6 +256,71 @@ func TestSessionMessageRequiresTargetForConcurrentTasks(t *testing.T) {
 	}
 }
 
+func TestSessionNoteActionsTargetTheirTask(t *testing.T) {
+	store, mux, firstID, sessionID := parkedTaskThread(t)
+	ctx := context.Background()
+	first, err := store.Get(ctx, firstID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.Create(ctx, "", "", "parallel task", first.OwnerNode, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSessionID(ctx, second.TaskID, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	for taskID, body := range map[string]string{firstID: "first note", second.TaskID: "second note"} {
+		if _, err := store.PostUserNote(ctx, taskID, body, nil, core.MsgGradeStatus, first.OwnerNode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	notes := getNotes(t, mux, sessionID)
+	if len(notes) != 2 || notes[0].Key != notes[1].Key || notes[0].TaskID == notes[1].TaskID {
+		t.Fatalf("expected the same board-local key on two tasks: %+v", notes)
+	}
+	key := notes[0].Key
+	for _, query := range []string{"", "?task_id=unrelated-task"} {
+		if res := noteReq(t, mux, http.MethodDelete, sessionID, key, query, ""); res.Code != http.StatusNotFound {
+			t.Fatalf("unscoped or unrelated delete %q: %d %s", query, res.Code, res.Body.String())
+		}
+	}
+	edit := noteReq(t, mux, http.MethodPatch, sessionID, key, "?task_id="+firstID, `{"text":"changed"}`)
+	if edit.Code != http.StatusOK {
+		t.Fatalf("edit: %d %s", edit.Code, edit.Body.String())
+	}
+	promote := noteReq(t, mux, http.MethodPost, sessionID, key, "/promote?task_id="+second.TaskID, "")
+	if promote.Code != http.StatusOK {
+		t.Fatalf("promote: %d %s", promote.Code, promote.Body.String())
+	}
+	notes = getNotes(t, mux, sessionID)
+	if len(notes) != 2 {
+		t.Fatalf("pending notes after edit/promote: %+v", notes)
+	}
+	for _, n := range notes {
+		switch n.TaskID {
+		case firstID:
+			if n.Text != "changed" || n.Mode != "queue" {
+				t.Errorf("edited queue note: %+v", n)
+			}
+		case second.TaskID:
+			if n.Text != "second note" || n.Mode != "inject" {
+				t.Errorf("promoted note: %+v", n)
+			}
+		default:
+			t.Errorf("unexpected pending note: %+v", n)
+		}
+	}
+	drop := noteReq(t, mux, http.MethodDelete, sessionID, key, "?task_id="+firstID, "")
+	if drop.Code != http.StatusOK {
+		t.Fatalf("drop: %d %s", drop.Code, drop.Body.String())
+	}
+	notes = getNotes(t, mux, sessionID)
+	if len(notes) != 1 || notes[0].TaskID != second.TaskID {
+		t.Fatalf("drop affected the other task: %+v", notes)
+	}
+}
+
 // parkedTaskThread builds the shape the pending strip actually reads: a live
 // (parked) task linked to a session, plus the one-route mux. Parked rather than
 // running so it cannot settle mid-test.

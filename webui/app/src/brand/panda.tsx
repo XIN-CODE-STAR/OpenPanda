@@ -13,7 +13,11 @@
 //                  in code.
 
 /** The symbol: orbit ring, polar star and two nodes. Square, so it drops into
- *  any fixed-size gutter without wrapping its own aspect. */
+ *  any fixed-size gutter without wrapping its own aspect. Both tones come
+ *  from --brand / --brand-star and the stroke is a presentation attribute,
+ *  so a scope can retune colour and weight without forking the geometry —
+ *  the sidebar tail does exactly that (see `.sidebar-brand-mark .panda-mark`
+ *  in styles/shell.css). */
 export function PandaMark({ size = 28 }: { size?: number }) {
   return (
     <svg
@@ -94,37 +98,24 @@ export function PandaLockup({ width = 240 }: { width?: number }) {
    panda for exactly that reason. Bump the number whenever the artwork changes;
    it is the only way to retire a cached copy. */
 
-/** The same lockup with the pet's face standing where the "O" was — the
- *  new-chat page's hero. The artwork is a variant of the shipped lockup: the O
- *  glyph is removed from the two files in /logo and the mascot's own portrait
- *  (a cut from the brand sheet, keyed out of its paper background) is laid
- *  over the gap, so the wordmark reads as one word. The cut is a raster, which
- *  is why it is an `<img>` over the SVG rather than a glyph inside it; on night
- *  it is inverted, because its lines are ink and the page is not. */
+/** The same wordmark with the panda's head standing where the "O" was — the
+ *  new-chat page's hero. One bitmap, not a lockup with a portrait laid over
+ *  the gap: the head is drawn into the lettering, so there is nothing to
+ *  align and no seam to hide. It is ink on transparent, which is what lets
+ *  night be the same file inverted (see chat.css) instead of a second cut to
+ *  keep in step. */
 export function HeroLockup({ width = 520 }: { width?: number }) {
-  /* 183.15 × 40, not the official 240×54: the hero cut carries no tagline and
-     no star — the pet is the mark here — and the box is cropped to what is
-     left, so the composer is not pushed down by empty canvas. */
-  const height = Math.round((width * 40) / 183.15)
+  const height = Math.round((width * 153) / 863)
   return (
-    <span class="panda-lockup hero-lockup" style={{ width: `${width}px` }}>
+    <span class="panda-lockup" style={{ width: `${width}px` }}>
       <img
         draggable={false}
-        class="panda-lockup-paper"
-        src="/logo/lockup-hero-paper.svg?v=2"
+        class="hero-wordmark"
+        src="/logo/wordmark-hero.png?v=4"
         width={width}
         height={height}
         alt="OpenPanda"
       />
-      <img
-        draggable={false}
-        class="panda-lockup-night"
-        src="/logo/lockup-hero-night.svg?v=2"
-        width={width}
-        height={height}
-        alt="OpenPanda"
-      />
-      <img class="hero-pet" src="/logo/hero-pet.png?v=1" alt="" aria-hidden="true" draggable={false} />
     </span>
   )
 }

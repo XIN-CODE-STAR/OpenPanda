@@ -1530,11 +1530,12 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 	// separate from baseIntent so a context-overflow retry can compress
 	// the accretion (compactRunNotes) without touching the spec itself.
 	var intentSteers, intentNotes []string
-	// pendingSteers are the directives folded into the prompt that have not
-	// been stamped read yet. A round cancelled before delivery keeps its note
-	// here, so the round that finally carries it stamps every note in its
-	// prompt — not only the one it just peeked.
+	// Pending directives can still be edited or deleted after a round
+	// is interrupted. Keep them apart from the delivered prompt history.
 	var pendingSteers []*steerNote
+	var pendingQueued []TaskMessage
+	var queuedLine string
+	var steerHistory []string
 	var deliveredSteers, deliveredNotes int
 	var deliveredStatic, deliveredSession, deliveredAdapter, deliveredRules string
 	fullIntent := func() string {
@@ -1547,6 +1548,10 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 		for _, n := range intentNotes {
 			b.WriteString("\n\n")
 			b.WriteString(n)
+		}
+		if queuedLine != "" {
+			b.WriteString("\n\n")
+			b.WriteString(queuedLine)
 		}
 		return b.String()
 	}
@@ -1639,6 +1644,23 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 	// intent, so each round injects only what changed; msgsSent meters this
 	// episode's posts against the per-task budget.
 	boardSeen := msgSeen{}
+	refreshNotes := func() {
+		pendingSteers = c.refreshRoundSteers(execCtx, taskID, boardSeen, pendingSteers)
+		intentSteers = make([]string, 0, len(pendingSteers)+len(steerHistory))
+		for _, note := range pendingSteers {
+			intentSteers = append(intentSteers, note.label+"\n"+note.body)
+		}
+		intentSteers = append(intentSteers, steerHistory...)
+		pendingQueued = c.pendingQueuedNotes(execCtx, taskID)
+		queuedLine = ""
+		if len(pendingQueued) > 0 {
+			lines := make([]string, 0, len(pendingQueued))
+			for _, note := range pendingQueued {
+				lines = append(lines, c.formatBoardLine(execCtx, note))
+			}
+			queuedLine = "[sibling board]\n" + strings.Join(lines, "\n")
+		}
+	}
 	msgsSent := 0
 	for round := 0; round < maxRounds; round++ {
 		// Evidence is per round: the judge of this round must see what THIS
@@ -1662,16 +1684,15 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 		// User inject (steer.go): a message sent in "inject" mode leads this
 		// round's intent — ahead of the task spec and any folded notes — so
 		// the user's directive sets the course instead of reading as context.
-		// Delivery is stamped only once the prompt reaches the adapter below;
-		// a crash in between must not make the note look read. The notes
-		// accumulate across rounds: a round can be cancelled before its
-		// adapter ever takes the prompt (a user inject aborts it), and the
-		// note then rides the *next* round's prompt. Stamping only the newest
-		// note left the earlier one pending forever even though the delivered
-		// prompt contained it.
-		if steer := c.peekRoundSteer(execCtx, taskID, boardSeen); steer != nil {
-			intentSteers = append([]string{steer.label + "\n" + steer.body}, intentSteers...)
-			pendingSteers = append(pendingSteers, steer)
+		// The adapter's receipt stamps each directive in the prompt. Until
+		// then a directive can carry over, be edited, or be withdrawn.
+		// Only an agent round reads a prompt. A native command never sees this
+		// text, and peeking it there advanced the board cursor without any
+		// delivery point: the note stayed pending forever while an inject
+		// killed the running command on the way. Leaving it alone keeps it
+		// queued for whoever can actually take it.
+		if plan.Kind == "agent" {
+			refreshNotes()
 		}
 		// The agent can spawn children itself (a CLI `task add
 		// --parent-id $PANDA_TASK_ID`), which the episode's opening snapshot
@@ -1840,11 +1861,17 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 			var updates []string
 			updates = append(updates, intentSteers[:len(intentSteers)-deliveredSteers]...)
 			updates = append(updates, intentNotes[deliveredNotes:]...)
+			if queuedLine != "" {
+				updates = append(updates, queuedLine)
+			}
 			if len(updates) > 0 {
 				delta = "[Continuation of this task; prior task, constraints and guidance remain in effect]\n" + strings.Join(updates, "\n\n")
 			}
 		}
 		sentSteers, sentNotes := len(intentSteers), len(intentNotes)
+		if queuedLine != "" {
+			sentNotes++
+		}
 		preparedSkills := usedSkills
 		startSkills := usedSkills
 		if delta != "" {
@@ -1884,11 +1911,11 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 		interrupted := false
 		overflowRetried := false
 		resumeRetried := false
-		// steersStamped flips the first time a run of this round reports that
+		// promptAcknowledged flips the first time a run of this round reports that
 		// the adapter took the prompt. It is deliberately not set before the
 		// run: a launch refusal must leave the note pending, and the flag is
 		// what keeps an overflow/resume retry from stamping twice.
-		steersStamped := false
+		var promptAcknowledged atomic.Bool
 		var extraTokens int
 		var extraCost float64
 		for {
@@ -1945,33 +1972,61 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 			// budget the round is not steerable: an inject then waits for the
 			// natural boundary (delivered at the next round, or as a durable
 			// note if the task ends first).
-			// The adapter announces the hand-off itself (a successful spawn or
-			// a session turn on its stdin); the observer above fires too early
-			// to be that proof. Stamping here is what keeps the console from
-			// offering to edit a directive that is already executing, and a
-			// launch refusal never calls it at all.
+			// The adapter layer announces the hand-off. Stamping here keeps
+			// the console from offering to edit a directive once it is read.
+			picked := append([]TaskMessage(nil), pendingQueued...)
+			for _, note := range pendingSteers {
+				if isUserSender(note.msg.Sender) {
+					picked = append(picked, note.msg)
+				}
+			}
+			var handoffErr error
+			var handoffStarted atomic.Bool
+			handoffID := ""
+			runCtx = commander.WithPromptHandoff(runCtx, func() error {
+				if len(picked) > 0 {
+					handoffID, handoffErr = c.store.reservePromptNotes(execCtx, taskID, attemptID, picked)
+					handoffStarted.Store(handoffID != "")
+				}
+				return handoffErr
+			})
 			runCtx = commander.WithPromptDelivered(runCtx, func() {
-				if steersStamped {
+				if promptAcknowledged.Swap(true) {
 					return
 				}
-				steersStamped = true
 				for _, note := range pendingSteers {
-					c.markSteerDelivered(context.WithoutCancel(execCtx), taskID, note)
+					c.markSteerDelivered(context.WithoutCancel(execCtx), taskID, note, handoffID)
 				}
-				// Every note in the prompt is stamped now; the next round
-				// starts a fresh list (the strings stay in intentSteers, which
-				// is what the prompt is assembled from).
+				for _, note := range pendingQueued {
+					c.markPromptNoteDelivered(context.WithoutCancel(execCtx), taskID, note, handoffID)
+				}
+				if queuedLine != "" {
+					intentNotes = append(intentNotes, queuedLine)
+				}
+				steerHistory = intentSteers
 				pendingSteers = nil
+				pendingQueued = nil
+				queuedLine = ""
 			})
 			roundCtx := runCtx
 			var roundCancel context.CancelFunc
-			steerable := steerRounds < maxSteerRounds
+			// A steer is only deliverable to a round that reads a prompt, and
+			// only an agent round does. For a native command the interrupt
+			// would kill work in flight for a note that can never be handed
+			// over, so the note stays queued instead.
+			steerable := steerRounds < maxSteerRounds && plan.Kind == "agent"
 			var watcherDone chan struct{}
+			var withdrawn atomic.Bool
 			if steerable {
 				roundCtx, roundCancel = context.WithCancel(runCtx)
 				c.registerInterrupt(taskID, roundCancel)
 				watcherDone = make(chan struct{})
-				go c.watchRoundSteer(roundCtx, taskID, boardSeen, roundCancel, watcherDone)
+				go c.watchRoundSteer(roundCtx, taskID, boardSeen, roundCancel, watcherDone, func() bool {
+					canChange := func() bool { return !handoffStarted.Load() && !promptAcknowledged.Load() }
+					changed := canChange() && c.promptSteerWithdrawn(roundCtx, taskID, picked) && canChange()
+					withdrawn.Store(changed)
+					return changed
+				})
 			}
 			roundAuthorized := task.Authorized
 			if taskPermissionMode(task.SpecJSON) == defense.ModePlan {
@@ -1981,12 +2036,23 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 				roundCtx = commander.WithRestricted(roundCtx)
 			}
 			res = router.Execute(roundCtx, *plan, prompt, workDir, roundAuthorized)
+			if handoffID != "" {
+				writeCtx, cancel := c.storeWriteCtx(execCtx)
+				if err := c.store.releasePromptNotes(writeCtx, taskID, handoffID); err != nil {
+					c.logger.Warn("release undelivered user notes", "task", taskID, "err", err)
+				}
+				cancel()
+			}
 			modelRecovery = commander.Result{}
 			if steerable {
 				c.clearInterrupt(taskID)
-				interrupted = roundCtx.Err() != nil && c.steerUnseen(execCtx, taskID, boardSeen)
+				interrupted = roundCtx.Err() != nil && (withdrawn.Load() || c.steerUnseen(execCtx, taskID, boardSeen))
 				roundCancel()
 				<-watcherDone
+			}
+			interrupted = interrupted || errors.Is(handoffErr, errPromptNotesChanged)
+			if errors.Is(handoffErr, ErrCancelled) {
+				return roundOutcome{}, ErrCancelled
 			}
 			if interrupted || queueStopping(ctx) {
 				break
@@ -2000,6 +2066,16 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 				commander.DropAgentSession(execCtx, res.Agent, res.Adapter)
 				_ = c.store.SetAgentSession(context.WithoutCancel(execCtx), taskID, "", "", "")
 				c.EvTrace(execCtx, taskID, EvPromptContext, map[string]any{"mode": "full_recovery", "reason": "resume_not_found", "round": round + 1})
+				if plan.Kind == "agent" && !promptAcknowledged.Load() {
+					refreshNotes()
+					sentSteers = len(intentSteers)
+					sentNotes = len(intentNotes)
+					if queuedLine != "" {
+						sentNotes++
+					}
+					prompt = assemblePrompt(fullIntent(), agentContextBudget(task))
+					preparedSkills = usedSkills
+				}
 				continue
 			}
 
@@ -2009,7 +2085,7 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 			// and re-run once under the tight budget. A second overflow — or
 			// any non-overflow failure — lands on the park path below as
 			// before.
-			if plan.Kind == "agent" && !res.OK && !overflowRetried &&
+			if plan.Kind == "agent" && !res.OK && !res.OutcomeUnconfirmed && !overflowRetried &&
 				commander.ContextOverflow(res.Stderr) {
 				overflowRetried = true
 				extraTokens += res.Tokens
@@ -2030,6 +2106,9 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 				// the next interruption and fail identically.
 				_ = c.store.SetAgentSession(context.WithoutCancel(execCtx), taskID, "", "", "")
 				intentNotes = c.compactRunNotesWithSupervisor(execCtx, intentNotes, supervisor)
+				if !promptAcknowledged.Load() {
+					refreshNotes()
+				}
 				prompt = assemblePrompt(fullIntent(), min(overflowPromptBudget, agentContextBudget(task)/2))
 				preparedSkills = usedSkills
 				deliveredSession, deliveredStatic = "", ""
@@ -2574,7 +2653,7 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 			turnCapped := plan.Kind == "agent" && turnCapFailure(res)
 			overflowed := plan.Kind == "agent" && commander.ContextOverflow(res.Stderr)
 			loginRequired := res.Tokens == 0 && commander.IsAuthenticationSetupRequired(res.Stderr)
-			if plan.Kind == "agent" && supervisor != nil && ctx.Err() == nil && execCtx.Err() == nil &&
+			if plan.Kind == "agent" && !res.OutcomeUnconfirmed && supervisor != nil && ctx.Err() == nil && execCtx.Err() == nil &&
 				!tokenExhausted && !turnCapped && !overflowed && !loginRequired && !commander.IsAuthorizationRefusal(res.Stderr) {
 				recoveryEvidence := evidence.render(scout.Cached(workDir).Test)
 				v := c.superviseAgentFailure(execCtx, supervisor, task, fullIntent(), res,
@@ -2722,9 +2801,17 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 				if recovery.Status == entry.VerdictContinue {
 					reviewReason = "Panda proposed recovery, but no eligible execution round remained: " + recovery.Reason
 				}
+				// Only a verdict that leaves work to do is continuable. A
+				// blocked verdict parks for changed input (the model refused
+				// its own id, the turn budget ran out), and the continue
+				// action's requeue CAS accepts accept_work alone — writing
+				// the marker beside that disposition would advertise an
+				// action that can only fail.
+				needsFollowup := recovery.Status == entry.VerdictContinue ||
+					(recovery.Status == entry.VerdictReview && isStagnationReason(recovery.Reason))
 				if err := c.store.pauseWithReviewResult(context.WithoutCancel(ctx), taskID, c.nodeID, map[string]any{
 					"ok": false, "stderr": reason, "stdout": res.Stdout, "verdict": recovery.Status,
-					"verdict_reason": reviewReason, "followup": recovery.Followup, "needs_followup": true,
+					"verdict_reason": reviewReason, "followup": recovery.Followup, "needs_followup": needsFollowup,
 					"agent": res.Agent, "model": res.Model, "injected": res.Injected,
 					"files_changed": lastChanged[:min(len(lastChanged), maxFilesChangedReport)], "files_truncated": filesTruncated,
 					"agent_session_id": sessionID, "agent_session_adapter": sessionAdapter,
@@ -2739,7 +2826,7 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 				return roundOutcome{done: true, payload: bus.TaskResultPayload{
 					TaskID: taskID, AttemptID: attemptID, State: StateReview,
 					ApprovalDisposition: string(ApprovalNeedsChangedInput), ExitCode: res.ExitCode, Stderr: reason,
-					Verdict: recovery.Status, VerdictReason: reviewReason, Followup: recovery.Followup, NeedsFollowup: true,
+					Verdict: recovery.Status, VerdictReason: reviewReason, Followup: recovery.Followup, NeedsFollowup: needsFollowup,
 					Tokens: res.Tokens, Cost: res.Cost, Agent: res.Agent, Model: res.Model, Injected: res.Injected,
 					AgentSessionID: sessionID, AgentSessionAdapter: sessionAdapter,
 					FilesChanged: lastChanged[:min(len(lastChanged), maxFilesChangedReport)], FilesTruncated: filesTruncated,
@@ -2755,9 +2842,13 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 			}
 			c.logProjectTask(task.Title, false, task.Project)
 			trackTask(c, task.Project, required, task.Title, false)
+			// A receipt without a result can hide completed side effects.
+			// Only the existing timeout-with-checkpoint path can resume it.
+			noRetry := res.OutcomeUnconfirmed && (res.ExitCode != 124 || sessionID == "")
 			return roundOutcome{done: true, payload: bus.TaskResultPayload{
 				TaskID: taskID, AttemptID: attemptID, State: StateFailed, OK: false, ExitCode: res.ExitCode, Stderr: res.Stderr,
-				Tokens: res.Tokens, Cost: res.Cost, Agent: res.Agent, Model: res.Model, Injected: res.Injected,
+				NoRetry: noRetry,
+				Tokens:  res.Tokens, Cost: res.Cost, Agent: res.Agent, Model: res.Model, Injected: res.Injected,
 				AgentSessionID: sessionID, AgentSessionAdapter: sessionAdapter,
 			}}, nil
 		}
@@ -2867,7 +2958,7 @@ func (w *runWork) executeRounds(ctx context.Context) (roundOutcome, error) {
 			// A user inject that landed while the judge deliberated outranks
 			// the verdict: run one more round carrying it rather than
 			// closing the task with the message unread.
-			if c.steerUnseen(execCtx, taskID, boardSeen) && steerRounds < maxSteerRounds {
+			if plan.Kind == "agent" && steerRounds < maxSteerRounds && c.steerUnseen(execCtx, taskID, boardSeen) {
 				steerRounds++
 				maxRounds++
 				continue

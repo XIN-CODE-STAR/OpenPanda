@@ -30,6 +30,8 @@ type AskRound struct {
 	CreatedAt     int64
 	Tasks         []Task
 	ConfirmedPlan bool // a confirmed implementation controller publishes its own final delivery
+	Dispatched    bool // durable even if the linked task rows have since been cleared
+	removed       map[string]bool
 	// PendingRecovery contains only failed tasks whose durable recovery decision
 	// is still outstanding. Retryability alone does not mean work is running.
 	PendingRecovery map[string]bool
@@ -37,17 +39,35 @@ type AskRound struct {
 }
 
 func (s *TaskStore) BeginAskRound(ctx context.Context, id, sessionID, locale string) error {
+	return s.beginAskRound(ctx, id, sessionID, locale, false, false)
+}
+
+func (s *TaskStore) BeginSideAskRound(ctx context.Context, id, sessionID, locale string) error {
+	return s.beginAskRound(ctx, id, sessionID, locale, true, false)
+}
+
+// BeginIdleAskRound starts an automatic continuation only if no live main
+// round owns the session. The condition and insert share one SQLite write.
+func (s *TaskStore) BeginIdleAskRound(ctx context.Context, id, sessionID, locale string) error {
+	return s.beginAskRound(ctx, id, sessionID, locale, false, true)
+}
+
+func (s *TaskStore) beginAskRound(ctx context.Context, id, sessionID, locale string, side, idleOnly bool) error {
 	if id == "" || sessionID == "" {
 		return fmt.Errorf("round and session identities required")
 	}
 	now := s.now()
-	result, err := s.db.ExecContext(ctx, `INSERT INTO ask_rounds(round_id,session_id,locale,lease_until,created_at)
- SELECT ?,?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM ask_rounds a WHERE a.session_id=? AND a.status='open' AND a.lease_until>=?
- AND (EXISTS(SELECT 1 FROM conversation_goal_rounds g WHERE g.round_id=a.round_id) OR EXISTS(SELECT 1 FROM conversation_plan_runs p WHERE p.round_id=a.round_id AND p.status='running')))`, id, sessionID, locale, now+int64(AskRoundLease/time.Second), now, sessionID, now)
+	result, err := s.db.ExecContext(ctx, `INSERT INTO ask_rounds(round_id,session_id,locale,lease_until,created_at,side)
+ SELECT ?,?,?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM ask_rounds a WHERE a.session_id=? AND a.status='open' AND a.lease_until>=?
+ AND ((? AND a.side=0) OR EXISTS(SELECT 1 FROM conversation_goal_rounds g WHERE g.round_id=a.round_id) OR EXISTS(SELECT 1 FROM conversation_plan_runs p WHERE p.round_id=a.round_id AND p.status='running')))`,
+		id, sessionID, locale, now+int64(AskRoundLease/time.Second), now, side, sessionID, now, idleOnly)
 	if err != nil {
 		return err
 	}
 	if n, _ := result.RowsAffected(); n != 1 {
+		if idleOnly {
+			return fmt.Errorf("%w: session has an active round", ErrConflict)
+		}
 		return fmt.Errorf("%w: session has an active goal or implementation round", ErrConflict)
 	}
 	return nil
@@ -58,16 +78,22 @@ func (s *TaskStore) TouchAskRound(ctx context.Context, id string) error {
 	return err
 }
 
+const askRoundAncestrySQL = `WITH RECURSIVE ancestors(id) AS (
+ SELECT ?
+ UNION SELECT t.parent_id FROM tasks t JOIN ancestors a ON t.task_id=a.id WHERE t.parent_id!=''
+), rounds(id) AS (
+ SELECT t.round_id FROM ancestors a JOIN ask_round_tasks t ON t.task_id=a.id
+ UNION SELECT t.round_id FROM ancestors a JOIN ask_round_removed_tasks t ON t.task_id=a.id
+ WHERE NOT EXISTS(SELECT 1 FROM tasks p WHERE p.task_id=a.id)
+)`
+
 // A retry can race the controller's cancellation walk. Check the entire
 // ancestry in the same transaction so revoked work cannot mint a new attempt.
 func checkConversationTaskTx(ctx context.Context, tx *sql.Tx, taskID string) error {
 	var revoked bool
-	err := tx.QueryRowContext(ctx, `WITH RECURSIVE ancestors(id,parent_id) AS (
- SELECT task_id,parent_id FROM tasks WHERE task_id=?
- UNION SELECT t.task_id,t.parent_id FROM tasks t JOIN ancestors a ON t.task_id=a.parent_id
-) SELECT EXISTS(SELECT 1 FROM ancestors a JOIN ask_round_tasks t ON t.task_id=a.id JOIN ask_rounds r ON r.round_id=t.round_id
+	err := tx.QueryRowContext(ctx, askRoundAncestrySQL+` SELECT EXISTS(SELECT 1 FROM rounds JOIN ask_rounds r ON r.round_id=rounds.id
  WHERE EXISTS(SELECT 1 FROM conversation_controls c WHERE c.session_id=r.session_id AND c.deleted=1)
- OR EXISTS(SELECT 1 FROM conversation_goal_rounds gr JOIN conversation_goals g ON g.id=gr.goal_id WHERE gr.round_id=r.round_id AND (g.generation!=gr.generation OR g.status='cleared' OR g.completion_requested=1))
+ OR EXISTS(SELECT 1 FROM conversation_goal_rounds gr JOIN conversation_goals g ON g.id=gr.goal_id WHERE gr.round_id=r.round_id AND (g.generation!=gr.generation OR g.status IN ('cleared','complete') OR (g.round_id=gr.round_id AND g.completion_requested=1)))
  OR EXISTS(SELECT 1 FROM conversation_plan_runs p WHERE p.round_id=r.round_id AND p.status='cancelled'))`, taskID).Scan(&revoked)
 	if err != nil {
 		return err
@@ -89,30 +115,46 @@ func (s *TaskStore) CloseAskRound(ctx context.Context, id, status string) error 
 	return err
 }
 
+// AskRoundMembersSQL lists live members of a round named by parameter ?1. A
+// retained child still belongs to its round after its parent leaves the board.
+const AskRoundMembersSQL = `WITH RECURSIVE members(id) AS (
+  SELECT task_id FROM ask_round_tasks WHERE round_id=?1
+  UNION
+  SELECT t.task_id FROM tasks t JOIN ask_round_removed_tasks a ON t.parent_id=a.task_id
+  WHERE a.round_id=?1 AND NOT EXISTS(SELECT 1 FROM tasks p WHERE p.task_id=a.task_id)
+  UNION
+  SELECT t.task_id FROM tasks t JOIN members m ON t.parent_id=m.id
+)`
+
 // AskRoundProgress reads one operation's task tree within its owning session.
 // Tasks may spawn children after the original ask has finished dispatching.
 func (s *TaskStore) AskRoundProgress(ctx context.Context, sessionID, roundID string) (AskRound, error) {
 	r := AskRound{ID: roundID, SessionID: sessionID}
-	if err := s.db.QueryRowContext(ctx, "SELECT status FROM ask_rounds WHERE session_id=? AND round_id=?", sessionID, roundID).Scan(&r.Status); err != nil {
+	if err := s.db.QueryRowContext(ctx, "SELECT status,dispatched FROM ask_rounds WHERE session_id=? AND round_id=?", sessionID, roundID).Scan(&r.Status, &r.Dispatched); err != nil {
 		return r, err
 	}
-	rows, err := s.db.QueryContext(ctx, `WITH RECURSIVE members(id) AS (
-  SELECT task_id FROM ask_round_tasks WHERE round_id=?
-  UNION
-  SELECT t.task_id FROM tasks t JOIN members m ON t.parent_id=m.id
-)
-SELECT t.task_id,t.state,COALESCE(t.parent_id,''),`+withdrawnPlanStageSQL+` FROM tasks t JOIN members ON t.task_id=members.id ORDER BY t.task_id`, roundID)
+	rows, err := s.db.QueryContext(ctx, AskRoundMembersSQL+`
+SELECT t.task_id,t.state,COALESCE(t.parent_id,''),`+withdrawnPlanStageSQL+`,0 FROM tasks t JOIN members ON t.task_id=members.id
+UNION ALL
+SELECT task_id,state,parent_id,withdrawn,1 FROM ask_round_removed_tasks
+WHERE round_id=?1 AND task_id NOT IN (SELECT id FROM members) ORDER BY task_id`, roundID)
 	if err != nil {
 		return r, err
 	}
 	for rows.Next() {
 		var t Task
-		var withdrawn bool
-		if err := rows.Scan(&t.TaskID, &t.State, &t.ParentID, &withdrawn); err != nil {
+		var withdrawn, removed bool
+		if err := rows.Scan(&t.TaskID, &t.State, &t.ParentID, &withdrawn, &removed); err != nil {
 			rows.Close()
 			return r, err
 		}
 		r.Tasks = append(r.Tasks, t)
+		if removed {
+			if r.removed == nil {
+				r.removed = make(map[string]bool)
+			}
+			r.removed[t.TaskID] = true
+		}
 		if withdrawn {
 			if r.Withdrawn == nil {
 				r.Withdrawn = make(map[string]bool)
@@ -134,7 +176,7 @@ func (s *TaskStore) askRoundRecovery(ctx context.Context, r *AskRound) error {
 	var ids []any
 	var marks []string
 	for _, t := range r.Tasks {
-		if t.State == StateFailed {
+		if t.State == StateFailed && !r.removed[t.TaskID] {
 			ids = append(ids, t.TaskID)
 			marks = append(marks, "?")
 		}
@@ -173,7 +215,7 @@ func (s *TaskStore) attachAskRoundTx(ctx context.Context, tx *sql.Tx, taskID str
 		return "", nil
 	}
 	var revoked bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM conversation_goal_rounds r JOIN conversation_goals g ON g.id=r.goal_id WHERE r.round_id=? AND (g.generation!=r.generation OR g.status='cleared' OR g.completion_requested=1)) OR EXISTS(SELECT 1 FROM conversation_controls c JOIN ask_rounds r ON r.session_id=c.session_id WHERE r.round_id=? AND c.deleted=1) OR EXISTS(SELECT 1 FROM conversation_plan_runs p WHERE p.round_id=? AND p.status!='running')`, id, id, id).Scan(&revoked); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM conversation_goal_rounds r JOIN conversation_goals g ON g.id=r.goal_id WHERE r.round_id=? AND (g.generation!=r.generation OR g.status IN ('cleared','complete') OR (g.round_id=r.round_id AND g.completion_requested=1))) OR EXISTS(SELECT 1 FROM conversation_controls c JOIN ask_rounds r ON r.session_id=c.session_id WHERE r.round_id=? AND c.deleted=1) OR EXISTS(SELECT 1 FROM conversation_plan_runs p WHERE p.round_id=? AND p.status!='running')`, id, id, id).Scan(&revoked); err != nil {
 		return "", err
 	}
 	if revoked {
@@ -184,6 +226,9 @@ func (s *TaskStore) attachAskRoundTx(ctx context.Context, tx *sql.Tx, taskID str
 		return "", fmt.Errorf("attach task to open ask round: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO ask_round_tasks(task_id,round_id) VALUES(?,?)`, taskID, id); err != nil {
+		return "", err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE ask_rounds SET dispatched=1 WHERE round_id=? AND dispatched=0`, id); err != nil {
 		return "", err
 	}
 	_, err := tx.ExecContext(ctx, `UPDATE tasks SET session_id=? WHERE task_id=?`, sessionID, taskID)
@@ -203,7 +248,7 @@ func (s *TaskStore) SettledAskRounds(ctx context.Context) ([]AskRound, error) {
 	if _, err := s.db.ExecContext(ctx, `UPDATE ask_rounds SET status='interrupted', closed_at=? WHERE status='open' AND lease_until<?`, s.now(), s.now()); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT round_id,session_id,locale,status,created_at,EXISTS(SELECT 1 FROM conversation_plan_runs p WHERE p.round_id=r.round_id AND p.session_id=r.session_id) FROM ask_rounds r
+	rows, err := s.db.QueryContext(ctx, `SELECT round_id,session_id,locale,status,created_at,dispatched,EXISTS(SELECT 1 FROM conversation_plan_runs p WHERE p.round_id=r.round_id AND p.session_id=r.session_id) FROM ask_rounds r
   WHERE status!='open' AND reported_version != (`+askRoundVersionSQL+`) AND EXISTS(SELECT 1 FROM ask_round_tasks m WHERE m.round_id=r.round_id)
   AND NOT EXISTS(SELECT 1 FROM ask_round_tasks m JOIN tasks t ON t.task_id=m.task_id
    WHERE m.round_id=r.round_id AND t.state NOT IN (?,?,?,?)) ORDER BY r.created_at,r.round_id`, StateDone, StateFailed, StateCancelled, StateExpired)
@@ -213,7 +258,7 @@ func (s *TaskStore) SettledAskRounds(ctx context.Context) ([]AskRound, error) {
 	var out []AskRound
 	for rows.Next() {
 		var r AskRound
-		if err := rows.Scan(&r.ID, &r.SessionID, &r.Locale, &r.Status, &r.CreatedAt, &r.ConfirmedPlan); err != nil {
+		if err := rows.Scan(&r.ID, &r.SessionID, &r.Locale, &r.Status, &r.CreatedAt, &r.Dispatched, &r.ConfirmedPlan); err != nil {
 			rows.Close()
 			return nil, err
 		}

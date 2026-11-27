@@ -101,7 +101,7 @@ func (e *Executor) Run(ctx context.Context, command string, args ...string) Nati
 	// wedge Wait forever after the command itself exits (or is killed).
 	cmd.WaitDelay = 5 * time.Second
 
-	err := cmd.Run()
+	err := waitResult(cmd, cmd.Run())
 	res := NativeResult{
 		ExitCode: 0,
 		Stdout:   stdout.String(),

@@ -52,29 +52,49 @@ var claudeTierKeys = []string{
 // derived from it.
 var claudeModelID = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_./:+@-]*(?:\[[0-9A-Za-z]+\])?$`)
 
+// splitWindowMarker separates Claude Code's `[1M]` marker from the model it
+// decorates. The marker is Claude Code's own syntax — a relay lists the model
+// without it, and a CC Switch tier value can be any gateway's name with the
+// marker appended — so the id to store is the part before it. The window it
+// asked for is returned separately, because the registry budgets against that
+// number.
+func splitWindowMarker(raw string) (id string, window int) {
+	s := strings.TrimSpace(raw)
+	if open := strings.LastIndex(s, "["); open > 0 && strings.HasSuffix(s, "]") {
+		if marker := strings.ToUpper(s[open+1 : len(s)-1]); strings.Contains(marker, "1M") {
+			return strings.TrimSpace(s[:open]), 1_000_000
+		}
+	}
+	return s, 0
+}
+
 // parseClaudeModel splits a tier value into the id to store and the window it
-// announced. Unlike cleanModelID it keeps the suffix.
+// announced. Unlike cleanModelID it keeps the suffix — a Claude Code tier is
+// the CLI's own spelling, and the collector hands it back verbatim.
 func parseClaudeModel(raw string) (id string, contextWindow int) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
 		return "", 0
 	}
-	if open := strings.LastIndex(s, "["); open > 0 && strings.HasSuffix(s, "]") {
-		if marker := strings.ToUpper(s[open+1 : len(s)-1]); strings.Contains(marker, "1M") {
-			contextWindow = 1_000_000
-		}
-	}
+	_, contextWindow = splitWindowMarker(s)
 	if !claudeModelID.MatchString(s) {
 		return "", 0
 	}
 	return s, contextWindow
 }
 
+func claudeSettingsPath(opt Options) string {
+	if dir := opt.env("CLAUDE_CONFIG_DIR"); filepath.IsAbs(dir) {
+		return filepath.Join(dir, "settings.json")
+	}
+	return joinHome(opt.Home, ".claude", "settings.json")
+}
+
 // collectClaude reads ~/.claude/settings.json, merges it under the process
 // environment, and turns the result into rows.
 func collectClaude(ctx context.Context, opt Options) Source {
 	src := Source{ID: SourceClaude, Label: "Claude Code", Status: StatusMissing}
-	settingsPath := joinHome(opt.Home, ".claude", "settings.json")
+	settingsPath := claudeSettingsPath(opt)
 	fileEnv := map[string]string{}
 	settingsText, hasSettings := readText(settingsPath)
 	if hasSettings {
@@ -119,22 +139,22 @@ func collectClaude(ctx context.Context, opt Options) Source {
 	keyRef := ""
 	bearer := false
 	switch {
-	case fileEnv["ANTHROPIC_AUTH_TOKEN"] != "" || fileEnv["ANTHROPIC_API_KEY"] != "":
-		keyRef = "claude:settings"
-		// ResolveKey prefers AUTH_TOKEN when both are present, and that one is
-		// a Bearer credential.
-		bearer = fileEnv["ANTHROPIC_AUTH_TOKEN"] != ""
 	case opt.env("ANTHROPIC_AUTH_TOKEN") != "":
 		keyRef = "env:ANTHROPIC_AUTH_TOKEN"
 		bearer = true
+	case fileEnv["ANTHROPIC_AUTH_TOKEN"] != "":
+		keyRef = "claude:settings"
+		bearer = true
 	case opt.env("ANTHROPIC_API_KEY") != "":
 		keyRef = "env:ANTHROPIC_API_KEY"
+	case fileEnv["ANTHROPIC_API_KEY"] != "":
+		keyRef = "claude:settings"
 	}
 
 	// Anthropic's own endpoint is a catalogue row; anything else is a relay and
 	// has to carry its address.
 	provider, rowBase := "custom", strings.TrimRight(strings.TrimSpace(base), "/")
-	if rowBase == "" || strings.Contains(rowBase, "api.anthropic.com") {
+	if rowBase == "" || sameURL(rowBase, "https://api.anthropic.com") {
 		provider, rowBase = "claude", ""
 	}
 
@@ -250,7 +270,15 @@ func ResolveKey(ref string, opt Options) string {
 			// working directory.
 			return ""
 		}
-		text, ok := readText(filepath.Join(home, "config.toml"))
+		file := "config.toml"
+		if profile, provider, found := strings.Cut(name, ":"); found {
+			if filepath.Base(profile) != profile || strings.ContainsAny(profile, `/\:`) ||
+				!strings.HasSuffix(profile, ".config.toml") || !providerID.MatchString(provider) {
+				return ""
+			}
+			file, name = profile, provider
+		}
+		text, ok := readText(filepath.Join(home, file))
 		if !ok {
 			return ""
 		}
@@ -262,7 +290,7 @@ func ResolveKey(ref string, opt Options) string {
 		}
 		return ""
 	case "claude":
-		text, ok := readText(joinHome(opt.Home, ".claude", "settings.json"))
+		text, ok := readText(claudeSettingsPath(opt))
 		if !ok {
 			return ""
 		}

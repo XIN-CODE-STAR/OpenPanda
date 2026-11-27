@@ -112,6 +112,70 @@ var migrations = []Migration{
 	{Version: 75, Name: "durable_child_coordination", Apply: migrateV75},
 	{Version: 76, Name: "conversation_plan_goal", Apply: migrateV76},
 	{Version: 77, Name: "detach_cleared_goal_rounds", Apply: migrateV77},
+	{Version: 78, Name: "keep_user_note_sequence", Apply: migrateV78},
+	{Version: 79, Name: "identify_peer_offline_episodes", Apply: migrateV79},
+	{Version: 80, Name: "remember_ask_round_dispatch", Apply: migrateV80},
+	{Version: 81, Name: "preserve_conversation_settlement", Apply: migrateV81},
+	{Version: 82, Name: "preserve_conversation_evidence_and_replies", Apply: migrateV82},
+	{Version: 83, Name: "fence_user_note_handoff", Apply: migrateV83},
+	{Version: 84, Name: "distinguish_side_ask_rounds", Apply: migrateV84},
+}
+
+func migrateV83(tx MigrationExec) error {
+	exists, err := tableExistsTx(tx, "task_messages")
+	if err != nil || !exists {
+		return err
+	}
+	_, err = tx.Exec(`ALTER TABLE task_messages ADD COLUMN handoff_id TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
+func migrateV78(tx MigrationExec) error {
+	exists, err := tableExistsTx(tx, "tasks")
+	if err != nil || !exists {
+		return err
+	}
+	if _, err := tx.Exec(`ALTER TABLE tasks ADD COLUMN user_note_seq INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	_, err = tx.Exec(`UPDATE tasks SET user_note_seq=notes.seq
+		FROM (
+			SELECT SUBSTR(scope, 6) AS task_id, MAX(sender_seq) AS seq
+			FROM task_messages WHERE scope LIKE 'task:%' AND (sender='user' OR sender LIKE 'user:%')
+			GROUP BY scope
+		) AS notes WHERE tasks.task_id=notes.task_id`)
+	return err
+}
+
+func migrateV79(tx MigrationExec) error {
+	exists, err := tableExistsTx(tx, "employee_cache")
+	if err != nil || !exists {
+		return err
+	}
+	// Record transitions at the table so direct disconnects, stale sweeps
+	// and mesh updates share the same episode identity. Heartbeat timestamps
+	// can change within a single outage or coincide across separate outages.
+	// The legacy marker keeps the old address-based read key for an outage
+	// already in progress during the upgrade.
+	for _, stmt := range []string{
+		`ALTER TABLE employee_cache ADD COLUMN offline_id TEXT NOT NULL DEFAULT ''`,
+		`UPDATE employee_cache SET offline_id='legacy' WHERE status='offline'`,
+		`CREATE TRIGGER employee_offline_insert AFTER INSERT ON employee_cache
+			WHEN NEW.status='offline'
+			BEGIN
+				UPDATE employee_cache SET offline_id=lower(hex(randomblob(16))) WHERE id=NEW.id;
+			END`,
+		`CREATE TRIGGER employee_offline_transition AFTER UPDATE OF status ON employee_cache
+			WHEN NEW.status='offline' AND OLD.status IS NOT NEW.status
+			BEGIN
+				UPDATE employee_cache SET offline_id=lower(hex(randomblob(16))) WHERE id=NEW.id;
+			END`,
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // migrateV62 adds employee_cache.dir_signer: the Ed25519 key that SIGNED a

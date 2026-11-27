@@ -324,7 +324,7 @@ func writeTaskMessageErr(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusNotFound, errors.New("no such task"))
 	case strings.Contains(msg, "no such note"):
 		writeErr(w, http.StatusNotFound, errors.New(msg))
-	case strings.Contains(msg, "already read"):
+	case errors.Is(err, core.ErrConflict), strings.Contains(msg, "already read"):
 		// The round folded this note into a prompt; editing or dropping it now
 		// would leave the board disagreeing with what the model was told.
 		writeErr(w, http.StatusConflict, errors.New(msg))
@@ -375,6 +375,8 @@ func (h *handler) deleteTask(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusNotFound, errors.New("no such task"))
 		case errors.Is(err, core.ErrTaskActive):
 			writeErr(w, http.StatusConflict, errors.New("task is active — cancel it first, then delete"))
+		case errors.Is(err, core.ErrPlanDependency):
+			writeErr(w, http.StatusConflict, err)
 		default:
 			writeErr(w, http.StatusInternalServerError, errors.New("delete failed"))
 		}

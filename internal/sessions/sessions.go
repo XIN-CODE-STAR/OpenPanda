@@ -174,6 +174,9 @@ func (t *Turn) normalizePlanConfirmation() {
 	}
 	rest, ok := strings.CutPrefix(t.Text, "Implement user-confirmed proposal version ")
 	if !ok {
+		rest, ok = strings.CutPrefix(t.Text, "/plan confirm ")
+	}
+	if !ok {
 		return
 	}
 	number, _, _ := strings.Cut(rest, " ")
@@ -189,7 +192,8 @@ func (t *Turn) normalizePlanConfirmation() {
 // the console labels such a turn from Kind/Ref, so the body is only read to
 // rebuild the model history from the stored plan run.
 func (t Turn) PlanConfirmationReceiptVersion() (int64, bool) {
-	if t.Kind != planConfirmationKind || !strings.HasPrefix(t.Text, "/plan confirm ") {
+	if (t.Kind != planConfirmationKind && (t.Role != "user" || !strings.HasPrefix(t.IdempotencyKey, planConfirmationKey))) ||
+		!strings.HasPrefix(t.Text, "/plan confirm ") {
 		return 0, false
 	}
 	version, err := strconv.ParseInt(strings.TrimPrefix(t.Text, "/plan confirm "), 10, 64)

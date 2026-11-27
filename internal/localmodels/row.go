@@ -42,41 +42,17 @@ func (c Candidate) Row(opt Options) (config.ModelConfig, error) {
 		keyRef = c.KeyRef
 	case c.KeyRef != "":
 		key = ResolveKey(c.KeyRef, opt)
-	}
-
-	mc := config.ModelConfig{
-		Provider:      c.Provider,
-		APIType:       c.APIType,
-		BaseURL:       strings.TrimRight(c.BaseURL, "/"),
-		Model:         c.Model,
-		APIKey:        key,
-		KeyEnv:        keyEnv,
-		KeyRef:        keyRef,
-		ContextWindow: c.ContextWindow,
-		NoAuth:        c.NoAuth || (c.Auth == "" && key == "" && keyEnv == "" && keyRef == ""),
-	}
-
-	// A known provider owns its endpoint, dialect and limits: borrow them so the
-	// row gets the catalogue's token policy instead of a bare URL. A candidate
-	// that names a different address (a relay behind a known vendor) keeps its
-	// own.
-	if c.Provider != "" && c.Provider != "custom" {
-		if p, ok := providers.Lookup(c.Provider); ok {
-			if built, ok := providers.ModelConfig(p.ID, c.Model, key); ok {
-				mc = built
-				mc.KeyEnv = keyEnv
-				mc.KeyRef = keyRef
-				if c.ContextWindow > 0 {
-					mc.ContextWindow = c.ContextWindow
-				}
-				mc.NoAuth = c.NoAuth || (c.Auth == "" && mc.APIKey == "" && mc.KeyEnv == "" && mc.KeyRef == "")
-				if c.BaseURL != "" && !sameURL(c.BaseURL, built.BaseURL) {
-					mc.BaseURL = strings.TrimRight(c.BaseURL, "/")
-					mc.APIType = c.APIType
-				}
-			}
+		if key == "" {
+			return config.ModelConfig{}, fmt.Errorf("source credential is no longer available")
 		}
 	}
+
+	mc := c.RegistryTarget()
+	mc.APIKey = key
+	mc.KeyEnv = keyEnv
+	mc.KeyRef = keyRef
+	mc.NoAuth = c.NoAuth || (c.Auth == "" && key == "" && keyEnv == "" && keyRef == "")
+
 	// A bearer credential (Claude Code's ANTHROPIC_AUTH_TOKEN) does not belong
 	// in x-api-key: the Anthropic route sends api_key there, and a relay that
 	// expects `Authorization: Bearer` would answer 401. The scheme is a
@@ -92,12 +68,42 @@ func (c Candidate) Row(opt Options) (config.ModelConfig, error) {
 	// the row is still the one this collector reported, whatever endpoint the
 	// catalogue lent it.
 	mc.Source = c.Source
+	if c.Source == SourceCCSwitch {
+		mc.ConnName = c.ProviderLabel
+	}
 	// Applied last: the catalogue branch above replaces the whole row when the
 	// provider is a known one, and a subscription credential must survive that.
 	mc.Auth = c.Auth
 	return mc, nil
 }
 
+// RegistryTarget resolves the endpoint, protocol and model as they will appear
+// in the registry without reading the candidate's credentials.
+func (c Candidate) RegistryTarget() config.ModelConfig {
+	mc := config.ModelConfig{
+		Provider:      c.Provider,
+		APIType:       c.APIType,
+		BaseURL:       strings.TrimRight(c.BaseURL, "/"),
+		Model:         c.Model,
+		ContextWindow: c.ContextWindow,
+	}
+	if c.Provider != "" && c.Provider != "custom" {
+		if built, ok := providers.ModelConfig(c.Provider, c.Model, ""); ok {
+			mc = built
+			if c.BaseURL != "" && !sameURL(c.BaseURL, built.BaseURL) {
+				mc.BaseURL = strings.TrimRight(c.BaseURL, "/")
+				mc.APIType = c.APIType
+			} else if c.BaseURL != "" && c.APIType != "" {
+				mc.APIType = c.APIType
+			}
+		}
+	}
+	if c.ContextWindow > 0 {
+		mc.ContextWindow = c.ContextWindow
+	}
+	return mc
+}
+
 func sameURL(a, b string) bool {
-	return strings.EqualFold(strings.TrimRight(strings.TrimSpace(a), "/"), strings.TrimRight(strings.TrimSpace(b), "/"))
+	return EndpointIdentity(a) == EndpointIdentity(b)
 }

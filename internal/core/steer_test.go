@@ -4,13 +4,21 @@ package core
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Xustalis/OpenPanda/internal/commander"
+	"github.com/Xustalis/OpenPanda/internal/config"
 	"github.com/Xustalis/OpenPanda/internal/defense"
+	"github.com/Xustalis/OpenPanda/internal/ledger"
+	"github.com/Xustalis/OpenPanda/internal/pyexec"
+	"github.com/Xustalis/OpenPanda/internal/storage"
+	"github.com/Xustalis/OpenPanda/internal/testdb"
 )
 
 // steerTestTask enqueues one task without a scheduler running, so it sits
@@ -61,22 +69,21 @@ func TestUserMessageModes(t *testing.T) {
 	if s := byBody["stop editing; check the logs first"]; s.Grade != MsgGradeSteer || s.SenderLabel != "user" {
 		t.Fatalf("steer note = %+v", s)
 	}
-	// The drain folds the queue note (grade != steer) and the seen-set keeps
-	// it once; the steer note is invisible to the drain — the directive path
-	// owns it.
+	// User notes stay pending until the prompt carrying each one is handed
+	// off. The sibling-board drain cannot declare a received user note.
 	task, _ := c.store.Get(ctx, tk.TaskID)
 	seen := msgSeen{}
-	lines := c.drainTaskMessages(ctx, task, seen)
-	if len(lines) != 1 || !strings.Contains(lines[0], "also update the README") {
-		t.Fatalf("drain after queue = %v", lines)
+	if lines := c.drainTaskMessages(ctx, task, seen); len(lines) != 0 {
+		t.Fatalf("sibling drain folded user notes: %v", lines)
 	}
-	// The fold is stamped on the row, not only in the in-memory seen-set: a
-	// console in another process reads consumed_at to draw "waiting for the
-	// next round" apart from "already read", and the seen-set is invisible to
-	// it.
-	if got := consumedAt(t, c, tk.TaskID, "also update the README"); got == 0 {
-		t.Fatal("drained queue note must be stamped consumed")
+	queued := c.pendingQueuedNotes(ctx, tk.TaskID)
+	if len(queued) != 1 || queued[0].Body != "also update the README" {
+		t.Fatalf("queued notes = %v", queued)
 	}
+	if got := consumedAt(t, c, tk.TaskID, queued[0].Body); got != 0 {
+		t.Fatal("preparing a queue note marked it consumed")
+	}
+	c.markPromptNoteDelivered(ctx, tk.TaskID, queued[0], "")
 	if got := consumedAt(t, c, tk.TaskID, "stop editing; check the logs first"); got != 0 {
 		t.Fatalf("steer note must stay unread until takeSteer, consumed_at=%d", got)
 	}
@@ -241,6 +248,418 @@ func TestSteerNotesAbortedBeforeDeliveryAreStampedNextRound(t *testing.T) {
 	}
 }
 
+func TestPendingSteerEditsAndDeletionReachNextPrompt(t *testing.T) {
+	const original = "keep the first draft"
+	const revised = "replace the first draft"
+	const additional = "include a summary"
+	for _, tc := range []struct {
+		name   string
+		edit   bool
+		inject bool
+	}{
+		{name: "edit interrupts via watcher", edit: true},
+		{name: "edit with another directive", edit: true, inject: true},
+		{name: "delete interrupts via watcher"},
+		{name: "delete before another directive", inject: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			c := newSuperviseCore(t, "steer-revision", defense.TierReversible)
+			c.SetSuperviseRounds(1)
+			task, err := c.Enqueue(ctx, TaskInput{
+				Title: "edit notes", Intent: "work", Requires: []string{"code:modify"}, Authorized: true,
+			}, DefaultQueueSpec())
+			if err != nil {
+				t.Fatal(err)
+			}
+			old, _, err := c.InjectUserNote(ctx, task.TaskID, original, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var prompts []string
+			c.router.SetAdapterRunner(func(runCtx context.Context, _, prompt, _ string) commander.AgentResult {
+				prompts = append(prompts, prompt)
+				if len(prompts) > 1 {
+					commander.PromptDelivered(runCtx)
+					return commander.AgentResult{OK: true, Result: "done"}
+				}
+				if tc.edit {
+					if _, err := c.store.EditUserNote(ctx, task.TaskID, old.Sender, revised, nil, c.nodeID); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := c.store.DeleteUserNote(ctx, task.TaskID, old.Sender); err != nil {
+					t.Fatal(err)
+				}
+				if tc.inject {
+					if status, err := c.InjectUserMessage(ctx, task.TaskID, additional); err != nil || status != "interrupted" {
+						t.Fatalf("second directive = %q, %v", status, err)
+					}
+				}
+				<-runCtx.Done()
+				return commander.AgentResult{ExitCode: 1, Result: "interrupted before delivery"}
+			})
+			if err := c.store.ClaimLocal(ctx, task.TaskID, c.nodeID); err != nil {
+				t.Fatal(err)
+			}
+			c.runScheduled(ctx, task.TaskID)
+			if len(prompts) != 2 || !strings.Contains(prompts[0], original) {
+				t.Fatalf("expected two attempts and the original in the first, got %q", prompts)
+			}
+			second := prompts[1]
+			if strings.Contains(second, original) {
+				t.Errorf("the stale directive reached the next adapter: %q", second)
+			}
+			if got := strings.Contains(second, revised); got != tc.edit {
+				t.Errorf("revised directive present = %t, want %t", got, tc.edit)
+			}
+			if tc.edit && consumedAt(t, c, task.TaskID, revised) == 0 {
+				t.Error("the edited directive was not marked delivered")
+			}
+			if !tc.edit {
+				events, err := c.store.Events(ctx, task.TaskID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, event := range events {
+					if event.Type == EvUserMsgConsumed && strings.Contains(event.DataJSON, original) {
+						t.Fatalf("withdrawn text recorded as delivered: %s", event.DataJSON)
+					}
+				}
+			}
+			if tc.inject {
+				other := strings.Index(second, additional)
+				if other < 0 || (tc.edit && other > strings.Index(second, revised)) {
+					t.Errorf("new directive should lead the carried directive: %q", second)
+				}
+				if consumedAt(t, c, task.TaskID, additional) == 0 {
+					t.Error("the new directive was not marked delivered")
+				}
+			}
+		})
+	}
+}
+
+func TestPrunedReadSteerDoesNotCancelTheAgent(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	c := newSuperviseCore(t, "prune-read-steer", defense.TierReversible)
+	c.SetSuperviseRounds(1)
+	task, err := c.Enqueue(ctx, TaskInput{
+		Title: "steer while running", Intent: "work", Requires: []string{"code:modify"}, Authorized: true,
+	}, DefaultQueueSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	note, _, err := c.InjectUserNote(ctx, task.TaskID, "read this instruction", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	c.router.SetAdapterRunner(func(runCtx context.Context, _, prompt, _ string) commander.AgentResult {
+		calls++
+		if calls != 1 || !strings.Contains(prompt, note.Body) {
+			t.Fatal("read steer failed to stay in the original round")
+		}
+		commander.PromptDelivered(runCtx)
+		if _, err := c.store.db.ExecContext(ctx, `DELETE FROM task_messages WHERE scope=? AND sender=? AND consumed_at>0`,
+			note.Scope, note.Sender); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-runCtx.Done():
+			t.Fatal("message cleanup cancelled a round that already acknowledged it")
+		case <-time.After(1250 * time.Millisecond):
+		}
+		return commander.AgentResult{OK: true, Result: "done"}
+	})
+	if err := c.store.ClaimLocal(ctx, task.TaskID, c.nodeID); err != nil {
+		t.Fatal(err)
+	}
+	c.runScheduled(ctx, task.TaskID)
+}
+
+func TestNativeObjectiveReviewDoesNotReplayForPendingSteer(t *testing.T) {
+	const directive = "do another operation"
+	for _, tc := range []struct {
+		name   string
+		inject bool
+	}{
+		{name: "no directive"},
+		{name: "pending directive", inject: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			work := t.TempDir()
+			marker := filepath.Join(work, "executions.log")
+			card := ledger.Card{
+				Device: "native-objective",
+				Native: []ledger.NativeAbility{queueFixtureAbility(t, "sys:info", "append", marker)},
+			}
+			c := NewCore(openTestDB(t), card.Device, card, 5, testLogger(), config.ModelConfig{})
+			c.SetWorkDir(work)
+			var reviews atomic.Int32
+			c.SetSupervisor(newFakeSupervisor(t, func(int) string {
+				reviews.Add(1)
+				return `{"status":"done","objective_assessments":[{"dimension":"visual","criterion":0,"status":"passed","evidence":"verified output"}]}`
+			}))
+			task, err := c.Enqueue(ctx, TaskInput{
+				Title: "append once", Intent: "record execution", SpecJSON: objectiveSpec,
+				Requires: []string{"sys:info"}, Authorized: true,
+			}, DefaultQueueSpec())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.inject {
+				if _, err := c.InjectUserMessage(ctx, task.TaskID, directive); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := c.store.ClaimLocal(ctx, task.TaskID, c.nodeID); err != nil {
+				t.Fatal(err)
+			}
+			c.runScheduled(ctx, task.TaskID)
+			got, err := c.store.Get(ctx, task.TaskID)
+			if err != nil || got.State != StateDone {
+				t.Fatalf("native task state = %q, %v (result %q)", got.State, err, got.ResultJSON)
+			}
+			recorded, err := os.ReadFile(marker)
+			if err != nil || string(recorded) != "executed\n" || reviews.Load() != 1 {
+				t.Fatalf("execution log = %q (%v), reviews = %d, want one execution and review", recorded, err, reviews.Load())
+			}
+			if tc.inject && consumedAt(t, c, task.TaskID, directive) != 0 {
+				t.Error("a directive for an agent was marked read by native execution")
+			}
+		})
+	}
+}
+
+func TestQueueNoteDeliveryFollowsPromptReceipt(t *testing.T) {
+	const noteText = "Include the handoff detail"
+	for _, tc := range []struct {
+		name, ability     string
+		native, delivered bool
+	}{
+		{name: "launch failed", ability: "code:modify"},
+		{name: "agent acknowledged", ability: "code:modify", delivered: true},
+		{name: "native command completed", ability: "sys:info", native: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			var c *Core
+			if tc.native {
+				work := t.TempDir()
+				card := ledger.Card{Device: "queue-native", Native: []ledger.NativeAbility{
+					queueFixtureAbility(t, tc.ability, "append", filepath.Join(work, "runs.log")),
+				}}
+				c = NewCore(openTestDB(t), card.Device, card, 5, testLogger(), config.ModelConfig{})
+				c.SetWorkDir(work)
+			} else {
+				c = newSuperviseCore(t, "queue-delivery", defense.TierReversible)
+				c.router.SetAdapterRunner(func(runCtx context.Context, _, prompt, _ string) commander.AgentResult {
+					if !strings.Contains(prompt, noteText) {
+						t.Fatal("the prepared prompt omitted the queued note")
+					}
+					if !tc.delivered {
+						return commander.AgentResult{ExitCode: 127, Result: "fixture agent unavailable"}
+					}
+					commander.PromptDelivered(runCtx)
+					return commander.AgentResult{OK: true, Result: "done"}
+				})
+			}
+			c.SetSuperviseRounds(1)
+			c.sleep = func(time.Duration) {}
+			task, err := c.Enqueue(ctx, TaskInput{
+				Title: "queue delivery", Intent: "work", Requires: []string{tc.ability}, Authorized: true,
+			}, DefaultQueueSpec())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := c.QueueUserMessage(ctx, task.TaskID, noteText); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.store.ClaimLocal(ctx, task.TaskID, c.nodeID); err != nil {
+				t.Fatal(err)
+			}
+			c.runScheduled(ctx, task.TaskID)
+			if got := consumedAt(t, c, task.TaskID, noteText) != 0; got != tc.delivered {
+				t.Errorf("note marked delivered = %t, want %t", got, tc.delivered)
+			}
+			pending, err := c.store.UserNotes(ctx, task.TaskID)
+			if err != nil || (len(pending) == 0) != tc.delivered {
+				t.Errorf("pending notes = %v, err=%v", pending, err)
+			}
+			if tc.native {
+				got, err := c.store.Get(ctx, task.TaskID)
+				if err != nil || got.State != StateDone {
+					t.Fatalf("native fixture state = %q, err=%v", got.State, err)
+				}
+			}
+		})
+	}
+}
+
+func TestFailedChildLaunchLeavesTaskNotesPending(t *testing.T) {
+	if !pyexec.Available() {
+		t.Skip("adapter transport requires Python")
+	}
+	const adapter = `
+import os
+import _harness as harness
+
+req = harness.read_request()
+try:
+    harness.run_plain([os.path.join(req.cwd, "absent-panda-fixture.exe"), req.prompt], cwd=req.cwd)
+except FileNotFoundError:
+    harness.emit(False, "fixture child binary not found", 127)
+`
+	ctx := context.Background()
+	dir := t.TempDir()
+	harness, err := os.ReadFile(filepath.Join("..", "..", "adapters", "_harness.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string][]byte{"claude_code.py": []byte(adapter), "_harness.py": harness} {
+		if err := os.WriteFile(filepath.Join(dir, name), body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("OPENPANDA_ADAPTER_DIR", dir)
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	c := newSuperviseCore(t, "missing-child", defense.TierReversible)
+	c.SetSuperviseRounds(1)
+	c.sleep = func(time.Duration) {}
+	task, err := c.Enqueue(ctx, TaskInput{
+		Title: "missing fixture subprocess", Intent: "work", Requires: []string{"code:modify"}, Authorized: true,
+	}, DefaultQueueSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.QueueUserMessage(ctx, task.TaskID, "queue for the child"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.InjectUserMessage(ctx, task.TaskID, "steer the child"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.store.ClaimLocal(ctx, task.TaskID, c.nodeID); err != nil {
+		t.Fatal(err)
+	}
+	c.runScheduled(ctx, task.TaskID)
+	got, err := c.store.Get(ctx, task.TaskID)
+	if err != nil || !strings.Contains(got.ResultJSON, "fixture child binary not found") {
+		t.Fatalf("task did not reach the downstream spawn refusal: %s, %v", got.ResultJSON, err)
+	}
+	notes, err := c.store.UserNotes(ctx, task.TaskID)
+	if err != nil || len(notes) != 2 {
+		t.Fatalf("downstream launch failure consumed user notes: %v, %v", notes, err)
+	}
+}
+
+func TestPendingNoteDeliveryFencesConcurrentMutations(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	path := filepath.Join(t.TempDir(), "tasks.db")
+	db := testdb.OpenFile(t, path)
+	card := ledger.Card{Device: "delivery-fixture"}
+	c := NewCore(db, card.Device, card, 5, testLogger(), config.ModelConfig{})
+	otherDB, err := storage.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer otherDB.Close()
+	other := NewCore(otherDB, card.Device, card, 5, testLogger(), config.ModelConfig{})
+	task := steerTestTask(t, c)
+	if err := c.store.ClaimLocal(ctx, task.TaskID, card.Device); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET state='running' WHERE task_id=?`, task.TaskID); err != nil {
+		t.Fatal(err)
+	}
+	task, err = c.store.Get(ctx, task.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	note, err := c.QueueUserNote(ctx, task.TaskID, "original", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := other.store.DeleteUserNote(ctx, task.TaskID, note.Sender); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.store.reservePromptNotes(ctx, task.TaskID, task.AttemptID, []TaskMessage{note}); !errors.Is(err, errPromptNotesChanged) {
+		t.Fatalf("stale prompt handoff = %v", err)
+	}
+	note, err = c.QueueUserNote(ctx, task.TaskID, "queued after withdrawal", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldHandoff, err := c.store.reservePromptNotes(ctx, task.TaskID, task.AttemptID, []TaskMessage{note})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handoff, err := c.store.reservePromptNotes(ctx, task.TaskID, task.AttemptID, []TaskMessage{note})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.store.releasePromptNotes(ctx, task.TaskID, oldHandoff); err != nil {
+		t.Fatal(err)
+	}
+	if c.markPromptNoteDelivered(ctx, task.TaskID, note, oldHandoff) {
+		t.Fatal("stale receipt acknowledged a replacement handoff")
+	}
+	if err := other.store.DeleteUserNote(ctx, task.TaskID, note.Sender); !errors.Is(err, ErrConflict) {
+		t.Fatalf("withdraw during handoff = %v", err)
+	}
+	if _, err := other.PromoteUserNote(ctx, task.TaskID, note.Sender); !errors.Is(err, ErrConflict) {
+		t.Fatalf("promote during handoff = %v", err)
+	}
+	if err := c.store.releasePromptNotes(ctx, task.TaskID, handoff); err != nil {
+		t.Fatal(err)
+	}
+	edited, err := other.store.EditUserNote(ctx, task.TaskID, note.Sender, "revised after failed delivery", nil, card.Device)
+	if err != nil || edited.Body != "revised after failed delivery" {
+		t.Fatalf("edit after released handoff = %+v, %v", edited, err)
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	finished := make(chan error, 1)
+	go func() {
+		_, err := other.store.EditUserNote(ctx, task.TaskID, edited.Sender, "should not overwrite read content", nil, card.Device)
+		finished <- err
+	}()
+	for otherDB.Stats().InUse == 0 {
+		select {
+		case <-time.After(5 * time.Millisecond):
+		case <-ctx.Done():
+			t.Fatal("edit never reached the SQLite write lock")
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE task_messages SET consumed_at=? WHERE scope=? AND sender=? AND sender_seq=?`,
+		time.Now().Unix(), edited.Scope, edited.Sender, edited.SenderSeq); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-finished:
+		if err == nil || !strings.Contains(err.Error(), "already read") {
+			t.Fatalf("concurrent edit result = %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("edit remained blocked")
+	}
+	actual, err := c.store.userNote(ctx, task.TaskID, edited.Sender)
+	if err != nil || actual.Body != edited.Body || actual.SenderSeq != edited.SenderSeq || actual.ConsumedAt == 0 {
+		t.Fatalf("read note mutated: %+v, %v", actual, err)
+	}
+}
+
 // consumedAt reads one note's delivery stamp off the board, failing when the
 // body is absent — a silent 0 would make the "must be stamped" assertions pass
 // for the wrong reason.
@@ -280,14 +699,15 @@ func TestPendingNoteCounts(t *testing.T) {
 	if got := counts[tk.TaskID]; got != 2 {
 		t.Fatalf("pending notes = %d, want 2 (map=%v)", got, counts)
 	}
-	task, _ := c.store.Get(ctx, tk.TaskID)
-	c.drainTaskMessages(ctx, task, msgSeen{})
+	for _, note := range c.pendingQueuedNotes(ctx, tk.TaskID) {
+		c.markPromptNoteDelivered(ctx, tk.TaskID, note, "")
+	}
 	counts, err = c.store.PendingNoteCounts(ctx)
 	if err != nil {
-		t.Fatalf("pending counts after drain: %v", err)
+		t.Fatalf("pending counts after delivery: %v", err)
 	}
 	if got := counts[tk.TaskID]; got != 0 {
-		t.Fatalf("pending notes after drain = %d, want 0", got)
+		t.Fatalf("pending notes after delivery = %d, want 0", got)
 	}
 }
 
@@ -496,9 +916,93 @@ func TestPeekRoundSteerLeavesDeliveryUnstamped(t *testing.T) {
 	if got := consumedAt(t, c, tk.TaskID, "keep the API stable"); got != 0 {
 		t.Fatalf("peek stamped the note consumed_at=%d, want pending", got)
 	}
-	c.markSteerDelivered(ctx, tk.TaskID, note)
+	c.markSteerDelivered(ctx, tk.TaskID, note, "")
 	if got := consumedAt(t, c, tk.TaskID, "keep the API stable"); got == 0 {
 		t.Fatal("delivered note must be stamped consumed")
+	}
+}
+
+func TestSteerReceiptDoesNotConsumeReplacement(t *testing.T) {
+	c := queueTestCore(t)
+	ctx := context.Background()
+	task := steerTestTask(t, c)
+	old, _, err := c.InjectUserNote(ctx, task.TaskID, "old directive", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := msgSeen{}
+	receipt := c.peekRoundSteer(ctx, task.TaskID, seen)
+	if receipt == nil || receipt.body != old.Body {
+		t.Fatalf("first peek = %+v", receipt)
+	}
+	if err := c.store.DeleteUserNote(ctx, task.TaskID, old.Sender); err != nil {
+		t.Fatal(err)
+	}
+	otherStore := NewTaskStore(c.store.db, c.logger)
+	replacement, err := otherStore.PostUserNote(ctx, task.TaskID, "replacement", nil, MsgGradeSteer, c.nodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.markSteerDelivered(ctx, task.TaskID, receipt, "")
+	if got := consumedAt(t, c, task.TaskID, replacement.Body); got != 0 {
+		t.Errorf("old receipt stamped replacement consumed_at=%d", got)
+	}
+	if replacement.Sender == old.Sender || replacement.SenderSeq <= old.SenderSeq {
+		t.Errorf("replacement reused the deleted identity: old=%+v replacement=%+v", old, replacement)
+	}
+	next := c.peekRoundSteer(ctx, task.TaskID, seen)
+	if next == nil || next.body != replacement.Body {
+		t.Fatalf("replacement missing from the same round cursor: %+v", next)
+	}
+	c.markSteerDelivered(ctx, task.TaskID, next, "")
+	if got := consumedAt(t, c, task.TaskID, replacement.Body); got == 0 {
+		t.Fatal("replacement remained unread after its own delivery")
+	}
+}
+
+func TestAdapterReceiptDoesNotConsumeDirectiveSentAfterItsPrompt(t *testing.T) {
+	ctx := context.Background()
+	c := newSuperviseCore(t, "steer-replacement", defense.TierReversible)
+	c.SetSuperviseRounds(1)
+	task, err := c.Enqueue(ctx, TaskInput{
+		Title: "steer", Intent: "work", Requires: []string{"code:modify"}, Authorized: true,
+	}, DefaultQueueSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, _, err := c.InjectUserNote(ctx, task.TaskID, "old directive", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender := &Core{store: NewTaskStore(c.store.db, c.logger), nodeID: c.nodeID}
+	var observed bool
+	c.router.SetAdapterRunner(func(runCtx context.Context, _, prompt, _ string) commander.AgentResult {
+		if !observed {
+			observed = true
+			if !strings.Contains(prompt, old.Body) || strings.Contains(prompt, "replacement directive") {
+				t.Errorf("unexpected first adapter prompt: %q", prompt)
+			}
+			if err := sender.store.DeleteUserNote(ctx, task.TaskID, old.Sender); err != nil {
+				t.Error(err)
+				return commander.AgentResult{ExitCode: 1}
+			}
+			if _, _, err := sender.InjectUserNote(ctx, task.TaskID, "replacement directive", nil); err != nil {
+				t.Error(err)
+				return commander.AgentResult{ExitCode: 1}
+			}
+			commander.PromptDelivered(runCtx)
+			if got := consumedAt(t, c, task.TaskID, "replacement directive"); got != 0 {
+				t.Errorf("first adapter receipt marked an unseen directive consumed_at=%d", got)
+			}
+		}
+		return commander.AgentResult{OK: false, ExitCode: 127, Result: "fixture stopped"}
+	})
+	if err := c.store.ClaimLocal(ctx, task.TaskID, c.nodeID); err != nil {
+		t.Fatal(err)
+	}
+	c.runScheduled(ctx, task.TaskID)
+	if !observed {
+		t.Fatal("the task never reached the adapter")
 	}
 }
 
@@ -547,7 +1051,7 @@ func TestWatchRoundSteerInterruptsForAnotherProcess(t *testing.T) {
 	tk := steerTestTask(t, c)
 	roundCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go c.watchRoundSteer(roundCtx, tk.TaskID, msgSeen{}, cancel, done)
+	go c.watchRoundSteer(roundCtx, tk.TaskID, msgSeen{}, cancel, done, nil)
 
 	_, status, err := c.InjectUserNote(context.Background(), tk.TaskID, "inspect the screenshot first", nil)
 	if err != nil || status != "queued" {

@@ -34,12 +34,17 @@ func TestRunAdapterProcess(t *testing.T) {
 	adapterDir = dir // redirect the constant for this test
 	defer func() { adapterDir = oldDir }()
 
-	res := runAdapterProcess(context.Background(), "fake.py", "PANDA", "", nil)
+	calls := 0
+	ctx := WithPromptDelivered(context.Background(), func() { calls++ })
+	res := runAdapterProcess(ctx, "fake.py", "PANDA", "", nil)
 	if !res.OK {
 		t.Fatalf("adapter failed: %+v", res)
 	}
 	if res.Result != "hello from PANDA" {
 		t.Fatalf("unexpected result: %q", res.Result)
+	}
+	if calls != 1 {
+		t.Fatalf("legacy adapter delivery callbacks = %d, want 1", calls)
 	}
 }
 
@@ -1071,5 +1076,332 @@ func TestRefusedLaunchDoesNotAnnounceDelivery(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatalf("a refused launch announced delivery %d times", calls)
+	}
+}
+
+func TestPythonAdapterDoesNotAcknowledgeStartupFailure(t *testing.T) {
+	for _, mode := range []string{"one-shot", "session"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv(adapterDirEnv, dir)
+			name := "claude_code.py"
+			harness, err := os.ReadFile(filepath.Join("..", "..", "adapters", "_harness.py"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "_harness.py"), harness, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			claude, err := os.ReadFile(filepath.Join("..", "..", "adapters", name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Route the real adapter's agent launcher to an absent binary in
+			// the fixture directory without consulting the developer's PATH.
+			failedChild := strings.Replace(string(claude),
+				"return harness.resolve_binary(BINARIES, default=\"claude\")",
+				"return os.path.abspath('absent-panda-test-cli.exe')", 1)
+			if failedChild == string(claude) {
+				t.Fatal("failed to isolate the Claude CLI launcher")
+			}
+			for _, script := range []string{
+				"def broken(\n",
+				`print('{"ok":false,"result":"adapter initialization failed","exit_code":1}')`,
+				`import json, sys
+req = json.loads(sys.stdin.readline())
+print('{"type":"prompt_delivered"}', file=sys.stdout if req.get("session") else sys.stderr, flush=True)
+print('{"ok":false,"result":"legacy parser receipt before missing CLI","exit_code":127}', flush=True)`,
+				failedChild,
+			} {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				ctx := WithAgentName(context.Background(), "claude_code")
+				if mode == "session" {
+					var pool *AgentSessions
+					ctx, pool = WithSessionPool(WithSessionMode(ctx))
+					t.Cleanup(pool.CloseAll)
+				}
+				calls := 0
+				ctx = WithPromptDelivered(ctx, func() { calls++ })
+				res := runAdapterProcess(ctx, name, "prompt is still queued", dir, nil)
+				if res.OK || calls != 0 {
+					t.Fatalf("startup failure result = %+v, delivery callbacks = %d", res, calls)
+				}
+			}
+		})
+	}
+}
+
+func TestPythonAdapterRejectsPromptBeforeTransport(t *testing.T) {
+	const script = `
+import json, pathlib, sys
+req = json.loads(sys.stdin.readline())
+pathlib.Path(req["cwd"], "prompt.txt").write_text(req["prompt"], encoding="utf-8")
+print('{"ok":true,"result":"received","exit_code":0}', flush=True)
+`
+	for _, session := range []bool{false, true} {
+		name := "one-shot"
+		if session {
+			name = "session"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv(adapterDirEnv, dir)
+			const adapter = "claude_code.py"
+			if err := os.WriteFile(filepath.Join(dir, adapter), []byte(script), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx := WithAgentName(context.Background(), "claude_code")
+			if session {
+				var pool *AgentSessions
+				ctx, pool = WithSessionPool(WithSessionMode(ctx))
+				defer pool.CloseAll()
+			}
+			ctx = WithPromptHandoff(ctx, func() error { return errors.New("pending note withdrawn") })
+			calls := 0
+			ctx = WithPromptDelivered(ctx, func() { calls++ })
+			res := runAdapterProcess(ctx, adapter, "withdrawn text", dir, nil)
+			if res.OK || res.Result != "pending note withdrawn" || calls != 0 {
+				t.Fatalf("refused handoff = %+v, acknowledgements = %d", res, calls)
+			}
+			marker := filepath.Join(dir, "prompt.txt")
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatalf("adapter received withheld prompt: %v", err)
+			}
+			ctx = WithPromptHandoff(ctx, func() error { return nil })
+			if res := runAdapterProcess(ctx, adapter, "approved text", dir, nil); !res.OK || calls != 1 {
+				t.Fatalf("allowed handoff = %+v, acknowledgements = %d", res, calls)
+			}
+			got, err := os.ReadFile(marker)
+			if err != nil || string(got) != "approved text" {
+				t.Fatalf("received prompt = %q, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestLegacyPythonAdapterAcknowledgesObservedWork(t *testing.T) {
+	const script = `
+import json, pathlib, sys, time
+req = json.loads(sys.stdin.readline())
+print('{"type":"event","ev":"tool_use","name":"dummy"}', file=sys.stderr, flush=True)
+deadline = time.monotonic() + 4
+while not pathlib.Path("tool-seen").exists() and time.monotonic() < deadline:
+    time.sleep(0.02)
+if not req.get("session"):
+    sys.exit(2)
+print('{"ok":false,"result":"failed after tool use","exit_code":2}', flush=True)
+for line in sys.stdin:
+    print('{"ok":false,"result":"next turn failed before work","exit_code":2}', flush=True)
+`
+	for _, mode := range []string{"one-shot", "session"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv(adapterDirEnv, dir)
+			const name = "claude_code.py"
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx := WithAgentName(context.Background(), "claude_code")
+			ctx = WithAgentEvents(ctx, func(ev AgentEvent) {
+				if ev.Ev == "tool_use" {
+					if err := os.WriteFile(filepath.Join(dir, "tool-seen"), nil, 0o600); err != nil {
+						t.Error(err)
+					}
+				}
+			})
+			calls := 0
+			ctx = WithPromptDelivered(ctx, func() { calls++ })
+			if mode == "session" {
+				var pool *AgentSessions
+				ctx, pool = WithSessionPool(WithSessionMode(ctx))
+				t.Cleanup(pool.CloseAll)
+			}
+			res := runAdapterProcess(ctx, name, "first", dir, nil)
+			if res.OK || res.ExitCode != 2 || !res.WorkObserved || calls != 1 {
+				t.Fatalf("failed result after tool use = %+v, delivery callbacks = %d", res, calls)
+			}
+			if mode == "session" {
+				res = runAdapterProcess(ctx, name, "next", dir, nil)
+				if res.OK || res.Result != "next turn failed before work" || calls != 1 {
+					t.Fatalf("next turn without work = %+v, delivery callbacks = %d", res, calls)
+				}
+			}
+		})
+	}
+}
+
+func TestPythonAdapterAcknowledgesReadBeforeReturning(t *testing.T) {
+	const script = `
+import os, sys, time
+import _harness as harness
+
+def reply(prompt, session=False, receipt=False):
+    code, out, _ = harness.run_plain(
+        [sys.executable, "-c", "import sys; print(sys.stdin.read())"], input=prompt)
+    if code or out.strip() != prompt:
+        harness.emit(False, "child did not receive the prompt", 1)
+        return
+    if session:
+        harness.session_prompt_delivered(receipt)
+    marker = prompt + ".ack"
+    until = time.monotonic() + 4
+    while not os.path.isfile(marker) and time.monotonic() < until:
+        time.sleep(0.02)
+    if not os.path.isfile(marker):
+        harness.emit(False, "delivery callback did not run", 1)
+    else:
+        harness.emit(True, prompt, 0)
+
+request = harness.read_request_lined()
+reply(request.prompt, request.session, request.prompt_receipt)
+if request.session:
+    for turn in harness.read_turn_lines():
+        reply(turn["text"], True, turn.get("prompt_receipt"))
+`
+	dir := t.TempDir()
+	t.Setenv(adapterDirEnv, dir)
+	harness, err := os.ReadFile(filepath.Join("..", "..", "adapters", "_harness.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "_harness.py"), harness, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const adapter = "claude_code.py"
+	if err := os.WriteFile(filepath.Join(dir, adapter), []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workDir := t.TempDir()
+	base := WithAgentName(context.Background(), "claude_code")
+	check := func(ctx context.Context, prompt string) {
+		t.Helper()
+		calls := 0
+		ctx = WithPromptDelivered(ctx, func() {
+			calls++
+			if err := os.WriteFile(filepath.Join(workDir, prompt+".ack"), []byte("delivered"), 0o600); err != nil {
+				t.Error(err)
+			}
+		})
+		res := runAdapterProcess(ctx, adapter, prompt, workDir, nil)
+		if !res.OK || res.Result != prompt || calls != 1 {
+			t.Fatalf("run %q: %+v, delivery callbacks = %d", prompt, res, calls)
+		}
+	}
+	check(base, "one-shot")
+	sessionCtx, pool := WithSessionPool(WithSessionMode(base))
+	defer pool.CloseAll()
+	check(sessionCtx, "fresh-session")
+	check(sessionCtx, "follow-up")
+}
+
+func TestSessionReceiptSurvivesAdapterExit(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(adapterDirEnv, dir)
+	const name = "claude_code.py"
+	const script = `
+import sys, json
+req = json.loads(sys.stdin.readline())
+if not req.get("session"):
+    print('{"ok":false,"result":"unexpected one-shot replay","exit_code":1}', flush=True)
+    sys.exit()
+print('{"type":"prompt_delivered","stage":"agent"}', flush=True)
+print('{"ok":true,"result":"first turn","exit_code":0}', flush=True)
+sys.stdin.readline()
+print('{"type":"prompt_delivered","stage":"agent"}', flush=True)
+print('{"ok":false,"result":"terminal failure after read","exit_code":1,"tokens":1}', flush=True)
+`
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, pool := WithSessionPool(WithSessionMode(WithAgentName(context.Background(), "claude_code")))
+	defer pool.CloseAll()
+	calls := 0
+	ctx = WithPromptDelivered(ctx, func() { calls++ })
+	if res := runAdapterProcess(ctx, name, "first", dir, nil); !res.OK || calls != 1 {
+		t.Fatalf("first result %+v, delivery callbacks %d", res, calls)
+	}
+	pool.mu.Lock()
+	session := pool.live["claude_code|"+name]
+	pool.mu.Unlock()
+	if session == nil {
+		t.Fatal("first turn did not keep a session")
+	}
+	ctx = WithExecutionProfiles(ctx, func(p AdapterExecutionProfile) {
+		if p.Transport == "session_turn" {
+			// Let the exit watcher finish before await reads stdout.
+			deadline := time.Now().Add(4 * time.Second)
+			for !session.isDead() && time.Now().Before(deadline) {
+				time.Sleep(5 * time.Millisecond)
+			}
+			if !session.isDead() {
+				t.Error("adapter did not exit after flushing the second result")
+			}
+		}
+	})
+	res := runAdapterProcess(ctx, name, "second", dir, nil)
+	if res.OK || res.Result != "terminal failure after read" || res.Tokens != 1 || calls != 2 {
+		t.Fatalf("second result %+v, delivery callbacks %d", res, calls)
+	}
+}
+
+func TestAdapterReceiptWithoutResultPreventsReplay(t *testing.T) {
+	const name = "claude_code.py"
+	dir := t.TempDir()
+	t.Setenv(adapterDirEnv, dir)
+	const script = `
+import json, sys
+req = json.loads(sys.stdin.readline())
+if req.get("session") and req["prompt"] == "before handoff":
+    sys.exit(1)
+with open("launches", "a") as f:
+    f.write(("session" if req.get("session") else "one-shot") + "\n")
+if req["prompt"] != "before handoff":
+    receipt = '{"type":"prompt_delivered","stage":"agent"}'
+    print(receipt, file=sys.stdout if req.get("session") else sys.stderr, flush=True)
+    print("503 Service unavailable", file=sys.stderr, flush=True)
+    sys.exit(1)
+print('{"ok":true,"result":"compatibility fallback","exit_code":0}', flush=True)
+`
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, prompt, launch string
+		session, wantOK      bool
+	}{
+		{"session after handoff", "after handoff", "session", true, false},
+		{"one-shot after handoff", "after handoff", "one-shot", false, false},
+		{"session before handoff", "before handoff", "one-shot", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			log := filepath.Join(workspace, "launches")
+			ctx := WithAgentName(context.Background(), "claude_code")
+			if tc.session {
+				sessionCtx, pool := WithSessionPool(WithSessionMode(ctx))
+				defer pool.CloseAll()
+				ctx = sessionCtx
+			}
+			var atDelivery []byte
+			receipts := 0
+			ctx = WithPromptDelivered(ctx, func() {
+				atDelivery, _ = os.ReadFile(log)
+				receipts++
+			})
+			res := runAdapterProcess(ctx, name, tc.prompt, workspace, nil)
+			launches, err := os.ReadFile(log)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.OK != tc.wantOK || receipts != 1 ||
+				strings.TrimSpace(string(atDelivery)) != tc.launch || strings.TrimSpace(string(launches)) != tc.launch {
+				t.Fatalf("result=%+v receipts=%d during=%q launches=%q", res, receipts, atDelivery, launches)
+			}
+			if !tc.wantOK && (replayableFailure(res) || agentFallbackEligible(res) || providerRescueEligible(ctx, name, res)) {
+				t.Fatalf("unconfirmed prompt outcome eligible for fresh execution: %+v", res)
+			}
+		})
 	}
 }

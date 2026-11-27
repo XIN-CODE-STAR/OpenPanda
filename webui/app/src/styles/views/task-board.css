@@ -958,7 +958,7 @@
 }
 
 /* The send box takes the row under the controls once it is open. */
-.task-card-actions .task-quick-send {
+.task-card-actions .task-send {
   flex: 1 1 100%;
 }
 

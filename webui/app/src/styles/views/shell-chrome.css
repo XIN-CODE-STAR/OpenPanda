@@ -117,80 +117,173 @@
 .orbit-action-btn:active {
   box-shadow: none;
 }
-/* — §4.2 Top-level soft banners (update status / onboarding).
-     .banner + .banner-warn/info/error/good is the shared chip style.
-     update-banner is painted by <UpdateBanner/> when the updater has
-     backed off to idle (403 / rate-limit / network offline), or when
-     a new release is available. */
-.banner {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: var(--sp-2) var(--sp-3);
-  margin: 0 var(--sp-3) var(--sp-2);
-  border-radius: var(--radius-md);
-  font-size: var(--fs-small);
-  border: 1px solid var(--hairline-sm);
-  background: var(--surface-alpha-sm);
-}
-.banner-ico { flex: 0 0 auto; font-size: 16px; }
-.banner-body {
+/* — §4.2 The rail's update chip (update status).
+     Painted by <UpdateNotice/> in the sidebar tail when the updater has
+     backed off to idle (403 / rate-limit / network offline), or when a new
+     release is available. It is a card, not a bar: it stacks directly above
+     the node chip at the same width, so the tail reads "what I run / what I
+     could run" as one block instead of a banner pushing every page down. */
+.rail-update {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 5px;
+  /* 6px here plus the footer's own 2px gap puts 8px between the two cards:
+     they are separate objects, and at 2px they read as one split box. */
+  margin-bottom: 6px;
+  padding: 9px 10px 10px;
+  /* Same 11px corner as .sidebar-foot, so the pair look cut from one sheet. */
+  border-radius: 11px;
+  /* No accent fill. Codex's update prompt is the reference here: its title is
+     bold, everything else is dim, and the notice itself is a hairline box with
+     nothing behind it (codex-rs/tui/src/update_prompt.rs). A tinted card in a
+     rail this quiet read as an alert about the app rather than a fact about
+     the node, so the card takes the node chip's own material and lets the ink
+     do the ranking. */
+  border: 1px solid var(--border-soft);
+  background: var(--bg-raised);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+.rail-update-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+}
+/* The glyph is a label for the title, not a badge: same ink as the summary,
+   one step under the title. `margin-top` centres it on the first line — a
+   15px glyph in a 13.5px/1.35 line box sits 2px high at flex-start. */
+.rail-update-ico {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  font-size: 15px;
+  color: var(--text-secondary);
+}
+/* The title is the only bold thing in the rail's tail, and it is allowed to
+   wrap: "更新检查已暂停（网络受限）" is wider than the 280px rail. 13.5px is
+   the rail's own row size — at 12.5px the Hanzi went muddy next to the 12.5px
+   version line in the chip below. */
+.rail-update-title {
   flex: 1 1 auto;
   min-width: 0;
+  font-size: var(--text-md);
+  font-weight: var(--fw-semibold, 620);
+  line-height: 1.35;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
 }
-.banner-body strong { color: var(--text-primary); font-weight: var(--fw-semibold, 620); }
-.banner-sub { color: var(--text-secondary); font-size: var(--fs-caption); line-height: var(--lh-default); }
-.banner-link {
-  flex: 0 0 auto;
-  color: var(--accent-2);
-  border: 1px solid var(--accent-2-border);
-  padding: var(--sp-1) var(--sp-2);
-  border-radius: var(--radius-sm);
-  font-size: var(--fs-caption);
-  font-weight: 500;
-  white-space: nowrap;
-  text-decoration: none;
-  background: var(--accent-2-soft);
-}
-.banner-link:hover { filter: brightness(1.08); }
-.banner-close {
+.rail-update-close {
   flex: 0 0 auto;
   appearance: none;
   background: transparent;
   border: 1px solid transparent;
+  width: 18px;
+  height: 18px;
+  /* Pulled up so the × sits on the title's cap rather than its line box. */
+  margin-top: -1px;
+  padding: 0;
+  line-height: 16px;
+  font-size: 15px;
   color: var(--text-tertiary);
-  width: 28px;
-  height: 28px;
-  line-height: 26px;
-  font-size: 18px;
-  border-radius: var(--radius-sm);
+  border-radius: 5px;
   cursor: pointer;
 }
-.banner-close:hover { color: var(--text-primary); background: var(--surface-alpha-sm); border-color: var(--hairline-xs); }
+.rail-update-close:hover {
+  color: var(--text-primary);
+  background: var(--surface-alpha-sm);
+}
+/* One line, clamped to two for the languages that run long. The updater's
+   changelog stays on 设置 → 系统 — it is an index of per-language links, not a
+   summary, and in this column it was three lines of markdown punctuation. */
+.rail-update-sub {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+/* The action is a button, not a link: an underlined string under a paragraph
+   read as a hyperlink from another era, and the card has exactly one thing to
+   press. Ghost outline at the card's own corner radius, ink on the label. */
+.rail-update-cta {
+  align-self: flex-start;
+  margin-top: 1px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text-primary);
+  font-weight: 500;
+  line-height: 1.5;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.rail-update-cta:hover {
+  background: var(--bg-hover);
+}
 
-.banner-warn {
+/* The paused check keeps its tint: it is the one state that is bad news, and
+   a hairline alone would file it next to "a newer build exists". The button
+   takes the same amber for its edge and label. The no-model card
+   (.rail-update-model, painted by <ModelNotice/>) wears it too: a node that
+   cannot answer is the same class of news as a check that gave up, and the two
+   never appear together — one is about the build, the other about the model. */
+.rail-update-warn,
+.rail-update-model {
   background: var(--semantic-warn-soft);
   border-color: var(--semantic-warn-border);
 }
-.banner-warn .banner-body strong { color: var(--text-primary); }
-.banner-warn .banner-sub { color: var(--text-secondary); }
-.banner-warn .banner-link {
+.rail-update-warn .rail-update-ico,
+.rail-update-model .rail-update-ico {
   color: var(--semantic-warn);
+}
+.rail-update-warn .rail-update-cta,
+.rail-update-model .rail-update-cta {
   border-color: var(--semantic-warn-border);
+  color: var(--semantic-warn);
+}
+.rail-update-warn .rail-update-cta:hover,
+.rail-update-model .rail-update-cta:hover {
   background: var(--semantic-warn-strong-soft);
 }
 
-.banner-info {
-  background: var(--accent-2-soft);
-  border-color: var(--accent-2-border);
+/* The no-model card is one row, not the update chip's three. The sentence and
+   its action are one thought — "you cannot chat yet → go set it up" — so the
+   button rides the right edge level with the copy instead of starting a third
+   line under it. Two lines of copy beside a 25px button is a ~54px card; the
+   stacked version was 91px, which in a 255px rail read as a panel rather than
+   a note. The button is centred on the copy block, so it lines up with the
+   text whether the sentence wraps to one line or two. */
+.rail-update-model {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 9px 8px 10px;
 }
-.banner-info .banner-link {
-  color: var(--accent-2);
-  border-color: var(--accent-2-border);
-  background: var(--accent-2-tint-md);
+.rail-update-model-main {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: flex-start;
+  gap: 7px;
+  min-width: 0;
+}
+.rail-update-model-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+/* In a column, the chip's `flex: 1 1 auto` would make the title grow; the row
+   is sized by its copy, so the title keeps its own height. */
+.rail-update-model .rail-update-title {
+  flex: none;
+}
+.rail-update-model .rail-update-cta {
+  flex: 0 0 auto;
+  align-self: center;
+  margin-top: 0;
 }
 
 /* — utility helpers: inline style migration (§2, P1 code-quality pass).

@@ -3,11 +3,15 @@
 package panel
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,8 +19,17 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/core"
 	"github.com/Xustalis/OpenPanda/internal/ledger"
 	"github.com/Xustalis/OpenPanda/internal/objectives"
+	"github.com/Xustalis/OpenPanda/internal/sessions"
 	"github.com/Xustalis/OpenPanda/internal/testdb"
 )
+
+func TestTaskMessageHandoffReportsConflict(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeTaskMessageErr(rec, fmt.Errorf("%w: note is being delivered", core.ErrConflict))
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "note is being delivered") {
+		t.Fatalf("handoff response = %d %s", rec.Code, rec.Body.String())
+	}
+}
 
 // TestSendTaskMessageWithoutEngine pins the scheduler-less path: queue mode
 // still lands the durable note (the store is enough), inject honestly refuses
@@ -361,5 +374,82 @@ func TestApproveUnfinishedTaskReturnsConflict(t *testing.T) {
 	cur, err := store.Get(context.Background(), id)
 	if rr.Code != http.StatusConflict || err != nil || cur.State != core.StateReview {
 		t.Fatalf("incomplete approval code=%d state=%s err=%v body=%s", rr.Code, cur.State, err, rr.Body.String())
+	}
+}
+
+func TestSendTaskMessageWithOnlyAttachment(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		engine, inject bool
+	}{
+		{name: "board queue"},
+		{name: "engine queue", engine: true},
+		{name: "engine inject", engine: true, inject: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			deps := Deps{
+				StaticDir: t.TempDir(), Token: testToken,
+				Sessions: sessions.NewStore(t.TempDir()),
+				Cfg:      &config.Config{Storage: config.StorageConfig{WorkPath: t.TempDir()}},
+			}
+			if tc.engine {
+				deps.Engine = newQueueEngine(t)
+				deps.Store = deps.Engine.TaskStore()
+			} else {
+				deps.Store = newTestStore(t)
+			}
+			task, err := deps.Store.Create(ctx, "", "proj", "picture target", "", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			session, err := deps.Sessions.Create("photo fixture")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := deps.Store.SetSessionID(ctx, task.TaskID, session.ID); err != nil {
+				t.Fatal(err)
+			}
+			h := New(deps)
+			var upload bytes.Buffer
+			writer := multipart.NewWriter(&upload)
+			part, err := writer.CreateFormFile("file", "shot.png")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := part.Write([]byte("photo fixture")); err != nil {
+				t.Fatal(err)
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatal(err)
+			}
+			req := authedReq(http.MethodPost, "/api/sessions/"+session.ID+"/upload", &upload)
+			req.Header.Set("Content-Type", writer.FormDataContentType())
+			uploadResponse := httptest.NewRecorder()
+			h.ServeHTTP(uploadResponse, req)
+			var uploaded struct{ Files []uploadedFile }
+			if uploadResponse.Code != http.StatusOK ||
+				json.Unmarshal(uploadResponse.Body.Bytes(), &uploaded) != nil || len(uploaded.Files) != 1 {
+				t.Fatalf("upload photo: HTTP %d, %s", uploadResponse.Code, uploadResponse.Body.String())
+			}
+			file := uploaded.Files[0].Mention
+			if file == "" || !strings.HasSuffix(filepath.ToSlash(file), "-shot.png") {
+				t.Fatalf("unexpected upload reference: %q", file)
+			}
+			body, err := json.Marshal(sendMessageRequest{Attachments: []string{file}, Inject: tc.inject})
+			if err != nil {
+				t.Fatal(err)
+			}
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, authedReq(http.MethodPost, "/api/tasks/"+task.TaskID+"/messages", strings.NewReader(string(body))))
+			if rr.Code != http.StatusOK {
+				t.Fatalf("send image: HTTP %d, %s", rr.Code, rr.Body.String())
+			}
+			notes, err := deps.Store.UserNotes(ctx, task.TaskID)
+			if err != nil || len(notes) != 1 || !strings.Contains(notes[0].Body, "@"+file) ||
+				len(notes[0].Attachments) != 1 || notes[0].Attachments[0] != file {
+				t.Fatalf("board notes = %+v, err=%v", notes, err)
+			}
+		})
 	}
 }

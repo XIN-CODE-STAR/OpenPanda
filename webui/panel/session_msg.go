@@ -532,7 +532,7 @@ func (h *handler) editSessionNote(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, errors.New("editing a board note requires the ask engine"))
 		return
 	}
-	taskID := h.noteTaskID(r.Context(), sessID, key)
+	taskID := h.noteTaskID(r.Context(), sessID, key, r.URL.Query().Get("task_id"))
 	if taskID == "" {
 		writeErr(w, http.StatusNotFound, errors.New("no such note"))
 		return
@@ -560,7 +560,7 @@ func (h *handler) deleteSessionNote(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, errors.New("dropping a board note requires the ask engine"))
 		return
 	}
-	taskID := h.noteTaskID(r.Context(), sessID, key)
+	taskID := h.noteTaskID(r.Context(), sessID, key, r.URL.Query().Get("task_id"))
 	if taskID == "" {
 		writeErr(w, http.StatusNotFound, errors.New("no such note"))
 		return
@@ -595,7 +595,7 @@ func (h *handler) promoteSessionNote(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, errors.New("promoting a board note requires the ask engine"))
 		return
 	}
-	taskID := h.noteTaskID(r.Context(), sessID, key)
+	taskID := h.noteTaskID(r.Context(), sessID, key, r.URL.Query().Get("task_id"))
 	if taskID == "" {
 		writeErr(w, http.StatusNotFound, errors.New("no such note"))
 		return
@@ -610,14 +610,18 @@ func (h *handler) promoteSessionNote(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// A sender key is board-local. Resolve it only when one live board owns it.
-func (h *handler) noteTaskID(ctx context.Context, sessID, key string) string {
+// A sender key is board-local. A request without a task id is accepted only
+// when exactly one live board in the session owns that sender key.
+func (h *handler) noteTaskID(ctx context.Context, sessID, key, taskID string) string {
 	tasks, err := h.liveTasksFor(ctx, sessID)
 	if err != nil {
 		return ""
 	}
 	var match string
 	for _, t := range tasks {
+		if taskID != "" && t.TaskID != taskID {
+			continue
+		}
 		notes, err := h.store.UserNotes(ctx, t.TaskID)
 		if err != nil {
 			return ""

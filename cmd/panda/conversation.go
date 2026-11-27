@@ -20,6 +20,21 @@ import (
 // modeCommand is the single command service used by CLI and TUI.
 func (r *repl) modeCommand(name, arg string) (message, prompt string, err error) {
 	defer func() { r.controlMu.Lock(); r.controlAt = time.Time{}; r.controlMu.Unlock() }()
+	arg = strings.TrimSpace(arg)
+	if name == "goal" && arg == "" && r.sessID() == "" {
+		return i18n.T(r.loc, "conversation.goalHelp"), "", nil
+	}
+	var planAction string
+	var version int64
+	if name == "plan" {
+		planAction, arg, version, err = parsePlanCommand(arg)
+		if err != nil {
+			return "", "", err
+		}
+		if r.sessID() == "" && (planAction == "show" || planAction == "confirm") {
+			return i18n.T(r.loc, "conversation.noProposal"), "", nil
+		}
+	}
 	eng := r.engine.Load()
 	if eng == nil {
 		if name == "goal" && strings.TrimSpace(arg) == "" {
@@ -36,11 +51,19 @@ func (r *repl) modeCommand(name, arg string) (message, prompt string, err error)
 	}
 	service := eng.Conversations(r.sessionsSt)
 	ctx := context.Background()
+	if planAction == "ask" {
+		// The ask worker carries Mode=plan through admission. A competing
+		// mode change cannot turn this command into an ordinary executable ask.
+		return "", arg, nil
+	}
+	if planAction == "confirm" {
+		_, err = service.ConfirmPlan(ctx, sid, version)
+		return i18n.T(r.loc, "conversation.implementing"), "", err
+	}
 	state, err := service.State(ctx, sid)
 	if err != nil {
 		return "", "", err
 	}
-	arg = strings.TrimSpace(arg)
 	var budget *int64
 	if flag, rest := splitGoalWord(arg); name == "goal" && strings.EqualFold(flag, "--tokens") {
 		value, text := splitGoalWord(rest)
@@ -52,23 +75,21 @@ func (r *repl) modeCommand(name, arg string) (message, prompt string, err error)
 		arg = text
 	}
 	if name == "plan" {
-		if strings.HasPrefix(arg, "confirm ") {
-			version, parseErr := strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(arg, "confirm ")), 10, 64)
-			if parseErr != nil {
-				return "", "", parseErr
+		if planAction == "show" {
+			if state.Proposal == "" {
+				return i18n.T(r.loc, "conversation.noProposal"), "", nil
 			}
-			_, err = service.ConfirmPlan(ctx, sid, version)
-			return i18n.T(r.loc, "conversation.implementing"), "", err
+			return proposalReview(r.loc, &askengine.Result{
+				ProposalBody:          state.Proposal,
+				ProposalVersion:       state.ProposalVersion,
+				ProposalContinuesGoal: state.Goal != nil && state.Goal.PausedByPlan,
+			}, ""), "", nil
 		}
-		enabled := !state.Planning
-		if arg != "" {
-			enabled = true
-		}
-		if err = service.SetPlanning(ctx, sid, enabled); err != nil {
+		if err = service.SetPlanning(ctx, sid, !state.Planning); err != nil {
 			return "", "", err
 		}
-		if enabled {
-			return i18n.T(r.loc, "conversation.planOn"), arg, nil
+		if !state.Planning {
+			return i18n.T(r.loc, "conversation.planOn"), "", nil
 		}
 		return i18n.T(r.loc, "conversation.planOff"), "", nil
 	}
@@ -107,6 +128,30 @@ func (r *repl) modeCommand(name, arg string) (message, prompt string, err error)
 	state, err = service.State(ctx, sid)
 	b, _ := json.Marshal(state.Goal)
 	return string(b), "", err
+}
+
+func parsePlanCommand(arg string) (action, prompt string, version int64, err error) {
+	word, rest := splitGoalWord(arg)
+	switch strings.ToLower(word) {
+	case "":
+		return "toggle", "", 0, nil
+	case "confirm":
+		version, err = strconv.ParseInt(rest, 10, 64)
+		if err != nil || version <= 0 || strings.HasPrefix(rest, "+") || version > 1<<53-1 {
+			return "", "", 0, errors.New("usage: /plan confirm <version>")
+		}
+		return "confirm", "", version, nil
+	case "show":
+		if rest == "" {
+			return "show", "", 0, nil
+		}
+	case "--":
+		if rest == "" {
+			return "", "", 0, errors.New("usage: /plan -- <description>")
+		}
+		return "ask", rest, 0, nil
+	}
+	return "ask", arg, 0, nil
 }
 
 func splitGoalWord(text string) (word, rest string) {

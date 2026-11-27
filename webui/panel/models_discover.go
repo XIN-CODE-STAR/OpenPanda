@@ -16,14 +16,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Xustalis/OpenPanda/internal/ccswitch"
 	"github.com/Xustalis/OpenPanda/internal/config"
 	"github.com/Xustalis/OpenPanda/internal/entry"
 	"github.com/Xustalis/OpenPanda/internal/localmodels"
+	"github.com/Xustalis/OpenPanda/internal/security"
 )
 
 // discoverTimeout bounds the whole scan. The OpenCode CLI alone can take ten
@@ -67,16 +68,13 @@ func (h *handler) ccswitchModels(w http.ResponseWriter, r *http.Request) {
 
 // markRegistered fills Candidate.Existing.
 //
-// "Already registered" is a property of this config, not of the machine: the
-// same endpoint+model pair can be a fresh find on another node. Marking it here
-// keeps the console from offering a duplicate the write would only suffix into
-// `-2`.
+// Discovery and import use the same registry identity for each candidate.
 func (h *handler) markRegistered(sources []localmodels.Source) {
 	h.readCfg(func(c *config.Config) {
 		registered := make(map[string]bool, len(c.Models)+1)
 		note := func(m config.ModelConfig) {
 			if m.Model != "" {
-				registered[discoverRowKey(m.BaseURL, m.Model)] = true
+				registered[modelIdentity(m)] = true
 			}
 		}
 		for _, m := range c.Models {
@@ -86,7 +84,7 @@ func (h *handler) markRegistered(sources []localmodels.Source) {
 		for si := range sources {
 			for ci := range sources[si].Candidates {
 				cand := &sources[si].Candidates[ci]
-				cand.Existing = registered[discoverRowKey(cand.BaseURL, cand.Model)]
+				cand.Existing = cand.Model != "" && registered[modelIdentity(cand.RegistryTarget())]
 			}
 		}
 	})
@@ -95,16 +93,7 @@ func (h *handler) markRegistered(sources []localmodels.Source) {
 // modelIdentity is the triple entry.Client keys a row on: two rows that agree on
 // it are one row, whatever their aliases say.
 func modelIdentity(mc config.ModelConfig) string {
-	return strings.ToLower(mc.NormalizedAPIType()) + "|" +
-		strings.ToLower(strings.TrimRight(strings.TrimSpace(mc.BaseURL), "/")) + "|" +
-		strings.TrimSpace(mc.Model)
-}
-
-// discoverRowKey is the identity of a row for duplicate purposes: the endpoint
-// it dials and the model it asks for, both normalized the way the entry client
-// normalizes them.
-func discoverRowKey(base, model string) string {
-	return strings.ToLower(strings.TrimRight(strings.TrimSpace(base), "/")) + "\x00" + strings.TrimSpace(model)
+	return strings.Join([]string{mc.NormalizedAPIType(), localmodels.EndpointIdentity(mc.BaseURL), strings.TrimSpace(mc.Model)}, "\x00")
 }
 
 // modelImportItem is one candidate the console ticked. It carries the
@@ -112,6 +101,7 @@ func discoverRowKey(base, model string) string {
 // server resolves it while writing, so a panel session cannot be replayed to
 // read a key.
 type modelImportItem struct {
+	CandidateID   string `json:"candidate_id,omitempty"`
 	Provider      string `json:"provider"`
 	Model         string `json:"model"`
 	BaseURL       string `json:"base_url,omitempty"`
@@ -121,6 +111,15 @@ type modelImportItem struct {
 	Auth          string `json:"auth,omitempty"`
 	ContextWindow int    `json:"context_window,omitempty"`
 	Alias         string `json:"alias,omitempty"`
+}
+
+type modelImportResult struct {
+	Added            int      `json:"added"`
+	Labeled          int      `json:"labeled"`
+	Aliases          []string `json:"aliases"`
+	CompletedIDs     []string `json:"completed_ids"`
+	Skipped          []string `json:"skipped"`
+	ActivationFailed bool     `json:"activation_failed,omitempty"`
 }
 
 // importModels serves POST /api/models/import — the batch form of POST
@@ -150,35 +149,61 @@ func (h *handler) importModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	opt := localmodels.Options{}
-	// KeyRef is a capability — "env:ANY_VAR", "claude:settings",
-	// "codex:<provider>" — not a label the client gets to invent. The import
-	// body is client-supplied, so accept only references that discovery
-	// actually reported for the same host; otherwise a panel session could
-	// name OPENPANDA_SHARED_SECRET and pair it with an attacker endpoint.
+	opt := localmodels.Options{SkipVerification: true}
+	var needsDiscovery, needsCCSwitch bool
+	for _, item := range req.Items {
+		if item.fromCCSwitch() {
+			needsCCSwitch = true
+		} else if item.needsDiscovery() {
+			needsDiscovery = true
+		}
+	}
+
+	// Verify references against the collector that issued them. The CC Switch
+	// sheet reads a separate store and imports the candidate from that store.
 	refCtx, refCancel := context.WithTimeout(r.Context(), discoverTimeout)
-	allowedRefs := discoveredKeyRefs(localmodels.Discover(refCtx, opt))
+	var localRows, ccSwitchRows map[importTarget]localmodels.Candidate
+	if needsCCSwitch {
+		ccSwitchRows = importCandidates(localmodels.CCSwitchGroups(refCtx, opt))
+	}
+	if needsDiscovery {
+		localRows = importCandidates(localmodels.Discover(refCtx, opt))
+	}
 	refCancel()
-	var added []config.ModelConfig
-	var skipped []string
-	var pending []struct {
+	result := modelImportResult{Aliases: []string{}, CompletedIDs: []string{}, Skipped: []string{}}
+	skip := func(item modelImportItem, why string) {
+		result.Skipped = append(result.Skipped, security.Redact(fmt.Sprintf("%s: %s", item.Model, why)))
+	}
+	type pendingImport struct {
 		mc   config.ModelConfig
 		item modelImportItem
 	}
+	var pending []pendingImport
 	for _, item := range req.Items {
-		if err := checkImportKeyRef(item, allowedRefs); err != nil {
-			skipped = append(skipped, fmt.Sprintf("%s: %v", item.Model, err))
-			continue
+		var mc config.ModelConfig
+		var err error
+		if item.fromCCSwitch() {
+			candidate, ok := ccSwitchRows[item.target()]
+			if !ok {
+				skip(item, "selection no longer matches the CC Switch store; refresh the list")
+				continue
+			}
+			mc, err = rowFromImportCandidate(candidate, item.Alias, opt)
+		} else if item.needsDiscovery() {
+			candidate, ok := localRows[item.target()]
+			if !ok {
+				skip(item, "selection no longer matches local discovery; refresh the list")
+				continue
+			}
+			mc, err = rowFromImportCandidate(candidate, item.Alias, opt)
+		} else {
+			mc, err = rowFromImport(item, opt)
 		}
-		mc, err := h.rowFromImport(item, opt)
 		if err != nil {
-			skipped = append(skipped, fmt.Sprintf("%s: %v", item.Model, err))
+			skip(item, err.Error())
 			continue
 		}
-		pending = append(pending, struct {
-			mc   config.ModelConfig
-			item modelImportItem
-		}{mc, item})
+		pending = append(pending, pendingImport{mc, item})
 	}
 	// A loopback row is cheap to check and expensive to get wrong: the proxy in
 	// front of it is the thing that decides which model ids exist, and "the
@@ -199,68 +224,106 @@ func (h *handler) importModels(w http.ResponseWriter, r *http.Request) {
 		if !localmodels.IsLoopback(pending[i].mc.BaseURL) {
 			continue
 		}
+		select {
+		case <-checkCtx.Done():
+			verdicts[i] = checkCtx.Err()
+			continue
+		case sem <- struct{}{}:
+		}
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			sem <- struct{}{}
 			defer func() { <-sem }()
 			verdicts[i] = localmodels.Verify(checkCtx, pending[i].mc, 12*time.Second)
 		}(i)
 	}
 	wg.Wait()
+	var added []pendingImport
 	for i, p := range pending {
 		if err := verdicts[i]; err != nil {
-			skipped = append(skipped, fmt.Sprintf("%s: %v", p.item.Model, err))
+			skip(p.item, err.Error())
 			continue
 		}
-		added = append(added, p.mc)
+		added = append(added, p)
 	}
 	if len(added) == 0 {
-		writeJSON(w, map[string]any{"added": 0, "aliases": []string{}, "skipped": skipped})
+		writeJSON(w, result)
 		return
 	}
 
-	var stored []config.ModelConfig
-	relabeled := 0
+	var activate config.ModelConfig
 	err := h.mutateCfgErr(func(c *config.Config) error {
-		stored = stored[:0]
-		relabeled = 0
+		if err := r.Context().Err(); err != nil {
+			return err
+		}
+		next := *c
+		next.Models = append([]config.ModelConfig(nil), c.Models...)
 		// Identity, not alias: an import that lands on an endpoint+dialect+model
 		// the registry already holds is the same row, and suffixing its alias
 		// with -2 would create a duplicate that the health check cannot tell
 		// apart (entry.Client keys on exactly this triple).
-		seen := make(map[string]int, len(c.Models)+len(added))
-		for i, m := range c.Models {
+		seen := make(map[string]int, len(next.Models)+len(added))
+		for i, m := range next.Models {
 			seen[modelIdentity(m)] = i
 		}
-		for _, mc := range added {
+		for _, row := range added {
+			mc := row.mc
 			id := modelIdentity(mc)
+			if row.item.CandidateID != "" {
+				result.CompletedIDs = append(result.CompletedIDs, row.item.CandidateID)
+			}
 			if idx, ok := seen[id]; ok {
 				// The row is already here, but this is the only moment the
 				// machine tells us where it came from: backfill the provenance
 				// so a connection imported before the field existed is still
 				// named after the tool that reported it. Not a duplicate —
 				// nothing is added, only labelled.
-				if mc.Source != "" && c.Models[idx].Source == "" {
-					c.Models[idx].Source = mc.Source
-					relabeled++
+				if mc.Source != "" && next.Models[idx].Source == "" {
+					next.Models[idx].Source = mc.Source
+					result.Labeled++
 				}
-				skipped = append(skipped, fmt.Sprintf("%s: already registered", mc.Model))
+				if row.item.CandidateID == "" {
+					skip(row.item, "already registered")
+				}
 				continue
 			}
-			seen[id] = len(c.Models)
-			mc.Name = freeAliasIn(c, defaultAlias(mc), config.ModelConfig{})
+			if next.Model.Model != "" && id == modelIdentity(next.Model) {
+				if row.item.CandidateID == "" {
+					skip(row.item, "already registered")
+				}
+				continue
+			}
+			seen[id] = len(next.Models)
+			mc.Name = freeAliasIn(&next, firstNonEmpty(mc.Name, defaultAlias(mc)), config.ModelConfig{})
 			// Append inside the loop: freeAliasIn reads the config, so the next
 			// row in this batch has to be visible to it or two candidates with
 			// one model id would both claim the same alias.
-			c.Models = append(c.Models, mc)
-			stored = append(stored, mc)
+			next.Models = append(next.Models, mc)
+			result.Aliases = append(result.Aliases, mc.Alias())
+			result.Added++
+			if next.Model.BaseURL == "" && next.Model.Provider == "" && next.Model.Model == "" {
+				next.Model = mc
+				activate = mc
+			}
 		}
 		// Nothing new is not a reason to rewrite (and snapshot) the file — but
 		// a backfilled label is a change, and it is the only one this pass made.
-		if (len(stored) > 0 || relabeled > 0) && h.configPath != "" {
-			return config.UpdateModelsSection(h.configPath, append([]config.ModelConfig(nil), c.Models...))
+		if result.Added == 0 && result.Labeled == 0 {
+			return nil
 		}
+		if h.configPath != "" {
+			var err error
+			if activate.Model != "" {
+				err = config.UpdateModelAndModelsSections(h.configPath, next.Model, next.Models)
+			} else {
+				err = config.UpdateModelsSection(h.configPath, next.Models)
+			}
+			if err != nil {
+				return err
+			}
+		}
+		c.Models = next.Models
+		c.Model = next.Model
 		return nil
 	})
 	if err != nil {
@@ -268,64 +331,54 @@ func (h *handler) importModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// No active model at all → make the first import live, the same rule the
-	// single add follows: a fresh install should be able to ask immediately.
-	var noActive bool
-	h.readCfg(func(c *config.Config) {
-		noActive = c.Model.BaseURL == "" && c.Model.Provider == "" && c.Model.Model == ""
-	})
-	if noActive && len(stored) > 0 {
-		if err := h.applyModelConfig(stored[0]); err != nil {
-			writeErr(w, http.StatusInternalServerError, err)
-			return
-		}
+	if activate.Model != "" {
+		result.ActivationFailed = h.activateModelConfig(activate) != nil
 	}
-
-	aliases := make([]string, 0, len(stored))
-	for _, m := range stored {
-		aliases = append(aliases, m.Alias())
-	}
-	writeJSON(w, map[string]any{"added": len(stored), "labeled": relabeled, "aliases": aliases, "skipped": skipped})
+	writeJSON(w, result)
 }
 
-// discoveredKeyRefs indexes the credential references discovery reported,
-// keyed by (reference, host). The host half is what keeps a legitimate
-// reference from being paired with an endpoint the caller chose.
-func discoveredKeyRefs(sources []localmodels.Source) map[string]bool {
-	out := make(map[string]bool)
-	for _, s := range sources {
-		for _, c := range s.Candidates {
-			if c.KeyRef == "" {
+// Match the selection to a current server candidate before resolving credentials
+// and use that candidate's auth scheme, context window and provenance.
+type importTarget struct {
+	id, ref, provider, baseURL, model, apiType, auth string
+}
+
+func (item modelImportItem) fromCCSwitch() bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(item.KeyRef)), ccswitch.RefPrefix)
+}
+
+func (item modelImportItem) needsDiscovery() bool {
+	return item.CandidateID != "" || strings.TrimSpace(item.KeyRef) != "" || strings.TrimSpace(item.Auth) != ""
+}
+
+func (item modelImportItem) target() importTarget {
+	return importTarget{
+		id:       item.CandidateID,
+		ref:      strings.TrimSpace(item.KeyRef),
+		provider: strings.TrimSpace(item.Provider),
+		baseURL:  localmodels.EndpointIdentity(item.BaseURL),
+		model:    strings.TrimSpace(item.Model),
+		apiType:  strings.TrimSpace(item.APIType),
+		auth:     strings.TrimSpace(item.Auth),
+	}
+}
+
+func importCandidates(groups []localmodels.Source) map[importTarget]localmodels.Candidate {
+	rows := make(map[importTarget]localmodels.Candidate)
+	for _, group := range groups {
+		for _, c := range group.Candidates {
+			if !c.Importable {
 				continue
 			}
-			out[strings.ToLower(c.KeyRef)+"\x00"+urlHost(c.BaseURL)] = true
+			item := modelImportItem{KeyRef: c.KeyRef, Provider: c.Provider, BaseURL: c.BaseURL,
+				Model: c.Model, APIType: c.APIType, Auth: c.Auth}
+			// Older clients submit the same fields without the candidate ID.
+			rows[item.target()] = c
+			item.CandidateID = c.ID
+			rows[item.target()] = c
 		}
 	}
-	return out
-}
-
-// checkImportKeyRef refuses a credential reference the client invented, or one
-// paired with a host other than the one discovery reported it for. A row with
-// no reference reads no secret, and a row with no base_url dials its provider's
-// catalogue endpoint, so neither needs the host half.
-func checkImportKeyRef(item modelImportItem, allowed map[string]bool) error {
-	ref := strings.ToLower(strings.TrimSpace(item.KeyRef))
-	if ref == "" || strings.TrimSpace(item.BaseURL) == "" {
-		return nil
-	}
-	host := urlHost(item.BaseURL)
-	if !allowed[ref+"\x00"+host] {
-		return fmt.Errorf("credential reference %q was not discovered for %s", item.KeyRef, host)
-	}
-	return nil
-}
-
-func urlHost(raw string) string {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil {
-		return ""
-	}
-	return strings.ToLower(u.Hostname())
+	return rows
 }
 
 // rowFromImport validates one item and builds the config row.
@@ -333,22 +386,30 @@ func urlHost(raw string) string {
 // The address check is the same one the add sheet's custom endpoint goes
 // through: the import body names a URL the daemon will dial later, so a caller
 // who holds the panel token must not be able to point it at a metadata service.
-func (h *handler) rowFromImport(item modelImportItem, opt localmodels.Options) (config.ModelConfig, error) {
+func rowFromImport(item modelImportItem, opt localmodels.Options) (config.ModelConfig, error) {
 	model := strings.TrimSpace(item.Model)
 	if model == "" {
 		return config.ModelConfig{}, errors.New("no model id")
+	}
+	apiType := strings.TrimSpace(item.APIType)
+	if apiType != "" {
+		apiType = normalizeAPIType(apiType)
 	}
 	cand := localmodels.Candidate{
 		Provider:      strings.TrimSpace(item.Provider),
 		Model:         model,
 		BaseURL:       strings.TrimSpace(item.BaseURL),
-		APIType:       normalizeAPIType(strings.TrimSpace(item.APIType)),
+		APIType:       apiType,
 		KeyRef:        strings.TrimSpace(item.KeyRef),
 		NoAuth:        item.NoAuth,
 		Auth:          strings.TrimSpace(item.Auth),
 		ContextWindow: item.ContextWindow,
 		Importable:    true,
 	}
+	return rowFromImportCandidate(cand, item.Alias, opt)
+}
+
+func rowFromImportCandidate(cand localmodels.Candidate, alias string, opt localmodels.Options) (config.ModelConfig, error) {
 	mc, err := cand.Row(opt)
 	if err != nil {
 		return config.ModelConfig{}, err
@@ -364,8 +425,8 @@ func (h *handler) rowFromImport(item modelImportItem, opt localmodels.Options) (
 	if _, err := entry.NewClient(mc); err != nil {
 		return config.ModelConfig{}, err
 	}
-	if item.Alias != "" {
-		mc.Name = strings.TrimSpace(item.Alias)
+	if alias != "" {
+		mc.Name = strings.TrimSpace(alias)
 	}
 	return mc, nil
 }

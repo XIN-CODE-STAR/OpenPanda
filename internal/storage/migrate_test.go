@@ -32,6 +32,36 @@ func TestMigrateTracksUserVersion(t *testing.T) {
 	}
 }
 
+func TestMigrateKeepsLegacyAskRoundsInMainConversation(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, m := range migrations {
+		if m.Version >= 84 {
+			break
+		}
+		if err := runMigration(db, m); err != nil {
+			t.Fatalf("migration %d: %v", m.Version, err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO ask_rounds(round_id,session_id,locale,lease_until,created_at)
+		VALUES('legacy-round','session','en',1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	var side bool
+	if err := db.QueryRow("SELECT side FROM ask_rounds WHERE round_id='legacy-round'").Scan(&side); err != nil {
+		t.Fatal(err)
+	}
+	if side {
+		t.Fatal("legacy round must remain a main conversation round")
+	}
+}
+
 func TestMigrateDetachesLegacyClearedGoalRounds(t *testing.T) {
 	db, err := Open(":memory:")
 	if err != nil {
@@ -72,6 +102,149 @@ func TestMigrateDetachesLegacyClearedGoalRounds(t *testing.T) {
 	var usage int
 	if err = db.QueryRow(`SELECT entry_tokens FROM conversation_goal_rounds WHERE goal_id='old'`).Scan(&usage); err != nil || usage != 17 {
 		t.Fatalf("migration lost the original ledger: %d, %v", usage, err)
+	}
+}
+
+func TestMigrateKeepsLegacyNoteSequenceAndOfflineEpisode(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, m := range migrations {
+		if m.Version > 77 {
+			break
+		}
+		if err := runMigration(db, m); err != nil {
+			t.Fatalf("migration %d: %v", m.Version, err)
+		}
+	}
+	for _, query := range []string{
+		`INSERT INTO tasks(task_id,state,owner_node,attempt_id) VALUES('legacy','queued','node','attempt')`,
+		`INSERT INTO task_messages(scope,sender,rcpt,sender_seq,grade,body,sent_at,recv_at,expires_at)
+			VALUES('task:legacy','user:7','legacy',9,'steer','old note',1,1,0),
+			('task:legacy','plan:22','legacy',22,'steer','plan adjustment',1,1,0)`,
+		`INSERT INTO employee_cache(id,status,last_seen) VALUES('peer','offline',123)`,
+	} {
+		if _, err := db.Exec(query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM task_messages WHERE sender='user:7'`); err != nil {
+		t.Fatal(err)
+	}
+	var seq int
+	if err := db.QueryRow(`SELECT user_note_seq FROM tasks WHERE task_id='legacy'`).Scan(&seq); err != nil || seq != 9 {
+		t.Fatalf("legacy sequence after deletion = %d, err=%v; want 9", seq, err)
+	}
+	var episode string
+	if err := db.QueryRow(`SELECT offline_id FROM employee_cache WHERE id='peer'`).Scan(&episode); err != nil || episode != "legacy" {
+		t.Fatalf("legacy offline episode = %q, err=%v", episode, err)
+	}
+	for _, status := range []string{"online", "offline"} {
+		if _, err := db.Exec(`UPDATE employee_cache SET status=? WHERE id='peer'`, status); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.QueryRow(`SELECT offline_id FROM employee_cache WHERE id='peer'`).Scan(&episode); err != nil || episode == "" || episode == "legacy" {
+		t.Fatalf("offline episode after recovery = %q, err=%v", episode, err)
+	}
+}
+
+func TestMigratePreservesEvidenceOfExistingAskRoundDispatch(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, migration := range migrations {
+		if migration.Version > 79 {
+			break
+		}
+		if err := runMigration(db, migration); err != nil {
+			t.Fatalf("migration %d: %v", migration.Version, err)
+		}
+	}
+	for _, query := range []string{
+		`INSERT INTO tasks(task_id,state,owner_node,attempt_id) VALUES('old-task','done','node','attempt')`,
+		`INSERT INTO ask_rounds(round_id,session_id,status,lease_until,created_at) VALUES
+			('dispatched','session','interrupted',0,1), ('empty','session','interrupted',0,1)`,
+		`INSERT INTO ask_rounds(round_id,session_id,status,lease_until,created_at,reported_version)
+			VALUES('reported','session','interrupted',0,1,'earlier-task:done')`,
+		`INSERT INTO ask_round_tasks(task_id,round_id) VALUES('old-task','dispatched')`,
+	} {
+		if _, err := db.Exec(query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM tasks WHERE task_id='old-task'`); err != nil {
+		t.Fatal(err)
+	}
+	for round, want := range map[string]bool{"dispatched": true, "reported": true, "empty": false} {
+		var got bool
+		if err := db.QueryRow(`SELECT dispatched FROM ask_rounds WHERE round_id=?`, round).Scan(&got); err != nil || got != want {
+			t.Fatalf("round %q dispatched=%t want=%t err=%v", round, got, want, err)
+		}
+	}
+}
+
+func TestMigratePreservesExistingGoalWaitAndUnsettledUsage(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, migration := range migrations {
+		if migration.Version > 80 {
+			break
+		}
+		if err := runMigration(db, migration); err != nil {
+			t.Fatalf("migration %d: %v", migration.Version, err)
+		}
+	}
+	for _, query := range []string{
+		`INSERT INTO conversation_goals(id,session_id,objective,status,completion_requested,waiting_for,created_at,updated_at)
+			VALUES('goal','session','objective','complete',1,'input',1,1)`,
+		`INSERT INTO ask_rounds(round_id,session_id,status,lease_until,created_at,closed_at)
+			VALUES('question','session','closed',0,1,2)`,
+		`INSERT INTO conversation_goal_rounds(round_id,goal_id,generation) VALUES('question','goal',1)`,
+		`INSERT INTO tasks(task_id,state,owner_node,attempt_id,parent_id,title,result_json) VALUES
+			('root','done','node','a','','Verify fixture','{"stdout":"Verified all fixtures."}'),
+			('child','done','node','b','root','','{}')`,
+		`INSERT INTO ask_round_tasks(task_id,round_id) VALUES('root','question')`,
+		`INSERT INTO delegation_metrics(task_id,delegator,executor,success,latency_ms,tokens,created_at,usage_source)
+			VALUES('child','origin','worker',1,0,80,1,'task'),('root','origin','entry',1,0,90,1,'ask')`,
+	} {
+		if _, err := db.Exec(query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	var status, waitingRound string
+	var audited bool
+	var tokens int
+	err = db.QueryRow(`SELECT status,waiting_round,completion_requested,task_tokens
+		FROM conversation_goals g JOIN conversation_goal_rounds r ON r.goal_id=g.id WHERE g.id='goal'`).
+		Scan(&status, &waitingRound, &audited, &tokens)
+	if err != nil || status != "active" || waitingRound != "question" || audited || tokens != 80 {
+		t.Fatalf("migrated state=%s question=%s audit=%t tokens=%d err=%v", status, waitingRound, audited, tokens, err)
+	}
+	if _, err := db.Exec("DELETE FROM tasks WHERE task_id='root'"); err != nil {
+		t.Fatal(err)
+	}
+	var verdict, title, stdout string
+	if err := db.QueryRow(`SELECT state,title,json_extract(result_json,'$.stdout') FROM ask_round_removed_tasks
+		WHERE task_id='root' AND round_id='question'`).Scan(&verdict, &title, &stdout); err != nil ||
+		verdict != "done" || title != "Verify fixture" || stdout != "Verified all fixtures." {
+		t.Fatalf("preserved verdict=%s title=%q output=%q err=%v", verdict, title, stdout, err)
 	}
 }
 

@@ -162,7 +162,6 @@ export function PermissionPicker(props: {
               {m === mode && <Icon name="check" size={14} class="perm-check" />}
             </button>
           ))}
-          <p class="perm-foot">{t('perm.foot')}</p>
         </div>
       )}
     </div>

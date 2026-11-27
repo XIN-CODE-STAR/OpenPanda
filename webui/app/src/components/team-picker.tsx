@@ -38,12 +38,15 @@ export function AgentFace(props: {
   )
 }
 
-/** The trigger a new conversation carries in its header, left of the node
- *  button: both answer how the first message will be dispatched (which
- *  machine, which hands), so they stand in the same corner. It is a glyph,
- *  not a chip — the header row is a row of glyphs, and the label lives in the
- *  tooltip and the accessible name. A count rides the corner once a team is
- *  picked, because "who did I hire" is state the glyph alone cannot show.
+/** Who works on this conversation, as a chip in the setup row above the
+ *  composer that opens the roster card.
+ *
+ *  The chip, not a glyph: the row is where a first message settles where it
+ *  runs, who runs it and on which machine, and three identical glyphs would
+ *  make the reader hover three times to tell them apart. The picked names are
+ *  the chip's label — "who did I hire" is state, and a count alone cannot say
+ *  it.
+ *
  *  The picker behind it is viewport-sized — a dialog, not a popover squeezed
  *  under a chip. */
 export function RosterPicker(props: {
@@ -61,24 +64,44 @@ export function RosterPicker(props: {
     setExpanded(true)
   }
 
+  // The label is the answer, not the question: one name, or the first plus a
+  // remainder — a roster of five would otherwise push the node pick off the
+  // row. Empty is a real answer ("let the scheduler pick"), so the chip names
+  // the field ("员工") rather than the gesture — the gesture is what the tip
+  // and the card's own heading already say.
+  const label =
+    props.value.length === 0
+      ? t('sessions.teamPick')
+      : props.value.length === 1
+        ? props.value[0]!
+        : `${props.value[0]} +${props.value.length - 1}`
+
   return (
     <div class="roster-picker" data-tour-target="team">
       <button
         type="button"
-        class="roster-trigger tip-down tip-right"
+        class={`roster-trigger setup-chip${props.value.length ? ' has-value' : ''}`}
         data-tip={t('sessions.pickTeam')}
-        aria-label={t('sessions.pickTeam')}
+        aria-label={props.value.length ? `${t('sessions.pickTeam')}: ${label}` : t('sessions.pickTeam')}
         aria-haspopup="dialog"
         aria-expanded={expanded}
         onClick={open}
       >
-        <Icon name="users" size={19} />
-        {props.value.length > 0 && <span class="roster-count">{props.value.length}</span>}
+        <Icon name="users" size={16} />
+        <span class="setup-chip-label">{label}</span>
       </button>
       <dialog ref={dialog} class="roster-dialog" aria-label={t('sessions.pickTeam')}
         onClose={() => setExpanded(false)}
         onClick={e => { if (e.target === e.currentTarget) dialog.current?.close() }}>
-        {opened && <TeamRoster {...props} standalone onClose={() => dialog.current?.close()} />}
+        {opened && (
+          <TeamRoster
+            value={props.value}
+            onChange={props.onChange}
+            onManage={props.onManage}
+            standalone
+            onClose={() => dialog.current?.close()}
+          />
+        )}
       </dialog>
     </div>
   )
@@ -88,8 +111,8 @@ export function RosterPicker(props: {
  *
  *  It used to be a chip in the composer's footer with its own trigger. In a
  *  thread the trigger now lives on the panda (see composer-pet.tsx); on a new
- *  conversation it is the header button (RosterPicker above). Either way this
- *  component is only the card: it loads the roster, draws each CLI as an
+ *  conversation it is the chip on the setup strip (RosterPicker above). Either
+ *  way this component is only the card: it loads the roster, draws each CLI as an
  *  employee (a face, a name, the job they are good at), and reports picks
  *  upward. Open state, outside-click and Escape belong to the trigger, which
  *  owns both itself and this card.

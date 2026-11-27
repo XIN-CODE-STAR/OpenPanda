@@ -65,6 +65,15 @@ func modelSettingsToConfig(req modelSettingsJSON, cur config.ModelConfig) config
 		Auth:          cur.Auth,
 		Params:        cur.Params,
 		Headers:       cur.Headers,
+		// The credential's other forms ride along too. This form only edits
+		// the inline key, so a save must not erase a row that reads its
+		// credential from an environment variable or another app's store:
+		// UpdateModelSection writes these three (and source) into the `model:`
+		// section, and an empty value there means "delete the key".
+		KeyEnv:    cur.KeyEnv,
+		KeyRef:    cur.KeyRef,
+		KeyScheme: cur.KeyScheme,
+		Source:    cur.Source,
 		// The form has no switch for the offline gate, so it rides along
 		// untouched — a save must not silently re-arm a knob the user turned
 		// off in the YAML.
@@ -106,6 +115,11 @@ func modelSettingsToConfig(req modelSettingsJSON, cur config.ModelConfig) config
 	}
 	if key := strings.TrimSpace(req.APIKey); key != "" {
 		mc.APIKey = key
+		// A key typed into the field replaces the reference: otherwise the
+		// stored key_env/key_ref would still resolve first and the new key
+		// would be dead weight. The scheme stays — it describes the header,
+		// not where the secret comes from.
+		mc.KeyEnv, mc.KeyRef = "", ""
 	}
 	return mc
 }
@@ -282,33 +296,45 @@ func (h *handler) getMCPSettings(w http.ResponseWriter, r *http.Request) {
 // Needs a live engine (MCP tools live inside it); configure the model first
 // — the settings save hot-loads one.
 func (h *handler) putMCPSettings(w http.ResponseWriter, r *http.Request) {
-	eng := h.currentEngine()
-	if eng == nil {
-		writeErr(w, http.StatusServiceUnavailable, errors.New("ask engine not configured (save a model first)"))
-		return
-	}
 	var req mcpSettingsJSON
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, errors.New("invalid JSON body"))
 		return
 	}
 	cmd := strings.TrimSpace(req.Command)
-
-	// SetMCPCommand spawns and lists tools first; a bad command fails here
-	// without touching the stored config or the running registry.
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
-	if err := eng.SetMCPCommand(ctx, cmd); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
+	if h.engines != nil {
+		h.engines.reloadMu.Lock()
+		defer h.engines.reloadMu.Unlock()
+	}
+	eng := h.currentEngine()
+	if eng == nil {
+		writeErr(w, http.StatusServiceUnavailable, errors.New("ask engine not configured (save a model first)"))
 		return
 	}
-	if h.configPath != "" {
-		if err := config.UpdateMCPSection(h.configPath, cmd); err != nil {
-			writeErr(w, http.StatusInternalServerError, err)
-			return
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	var persistErr error
+	err := eng.MutateConfigErr(func(cfg *config.Config) error {
+		err := eng.ConfigureMCPCommand(ctx, cmd, func() error {
+			if h.configPath != "" {
+				persistErr = config.UpdateMCPSection(h.configPath, cmd)
+			}
+			return persistErr
+		})
+		if err == nil {
+			cfg.MCP.Command = cmd
 		}
+		return err
+	})
+	if err != nil {
+		code := http.StatusBadRequest
+		if persistErr != nil {
+			code = http.StatusInternalServerError
+		}
+		writeErr(w, code, err)
+		return
 	}
-	h.mutateCfg(func(c *config.Config) { c.MCP.Command = cmd })
 	writeJSON(w, mcpSettingsJSON{Command: cmd})
 }
 

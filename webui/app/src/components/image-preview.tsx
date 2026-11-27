@@ -8,10 +8,11 @@
 // Bytes move through fetchBlob: an <img src> cannot carry the Bearer token, so
 // the console fetches /api/fs/image itself and hands the <img> an object URL.
 
-import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
+import { useContext, useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
 import { createPortal } from 'preact/compat'
 import { fetchBlob } from '../api/client'
 import { imageBytesUrl } from './attach'
+import { SessionScope } from './session-scope'
 import { t } from '../i18n'
 import { Icon } from './icons'
 import { useModalFocus } from './modal-focus'
@@ -42,6 +43,11 @@ export function ImagePreview({ path, dataUrl, label, className = '' }: ImagePrev
   const [zoom, setZoom] = useState(false)
   const [near, setNear] = useState(false)
   const holder = useRef<HTMLDivElement>(null)
+  // A relative path is relative to the thread's worktree, and a worktree
+  // outside work_path is only a readable root when the request names it.
+  // Without this the preview 403'd (or resolved to a same-named file under
+  // work_path) while the panel around it read the file fine.
+  const session = useContext(SessionScope)
 
   // A computer-use run reads dozens of screenshots, and "expand all" on that
   // log used to fire every fetch at once. The bytes are only worth asking for
@@ -77,7 +83,7 @@ export function ImagePreview({ path, dataUrl, label, className = '' }: ImagePrev
     let made = ''
     setUrl('')
     setFailed(false)
-    fetchBlob(`/api/fs/image?path=${encodeURIComponent(path)}`)
+    fetchBlob(imageBytesUrl(path, session))
       .then((blob) => {
         made = URL.createObjectURL(blob)
         if (!alive) {
@@ -93,7 +99,7 @@ export function ImagePreview({ path, dataUrl, label, className = '' }: ImagePrev
       alive = false
       if (made) URL.revokeObjectURL(made)
     }
-  }, [path, dataUrl, near])
+  }, [path, dataUrl, near, session])
 
   if (failed) {
     return <div class={`img-miss dim ${className}`}>{t('events.imageUnavailable')}</div>

@@ -870,9 +870,8 @@ func needsFollowupResult(resultJSON string) bool {
 // action cross-process: a CLI or console marks the row, the queue-owning
 // daemon does the running.
 //
-// The operator's note lands as a steer-grade board note BEFORE the requeue,
-// so the scheduler's first continued round sees it lead the intent even when
-// the claim lands in the same tick. With no note the steer carries a plain
+// The steer-grade board note commits with the requeue, so the scheduler can
+// only read the directive of a successful claim. With no note the steer carries a plain
 // "keep going" directive — the resumed agent session supplies the rest of
 // the context.
 //
@@ -899,10 +898,7 @@ func (c *Core) ContinueReviewed(ctx context.Context, taskID, note string) (Task,
 	if steer == "" {
 		steer = "the operator asked to continue — pick up where the previous round stopped and finish the remaining work"
 	}
-	if _, err := c.userMessage(ctx, taskID, steer, nil, MsgGradeSteer, "continue"); err != nil {
-		return cur, err
-	}
-	if err := c.store.RequeueForContinue(ctx, taskID, cur.OwnerNode); err != nil {
+	if err := c.store.RequeueForContinue(ctx, cur, steer); err != nil {
 		final, gerr := c.store.Get(ctx, taskID)
 		if gerr != nil {
 			return cur, gerr

@@ -213,3 +213,42 @@ func TestUpdateModelSectionCarriesCredentialReferences(t *testing.T) {
 		t.Errorf("inline row = key %q scheme %q", cfg.Model.APIKey, cfg.Model.KeyScheme)
 	}
 }
+
+// TestUpdateModelSectionCarriesConnectionName: the console's name for a
+// connection is written by the same field-by-field rewrite as the rest of the
+// live section, so it has to be in that list — otherwise renaming a row that
+// only exists under `model:` survives until the next restart and then falls
+// back to the vendor name.
+func TestUpdateModelSectionCarriesConnectionName(t *testing.T) {
+	p := writeTemp(t, `node:
+  name: "n"
+`)
+	mc := ModelConfig{
+		Name: "b", Provider: "custom", APIType: "anthropic",
+		BaseURL: "https://relay.example/v1", Model: "m", APIKey: "sk-b",
+		ConnName: "公司中转",
+	}
+	if err := UpdateModelSection(p, mc); err != nil {
+		t.Fatalf("UpdateModelSection: %v", err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Model.ConnName != "公司中转" {
+		t.Errorf("model.conn_name = %q, want 公司中转", cfg.Model.ConnName)
+	}
+
+	// Clearing the name removes the key rather than leaving an empty string.
+	mc.ConnName = ""
+	if err := UpdateModelSection(p, mc); err != nil {
+		t.Fatalf("UpdateModelSection clear: %v", err)
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "conn_name") {
+		t.Errorf("conn_name survived a cleared name:\n%s", data)
+	}
+}

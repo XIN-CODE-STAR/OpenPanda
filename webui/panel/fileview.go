@@ -86,7 +86,8 @@ func (h *handler) viewFile(w http.ResponseWriter, r *http.Request) {
 	// chat is the path the agent used, and the agent runs in the session's
 	// worktree (or its project's work dir), not in whatever directory the
 	// daemon started in.
-	workDir := h.sessionCwd(q.Get("session"))
+	id := q.Get("session")
+	workDir := h.sessionCwd(id)
 	if workDir != "" {
 		// Resolve the base once, up front: the path below is resolved before
 		// the root check, and comparing a resolved child against an unresolved
@@ -96,7 +97,7 @@ func (h *handler) viewFile(w http.ResponseWriter, r *http.Request) {
 			workDir = real
 		}
 	}
-	abs, base, err := h.resolveViewPath(reqPath, workDir)
+	abs, base, err := h.resolveViewPath(h.resolveLegacyUpload(id, workDir, reqPath), workDir)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, errors.New("invalid path"))
 		return

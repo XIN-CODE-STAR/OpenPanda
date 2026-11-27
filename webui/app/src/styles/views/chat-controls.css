@@ -644,19 +644,49 @@
 
 .composer-proposal { display: flex; align-items: flex-start; gap: 12px; padding: 10px 14px; border-top: 1px solid var(--border); font-size: 12px; }
 .composer-plan-trigger[aria-pressed="true"] { color: var(--text); background: var(--bg-active); }
+
+/* The plan chip leaves plan mode when pressed, and the × is the only thing on
+   the chip that says so — the bulb reads as a status badge, which is why the
+   way out used to be a guess. It fades in on hover and expands in place: the
+   row has flexible space to the right of the chip, so nothing beside it moves.
+   Keyboard users get the same mark on focus, and a device without hover keeps
+   the chip's plain label — the press works either way. */
+.composer-plan-trigger .plan-chip-x {
+  display: inline-flex;
+  align-items: center;
+  width: 0;
+  margin-left: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition: width var(--dur-fast) var(--ease-standard),
+    margin-left var(--dur-fast) var(--ease-standard),
+    opacity var(--dur-fast) var(--ease-standard);
+}
+.composer-plan-trigger:hover .plan-chip-x,
+.composer-plan-trigger:focus-visible .plan-chip-x {
+  width: 12px;
+  margin-left: 2px;
+  opacity: .72;
+}
 .composer-proposal button { flex-shrink: 0; border-radius: 8px; padding: 6px 10px; }
 @media (max-width: 480px) { .composer-proposal { flex-wrap: wrap; } }
 
-/* The proposal bar stands on the lane between the transcript and the composer
-   — after the reply that produced it, outside the input's frame. It shares the
-   composer's measure so the two read as one column: the bar is what you act
-   on, the box below is where you type next. The clarify card uses the same
-   shelf, so "something is waiting for you" always appears in the same place. */
+/* The proposal uses the second track of the pet's existing header. Give
+   the absolute row room above the box without moving the pet's feet. */
+.composer.has-plan-proposal { padding-block-start: 52px; }
+.plan-proposal-slot {
+  min-width: 0;
+  /* Clear the input border without adding height to the pet's grid row. */
+  position: relative;
+  align-self: end;
+  inset-block-end: calc(var(--pet-overhang) + 3px);
+  container: plan-proposal / inline-size;
+  pointer-events: auto;
+}
+/* Implementation status stays on its own shelf above the pet. */
 .plan-dock {
   flex: none;
-  /* The pet stands on the composer's top edge (38px tall, 6px of it inside the
-     box), so the shelf above the box has to give that overhang back or the
-     panda lands on the proposal bar. */
+  /* Give the pet's overhang back so it doesn't land on the running bar. */
   padding: 0 calc(var(--sp-6) + var(--panel-lane)) 34px var(--chat-leading-gutter);
   transition: padding-right var(--dur-med) var(--ease-standard);
 }
@@ -701,30 +731,31 @@
   color: var(--text-secondary);
 }
 .plan-dock-review { flex: none; }
-/* The card's body is a button now: reading the plan is one intention, acting
-   on it is the other, and both need their own hit area. A button inside a flex
-   card inherits the browser's chrome, so its frame is stripped and the card's
-   own border stays the only one on screen. */
-.plan-dock-open {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  flex: 1;
+.plan-dock-proposal {
+  width: 100%;
   min-width: 0;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  background: none;
-  font: inherit;
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
+  /* Match the pet's visible height, rather than its transparent frame. */
+  min-height: 36px;
+  padding: 2px var(--sp-2) 2px var(--sp-3);
+  line-height: 1.2;
+  text-align: start;
+  animation-name: fade-in;
 }
-.plan-dock-open:hover .plan-dock-title { color: var(--brand); }
-.plan-dock-open:focus-visible {
+.plan-dock-proposal:is(:hover, [aria-expanded=true]) {
+  border-color: var(--border-strong);
+}
+.plan-dock-proposal:focus-visible {
   outline: 2px solid var(--brand);
-  outline-offset: 4px;
-  border-radius: var(--radius-md);
+  outline-offset: 0;
+}
+@container plan-proposal (max-width: 330px) {
+  .plan-dock-proposal { gap: var(--sp-2); padding-inline: var(--sp-2); }
+  .plan-dock-proposal .plan-dock-review > svg { display: none; }
+}
+@container plan-proposal (max-width: 228px) {
+  .plan-dock-proposal .plan-dock-review { padding-inline: 4px; }
+  .plan-dock-proposal .plan-dock-review > span { display: none; }
+  .plan-dock-proposal .plan-dock-review > svg { display: block; }
 }
 /* A confirmed plan runs with no stream of its own, so this card is the only
    liveness signal between "开始实施" and the first transcript line. The dot
@@ -761,6 +792,8 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .plan-pane-head {
   flex: none;
@@ -784,9 +817,12 @@
   flex: 1;
   min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
+  overflow-wrap: anywhere;
   padding: var(--sp-4);
   color: var(--text);
 }
+.plan-pane-body:focus-visible { outline-offset: -2px; }
 .plan-pane-foot {
   flex: none;
   display: flex;
@@ -819,8 +855,15 @@
 }
 .plan-pane-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: var(--sp-2);
+}
+.plan-pane-actions > .btn {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: normal;
+  text-align: center;
 }
 @keyframes plan-dock-in {
   from { opacity: 0; transform: translateY(4px); }
@@ -830,8 +873,8 @@
   .plan-dock-card { animation: none; }
 }
 @media (max-width: 480px) {
-  .plan-dock-card { flex-wrap: wrap; }
-  .plan-dock-review { width: 100%; }
+  .plan-dock-live { flex-wrap: wrap; }
+  .plan-dock-live .plan-dock-review { width: 100%; }
 }
 
 .conversation-dialog {

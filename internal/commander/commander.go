@@ -1135,22 +1135,23 @@ func (r *Router) execAgent(ctx context.Context, plan Plan, prompt string, cwd st
 		}
 
 		res := Result{
-			OK:             ar.OK,
-			ExitCode:       ar.ExitCode,
-			Stdout:         ar.Result,
-			Stderr:         stderr,
-			Tokens:         ar.Tokens,
-			Cost:           ar.Cost,
-			Agent:          name,
-			Adapter:        ag.Adapter,
-			Usage:          ar.Usage,
-			SessionID:      ar.SessionID,
-			Model:          ar.Model,
-			Injected:       ar.Injected,
-			RescueError:    ar.RescueError,
-			Structured:     ar.Structured,
-			SubagentStats:  ar.SubagentStats,
-			ResumeRejected: rejectedResume(runCtx, ag.Adapter, ar),
+			OK:                 ar.OK,
+			ExitCode:           ar.ExitCode,
+			Stdout:             ar.Result,
+			Stderr:             stderr,
+			Tokens:             ar.Tokens,
+			Cost:               ar.Cost,
+			Agent:              name,
+			Adapter:            ag.Adapter,
+			Usage:              ar.Usage,
+			SessionID:          ar.SessionID,
+			Model:              ar.Model,
+			Injected:           ar.Injected,
+			RescueError:        ar.RescueError,
+			Structured:         ar.Structured,
+			SubagentStats:      ar.SubagentStats,
+			ResumeRejected:     !ar.outcomeUnconfirmed && rejectedResume(runCtx, ag.Adapter, ar),
+			OutcomeUnconfirmed: ar.outcomeUnconfirmed,
 		}
 		lastExecRes = &res
 
@@ -1211,7 +1212,7 @@ func (r *Router) execAgent(ctx context.Context, plan Plan, prompt string, cwd st
 		// they verify the login, so requiring an empty id here made an
 		// unauthenticated start look like interrupted work and kept the task
 		// from being handed to a healthy peer.
-		res.NoProviderWork = !ar.WorkObserved && ar.Tokens == 0 && (providerFailure || ar.ExitCode == 127)
+		res.NoProviderWork = !ar.hasWorkEvidence() && (providerFailure || ar.ExitCode == 127)
 		// This run never got off the ground. Remember it so a supervisor
 		// retry or the next task does not hand the same locked-out CLI
 		// another 2.5-minute attempt.
@@ -1278,8 +1279,9 @@ var agentDispatchFailurePatterns = []string{
 	// and the singular noun escaped every pattern above, so a task stayed on
 	// a CLI that could never run instead of falling through to another one.
 	"missing_credential", "missing credential", "no credential",
-	"insufficient", "quota exceeded", "insufficient_quota", "out of credits",
-	"billing", "account funds",
+	"insufficient balance", "insufficient account funds", "insufficient credits",
+	"insufficient quota", "quota exceeded", "insufficient_quota", "out of credits",
+	"billing required", "billing hard limit",
 	"model not found", "unknown model", "invalid model", "unrecognized_model",
 	"connection refused", "no such host", "network is unreachable",
 	"certificate", "tls handshake", "ssl", "x509",
@@ -1306,13 +1308,15 @@ func agentFallbackEligible(ar AgentResult) bool {
 	if ar.OK {
 		return false
 	}
-	// A minted session id is not evidence of work: a CLI that opens a session
-	// before checking its credential leaves one behind with zero tokens and
-	// nothing observed. Interrupted work is the signal that belongs to core
-	// recovery — timeouts, billed tokens, a touched workspace, a session the
-	// adapter itself declared dead.
-	if ar.ExitCode == 124 || ar.hasWorkEvidence() || ar.SessionDead {
+	if ar.ExitCode == 124 || ar.promptAccepted || ar.hasWorkEvidence() || ar.SessionDead {
 		return false // interrupted work belongs to core recovery, never fresh fallback
+	}
+	if ar.SessionID != "" {
+		// A minted id can precede a CLI login refusal. Permit that known
+		// startup outcome but leave other checkpointed failures with their
+		// original agent. The adapter-specific provider path has its own
+		// checks for an explicitly rejected startup.
+		return IsAuthenticationSetupRequired(ar.Result) || IsAuthenticationSetupRequired(ar.Stderr)
 	}
 	if ar.ExitCode == 126 || ar.ExitCode == 127 {
 		return true
@@ -1348,13 +1352,16 @@ func describeAgentFailure(ar AgentResult) string {
 type Result struct {
 	// NoProviderWork is local dispatch evidence used before handing off to a peer.
 	NoProviderWork bool `json:"-"`
-	OK             bool
-	ExitCode       int
-	Stdout         string
-	Stderr         string
-	Tokens         int
-	Cost           float64
-	NeedManual     bool
+	// OutcomeUnconfirmed means the CLI received the prompt but no result
+	// reached the caller. Recovery must not start a new execution blindly.
+	OutcomeUnconfirmed bool `json:"-"`
+	OK                 bool
+	ExitCode           int
+	Stdout             string
+	Stderr             string
+	Tokens             int
+	Cost               float64
+	NeedManual         bool
 	// ResumeRejected is computed at the adapter boundary, never trusted from
 	// adapter-authored JSON. It permits one full-input cold recovery.
 	ResumeRejected bool
@@ -1423,6 +1430,9 @@ type AgentResult struct {
 	SessionDead bool `json:"session_dead,omitempty"`
 	// WorkObserved is trusted Go-side tool activity, never adapter-authored.
 	WorkObserved bool `json:"-"`
+	// An explicit agent receipt and whether the result wire was lost. Only
+	// the transport may set these fields.
+	promptAccepted, outcomeUnconfirmed bool
 	// OpenCode can mint an empty session before its provider accepts a fresh run.
 	ProviderStartupFailure bool `json:"provider_startup_failure,omitempty"`
 	// RescueError is set by the router, not by the adapter.
@@ -1625,17 +1635,19 @@ func providerRescueEligible(ctx context.Context, adapter string, res AgentResult
 	// api_retry failure envelope can precede any work. Tool activity, token
 	// usage and all ordinary checkpoints still forbid a full replay.
 	text := res.Result + " " + res.Stderr
-	if ResumeID(ctx) != "" && (ResumeAdapter(ctx) == "" || ResumeAdapter(ctx) == adapter) {
+	if res.outcomeUnconfirmed || (ResumeID(ctx) != "" && (ResumeAdapter(ctx) == "" || ResumeAdapter(ctx) == adapter)) {
 		return false
 	}
 	if adapter == "opencode.py" && res.ProviderStartupFailure && strings.HasPrefix(res.Result, "provider failure: ") {
 		res.SessionID = ""
+		res.promptAccepted = false
 	} else if adapter == "claude_code.py" && (claudeProviderFailure(res) ||
 		// The plain "not logged in" refusal is the other shape of a startup
 		// failure, and it does not carry the api_retry prefix. Zero tokens and
 		// no observed work mean the minted handle describes nothing.
 		(res.Tokens == 0 && !res.WorkObserved && (res.Usage == nil || *res.Usage == (UsageDetail{})) && IsAuthenticationSetupRequired(text))) {
 		res.SessionID = ""
+		res.promptAccepted = false
 	}
 	return replayableFailure(res) && !commanderKill(res) &&
 		(isProviderFailureOrAuth(text) || IsModelConfigFailure(text))

@@ -3082,6 +3082,29 @@ class HarnessContractTest(unittest.TestCase):
         self.assertEqual(payload["result"], "hi there")
         self.assertEqual(payload["exit_code"], 7)
         self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.stderr, "")
+
+    def test_receipt_requires_a_successful_child_handoff(self):
+        body = 'r = _harness.read_request(); _harness.emit(True, r.prompt, 0)'
+        request = json.dumps({"prompt": "hi there", "prompt_receipt": True})
+        payload, proc = run_harness(
+            body, stdin_data=request)
+        self.assertEqual(payload["result"], "hi there")
+        self.assertEqual(proc.stderr, "")
+
+        for transport in ("run_plain", "run_stream"):
+            body = (
+                "import sys; r = _harness.read_request(); "
+                f"_harness.{transport}([sys.executable, '-c', 'import sys; sys.stdin.read()'], input=r.prompt); "
+                "_harness.emit(True, r.prompt, 0)"
+            )
+            payload, proc = run_harness(body, stdin_data=request)
+            self.assertEqual(payload["result"], "hi there")
+            self.assertEqual(json.loads(proc.stderr), {"type": "prompt_delivered", "stage": "agent"})
+
+        payload, proc = run_harness(body, stdin_data='{"prompt_receipt":true,')
+        self.assertFalse(payload["ok"])
+        self.assertEqual(proc.stderr, "")
 
     def test_read_request_carries_resume_and_policy(self):
         req = {"prompt": "p", "resume": "sess-9", "tools_policy": "extended"}

@@ -5,8 +5,10 @@ import assert from 'node:assert/strict'
 import {
   favoriteKey,
   groupRows,
+  normDir,
   pathEnterTarget,
   pathLike,
+  pathQueryRows,
   splitPathQuery,
   type DirGroup,
   type WorkdirRow,
@@ -117,9 +119,16 @@ test('groupRows puts rows without a stamp in the tail band', () => {
 test('pathLike tells a path from a search word', () => {
   assert.equal(pathLike('D:\\X'), true)
   assert.equal(pathLike('~/code'), true)
+  assert.equal(pathLike('~'), true)
+  assert.equal(pathLike('~project'), false)
   assert.equal(pathLike('C:'), true)
+  assert.equal(pathLike('C:relative'), false)
   assert.equal(pathLike('panda'), false)
   assert.equal(pathLike(''), false)
+  // A separator inside a word does not make it a path: the server would
+  // resolve it against its own working directory, not the one on screen.
+  assert.equal(pathLike('src/utils'), false)
+  assert.equal(pathLike('/usr'), true)
 })
 
 test('splitPathQuery splits at the last separator', () => {
@@ -129,4 +138,89 @@ test('splitPathQuery splits at the last separator', () => {
   // A drive letter on its own is a place to look, not a prefix.
   assert.deepEqual(splitPathQuery('D:'), { base: 'D:\\', prefix: '', self: '' })
   assert.equal(splitPathQuery('proj'), null)
+  // An absolute path cuts at 0: the base is the root, not the empty string —
+  // an empty base asks the server for "no path", which it answers with home.
+  assert.deepEqual(splitPathQuery('/usr'), { base: '/', prefix: 'usr', self: '' })
+  // The root itself is a place to look; returning null left the card on
+  // "loading" forever.
+  assert.deepEqual(splitPathQuery('/'), { base: '/', prefix: '', self: '/' })
+  assert.deepEqual(splitPathQuery('\\'), { base: '\\', prefix: '', self: '\\' })
+  assert.deepEqual(splitPathQuery('~'), { base: '~', prefix: '', self: '~' })
+})
+
+test('normDir folds case for Windows paths only', () => {
+  assert.equal(normDir('D:\\X\\Proj\\'), 'd:\\x\\proj')
+  // A POSIX tree is case-sensitive: /w/New and /w/new are two folders, and
+  // folding them made the cursor land on the wrong one.
+  assert.equal(normDir('/w/New/'), '/w/New')
+  assert.notEqual(normDir('/w/New'), normDir('/w/new'))
+  assert.notEqual(normDir('/'), normDir(''))
+})
+
+test('path completions put the exact POSIX directory ahead of folded matches', () => {
+  const query = '/work/new'
+  const listing = {
+    separator: '/',
+    current: '/work',
+    parent: '/',
+    directories: [
+      { name: 'New', path: '/work/New' },
+      { name: 'new-project', path: '/work/new-project' },
+      { name: 'new', path: '/work/new' },
+    ],
+  }
+  const options = pathQueryRows(query, splitPathQuery(query)!, listing)
+  assert.deepEqual(options.map((row) => row.dir), ['/work/new', '/work/New', '/work/new-project'])
+  assert.equal(pathEnterTarget(query, options, query, 0)?.dir, '/work/new')
+  assert.equal(pathEnterTarget(query, options, query, 1)?.dir, '/work/New')
+  const differentCase = '/work/NEW'
+  assert.deepEqual(pathQueryRows(differentCase, splitPathQuery(differentCase)!, listing).at(-1), {
+    name: 'NEW', dir: differentCase, create: true,
+  })
+})
+
+test('path completions match drive aliases and ignore Windows case and separators', () => {
+  const query = 'd:/work/new'
+  const options = pathQueryRows(query, splitPathQuery(query)!, {
+    separator: '\\',
+    current: 'D:\\Work',
+    parent: 'D:\\',
+    directories: [
+      { name: 'New Project', path: 'D:\\Work\\New Project' },
+      { name: 'New', path: 'D:\\Work\\New' },
+    ],
+  })
+  assert.equal(options.length, 2)
+  assert.equal(pathEnterTarget(query, options, query, 0)?.dir, 'D:\\Work\\New')
+})
+
+test('root and home paths select the directory itself when the listing arrives', () => {
+  const root = pathQueryRows('/', splitPathQuery('/')!, {
+    separator: '/', current: '/', parent: '', directories: [{ name: 'usr', path: '/usr' }],
+  })
+  assert.equal(pathEnterTarget('/', root, '/', 0)?.dir, '/')
+  assert.equal(pathEnterTarget('/', root, '/', 1)?.dir, '/usr')
+
+  const home = pathQueryRows('~', splitPathQuery('~')!, {
+    separator: '/', current: '/home/reader', parent: '/home', directories: null,
+  })
+  assert.equal(pathEnterTarget('~', home, '', 0), null)
+  assert.equal(pathEnterTarget('~', home, '~', 0)?.dir, '/home/reader')
+})
+
+test('a home-relative completion uses the node path and only offers creation for missing paths', () => {
+  const query = '~/projects'
+  const options = pathQueryRows(query, splitPathQuery(query)!, {
+    separator: '/',
+    current: '/home/reader',
+    parent: '/home',
+    directories: [{ name: 'projects', path: '/home/reader/projects' }],
+  })
+  assert.deepEqual(options, [{ name: 'projects', dir: '/home/reader/projects' }])
+
+  const withSeparator = query + '/'
+  const self = pathQueryRows(withSeparator, splitPathQuery(withSeparator)!, {
+    separator: '/', current: '/home/reader/projects', parent: '/home/reader', directories: [],
+  })
+  assert.equal(pathEnterTarget(withSeparator, self, withSeparator, 0)?.dir, '/home/reader/projects')
 })

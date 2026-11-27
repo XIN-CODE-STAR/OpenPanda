@@ -19,11 +19,12 @@
 //     registry into a phone book.
 
 import { useEffect, useRef, useState } from 'preact/hooks'
-import { api, type DiscoverSource, type DiscoveredModel, type ModelImportItem } from '../api/client'
+import { api, type DiscoverSource, type DiscoveredModel, type ModelImportResult } from '../api/client'
 import { useModalFocus } from '../components/modal-focus'
 import { Icon } from '../components/icons'
 import { t } from '../i18n'
 import { hostOf } from './model-connections'
+import { ImportFailures, markImported, useModelImport } from './model-import'
 
 /** Rows shown before a source collapses into "show all". A catalogue source can
  *  carry eighty; the sheet is for choosing, not for scrolling. */
@@ -31,13 +32,14 @@ const COLLAPSED_ROWS = 8
 
 export function DiscoverSheet(props: {
   onClose(): void
-  onDone(added: number, skipped?: string[]): void
+  onDone(result: ModelImportResult): void
 }) {
   const [sources, setSources] = useState<DiscoverSource[] | null>(null)
   const [error, setError] = useState('')
   const [picked, setPicked] = useState<Set<string>>(new Set())
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
-  const [busy, setBusy] = useState(false)
+  const importer = useModelImport(props.onDone, props.onClose)
+  const scanned = useRef(false)
   // The scan runs the OpenCode CLI and then a live check per loopback model, so
   // it can take twenty seconds. A frozen "scanning…" reads as a hang; a ticking
   // number reads as work.
@@ -46,8 +48,10 @@ export function DiscoverSheet(props: {
   useModalFocus(box, true)
 
   function scan() {
+    importer.clearFailures()
     setError('')
     setSources(null)
+    setElapsed(0)
     api
       .discoverModels()
       .then((r) => {
@@ -55,13 +59,11 @@ export function DiscoverSheet(props: {
         // The default tick: importable, not already registered, and the
         // collector considers it the real thing (a configured model, a live
         // server) rather than one row of a vendor catalogue.
-        const next = new Set<string>()
-        for (const s of r.sources) {
-          for (const c of s.candidates) {
-            if (c.importable && !c.existing && c.suggested) next.add(c.id)
-          }
-        }
-        setPicked(next)
+        const first = !scanned.current
+        scanned.current = true
+        setPicked((previous) => new Set(r.sources.flatMap((s) => s.candidates)
+          .filter((c) => importable(c) && (first ? c.suggested : previous.has(c.id)))
+          .map((c) => c.id)))
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
   }
@@ -101,40 +103,19 @@ export function DiscoverSheet(props: {
     return c.importable && !c.existing
   }
 
-  async function submit() {
+  function submit() {
     if (!sources) return
-    const items: ModelImportItem[] = []
-    for (const s of sources) {
-      for (const c of s.candidates) {
-        if (!picked.has(c.id) || !importable(c)) continue
-        items.push({
-          provider: c.provider,
-          model: c.model,
-          base_url: c.base_url || undefined,
-          api_type: c.api_type || undefined,
-          key_ref: c.key_ref || undefined,
-          no_auth: c.no_auth,
-          auth: c.auth || undefined,
-          context_window: c.context_window,
-        })
-      }
-    }
-    if (!items.length) return
-    setBusy(true)
-    try {
-      const r = await api.importModels(items)
-      props.onDone(r.added, r.skipped)
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e))
-      setBusy(false)
-    }
+    void importer.submit(sources, picked, (ids) => {
+      setSources((current) => markImported(current, ids))
+      setPicked((current) => new Set([...current].filter((id) => !ids.has(id))))
+    })
   }
 
-  const count = picked.size
+  const count = sources ? picked.size : 0
   const nothing = sources !== null && !sources.some((s) => s.candidates.some(importable))
 
   return (
-    <div class="modal-backdrop" onClick={(e) => e.target === e.currentTarget && props.onClose()}>
+    <div class="modal-backdrop" onClick={(e) => e.target === e.currentTarget && importer.close()}>
       <div
         ref={box}
         class="modal wizard-modal"
@@ -144,7 +125,7 @@ export function DiscoverSheet(props: {
         onKeyDown={(e) => {
           if (e.key === 'Escape') {
             e.stopPropagation()
-            props.onClose()
+            importer.close()
           }
         }}
       >
@@ -160,7 +141,8 @@ export function DiscoverSheet(props: {
             class="btn-icon wizard-close"
             aria-label={t('common.close')}
             title={t('common.close')}
-            onClick={props.onClose}
+            onClick={importer.close}
+            disabled={importer.busy}
           >
             <Icon name="x" size={16} />
           </button>
@@ -183,6 +165,8 @@ export function DiscoverSheet(props: {
                 </button>
               </div>
             )}
+
+            <ImportFailures failures={importer.failures} />
 
             {sources?.map((s) => {
               const rows = s.candidates.filter((c) => c.importable || c.existing || c.model)
@@ -211,7 +195,7 @@ export function DiscoverSheet(props: {
                       </span>
                     )}
                     {ids.length > 0 && (
-                      <button type="button" class="discover-all" onClick={() => toggleSource(s)}>
+                      <button type="button" class="discover-all" disabled={importer.busy} onClick={() => toggleSource(s)}>
                         {allPicked ? t('models.discover.clearAll') : t('models.discover.selectAll')}
                       </button>
                     )}
@@ -229,7 +213,7 @@ export function DiscoverSheet(props: {
                       >
                         <input
                           type="checkbox"
-                          disabled={!usable}
+                          disabled={!usable || importer.busy}
                           checked={usable && picked.has(c.id)}
                           onChange={() => toggle(c.id)}
                         />
@@ -249,7 +233,7 @@ export function DiscoverSheet(props: {
                             </span>
                           )}
                           {usable && !c.verified && (
-                            <span class="discover-tag unchecked" title={t('models.discover.unverifiedHint')}>
+                            <span class="discover-tag unchecked" title={c.check || t('models.discover.unverifiedHint')}>
                               {t('models.discover.unverified')}
                             </span>
                           )}
@@ -287,16 +271,19 @@ export function DiscoverSheet(props: {
 
           <footer class="wizard-foot">
             <span class="wizard-foot-note">{t('models.discover.picked', { n: count })}</span>
-            <button type="button" class="btn" onClick={props.onClose}>
+            <button type="button" class="btn" onClick={scan} disabled={importer.busy || !sources}>
+              {t('models.discover.refresh')}
+            </button>
+            <button type="button" class="btn" onClick={importer.close} disabled={importer.busy}>
               {t('common.cancel')}
             </button>
             <button
               type="button"
               class="btn primary"
-              disabled={count === 0 || busy}
-              onClick={() => void submit()}
+              disabled={count === 0 || importer.busy}
+              onClick={submit}
             >
-              {busy ? t('models.discover.importing') : t('models.discover.import', { n: count })}
+              {importer.busy ? t('models.discover.importing') : t('models.discover.import', { n: count })}
             </button>
           </footer>
         </div>

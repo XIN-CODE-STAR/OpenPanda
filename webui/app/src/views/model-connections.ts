@@ -25,6 +25,10 @@ export interface Conn {
    *  one. It is provenance, not routing: the card is named after it so a
    *  relay the person never typed does not read as "custom base_url". */
   source: string
+  /** The name the user gave this connection. Empty means "name it from the
+   *  vendor" — see connName(). It rides on the rows (config has no connection
+   *  record), so the first non-empty one speaks for the group. */
+  customName: string
   baseURL: string
   apiType: string
   keyHint: string
@@ -114,20 +118,38 @@ export function labelOf(providers: ProviderInfo[], id?: string): string {
 /** The discovery collectors that can label a connection. Anything else (a
  *  hand-written row, or a value a newer panel invented) is not a source the
  *  card knows how to name. */
-const CONN_SOURCES = new Set(['codex', 'claude', 'opencode', 'local'])
+const CONN_SOURCES = new Set(['codex', 'claude', 'opencode', 'local', 'ccswitch'])
 
 /** The card's heading.
  *
- *  A known vendor names itself ("ChatGPT (OpenAI)", "通义千问 (DashScope)"),
- *  which is the best a card can do. A row imported from another tool is named
- *  after that tool: the person never chose the address a CLI config carried,
- *  so "自定义 / 中转站" plus a loopback port describes the plumbing instead of
- *  the thing they imported. Only a row nobody can place keeps the generic
- *  label — and even then it is the short one, because the catalogue's own
- *  "自定义 / 中转站 (custom base_url)" wraps to two lines in a 232px card. */
+ *  A name the user typed wins over everything: it is the one label that tells
+ *  two relays apart when both would otherwise read "自定义 / 中转站 · 本地端点",
+ *  which is the whole reason the field exists.
+ *
+ *  Otherwise a known vendor names itself ("ChatGPT (OpenAI)", "通义千问
+ *  (DashScope)"), which is the best a card can do. A row imported from another
+ *  tool is named after that tool: the person never chose the address a CLI
+ *  config carried, so "自定义 / 中转站" plus a loopback port describes the
+ *  plumbing instead of the thing they imported. Only a row nobody can place
+ *  keeps the generic label — and even then it is the short one, because the
+ *  catalogue's own "自定义 / 中转站 (custom base_url)" wraps to two lines in a
+ *  232px card. */
 export function connName(c: Conn, providers: ProviderInfo[]): string {
+  return c.customName || derivedConnName(c, providers)
+}
+
+/** What the card would say if the user had not named the connection. The edit
+ *  sheet paints it as the input's placeholder, so "leave it empty" reads as
+ *  the concrete name it produces rather than as an abstract default. Takes the
+ *  two fields it reads rather than a whole Conn: the add sheet has no
+ *  connection yet, only a vendor and no provenance. */
+export function derivedConnName(
+  c: Pick<Conn, 'provider' | 'source'>,
+  providers: ProviderInfo[],
+): string {
   const known = providers.find((p) => p.id === c.provider)
   if (known && c.provider !== 'custom') return known.label
+  if (c.source === 'ccswitch') return t('models.ccswitch.trigger')
   if (CONN_SOURCES.has(c.source)) return t(`models.discover.source.${c.source}`)
   return t('models.customProvider')
 }
@@ -209,6 +231,7 @@ export function groupConnections(data: ModelsResponse): Conn[] {
         provider: m.entry.provider ?? '',
         providerLabel: m.entry.provider_label ?? m.entry.provider ?? '',
         source: m.entry.source ?? '',
+        customName: m.entry.conn_name ?? '',
         baseURL: m.entry.base_url,
         apiType: m.entry.api_type,
         keyHint: m.entry.key_hint ?? '',
@@ -225,6 +248,9 @@ export function groupConnections(data: ModelsResponse): Conn[] {
     // One imported row is enough to say where the account came from: a row the
     // person added by hand to the same account does not erase that.
     if (!conn.source && m.entry.source) conn.source = m.entry.source
+    // Same rule for the name: a row written before the field existed (or by an
+    // older console) must not hide a name its siblings carry.
+    if (!conn.customName && m.entry.conn_name) conn.customName = m.entry.conn_name
   }
   return [...byId.values()].sort((a, b) => {
     const aActive = a.members.some((m) => m.entry.active)

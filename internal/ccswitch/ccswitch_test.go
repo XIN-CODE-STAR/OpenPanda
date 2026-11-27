@@ -14,6 +14,7 @@ import (
 // seed writes a store at <home>/.cc-switch/cc-switch.db with one provider.
 func seed(t *testing.T) (home, id string) {
 	t.Helper()
+	t.Setenv("CC_SWITCH_DB", "")
 	home = t.TempDir()
 	dir := filepath.Join(home, ".cc-switch")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -89,11 +90,75 @@ func TestReadMissingStoreIsNotAnError(t *testing.T) {
 	}
 }
 
+func TestReadAndResolveGeminiFromTheOverriddenStore(t *testing.T) {
+	home, _ := seed(t)
+	override := filepath.Join(t.TempDir(), "CC Switch #1.db")
+	if err := os.Rename(Path(home), override); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", override)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec("DELETE FROM providers"); err != nil {
+		t.Fatal(err)
+	}
+	providers, err := Read(override)
+	if err != nil || providers == nil || len(providers) != 0 {
+		t.Fatalf("empty store: %d entries, present=%v, error=%v", len(providers), providers != nil, err)
+	}
+	for id, settings := range map[string]string{
+		"api":    `{"env":{"GEMINI_MODEL":"models/gemini-test","GEMINI_API_KEY":"gemini-fixture"}}`,
+		"vertex": `{"env":{"GEMINI_MODEL":"gemini-test","GEMINI_API_KEY":"vertex-fixture","GOOGLE_GENAI_USE_VERTEXAI":"true"}}`,
+	} {
+		if _, err := db.Exec("INSERT INTO providers VALUES (?, ?, ?, ?, 0, 1)", id, AppGemini, id, settings); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("CC_SWITCH_DB", override)
+	providers, err = Read(override)
+	if err != nil || len(providers) != 2 {
+		t.Fatalf("Gemini store: %d entries, error=%v", len(providers), err)
+	}
+	google := providers[0]
+	if google.APIType != "google" || google.BaseURL != "https://generativelanguage.googleapis.com" ||
+		len(google.Models) != 1 || google.Models[0] != "gemini-test" || !google.HasToken || providers[1].HasToken {
+		t.Fatal("Gemini model, default endpoint, or auth type was parsed incorrectly")
+	}
+	if ResolveKey(MakeRef(AppGemini, "api"), home) != "gemini-fixture" ||
+		ResolveKey(MakeRef(AppGemini, "vertex"), home) != "" {
+		t.Fatal("Gemini credential resolution does not match discovery")
+	}
+}
+
+func TestClaudeFormatsFromCurrentAndLegacyCCSwitchSettings(t *testing.T) {
+	for _, tc := range []struct {
+		name, meta, fields, protocol string
+		bearer, hasToken             bool
+	}{
+		{"metadata prefers Chat", `{"apiFormat":"openai_chat"}`, `,"api_format":"openai_responses"`, "openai", true, true},
+		{"legacy Responses", "", `,"api_format":"openai_responses"`, "responses", true, true},
+		{"legacy compat mode", "", `,"openrouter_compat_mode":true`, "openai", true, true},
+		{"native Gemini API key", `{"apiFormat":"gemini_native"}`, "", "google", false, true},
+		{"managed OAuth", `{"apiFormat":"openai_responses","providerType":"codex_oauth"}`, "", "responses", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := Provider{AppType: AppClaudeDesktop}
+			applySettings(&provider, `{"env":{"ANTHROPIC_AUTH_TOKEN":"fixture"}`+tc.fields+`}`, tc.meta)
+			if provider.APIType != tc.protocol || provider.Bearer != tc.bearer || provider.HasToken != tc.hasToken {
+				t.Fatalf("got protocol=%s bearer=%v hasToken=%v", provider.APIType, provider.Bearer, provider.HasToken)
+			}
+		})
+	}
+}
+
 // seedCodex writes a store with one Codex provider: auth.json under "auth"
 // and config.toml as a string under "config", which is the shape CC Switch
 // stores for that app.
 func seedCodex(t *testing.T) (home, id string) {
 	t.Helper()
+	t.Setenv("CC_SWITCH_DB", "")
 	home = t.TempDir()
 	dir := filepath.Join(home, ".cc-switch")
 	if err := os.MkdirAll(dir, 0o755); err != nil {

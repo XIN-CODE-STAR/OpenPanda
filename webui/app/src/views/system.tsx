@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { useCallback, useEffect, useState } from 'preact/hooks'
+import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
 import {
   api,
   ApiError,
@@ -142,12 +142,19 @@ function UpdateCard() {
   const [busy, setBusy] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const [unavailable, setUnavailable] = useState(false)
+  const statusGeneration = useRef(0)
+  const actionPending = useRef(false)
 
   const refresh = useCallback(async () => {
+    if (actionPending.current) return
+    const generation = ++statusGeneration.current
     try {
-      setStatus(await api.updateStatus())
+      const latest = await api.updateStatus()
+      if (generation !== statusGeneration.current) return
+      setStatus(latest)
       setUnavailable(false)
     } catch (e) {
+      if (generation !== statusGeneration.current) return
       // The backend restarts right after apply — ignore the transient miss.
       // A 404 means this panel runs without the self-update endpoints (the
       // standalone sidecar disables them), so say so instead of spinning.
@@ -161,19 +168,25 @@ function UpdateCard() {
   useEffect(() => {
     void refresh()
   }, [refresh])
-  useVisibleInterval(() => void refresh(), 2000)
+  useVisibleInterval(refresh, 2000)
 
   async function act(fn: () => Promise<UpdateStatus>) {
+    if (actionPending.current) return
+    actionPending.current = true
+    statusGeneration.current++
     setBusy(true)
     setActionError(null)
+    let refreshAfterFailure = false
     try {
       setStatus(await fn())
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e))
-      void refresh()
+      refreshAfterFailure = true
     } finally {
+      actionPending.current = false
       setBusy(false)
     }
+    if (refreshAfterFailure) void refresh()
   }
 
   if (!status) {

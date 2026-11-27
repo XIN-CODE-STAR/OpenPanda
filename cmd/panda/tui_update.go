@@ -1471,7 +1471,7 @@ func (m tuiModel) submitSlash(name, arg, text string) (tea.Model, tea.Cmd) {
 			return m, m.printBlock(block{kind: blockError, body: err.Error()})
 		}
 		if prompt != "" {
-			return m.askTurn(prompt, "")
+			return m.askTurn(prompt, "plan")
 		}
 		return m, m.printBlock(block{kind: blockNote, body: message})
 	case "spec":

@@ -6,9 +6,12 @@ package main
 
 import (
 	"context"
-	"github.com/Xustalis/OpenPanda/internal/sessions"
 	"strings"
 	"testing"
+
+	"github.com/Xustalis/OpenPanda/internal/conversation"
+	"github.com/Xustalis/OpenPanda/internal/sessions"
+	"github.com/Xustalis/OpenPanda/internal/storage"
 )
 
 func TestTerminalCommandsSharePersistentConversationService(t *testing.T) {
@@ -33,6 +36,7 @@ func TestTerminalCommandsSharePersistentConversationService(t *testing.T) {
 	if got := command("plan", "inspect the complete fixture"); got != "inspect the complete fixture" {
 		t.Fatalf("prompt=%q", got)
 	}
+	command("plan", "") // Enter planning without sending to the model fixture.
 	command("goal", "--tokens 2000 complete the original objective")
 	state, err := service.State(context.Background(), sess.ID)
 	if err != nil || !state.Planning || state.Goal.Status != "paused" || state.Goal.TokenBudget == nil || *state.Goal.TokenBudget != 2000 {
@@ -57,6 +61,61 @@ func TestTerminalCommandsSharePersistentConversationService(t *testing.T) {
 	state, _ = service.State(context.Background(), sess.ID)
 	if state.Goal != nil || r.conversationBadge() != "" {
 		t.Fatal("clear left a current goal")
+	}
+}
+
+func TestTerminalPlanReviewAndExactConfirmation(t *testing.T) {
+	m, _, _ := newNoteTUI(t, true)
+	r := m.r
+	r.sessionsSt = sessions.NewStore(t.TempDir())
+	if _, _, err := r.modeCommand("plan", "show"); err != nil || r.sessID() != "" {
+		t.Fatalf("reading without a proposal created a session: %v", err)
+	}
+	sess, err := r.sessionsSt.Create("terminal plan fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.setSess(sess)
+	service := r.engine.Load().Conversations(r.sessionsSt)
+	service.Close()
+	ctx := context.Background()
+	if err := service.SetPlanning(ctx, sess.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	db, err := storage.Open(r.cfg.Storage.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	version, err := (&conversation.Store{DB: db}).SaveProposal(ctx, sess.ID, "Inspect and verify the fixture.")
+	if err != nil || version != 1 {
+		t.Fatalf("proposal: version=%d err=%v", version, err)
+	}
+	if err := service.SetPlanning(ctx, sess.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	text, prompt, err := r.modeCommand("plan", "SHOW")
+	if err != nil || prompt != "" || !strings.Contains(text, "Inspect and verify the fixture.") || !strings.Contains(text, "/plan confirm 1") {
+		t.Fatalf("proposal review: %q, %q, %v", text, prompt, err)
+	}
+	for _, invalid := range []string{"confirm", "confirm +1", "confirm 0", "confirm 1 extra", "confirm 9007199254740992"} {
+		if _, _, err := r.modeCommand("plan", invalid); err == nil {
+			t.Fatalf("accepted malformed command %q", invalid)
+		}
+	}
+	_, prompt, err = r.modeCommand("plan", "-- confirm the fixture")
+	if err != nil || prompt != "confirm the fixture" {
+		t.Fatalf("literal plan prompt: %q, %v", prompt, err)
+	}
+	if _, _, err := r.modeCommand("plan", "CONFIRM\t1"); err != nil {
+		t.Fatal(err)
+	}
+	state, err := service.State(ctx, sess.ID)
+	if err != nil || state.Planning || state.Proposal != "" || state.ConfirmedVersion != version || state.Implementation == nil {
+		t.Fatalf("confirmation: %+v, %v", state, err)
+	}
+	if _, _, err := r.modeCommand("plan", "confirm 1"); err == nil {
+		t.Fatal("duplicate confirmation was accepted")
 	}
 }
 

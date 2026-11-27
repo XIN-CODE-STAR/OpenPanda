@@ -9,18 +9,25 @@
 // of thirty rows made the two a person actually wanted impossible to find.
 // Choosing a tab is choosing which list to look at; nothing is shown for the
 // rosters nobody opened.
+//
+// Inside a tab the list is split a second time, by the provider the person
+// saved in CC Switch. A roster of twelve providers flattened into one
+// checklist is the same wall the tabs were meant to remove; a heading per
+// provider — with its own tick, its host and its model count — is the shape
+// CC Switch itself shows, and the one a person can scan.
 
 import { useEffect, useRef, useState } from 'preact/hooks'
-import { api, type DiscoverSource, type DiscoveredModel, type ModelImportItem } from '../api/client'
+import { api, type DiscoverSource, type ModelImportResult } from '../api/client'
 import { useModalFocus } from '../components/modal-focus'
 import { Icon } from '../components/icons'
 import { t } from '../i18n'
-import { hostOf } from './model-connections'
-import { fmtTokens, keyLabel, noteHint, noteLabel } from './model-discover'
+import { splitProviders, usable } from './model-ccswitch-groups'
+import { fmtTokens } from './model-discover'
+import { ImportFailures, markImported, useModelImport } from './model-import'
 
 export function CCSwitchSheet(props: {
   onClose(): void
-  onDone(added: number, skipped?: string[]): void
+  onDone(result: ModelImportResult): void
 }) {
   const [groups, setGroups] = useState<DiscoverSource[] | null>(null)
   const [error, setError] = useState('')
@@ -30,11 +37,17 @@ export function CCSwitchSheet(props: {
   // selected" is always a number the person chose. Ticking a whole roster is
   // one click away, which is the right cost for "import all of these".
   const [picked, setPicked] = useState<Set<string>>(new Set())
-  const [busy, setBusy] = useState(false)
+  // Provider sections start open: the sheet's job is ticking models, and a
+  // closed section would hide both the rows and their "already imported"
+  // state behind a click nobody asked for. Collapsing is for skipping a
+  // provider the person already knows they do not want.
+  const [closed, setClosed] = useState<Set<string>>(new Set())
+  const importer = useModelImport(props.onDone, props.onClose)
   const box = useRef<HTMLDivElement>(null)
   useModalFocus(box, true)
 
   function load() {
+    importer.clearFailures()
     setError('')
     setGroups(null)
     api
@@ -44,18 +57,19 @@ export function CCSwitchSheet(props: {
         // Open the first roster that has something to offer. A group that is
         // configured but has no importable row stays one click away instead of
         // taking the opening screen.
-        const first = r.groups.find((g) => g.candidates.some(importable)) ?? r.groups[0]
-        setTab(first?.id ?? '')
-        setPicked(new Set())
+        const first = r.groups.find((g) => g.candidates.some(usable))
+          ?? r.groups.find((g) => g.candidates.length > 0)
+          ?? r.groups[0]
+        setTab((previous) => r.groups.some((g) => g.id === previous) ? previous : first?.id ?? '')
+        setPicked((previous) => new Set(r.groups.flatMap((g) => g.candidates)
+          .filter((c) => usable(c) && previous.has(c.id))
+          .map((c) => c.id)))
+        setClosed(new Set())
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
   }
 
   useEffect(load, [])
-
-  function importable(c: DiscoveredModel): boolean {
-    return c.importable && !c.existing
-  }
 
   function toggle(id: string) {
     setPicked((cur) => {
@@ -66,60 +80,52 @@ export function CCSwitchSheet(props: {
     })
   }
 
-  async function submit() {
-    if (!groups) return
-    const items: ModelImportItem[] = []
-    for (const g of groups) {
-      for (const c of g.candidates) {
-        if (!picked.has(c.id) || !importable(c)) continue
-        items.push({
-          provider: c.provider,
-          model: c.model,
-          base_url: c.base_url || undefined,
-          api_type: c.api_type || undefined,
-          key_ref: c.key_ref || undefined,
-          no_auth: c.no_auth,
-          auth: c.auth || undefined,
-          context_window: c.context_window,
-        })
-      }
-    }
-    if (!items.length) return
-    setBusy(true)
-    try {
-      const r = await api.importModels(items)
-      props.onDone(r.added, r.skipped)
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e))
-      setBusy(false)
-    }
-  }
-
-  const current = groups?.find((g) => g.id === tab) ?? null
-  const count = picked.size
-  // How many of the ticked rows the open roster owns. A selection made on
-  // another tab survives (the import covers every group), so the footer has to
-  // say where the rest of it lives — otherwise "5 selected" next to one ticked
-  // row reads as a bug.
-  const here = current ? current.candidates.filter((c) => importable(c) && picked.has(c.id)).length : 0
-  const hereIds = current ? current.candidates.filter(importable).map((c) => c.id) : []
-  const allHere = hereIds.length > 0 && hereIds.every((id) => picked.has(id))
-
-  // Roster-wide tick. Scoped to the open tab on purpose: the rows the person
-  // cannot see must not change under a click they aimed at the ones they can.
-  function toggleRoster() {
+  // One tick, many rows: a provider's models or a whole roster. The caller
+  // says which way the tick goes, so "some of them are on" resolves to "all
+  // of them" instead of flipping each row to its opposite.
+  function tick(ids: string[], on: boolean) {
     setPicked((cur) => {
       const next = new Set(cur)
-      for (const id of hereIds) {
-        if (allHere) next.delete(id)
-        else next.add(id)
+      for (const id of ids) {
+        if (on) next.add(id)
+        else next.delete(id)
       }
       return next
     })
   }
 
+  function submit() {
+    if (!groups) return
+    void importer.submit(groups, picked, (ids) => {
+      setGroups((current) => markImported(current, ids))
+      setPicked((current) => new Set([...current].filter((id) => !ids.has(id))))
+    })
+  }
+
+  const current = groups?.find((g) => g.id === tab) ?? null
+  const noStore = groups?.find((g) => g.id === 'ccswitch')
+  const count = groups ? picked.size : 0
+  const rows = current ? current.candidates.filter((c) => usable(c) || c.existing) : []
+  const sections = splitProviders(rows)
+  const hereIds = current ? current.candidates.filter(usable).map((c) => c.id) : []
+  // How many of the ticked rows the open roster owns. A selection made on
+  // another tab survives (the import covers every group), so the footer has to
+  // say where the rest of it lives — otherwise "5 selected" next to one ticked
+  // row reads as a bug.
+  const here = current ? current.candidates.filter((c) => usable(c) && picked.has(c.id)).length : 0
+  const allHere = hereIds.length > 0 && hereIds.every((id) => picked.has(id))
+
+  function toggleOpen(key: string) {
+    setClosed((cur) => {
+      const next = new Set(cur)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
   return (
-    <div class="modal-backdrop" onClick={(e) => e.target === e.currentTarget && props.onClose()}>
+    <div class="modal-backdrop" onClick={(e) => e.target === e.currentTarget && importer.close()}>
       <div
         ref={box}
         class="modal wizard-modal"
@@ -129,7 +135,7 @@ export function CCSwitchSheet(props: {
         onKeyDown={(e) => {
           if (e.key === 'Escape') {
             e.stopPropagation()
-            props.onClose()
+            importer.close()
           }
         }}
       >
@@ -145,7 +151,8 @@ export function CCSwitchSheet(props: {
             class="btn-icon wizard-close"
             aria-label={t('common.close')}
             title={t('common.close')}
-            onClick={props.onClose}
+            onClick={importer.close}
+            disabled={importer.busy}
           >
             <Icon name="x" size={16} />
           </button>
@@ -164,10 +171,18 @@ export function CCSwitchSheet(props: {
               </div>
             )}
 
-            {groups && (
+            <ImportFailures failures={importer.failures} />
+
+            {noStore && (
+              <p class="discover-none" role="status" title={noStore.detail}>
+                {t(noStore.status === 'missing' ? 'models.ccswitch.missing' : 'models.ccswitch.readError')}
+              </p>
+            )}
+
+            {groups && !noStore && (
               <div class="ccswitch-tabs" role="tablist" aria-label={t('models.ccswitch.title')}>
                 {groups.map((g) => {
-                  const usable = g.candidates.filter(importable).length
+                  const usableCount = g.candidates.filter(usable).length
                   const on = g.id === tab
                   return (
                     <button
@@ -175,67 +190,117 @@ export function CCSwitchSheet(props: {
                       type="button"
                       role="tab"
                       aria-selected={on}
-                      class={`ccswitch-tab${on ? ' on' : ''}${usable === 0 ? ' bare' : ''}`}
-                      onClick={() => setTab(g.id)}
+                      class={`ccswitch-tab${on ? ' on' : ''}${usableCount === 0 ? ' bare' : ''}`}
+                      onClick={() => {
+                        setTab(g.id)
+                        // Sections are keyed by endpoint, and the same relay
+                        // can appear in two rosters: a collapse made on the
+                        // Claude tab must not follow the person to Codex.
+                        setClosed(new Set())
+                      }}
                     >
                       <span class="ccswitch-tab-name">{g.label}</span>
-                      <span class="ccswitch-tab-count">{usable}</span>
+                      <span class="ccswitch-tab-count">{usableCount}</span>
                     </button>
                   )
                 })}
               </div>
             )}
 
-            {current && (
+            {current && !noStore && (
               <>
-                {(current.detail || hereIds.length > 0) && (
-                  <div class="ccswitch-bar">
-                    {current.detail && (
-                      <p class="discover-hint ccswitch-detail" title={current.detail}>
-                        {current.detail}
-                      </p>
-                    )}
-                    {hereIds.length > 0 && (
-                      <button type="button" class="discover-all" onClick={toggleRoster}>
-                        {allHere ? t('models.discover.clearAll') : t('models.discover.selectAll')}
-                      </button>
-                    )}
-                  </div>
-                )}
-                {current.candidates.filter(importable).length === 0 && (
+                {hereIds.length === 0 && (
                   <p class="discover-none">
-                    {current.status === 'missing'
-                      ? t('models.ccswitch.missing')
-                      : t('models.ccswitch.empty')}
+                    {t(sections.length > 0 ? 'models.ccswitch.allRegistered' : 'models.ccswitch.empty')}
                   </p>
                 )}
-                {current.candidates
-                  .filter((c) => importable(c) || c.existing)
-                  .map((c) => {
-                    const usable = importable(c)
-                    return (
-                      <label
-                        key={c.id}
-                        class={`discover-row${usable ? '' : ' off'}${c.existing ? ' existing' : ''}`}
-                        title={usable ? undefined : noteHint(c) || undefined}
-                      >
-                        <input
-                          type="checkbox"
-                          disabled={!usable}
-                          checked={usable && picked.has(c.id)}
-                          onChange={() => toggle(c.id)}
-                        />
-                        <span class="discover-model mono">{c.model}</span>
-                        <span class="discover-meta">
-                          <span class="mono">{c.base_url ? hostOf(c.base_url) : c.provider_label || c.provider}</span>
-                          {c.note && <span class="discover-note">{noteLabel(c)}</span>}
-                          {c.context_window ? <span>{fmtTokens(c.context_window)}</span> : null}
-                          {c.existing && <span class="discover-tag">{t('models.discover.existing')}</span>}
-                          {!c.existing && <span class="discover-key">{keyLabel(c)}</span>}
-                        </span>
-                      </label>
-                    )
-                  })}
+
+                {hereIds.length > 0 && (
+                  <div class="ccswitch-bar">
+                    <label class="ccswitch-all">
+                      <TriCheck
+                        checked={allHere}
+                        indeterminate={!allHere && here > 0}
+                        ariaLabel={t('models.discover.selectAll')}
+                        disabled={importer.busy}
+                        onChange={() => tick(hereIds, !allHere)}
+                      />
+                      <span>{t('models.discover.selectAll')}</span>
+                    </label>
+                    {/* The server's own sentence ("12 provider(s), 10
+                        importable · 2 skipped") stays a tooltip: it counts
+                        providers and models, and the two numbers do not line
+                        up with the rows on screen. What the bar states is
+                        what the list holds. */}
+                    <span class="ccswitch-roster" title={current.detail || undefined}>
+                      {t('models.ccswitch.roster', { p: sections.length, n: hereIds.length })}
+                    </span>
+                  </div>
+                )}
+
+                {sections.map((s) => {
+                  const all = s.ids.length > 0 && s.ids.every((id) => picked.has(id))
+                  const some = s.ids.some((id) => picked.has(id))
+                  const open = !closed.has(s.key)
+                  return (
+                    <section class="ccswitch-group" key={s.key}>
+                      <header class="ccswitch-group-head">
+                        {s.ids.length > 0 ? (
+                          <label class="ccswitch-group-pick">
+                            <TriCheck
+                              checked={all}
+                              indeterminate={!all && some}
+                              ariaLabel={`${all ? t('models.discover.clearAll') : t('models.discover.selectAll')} · ${s.label}`}
+                              disabled={importer.busy}
+                              onChange={() => tick(s.ids, !all)}
+                            />
+                          </label>
+                        ) : (
+                          <span class="ccswitch-group-pick" aria-hidden="true" />
+                        )}
+                        <button
+                          type="button"
+                          class="ccswitch-group-name"
+                          aria-expanded={open}
+                          onClick={() => toggleOpen(s.key)}
+                        >
+                          <Icon name={open ? 'chevron-down' : 'chevron-right'} size={13} />
+                          <span class="ccswitch-group-label">{s.label}</span>
+                          {s.host && s.host !== s.label && (
+                            <span class="ccswitch-group-host mono">{s.host}</span>
+                          )}
+                          <span class="ccswitch-group-count">{s.rows.length}</span>
+                        </button>
+                      </header>
+                      {open &&
+                        s.rows.map((c) => {
+                          const on = usable(c)
+                          return (
+                            <label
+                              key={c.id}
+                              class={`discover-row ccswitch-row${on ? '' : ' off'}`}
+                            >
+                              <input
+                                type="checkbox"
+                                disabled={!on || importer.busy}
+                                checked={on && picked.has(c.id)}
+                                onChange={() => toggle(c.id)}
+                              />
+                              <span class="discover-model mono">{c.model}</span>
+                              <span class="discover-meta">
+                                {c.context_window ? (
+                                  <span class="ccswitch-window">{fmtTokens(c.context_window)}</span>
+                                ) : null}
+                                {c.existing && (
+                                  <span class="discover-tag">{t('models.discover.existing')}</span>
+                                )}
+                              </span>
+                            </label>
+                          )
+                        })}
+                    </section>
+                  )
+                })}
               </>
             )}
           </div>
@@ -246,16 +311,19 @@ export function CCSwitchSheet(props: {
                 ? t('models.discover.picked', { n: count })
                 : t('models.ccswitch.pickedSplit', { n: count, here })}
             </span>
-            <button type="button" class="btn" onClick={props.onClose}>
+            <button type="button" class="btn" onClick={load} disabled={importer.busy || !groups}>
+              {t('models.discover.refresh')}
+            </button>
+            <button type="button" class="btn" onClick={importer.close} disabled={importer.busy}>
               {t('common.cancel')}
             </button>
             <button
               type="button"
               class="btn primary"
-              disabled={count === 0 || busy}
-              onClick={() => void submit()}
+              disabled={count === 0 || importer.busy}
+              onClick={submit}
             >
-              {busy
+              {importer.busy
                 ? t('models.discover.importing')
                 : count === 0
                   ? t('models.discover.importNone')
@@ -265,5 +333,31 @@ export function CCSwitchSheet(props: {
         </div>
       </div>
     </div>
+  )
+}
+
+/** A checkbox that can also render "some of this group". The DOM has no
+ *  attribute for indeterminate — it is a property that only exists after the
+ *  element does — so it has to be written on every change. */
+function TriCheck(props: {
+  checked: boolean
+  indeterminate: boolean
+  ariaLabel: string
+  disabled: boolean
+  onChange(on: boolean): void
+}) {
+  const ref = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    if (ref.current) ref.current.indeterminate = props.indeterminate
+  }, [props.indeterminate])
+  return (
+    <input
+      type="checkbox"
+      ref={ref}
+      aria-label={props.ariaLabel}
+      checked={props.checked}
+      disabled={props.disabled}
+      onChange={(e) => props.onChange((e.target as HTMLInputElement).checked)}
+    />
   )
 }

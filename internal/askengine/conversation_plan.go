@@ -5,6 +5,7 @@ package askengine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -140,7 +141,7 @@ func (e *Engine) registerProposalTool(reg *entry.Registry, scope AskScope) {
 }
 
 func (s *ConversationService) sweepPlans(ctx context.Context) {
-	rows, err := s.store.DB.QueryContext(ctx, "SELECT session_id,version,proposal,round_id,status,goal_id,goal_generation FROM conversation_plan_runs WHERE status IN ('pending','running')")
+	rows, err := s.store.DB.QueryContext(ctx, "SELECT session_id,version,proposal,round_id,status,goal_id,goal_generation FROM conversation_plan_runs WHERE status IN ('pending','running') ORDER BY session_id,version")
 	if err != nil {
 		return
 	}
@@ -190,10 +191,19 @@ func (s *ConversationService) sweepPlans(ctx context.Context) {
 				if n, _ := result.RowsAffected(); n != 1 {
 					continue
 				}
-				round.Status = "interrupted"
+				// Dispatch and lease recovery serialize on the database writer.
+				// A dispatch may have committed just before we sealed the round.
+				round, err = s.engine.TaskStore().AskRoundProgress(ctx, r.sid, r.round)
+				if err != nil {
+					continue
+				}
 			}
 			settled := true
-			success := round.Status == "closed"
+			// An interrupted controller did not necessarily interrupt its
+			// dispatch. Committed stages are authoritative even when no
+			// assistant receipt was written before the process exited.
+			success := round.Status == "closed" || (round.Status == "interrupted" && len(round.Tasks) > 0)
+			hasRoot := false
 			for _, t := range round.Tasks {
 				if !goalTaskSettled(t.State) || round.PendingRecovery[t.TaskID] {
 					settled = false
@@ -205,6 +215,7 @@ func (s *ConversationService) sweepPlans(ctx context.Context) {
 				if t.ParentID != "" {
 					continue
 				}
+				hasRoot = true
 				if t.State != core.StateDone && !round.Withdrawn[t.TaskID] {
 					success = false
 				}
@@ -212,19 +223,33 @@ func (s *ConversationService) sweepPlans(ctx context.Context) {
 			if !settled {
 				continue
 			}
+			// Older stores may retain the dispatch marker but no verdict.
+			// Only an implementation with no dispatch can succeed without a root.
+			success = success && (!round.Dispatched || hasRoot)
 			if r.goal != "" {
 				s.reconcile(ctx, &conversation.Goal{ID: r.goal, SessionID: r.sid, RoundID: r.round})
+				var unsettled bool
+				if err := s.store.DB.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM conversation_goal_rounds WHERE round_id=? AND settled=0)", r.round).Scan(&unsettled); err != nil || unsettled {
+					continue
+				}
 			}
-			if round.Status == "interrupted" {
-				// Reconcile the previous tree before continuing from durable
-				// checkpoints in a new round; never replay the old dispatch.
-				_, _ = s.store.DB.ExecContext(ctx, "UPDATE conversation_plan_runs SET status='pending',round_id='' WHERE session_id=? AND version=? AND status='running' AND round_id=?", r.sid, r.version, r.round)
-				if st := s.sessionStore(); st != nil {
-					_, _ = st.SetOperation(r.sid, sessions.Operation{ID: r.round, Status: "done"})
+			if round.Status == "interrupted" && !round.Dispatched {
+				// Only a round that died before publishing work can start
+				// again. Task publication sets the flag in the same transaction.
+				result, retryErr := s.store.DB.ExecContext(ctx, `UPDATE conversation_plan_runs SET status='pending',round_id=''
+					WHERE session_id=? AND version=? AND status='running' AND round_id=?
+					AND EXISTS(SELECT 1 FROM ask_rounds WHERE round_id=? AND status='interrupted' AND dispatched=0)`,
+					r.sid, r.version, r.round, r.round)
+				if retryErr == nil {
+					if n, _ := result.RowsAffected(); n == 1 {
+						if st := s.sessionStore(); st != nil {
+							_, _ = st.SetOperation(r.sid, sessions.Operation{ID: r.round, Status: "done"})
+						}
+					}
 				}
 				continue
 			}
-			turns, err := s.planDeliveryTurns(ctx, r.sid, r.round)
+			turns, err := s.planDeliveryTurns(ctx, r.sid, r.round, success, round.Withdrawn)
 			if err != nil {
 				continue
 			}
@@ -247,7 +272,7 @@ func (s *ConversationService) sweepPlans(ctx context.Context) {
 				continue
 			}
 			if success && r.goal != "" {
-				_, err = tx.ExecContext(ctx, "UPDATE conversation_goals SET status=CASE WHEN token_budget IS NOT NULL AND tokens>=token_budget THEN 'budget_limited' ELSE 'active' END,paused_by_plan=0,blocked_streak=0,blocker='' WHERE id=? AND generation=? AND status='paused' AND paused_by_plan=1 AND NOT EXISTS(SELECT 1 FROM conversation_controls WHERE session_id=? AND planning=1)", r.goal, r.generation, r.sid)
+				_, err = tx.ExecContext(ctx, "UPDATE conversation_goals SET status=CASE WHEN token_budget IS NOT NULL AND tokens>=token_budget THEN 'budget_limited' ELSE 'active' END,completion_requested=0,paused_by_plan=0,blocked_streak=0,blocker='' WHERE id=? AND generation=? AND status='paused' AND paused_by_plan=1 AND NOT EXISTS(SELECT 1 FROM conversation_controls WHERE session_id=? AND planning=1)", r.goal, r.generation, r.sid)
 				if err != nil {
 					tx.Rollback()
 					continue
@@ -279,6 +304,9 @@ func (s *ConversationService) sweepPlans(ctx context.Context) {
 			}
 			continue
 		}
+		if restored, err := s.restoreInterruptedPlanDispatch(ctx, r.sid, r.version); restored || err != nil {
+			continue
+		}
 		if planning {
 			continue
 		}
@@ -295,7 +323,13 @@ func (s *ConversationService) sweepPlans(ctx context.Context) {
 		if err != nil {
 			continue
 		}
-		result, err := tx.ExecContext(ctx, "UPDATE conversation_plan_runs SET status='running',round_id=? WHERE session_id=? AND version=? AND status='pending' AND EXISTS(SELECT 1 FROM conversation_controls c WHERE c.session_id=conversation_plan_runs.session_id AND c.deleted=0 AND c.planning=0) AND NOT EXISTS(SELECT 1 FROM conversation_plan_runs p WHERE p.session_id=conversation_plan_runs.session_id AND p.status='running') AND NOT EXISTS(SELECT 1 FROM ask_rounds a WHERE a.session_id=conversation_plan_runs.session_id AND a.status='open' AND a.lease_until>=CAST(strftime('%s','now') AS INTEGER)) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.session_id=conversation_plan_runs.session_id AND t.state NOT IN ('done','failed','cancelled','expired'))", round, r.sid, r.version)
+		result, err := tx.ExecContext(ctx, `UPDATE conversation_plan_runs SET status='running',round_id=?
+WHERE session_id=? AND version=? AND status='pending'
+AND EXISTS(SELECT 1 FROM conversation_controls c WHERE c.session_id=conversation_plan_runs.session_id AND c.deleted=0 AND c.planning=0)
+AND NOT EXISTS(SELECT 1 FROM conversation_plan_runs p WHERE p.session_id=conversation_plan_runs.session_id
+  AND (p.status IN ('running','waiting_input') OR (p.status='pending' AND p.version<conversation_plan_runs.version)))
+AND NOT EXISTS(SELECT 1 FROM ask_rounds a WHERE a.session_id=conversation_plan_runs.session_id AND a.status='open' AND a.lease_until>=CAST(strftime('%s','now') AS INTEGER))
+AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.session_id=conversation_plan_runs.session_id AND t.state NOT IN ('done','failed','cancelled','expired'))`, round, r.sid, r.version)
 		if err != nil {
 			tx.Rollback()
 			continue
@@ -326,6 +360,47 @@ func (s *ConversationService) sweepPlans(ctx context.Context) {
 		s.wg.Add(1)
 		go func(sid, round, text string, version int64) { defer s.wg.Done(); s.runPlan(sid, round, text, version) }(r.sid, round, r.text, r.version)
 	}
+}
+
+// Older controllers could put a dispatched run back in pending and clear its
+// round pointer. Reconnect it using the confirmation's exact version and round
+// before a new round can claim that pending row.
+func (s *ConversationService) restoreInterruptedPlanDispatch(ctx context.Context, sid string, version int64) (bool, error) {
+	var orphaned bool
+	if err := s.store.DB.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM ask_rounds a WHERE a.session_id=? AND a.status='interrupted' AND a.dispatched=1
+		AND NOT EXISTS(SELECT 1 FROM conversation_plan_runs p WHERE p.session_id=a.session_id AND p.round_id=a.round_id)
+	)`, sid).Scan(&orphaned); err != nil || !orphaned {
+		return false, err
+	}
+	st := s.sessionStore()
+	if st == nil {
+		return false, nil
+	}
+	sess, err := st.Get(sid)
+	if err != nil {
+		return false, err
+	}
+	versionRef := strconv.FormatInt(version, 10)
+	for i := len(sess.Turns) - 1; i >= 0; i-- {
+		turn := sess.Turns[i]
+		round, ok := strings.CutPrefix(turn.IdempotencyKey, "plan:user:")
+		if !ok || round == "" || turn.Role != "user" || turn.Ref != versionRef {
+			continue
+		}
+		result, err := s.store.DB.ExecContext(ctx, `UPDATE conversation_plan_runs SET status='running', round_id=?
+			WHERE session_id=? AND version=? AND status='pending' AND round_id=''
+			AND EXISTS(SELECT 1 FROM ask_rounds WHERE round_id=? AND session_id=? AND status='interrupted' AND dispatched=1)
+			AND NOT EXISTS(SELECT 1 FROM conversation_plan_runs p WHERE p.session_id=? AND (p.round_id=? OR p.status='running'))`,
+			round, sid, version, round, sid, sid, round)
+		if err != nil {
+			return false, err
+		}
+		if n, err := result.RowsAffected(); n != 0 || err != nil {
+			return n == 1, err
+		}
+	}
+	return false, nil
 }
 
 func (s *ConversationService) planEligible(ctx context.Context, sid, round string, version int64) bool {
@@ -465,7 +540,7 @@ func (s *ConversationService) runPlan(sid, round, proposal string, version int64
 			}
 		}
 		turn.Tokens = out.Tokens()
-		if out.ExitCode != 0 || out.Denied {
+		if out.ExitCode != 0 || out.Denied || out.EmptyResponse || out.incompleteAnswer {
 			status = "stopped"
 			turn.Kind = "error"
 			if turn.Text == "" {
@@ -485,16 +560,26 @@ func (s *ConversationService) runPlan(sid, round, proposal string, version int64
 		status = "stopped"
 	}
 	if out != nil && out.NeedsClarification && err == nil {
-		_, _ = s.store.DB.ExecContext(finishCtx, "UPDATE conversation_plan_runs SET status='waiting_input' WHERE session_id=? AND version=? AND round_id=? AND status='running'", sid, version, round)
+		err = s.store.PublishPlanQuestion(finishCtx, sid, round, version, func() error {
+			_, _, err := st.PersistTurns(sid, turn)
+			return err
+		})
+		if err == nil {
+			op.Status = "done"
+			_, _ = st.FinishRunningOperation(sid, op)
+			_ = st.Checkpoint(finishCtx, sid)
+			return
+		}
+		if errors.Is(err, conversation.ErrConflict) {
+			return
+		}
+		turn.Kind, turn.Text = "error", err.Error()
 	}
 	_, _ = st.AppendTurn(sid, turn)
 	// A dispatch receipt closes this ask, while the durable plan operation
 	// remains running until sweepPlans observes all member tasks settling.
 	if status == "stopped" {
 		op.Status = "error"
-		if out != nil && out.NeedsClarification && err == nil {
-			op.Status = "done"
-		}
 		_, _ = st.FinishRunningOperation(sid, op)
 	}
 	_ = s.engine.TaskStore().CloseAskRound(finishCtx, round, status)
@@ -630,7 +715,9 @@ func (w *planPhaseWriter) flushLocked() {
 func confirmedPlanHistory(sess *sessions.Session, version int64, window int) ([]entry.Turn, bool) {
 	prefix := fmt.Sprintf("Implement user-confirmed proposal version %d in the current session.", version)
 	for i, t := range sess.Turns {
-		if !strings.HasPrefix(t.IdempotencyKey, "plan:user:") || !strings.HasPrefix(t.Text, prefix) {
+		receiptVersion, receipt := t.PlanConfirmationReceiptVersion()
+		if t.Role != "user" || !strings.HasPrefix(t.IdempotencyKey, "plan:user:") ||
+			(!strings.HasPrefix(t.Text, prefix) && (!receipt || receiptVersion != version)) {
 			continue
 		}
 		_, tail := sessions.SplitForBudget(sess.Turns[i+1:], sessions.ReplayBudget(window))

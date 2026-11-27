@@ -668,8 +668,7 @@ def read_request(default_timeout=DEFAULT_TIMEOUT):
     process exits. Returns a Request namespace: prompt, timeout_s, cwd (None
     when unset), resume ("" when unset) and tools_policy ("" when unset).
     """
-    raw = sys.stdin.read()
-    return _build_request(_parse_request(raw, default_timeout), default_timeout)
+    return _read_prompt_request(sys.stdin.read(), default_timeout)
 
 
 def read_request_lined(default_timeout=DEFAULT_TIMEOUT):
@@ -688,8 +687,36 @@ def read_request_lined(default_timeout=DEFAULT_TIMEOUT):
             emit(False, "empty adapter request", 2)
             sys.exit(0)
         if line.strip():
-            return _build_request(
-                _parse_request(line, default_timeout), default_timeout)
+            return _read_prompt_request(line, default_timeout)
+
+
+_one_shot_receipt = False
+
+
+def _read_prompt_request(raw, default_timeout):
+    global _one_shot_receipt
+    req = _build_request(_parse_request(raw, default_timeout), default_timeout)
+    _one_shot_receipt = req.prompt_receipt and not req.session
+    return req
+
+
+def session_prompt_delivered(requested):
+    if requested is True:
+        _prompt_delivered(sys.stdout)
+
+
+def _one_shot_prompt_delivered():
+    global _one_shot_receipt
+    if _one_shot_receipt:
+        _one_shot_receipt = False
+        _prompt_delivered(sys.stderr)
+
+
+def _prompt_delivered(stream):
+    # One-shot stdout is reserved for the result object. In a session the
+    # receipt travels ahead of its result on the same ordered stream.
+    stream.write('{"type":"prompt_delivered","stage":"agent"}\n')
+    stream.flush()
 
 
 def _strip_nul(value):
@@ -741,6 +768,7 @@ def _build_request(req, default_timeout):
         task_id=_strip_nul(req.get("task_id") or ""),
         complexity=complexity,
         authorized=authorized,
+        prompt_receipt=req.get("prompt_receipt") is True and isinstance(req.get("prompt"), str),
     )
 
 
@@ -753,7 +781,7 @@ class Request:
                  max_turns=0, restricted=False, system_prompt="",
                  result_schema="", mcp_config="", max_budget_usd=0.0,
                  effort="", session=False, task_id="", complexity=0.0,
-                 authorized=False):
+                 authorized=False, prompt_receipt=False):
         self.prompt = prompt
         self.timeout = timeout
         self.cwd = cwd
@@ -800,6 +828,7 @@ class Request:
         # alive and serves one turn per {"type":"user","text":…} stdin line,
         # emitting a result envelope per turn (see run_session).
         self.session = session
+        self.prompt_receipt = prompt_receipt
         # task_id is the OpenPanda task this run belongs to; it is already
         # injected as PANDA_TASK_ID env by the Go side — adapters that need
         # it in-band (e.g. a flag) read it here.
@@ -1059,6 +1088,8 @@ def run_stream(cmd, cwd=None, timeout=DEFAULT_TIMEOUT, on_line=None, on_stderr=N
         stderr=subprocess.PIPE, env=os.environ.copy(), cwd=cwd,
         **GROUP_KW,
     )
+    if input is None:
+        _one_shot_prompt_delivered()
     # _popen takes the pipe set as **kw, so the checker cannot see that these
     # were PIPE. Bind them once here, where the spawn is still in view, instead
     # of touching the Optional attributes at every use — and raise here rather
@@ -1078,6 +1109,7 @@ def run_stream(cmd, cwd=None, timeout=DEFAULT_TIMEOUT, on_line=None, on_stderr=N
             try:
                 stdin.write(input.encode("utf-8"))
                 stdin.flush()
+                _one_shot_prompt_delivered()
             except (BrokenPipeError, OSError, ValueError):
                 # The child exited or closed its end before reading the whole
                 # payload. Its stderr already carries the real reason; a write
@@ -1204,6 +1236,8 @@ def run_plain(cmd, cwd=None, timeout=DEFAULT_TIMEOUT,
         stderr=subprocess.PIPE, env=os.environ.copy(), cwd=cwd,
         **GROUP_KW,
     )
+    if input is None:
+        _one_shot_prompt_delivered()
     stop_beat = threading.Event()
     if heartbeat_s and heartbeat_s > 0:
         label = cmd[0] if cmd else "cli"
@@ -1249,6 +1283,8 @@ def run_plain(cmd, cwd=None, timeout=DEFAULT_TIMEOUT,
         try:
             with proc.stdin as stream:
                 stream.write(payload)
+                stream.flush()
+                _one_shot_prompt_delivered()
         except BrokenPipeError:
             pass  # The CLI finished before consuming the whole request.
         except OSError as exc:

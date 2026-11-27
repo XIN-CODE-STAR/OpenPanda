@@ -90,7 +90,7 @@ func (s *TaskStore) recordDelegationMetric(ctx context.Context, taskID, delegato
 	if err != nil || tx == nil {
 		return err
 	}
-	if err = chargeSettledGoalMetric(ctx, tx, taskID, int64(tokens)); err != nil {
+	if err = chargeGoalMetric(ctx, tx, taskID, int64(tokens)); err != nil {
 		return err
 	}
 	return tx.Commit()

@@ -42,6 +42,26 @@ export function planArgument(input: string): string | null {
   return match ? (match[1] ?? '').trim() : null
 }
 
+/** The typed command reserves confirmation and review. An armed Plan chip
+ * passes its draft directly to the planner. */
+export function planCommand(argument: string) {
+  const match = /^(\S+)(?:\s+([\s\S]*))?$/.exec(argument)
+  const word = match?.[1]?.toLowerCase()
+  const rest = match?.[2]?.trim() ?? ''
+  if (word === 'show' && !rest) return { action: 'show' as const }
+  if (word === 'confirm') {
+    const version = Number(rest)
+    if (/^[0-9]+$/.test(rest) && Number.isSafeInteger(version) && version > 0) {
+      return { action: 'confirm' as const, version }
+    }
+    return { action: 'invalid' as const, usage: '/plan confirm <version>' }
+  }
+  if (word === '--') {
+    return rest ? { action: 'ask' as const, prompt: rest } : { action: 'invalid' as const, usage: '/plan -- <description>' }
+  }
+  return { action: 'ask' as const, prompt: argument }
+}
+
 /** The words a `/` query is matched against, one entry per word so the menu
  *  can rank on word starts (see rankWords): the label without its slash (the
  *  verb as displayed), the id's tail — `go:workspace` → "workspace", so

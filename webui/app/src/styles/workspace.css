@@ -21,8 +21,19 @@
      (see `.main:has(> .ws-page)` in shell.css): the two views trade places
      from the rail, so a different edge or corner would make the switch read as
      a different app. `overflow: hidden` is what turns the radius into an edge
-     the bar, the map and the composer all stop at. */
-  background: var(--bg);
+     the bar, the map and the composer all stop at.
+
+     The dot paper is painted here rather than on `.ws-map` so it runs the whole
+     card, under the composer too: the drawing's surface and the dock's were the
+     same desk, and a paper that stopped at the box's top border cut the page
+     into a canvas and a white strip (see `.ws-map`, which now carries only the
+     header's wash). */
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(circle at 1px 1px, var(--border-soft) 1px, transparent 0),
+    radial-gradient(ellipse at 28% 30%, color-mix(in srgb, var(--glow-blue) 45%, transparent), transparent 65%);
+  background-size: 22px 22px, 100% 100%;
+  background-repeat: repeat, no-repeat;
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-xl);
   box-shadow: var(--shadow-xs);
@@ -69,6 +80,15 @@
 .ws-head-icon {
   flex: none;
   color: var(--text);
+}
+/* The mark keeps the console's own ink instead of the section's blue (see
+   sections.css, which paints each destination's mark with its ink): on this
+   page the glyph in a card carries the machine class, and hue is reserved for
+   status and selection — a blue square in the corner read as a stray link. */
+.ws-page .ws-head-icon {
+  color: var(--text-secondary);
+  background: var(--bg-raised);
+  border-color: var(--border-soft);
 }
 .ws-title {
   flex: none;
@@ -750,14 +770,30 @@
    rides 28px wider on a narrow window) reads as three different composers
    instead of one control in three places. The right lane is empty here unless
    a header card opens; reserving it is what lands the box on the same pixel
-   the chat's does. */
+   the chat's does.
+
+   All four sides are stated here, not just the right one. The chat's shorthand
+   reads its left lane from `--chat-leading-gutter`, which is set on `.chat` —
+   this composer is not its child, so that shorthand is invalid at computed
+   value time and every side it covers collapses to 0 instead of falling back.
+   Inheriting it left the box glued to the paper's last row and the footer
+   chips riding the card's bottom edge. 52px is that lane's value (chat.css,
+   `.chat`); keep the two in step. */
 .ws-page .composer {
   flex: none;
-  padding-right: calc(var(--sp-6) + var(--panel-lane));
+  padding: 26px calc(var(--sp-6) + var(--panel-lane)) var(--sp-5) 52px;
   /* The lane is the same for both header cards, so swapping one for the other
      moves nothing; this transition only ever runs when a card opens or closes,
      and it is what makes the box slide rather than jump. */
   transition: padding-right var(--dur-med) var(--ease-standard);
+}
+/* The chat gives that lane back below 760px — a phone has no prompt rail to
+   keep clear (chat.css, `.chat`) — so the bench gives it back too, or the two
+   composers stop lining up exactly where the pane is narrowest. */
+@media (max-width: 760px) {
+  .ws-page .composer {
+    padding-left: var(--sp-4);
+  }
 }
 
 /* ---- The thread pick (composer footer) ----------------------------------- */
@@ -928,29 +964,24 @@
   /* 44px of headroom: the pet stands on the first panel's top edge and hangs
      36px above it, and this box is the thing that would clip her. */
   padding: 44px 26px 30px;
-  /* Dot paper, the way the drawing on the desk was ruled: the pane is mostly
-     empty with one or two machines on it, and a ruled surface reads as canvas
-     where a blank one reads as a rendering failure. `local` keeps the dots
-     travelling with the panels when the fleet outgrows the pane.
+  /* Only the seam under the header lives here now. The dot paper belongs to
+     the card (`.ws-page`), so it runs under the composer as well: the drawing
+     and the dock are the same desk, and a paper that stopped at the box's top
+     border read as a canvas with a white strip bolted under it.
 
-     The first layer is the seam under the header: a wash of the header's own
-     colour that dissolves into the paper over the first 44px, so the canvas
-     opens with a fade rather than a cut edge. It is a *background* layer on
-     purpose — an overlay would dim the pet standing in that headroom, while a
-     layer sits under every child and only softens the dots. Its attachment is
-     `scroll` where the paper is `local`: the wash stays put under the bar
-     while the dots travel with the panels. */
+     This layer is a wash of the header's own colour that dissolves into that
+     paper over the first 44px, so the canvas opens with a fade rather than a
+     cut edge. It is a *background* layer on purpose — an overlay would dim the
+     pet standing in that headroom, while a layer sits under every child and
+     only softens the dots. `scroll`, not `local`: the wash is pinned under the
+     bar while the panels travel over it. */
   background-image: linear-gradient(
-      to bottom,
-      var(--chat-head) 0,
-      color-mix(in srgb, var(--chat-head) 58%, transparent) 20px,
-      transparent 44px
-    ),
-    radial-gradient(circle at 1px 1px, var(--border-soft) 1px, transparent 0),
-    radial-gradient(ellipse at 28% 30%, color-mix(in srgb, var(--glow-blue) 45%, transparent), transparent 65%);
-  background-size: 100% 100%, 22px 22px, 100% 100%;
-  background-repeat: no-repeat, repeat, no-repeat;
-  background-attachment: scroll, local, local;
+    to bottom,
+    var(--chat-head) 0,
+    color-mix(in srgb, var(--chat-head) 58%, transparent) 20px,
+    transparent 44px
+  );
+  background-repeat: no-repeat;
 }
 
 .ws-panels {
@@ -1159,7 +1190,10 @@
   background: var(--bg-inset);
 }
 .ws-panel {
-  --device-ink: var(--task-blue);
+  /* The default machine class carries the page's own ink, not the section
+     blue: a laptop is the unremarkable case, and the tint is a class mark, not
+     an accent (mini/server/vm keep their hues below). */
+  --device-ink: var(--text-secondary);
   background-image: linear-gradient(135deg, color-mix(in srgb, var(--device-ink) 8%, transparent), transparent 62%);
 }
 .ws-panel[data-form='mini'] { --device-ink: var(--task-amber); }
@@ -1764,5 +1798,15 @@
 }
 
 .ws-panel-glyph { color: var(--device-ink); }
+/* The bench's composer takes the chat's neutral focus, not a colour: the box
+   is the same object in the same column, and the chat answers focus with a
+   deeper hairline plus a close halo instead of an accent (chat.css,
+   `.composer-box:focus-within`). Painting `--task-blue` over it here was the
+   one blue ring on a page whose hue is reserved for status and selection.
+   The resting edge stays `--composer-edge`: the box sits on dot paper, where
+   the chat's softer `--border-soft` would stop reading as an object. */
 .ws-page .composer-box { border-color: var(--composer-edge); box-shadow: var(--section-shadow); }
-.ws-page .composer-box:focus-within { border-color: var(--task-blue); }
+.ws-page .composer-box:focus-within {
+  border-color: var(--border-strong);
+  box-shadow: var(--section-shadow), 0 0 0 3px var(--surface-alpha-sm);
+}

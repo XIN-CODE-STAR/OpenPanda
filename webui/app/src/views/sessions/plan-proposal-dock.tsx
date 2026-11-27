@@ -4,36 +4,31 @@ import { Icon } from '../../components/icons'
 import { t } from '../../i18n'
 import { proposalSummary } from './plan-proposal'
 
-/** The proposal's home is the side dock, but the one thing waiting for a
- *  decision has to be visible from the transcript — after the reply, before
- *  the box, the same shelf the clarify card uses.
- *
- *  Two doors, because "look at it" and "act on it" are two intentions:
- *  clicking the card reads the plan in the dock; the button opens the same
- *  pane with the note field focused, which is where both "change this" and
- *  "start" live. The old label ("查看并实施") collapsed both into one click and
- *  read as "you must implement to read". */
-export function PlanProposalDock({ version, text, onOpen, onReview }: {
+/** The whole bar is one read-only door into the side dock. A decision belongs
+ *  to the pane with the full document, never to this summary. */
+export function PlanProposalDock({ version, text, expanded, onOpen }: {
   version: number
   text: string
+  expanded: boolean
   onOpen(): void
-  onReview(): void
 }) {
   const summary = proposalSummary(text)
   return (
-    <div class="plan-dock">
-      <section class="plan-dock-card">
-        <button type="button" class="plan-dock-open" title={t('sessions.plan.view')} onClick={onOpen}>
-          <span class="plan-dock-icon" aria-hidden="true"><Icon name="lightbulb" size={17} /></span>
-          <span class="plan-dock-copy">
-            <strong class="plan-dock-title">{t('sessions.plan.proposal')} · {version}</strong>
-            <span class="plan-dock-summary">{summary || t('sessions.plan.ready')}</span>
-          </span>
-        </button>
-        <button type="button" class="btn primary plan-dock-review" onClick={onReview}>
-          {t('sessions.plan.review')}
-        </button>
-      </section>
+    <div class="plan-proposal-slot">
+      <button type="button" id="plan-proposal-trigger" class="plan-dock-card plan-dock-proposal"
+        title={t('sessions.plan.view')} aria-label={t('sessions.plan.review')}
+        aria-expanded={expanded} aria-controls={expanded ? 'plan-panel' : undefined}
+        aria-describedby="plan-proposal-title plan-proposal-summary" onClick={onOpen}>
+        <span class="plan-dock-icon" aria-hidden="true"><Icon name="lightbulb" size={17} /></span>
+        <span class="plan-dock-copy">
+          <strong id="plan-proposal-title" class="plan-dock-title">{t('sessions.plan.proposal')} · {version}</strong>
+          <span id="plan-proposal-summary" class="plan-dock-summary">{summary || t('sessions.plan.ready')}</span>
+        </span>
+        <span class="btn small primary plan-dock-review" aria-hidden="true">
+          <span>{t('sessions.plan.review')}</span>
+          <Icon name="chevron-right" size={15} />
+        </span>
+      </button>
     </div>
   )
 }
@@ -54,6 +49,7 @@ const PLAN_PHASES: Record<string, string> = {
   retry: 'sessions.plan.phase.retry',
   offline: 'sessions.plan.phase.offline',
   clarify: 'sessions.plan.phase.clarify',
+  waiting_input: 'sessions.plan.phase.clarify',
   answer: 'sessions.plan.phase.answer',
   model: 'sessions.plan.phase.model',
 }
@@ -68,7 +64,9 @@ export function PlanRunningDock({ phase, detail, onStop, onTask }: {
   return (
     <div class="plan-dock">
       <section class="plan-dock-card plan-dock-live" aria-live="polite">
-        <span class="plan-dock-icon" aria-hidden="true"><span class="plan-dock-pulse" /></span>
+        <span class="plan-dock-icon" aria-hidden="true">
+          {phase === 'waiting_input' ? <Icon name="message" size={17} /> : <span class="plan-dock-pulse" />}
+        </span>
         <span class="plan-dock-copy">
           <strong class="plan-dock-title">{t('sessions.plan.running')}</strong>
           <span class="plan-dock-summary">

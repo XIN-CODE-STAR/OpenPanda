@@ -40,7 +40,11 @@ type modelEntryJSON struct {
 	// Source is the discovery collector this row was imported from ("codex" |
 	// "claude" | "opencode" | "local"), empty for a hand-written row. The
 	// console names the connection after it and marks it as imported.
-	Source         string `json:"source,omitempty"`
+	Source string `json:"source,omitempty"`
+	// ConnName is the console's own name for the connection this row belongs
+	// to (see config.ModelConfig.ConnName). Reported so the edit form opens on
+	// the stored name instead of the derived one, and so a card can paint it.
+	ConnName       string `json:"conn_name,omitempty"`
 	APIType        string `json:"api_type"`
 	BaseURL        string `json:"base_url"`
 	Model          string `json:"model"`
@@ -144,6 +148,7 @@ func modelEntryOf(mc config.ModelConfig, active config.ModelConfig) modelEntryJS
 		Alias:          mc.Alias(),
 		Provider:       mc.Provider,
 		Source:         mc.Source,
+		ConnName:       mc.ConnName,
 		APIType:        mc.NormalizedAPIType(),
 		BaseURL:        mc.BaseURL,
 		Model:          mc.Model,
@@ -287,6 +292,14 @@ type addModelRequest struct {
 	Model    string `json:"model,omitempty"`
 	APIKey   string `json:"api_key,omitempty"`
 	Alias    string `json:"alias,omitempty"`
+	// ConnName is the console's display name for the connection the row
+	// belongs to. A pointer because the field is tri-state, like
+	// AllowPlaintext: absent means "an edit that does not mention the name",
+	// which must keep the stored one; an empty string means "go back to the
+	// vendor's name", which is an instruction, not an omission. Every row of
+	// one connection carries the same value — the connection has no record of
+	// its own.
+	ConnName *string `json:"conn_name,omitempty"`
 	// ReuseFrom names an existing entry whose key this one borrows. Two
 	// accounts of one vendor share a provider id and an endpoint, so "the key
 	// on file for this provider" is ambiguous — the caller says which row it
@@ -382,8 +395,11 @@ func (h *handler) modelFromRequest(req addModelRequest, existingKey string, cred
 	var mc config.ModelConfig
 	provider := strings.TrimSpace(req.Provider)
 	base := strings.TrimSpace(req.BaseURL)
+	noAuth := req.NoAuth != nil && *req.NoAuth
 	key := strings.TrimSpace(req.APIKey)
-	if key == "" {
+	if noAuth {
+		key = ""
+	} else if key == "" {
 		key = strings.TrimSpace(existingKey)
 	}
 	// The row this entry borrows its credential from. The credential is not
@@ -405,7 +421,7 @@ func (h *handler) modelFromRequest(req addModelRequest, existingKey string, cred
 		// entry persisted keyless (NoAuth: true) and the user lost the key that
 		// was already on file. The key is bound to its host, though: reusing
 		// it on another host would ship it to whoever owns that host.
-		if key == "" {
+		if key == "" && !noAuth {
 			src, ok, err := h.borrowFrom(req, base)
 			if err != nil {
 				return config.ModelConfig{}, err
@@ -440,7 +456,7 @@ func (h *handler) modelFromRequest(req addModelRequest, existingKey string, cred
 		// named row says which key this model belongs to. If the request also
 		// names a different endpoint, the borrowed key would be sent there —
 		// same host rule as the custom branch above.
-		if key == "" {
+		if key == "" && !noAuth {
 			src, ok, err := h.borrowFrom(req, base)
 			if err != nil {
 				return config.ModelConfig{}, err
@@ -450,13 +466,13 @@ func (h *handler) modelFromRequest(req addModelRequest, existingKey string, cred
 				key = src.APIKey
 			}
 		}
-		if key == "" && !hasLender && !credentialed {
+		if key == "" && !noAuth && !hasLender && !credentialed {
 			key = h.findProviderKey(p.ID) // reuse a key already on file for this provider
 		}
 		// A named lender with a reference (key_ref/key_env) or an explicit
 		// no-auth row has a credential even though it has no literal key; the
 		// reference is copied below.
-		if key == "" && !p.NoAuth && !credentialed && !(hasLender && lenderCredential(lender)) {
+		if key == "" && !noAuth && !p.NoAuth && !credentialed && !(hasLender && lenderCredential(lender)) {
 			return config.ModelConfig{}, errors.New("api_key is required for this provider")
 		}
 		mc, _ = providers.ModelConfig(p.ID, strings.TrimSpace(req.Model), key)
@@ -535,19 +551,20 @@ func (h *handler) modelFromRequest(req addModelRequest, existingKey string, cred
 		mc.MaxRetries = 0
 	}
 	if req.NoAuth != nil {
-		mc.NoAuth = *req.NoAuth
-		// 免密钥 is a statement that this endpoint takes none: keeping the
-		// stored secret would leave a credential the user just said is unused,
-		// and the badge would keep claiming one is set.
-		if *req.NoAuth && strings.TrimSpace(req.APIKey) == "" {
-			mc.APIKey = ""
-		}
+		mc.NoAuth = noAuth
 	}
 	if req.Params != nil {
 		mc.Params = req.Params
 	}
 	if req.Headers != nil {
 		mc.Headers = req.Headers
+	}
+	// The connection name is display data, so it is applied last and only when
+	// the request actually speaks about it: an edit that never mentions the
+	// field keeps the stored name (the caller carries it over), while an empty
+	// string is the deliberate "name it from the vendor again".
+	if req.ConnName != nil {
+		mc.ConnName = strings.TrimSpace(*req.ConnName)
 	}
 	return mc, nil
 }
@@ -775,6 +792,7 @@ func (h *handler) addModel(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, errors.New("config not loaded"))
 		return
 	}
+	noAuth := req.NoAuth != nil && *req.NoAuth
 
 	// A copy starts from the source entry's invisible half: the credential,
 	// the raw params/headers, the plaintext waiver, and the OAuth binding.
@@ -788,7 +806,7 @@ func (h *handler) addModel(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		copied = &from
-		if strings.TrimSpace(req.APIKey) == "" {
+		if strings.TrimSpace(req.APIKey) == "" && !noAuth {
 			if from.APIKey != "" {
 				req.APIKey = from.APIKey
 			} else {
@@ -811,6 +829,13 @@ func (h *handler) addModel(w http.ResponseWriter, r *http.Request) {
 			waiver := true
 			req.AllowPlaintext = &waiver
 		}
+		// A duplicate shares the source's endpoint and key, so it lands on the
+		// same connection card — it must not arrive nameless and leave the
+		// group with a name on some rows and not others.
+		if req.ConnName == nil && from.ConnName != "" {
+			name := from.ConnName
+			req.ConnName = &name
+		}
 	}
 
 	mc, err := h.modelFromRequest(req, "", false)
@@ -822,7 +847,7 @@ func (h *handler) addModel(w http.ResponseWriter, r *http.Request) {
 	// without them a copied subscription- or key_ref-backed entry would
 	// silently become a keyless one. adoptCredential only fills what the
 	// request left empty, so a typed key still wins.
-	if copied != nil {
+	if copied != nil && !noAuth {
 		adoptCredential(&mc, *copied)
 	}
 	alias := strings.TrimSpace(req.Alias)
@@ -902,12 +927,8 @@ func (h *handler) updateModel(w http.ResponseWriter, r *http.Request) {
 		}
 	})
 	active := h.engineModel()
-	wasActive := false
-	if found {
-		wasActive = sameEntry(old, active)
-	}
 	if !found && entryMatches(active, name, modelQ, baseQ, keyQ) {
-		old, found, wasActive = active, true, true
+		old, found = active, true
 	}
 	if !found {
 		// A base the renderer normalized (a catalogue alias form, a plan's
@@ -930,9 +951,8 @@ func (h *handler) updateModel(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case haveReg:
 			old, found, inRegistry = reg, true, true
-			wasActive = sameEntry(reg, active)
 		case haveLive:
-			old, found, wasActive = live, true, true
+			old, found = live, true
 		}
 	}
 	if !found {
@@ -960,6 +980,7 @@ func (h *handler) updateModel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	wantProviderChanged := wantProvider != "" && effectiveProviderID(old) != wantProvider
+	noAuth := req.NoAuth != nil && *req.NoAuth
 	// The raw params/headers are not part of the entry JSON (see
 	// addModelRequest.CopyFrom), so the edit form cannot echo them back. An
 	// edit that omits them means "unchanged" — rebuilding the row without
@@ -975,7 +996,7 @@ func (h *handler) updateModel(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	existingKey := old.APIKey
-	if wantProviderChanged {
+	if wantProviderChanged && !noAuth {
 		existingKey = h.keyAcrossVendorSwitch(old, wantProvider)
 	}
 	// The edit form carries the stored key forward when the request omits one.
@@ -983,7 +1004,7 @@ func (h *handler) updateModel(w http.ResponseWriter, r *http.Request) {
 	// would be sent to the new host on the next turn. A vendor switch is
 	// different — its key comes from the new vendor's own row (see
 	// keyAcrossVendorSwitch), not from the endpoint being left behind.
-	if strings.TrimSpace(req.APIKey) == "" && existingKey != "" && !wantProviderChanged &&
+	if !noAuth && strings.TrimSpace(req.APIKey) == "" && existingKey != "" && !wantProviderChanged &&
 		strings.TrimSpace(req.BaseURL) != strings.TrimSpace(old.BaseURL) &&
 		!sameEndpointHost(req.BaseURL, old.BaseURL) {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf(
@@ -1007,12 +1028,10 @@ func (h *handler) updateModel(w http.ResponseWriter, r *http.Request) {
 	// An env reference belongs to the vendor it was written for, so a vendor
 	// switch drops it for the same reason keyAcrossVendorSwitch drops a stored
 	// key: otherwise the new endpoint is dialed with the old account's token.
-	if strings.TrimSpace(req.APIKey) == "" {
-		if old.KeyEnv != "" && !wantProviderChanged {
-			mc.KeyEnv = old.KeyEnv
-		}
-	} else {
+	if noAuth || strings.TrimSpace(req.APIKey) != "" {
 		mc.KeyEnv = ""
+	} else if old.KeyEnv != "" && !wantProviderChanged {
+		mc.KeyEnv = old.KeyEnv
 	}
 	// The same "an edit keeps what it does not restate" rule covers the row
 	// fields the console never paints. `source` is provenance (which importer
@@ -1025,7 +1044,14 @@ func (h *handler) updateModel(w http.ResponseWriter, r *http.Request) {
 	// account being left behind.
 	mc.Source = old.Source
 	mc.OfflineWait = old.OfflineWait
-	if !wantProviderChanged {
+	// The connection's display name follows the same rule: a client that does
+	// not know the field (or a request that only fixes a limit) must not wipe
+	// the name the card is painted from. Renaming is explicit — the console
+	// sends the field on every row of the connection it just renamed.
+	if req.ConnName == nil {
+		mc.ConnName = old.ConnName
+	}
+	if !wantProviderChanged && !noAuth {
 		mc.KeyScheme = old.KeyScheme
 		if strings.TrimSpace(req.APIKey) == "" {
 			mc.KeyRef = old.KeyRef
@@ -1063,26 +1089,41 @@ func (h *handler) updateModel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var stored config.ModelConfig
+	var wasActive bool
 	err = h.mutateCfgErr(func(c *config.Config) error {
+		wasActive = sameEntry(c.Model, old)
 		mc.Name = freeAliasIn(c, want, old)
 		stored = mc
-		if !inRegistry {
-			return nil // the live entry is rewritten by applyModelConfig below
-		}
-		for i := range c.Models {
-			if sameEntry(c.Models[i], old) {
-				c.Models[i] = mc
-				if h.configPath != "" {
-					return config.UpdateModelsSection(h.configPath, slices.Clone(c.Models))
-				}
-				return nil
+		var models []config.ModelConfig
+		if inRegistry {
+			models = slices.Clone(c.Models)
+			idx := slices.IndexFunc(models, func(row config.ModelConfig) bool { return sameEntry(row, old) })
+			if idx >= 0 {
+				models[idx] = mc
+			} else {
+				// A concurrent delete removed the row after the edit found it.
+				models = append(models, mc)
 			}
 		}
-		// The row went away under us (a concurrent delete) — recreating it is
-		// friendlier than losing the edit the user just confirmed.
-		c.Models = append(c.Models, mc)
 		if h.configPath != "" {
-			return config.UpdateModelsSection(h.configPath, slices.Clone(c.Models))
+			var saveErr error
+			switch {
+			case inRegistry && wasActive:
+				saveErr = config.UpdateModelAndModelsSections(h.configPath, mc, models)
+			case inRegistry:
+				saveErr = config.UpdateModelsSection(h.configPath, models)
+			case wasActive:
+				saveErr = config.UpdateModelSection(h.configPath, mc)
+			}
+			if saveErr != nil {
+				return saveErr
+			}
+		}
+		if inRegistry {
+			c.Models = models
+		}
+		if wasActive {
+			c.Model = mc
 		}
 		return nil
 	})
@@ -1094,7 +1135,7 @@ func (h *handler) updateModel(w http.ResponseWriter, r *http.Request) {
 	// from the previous endpoint/key, so a key fix would otherwise take
 	// effect only after a restart.
 	if wasActive {
-		if err := h.applyModelConfig(stored); err != nil {
+		if err := h.activateModelConfig(stored); err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
 		}
@@ -1821,6 +1862,10 @@ func (h *handler) applyModelConfig(mc config.ModelConfig) error {
 	}); err != nil {
 		return err
 	}
+	return h.activateModelConfig(mc)
+}
+
+func (h *handler) activateModelConfig(mc config.ModelConfig) error {
 	if eng := h.currentEngine(); eng != nil {
 		if err := eng.SetModel(mc); err != nil {
 			return err

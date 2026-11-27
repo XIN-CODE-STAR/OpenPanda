@@ -116,6 +116,63 @@ func TestDedupeKeepsTheCredential(t *testing.T) {
 	}
 }
 
+func TestDedupeSeparatesProtocolsAndKeepsUsableCandidates(t *testing.T) {
+	const base = "https://relay.invalid/Tenant"
+	sources := []Source{
+		{ID: SourceCodex, Candidates: []Candidate{
+			{Source: SourceCodex, Provider: "custom", Model: "model", BaseURL: base, APIType: "responses"},
+		}},
+		{ID: SourceClaude, Candidates: []Candidate{
+			{Source: SourceClaude, Provider: "custom", Model: "model", BaseURL: base, APIType: "anthropic", Importable: true},
+		}},
+		{ID: SourceOpenCode, Candidates: []Candidate{
+			{Source: SourceOpenCode, Provider: "custom", Model: "model", BaseURL: base, APIType: "responses", Importable: true},
+		}},
+	}
+	out := dedupe(sources)
+	if len(out[0].Candidates) != 0 || len(out[1].Candidates) != 1 || len(out[2].Candidates) != 1 ||
+		out[1].Candidates[0].ID == out[2].Candidates[0].ID {
+		t.Fatalf("discovery merged distinct routes or hid an importable row: %+v", out)
+	}
+}
+
+func TestCollectCodexKeepsTheConfiguredProfileCredential(t *testing.T) {
+	home := t.TempDir()
+	opt := Options{NoProbe: true, Getenv: func(key string) string {
+		if key == "CODEX_HOME" {
+			return home
+		}
+		return ""
+	}}
+	for name, body := range map[string]string{
+		"config.toml": `model = "current"
+model_provider = "relay"
+[model_providers.relay]
+base_url = "https://relay.invalid/main"
+experimental_bearer_token = "main-fixture"`,
+		"work.config.toml": `model = "saved"
+model_provider = "relay"
+[model_providers.relay]
+base_url = "https://relay.invalid/profile"
+experimental_bearer_token = "profile-fixture"`,
+	} {
+		if err := os.WriteFile(filepath.Join(home, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range collectCodex(context.Background(), opt).Candidates {
+		if c.Model != "saved" {
+			continue
+		}
+		row, err := c.Row(opt)
+		if err != nil || row.BaseURL != "https://relay.invalid/profile" || row.APIKey != "profile-fixture" {
+			t.Fatalf("saved model did not use its profile endpoint and credential: %v", err)
+		}
+		return
+	}
+	t.Fatal("saved model missing from discovery")
+}
+
 func TestCollectClaudeFromSettingsFile(t *testing.T) {
 	home := t.TempDir()
 	dir := filepath.Join(home, ".claude")

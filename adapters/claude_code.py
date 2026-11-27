@@ -860,7 +860,7 @@ def _main_session(req, model, max_turns):
     deadline = harness.TurnDeadline(proc)
     session_id = ""
 
-    def serve_turn(text):
+    def serve_turn(text, prompt_receipt):
         """One user message → events until this turn's result event."""
         nonlocal session_id
         if not harness.write_line(proc.stdin, {
@@ -869,6 +869,7 @@ def _main_session(req, model, max_turns):
                             "content": [{"type": "text", "text": text}]}}):
             return {"ok": False, "result": "claude session closed",
                     "exit_code": 1, "_dead": True}
+        harness.session_prompt_delivered(prompt_receipt)
         deadline.start(req.timeout)
         final = None
         try:
@@ -913,14 +914,14 @@ def _main_session(req, model, max_turns):
     # Go side falls back to a one-shot run, and an uncaught traceback here
     # would surface as "adapter session ended" instead of the real cause.
     try:
-        out = serve_turn(req.prompt)
+        out = serve_turn(req.prompt, req.prompt_receipt)
         _emit_turn_result(out)
         if not out.get("_dead"):
             for msg in harness.read_turn_lines():
                 text = msg.get("text") or ""
                 if not text.strip():
                     continue
-                out = serve_turn(text)
+                out = serve_turn(text, msg.get("prompt_receipt"))
                 _emit_turn_result(out)
                 if out.get("_dead"):
                     break

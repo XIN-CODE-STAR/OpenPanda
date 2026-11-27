@@ -5,6 +5,7 @@ package askengine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -375,6 +376,12 @@ func TestDeepConcurrentMetricWritersAndSettlement(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err = tasks.CloseAskRound(ctx, g.RoundID, "closed"); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Settle(ctx, g, 0); !errors.Is(err, conversation.ErrConflict) {
+		t.Fatalf("settled with a live descendant: %v", err)
+	}
+	if err = tasks.Cancel(ctx, child.TaskID); err != nil {
 		t.Fatal(err)
 	}
 	start := make(chan struct{})

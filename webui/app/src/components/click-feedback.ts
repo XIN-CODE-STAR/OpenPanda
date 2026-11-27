@@ -8,6 +8,7 @@ export function installClickFeedback(): () => void {
   function paint(target: Element, x: number, y: number, control: boolean) {
     const dot = document.createElement('span')
     dot.className = control ? 'click-feedback control' : 'click-feedback'
+    dot.classList.toggle('sidebar-click', target.closest('.sidebar') !== null)
     dot.setAttribute('aria-hidden', 'true')
     dot.style.left = x + 'px'
     dot.style.top = y + 'px'

@@ -110,6 +110,9 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.thread-group-head > svg:first-child {
+  color: var(--text-secondary);
+}
 /* The conversation history, living inside the sidebar under 对话. It reuses
    the rail's row classes; what changes is the wrapper: full sidebar width, no
    border, and the list grows the nav (which scrolls) instead of owning a pane
@@ -322,7 +325,7 @@
   flex: none;
   width: 14px;
   height: 14px;
-  accent-color: var(--accent);
+  accent-color: var(--text-secondary);
 }
 /* The checkbox is the row's leading cell in batch mode; the title column
    keeps the flex:1 it already had. */
@@ -334,13 +337,6 @@
    directories keep the normal hover. */
 .thread-group.editing .thread-item:hover .thread-meta {
   opacity: 1;
-}
-.thread-item.selected {
-  background: var(--accent-soft);
-  color: var(--text);
-}
-.thread-item.selected .thread-title {
-  color: var(--text);
 }
 .thread-item {
   display: flex;
@@ -356,7 +352,7 @@
      gap to the title, so a title starts where the directory name starts (see
      .thread-mark). */
   padding: 6px 6px 6px 20px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   text-align: left;
   color: var(--text-secondary);
   font-size: var(--text-lg);
@@ -366,13 +362,12 @@
   background: var(--surface-alpha-sm);
   color: var(--text);
 }
-.thread-item.active {
+.thread-item.selected {
   background: var(--surface-alpha-md);
   color: var(--text);
-  /* A simple rounded bar is the whole selection — no leading accent edge, no
-     second mark in a column that is all text. */
-  border-radius: var(--radius-md);
-  box-shadow: inset 0 0 0 1px var(--hairline-xs);
+}
+.thread-item.selected .thread-title {
+  font-weight: 600;
 }
 .thread-item-main {
   flex: 1;
@@ -472,7 +467,7 @@
    is an outcome you cannot check. */
 .thread-mark {
   position: absolute;
-  left: 2px;
+  inset-inline-start: 4px;
   top: 50%;
   transform: translateY(-50%);
   width: 13px;
@@ -2230,7 +2225,12 @@
   position: relative;
   display: flex;
   align-items: flex-end;
-  gap: 2px;
+  /* No gap, and the pet's own right padding is gone below (see
+     `.composer-panda`): the faces are worn on the flank, so the only air
+     between a face and the pet's ink is the sprite's own transparent margin —
+     about 7px. A 2px gap on top of a 6px padding read as "a face standing next
+     to the pet" rather than on it. */
+  gap: 0;
   pointer-events: auto;
 }
 .composer-goal {
@@ -2342,11 +2342,14 @@
   /* 44px of sprite on a 44px square leaves no hover padding; the +6 below
      gives the pointer a little slack around the ink so a missed press lands
      on the pet rather than on the box behind it.
+     The right side gets none: that 6px was air between the pet and the roster
+     faces, which are worn on its flank (see `.composer-pet`). The ink stops
+     7.2px inside the 44px frame anyway, so the pointer still has slack there.
      No hover styling on purpose: the pet is decoration standing on the
      composer, and dimming it every time the pointer crossed the corner made
      the panda look like a disabled control. The press still works; it just
      does not advertise itself in colour. */
-  padding: 6px;
+  padding: 6px 0 6px 6px;
   margin-bottom: -6px;
   margin-left: -6px;
 }
@@ -2590,63 +2593,13 @@
   background: var(--bg-hover);
   color: var(--text);
 }
-/* A pinned node is not the default any more, and the glyph is the only place
-   left that can say so — the header has no room for the node's name. */
-.node-pick-btn.pinned:not(.open) {
-  color: var(--accent);
-}
-/* The roster trigger rides this row on a new conversation, left of the node
-   button: both answer "how this turn is dispatched" — which machine, which
-   hands — so they stand together instead of one here and one over the input.
-   It is a glyph of the node mark's size and weight: the bar is a row of
-   glyphs, and a worded chip here outweighed every other tool in it. The name
-   lives in the tooltip and the accessible name; the one thing a glyph cannot
-   say — how many people were hired — rides the corner as a count. */
-.chat-head-tools .roster-picker {
-  display: flex;
-  align-items: center;
-  flex: none;
-}
-.chat-head-tools .roster-trigger {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: var(--head-tool);
-  height: var(--head-tool);
-  padding: 0;
-  border-radius: 10px;
-  background: transparent;
-  color: var(--text-secondary);
-}
-.chat-head-tools .roster-trigger svg {
-  width: 19px;
-  height: 19px;
-}
-.chat-head-tools .roster-trigger:hover,
-.chat-head-tools .roster-trigger[aria-expanded="true"] {
-  background: var(--bg-hover);
-  color: var(--text);
-}
-/* The chip's count shrinks to a corner badge: a 36px square has no room for
-   the 16px pill it used to be, and hanging off the corner is where a count
-   on a glyph belongs. */
-.chat-head-tools .roster-trigger .roster-count {
-  position: absolute;
-  top: 1px;
-  right: 1px;
-  min-width: 14px;
-  height: 14px;
-  padding-inline: 3px;
-  border-radius: 7px;
-  font-size: 10px;
-}
-/* The trigger stays in the header; the card it opens is the roster's twin —
-   a right-edge sheet with its own scrim, its own head and the same row rhythm
-   (`.node-dialog`, below). It used to be a popover hanging under the bar,
-   which made the third header pick the only one that behaved like a menu. In
-   the side dock the same markup gets `.is-inline` and becomes a static page
-   (dock.css). */
+/* The chip on the new-chat setup strip opens a card, not a menu: the same
+   right-edge sheet with its own scrim, its own head and the same row rhythm
+   (`.node-dialog`, below) as the roster and the directory pick — the three
+   picks stand in one row, so the three cards must not disagree about what a
+   pick looks like. It used to be a popover hanging under the header bar,
+   which made this one the only pick that behaved like a menu. In the side
+   dock the same markup gets `.is-inline` and becomes a static page (dock.css). */
 .node-picker {
   display: flex;
 }
@@ -3398,8 +3351,14 @@
   /* The top gap separates the writing area from the tools without drawing a
      divider. The composer's own bottom padding keeps the row off the border.
      12, not 16: with the field at two rows the box was still 134px tall for a
-     single line of placeholder — the tools floated in the middle of it. */
-  padding: 12px 10px 0;
+     single line of placeholder — the tools floated in the middle of it.
+     Left is 0: the box already insets this row by 14px, and the + carries
+     5px of its own (30px target around a 20px glyph), so a third inset here
+     put the first control ~29px off the edge — it read as floating rather
+     than as the row's start. Zero lands the glyph at 19px, level with where
+     Codex puts the same control. The right keeps its 10px: Send is a filled
+     pill and needs the air. */
+  padding: 12px 10px 0 0;
 }
 /* Send stays quiet while the field is empty, then becomes the one solid action
    once there is something to submit. The state change carries the hierarchy. */
@@ -3800,18 +3759,21 @@
   gap: 1px;
   min-width: 22px;
 }
-/* The row's own buttons take the stamp's slot: they are what you reach for
-   while the pointer is on the row, and the stamp is the thing you can afford
-   to lose for those two seconds. */
+.wd-row-side:not(:has(.wd-row-when)) {
+  flex-direction: row-reverse;
+}
 .wd-row-acts {
-  position: absolute;
-  top: 0;
-  right: 0;
   display: flex;
   gap: 1px;
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--dur-fast) var(--ease);
+}
+/* Only a stamped row has a slot above the star for the hover actions. */
+.wd-row-when ~ .wd-row-acts {
+  position: absolute;
+  top: 0;
+  right: 0;
 }
 .wd-row:hover .wd-row-acts,
 .wd-row:focus-within .wd-row-acts {
@@ -5026,12 +4988,18 @@
   position: relative;
   flex: none;
 }
+/* A drawn plus, not a typed one: the character's weight and width came from
+   whatever font the system picked, and at 24px it read as a footnote glyph
+   next to the permission chip. 30px box, 20px stroke icon — the size Codex
+   gives the same control, and the first thing the eye lands on in the row. */
 .attach-btn {
-  width: 24px;
-  height: 24px;
-  font-size: 17px;
-  line-height: 1;
+  width: 30px;
+  height: 30px;
   color: var(--text-tertiary);
+}
+.attach-btn svg {
+  width: 20px;
+  height: 20px;
 }
 .attach-btn:hover {
   color: var(--text);
@@ -5298,14 +5266,16 @@
   height: 24px;
   /* Same lanes as the log and the composer: 52px of prompt rail on the left,
      plus the header card's lane on the right while one is open, so the bubbles
-     slide with the column instead of hanging off it. */
+     slide with the column instead of hanging off it. Inside a session pane the
+     inset and the measure come from that pane (see `.session-chat-pane`), the
+     same two numbers the box under the trail uses. */
   padding: 0 calc(var(--sp-6) + var(--panel-lane)) 0 var(--chat-leading-gutter);
   /* Where the trail starts, measured from the composer's content box. The pet
-     is 18px in and 44px wide, so 54 puts the first bubble just past the head's
-     right edge and lets the trail climb away from it — the thought is the
-     pet's, not the roster's. The roster faces hang lower on the flank (their
-     top is 24px above the box, the trail's bottom 39), so the two never meet
-     and this lane needs no face count. */
+     is 18px in and 44px wide (its ink 7.2px narrower on each side), so 54 puts
+     the first bubble just past the head's right edge and lets the trail climb
+     away from it — the thought is the pet's, not the roster's. The roster faces
+     hang lower on the flank (their top is 24px above the box, the trail's
+     bottom 39), so the two never meet and this lane needs no face count. */
   --pet-lane: 54px;
   transition: padding-right var(--dur-med) var(--ease-standard);
 }
@@ -5313,8 +5283,10 @@
    a real element and not padding on the strip: measured from the strip, the
    lane lands at the *pane's* edge, which in a wide window is ~150px left of the
    centred composer — the bubbles ended up on top of the panda, which is the bug
-   this rail removes. `.composer > *` caps at the same 900px, so the two edges
-   stay in step at every width. */
+   this rail removes. The measure is the box's own (see
+   `.session-chat-pane .note-rail`), so the two edges stay in step at every
+   width — with a plain 900px here the rail and an 820px box drifted apart by
+   up to ±26px and the trail sat off the pet's head. */
 .note-rail {
   max-width: 900px;
   margin: 0 auto;
@@ -5355,9 +5327,13 @@
   /* Bottom-aligned so the trail grows upward from one baseline, and the
      tallest bubble still fits the button's own height — a bubble that poked
      out of its button would have a dead strip where the pointer cannot reach
-     it. */
+     it. 5px, not 6: with the sizes growing 10 → 13 → 16, the *centres* are
+     what the eye follows, and a 6px edge gap spread them 17.5 then 20.5 while
+     the climb stayed 5.5 each — the trail visibly flattened at the third
+     bubble. 5px puts the centres 16.5 and 19 apart, which is as even as
+     integer sizes allow. */
   align-items: flex-end;
-  gap: 6px;
+  gap: 5px;
   height: 24px;
   padding: 0;
   border: 0;
@@ -5396,10 +5372,14 @@
   height: 13px;
   transform: translateY(-4px);
 }
+/* 8.5, not 8: with the 5px gap the third centre is 19px along, so its climb
+   has to be 6 rather than 5.5 for the three centres to stay on one line — the
+   trail's whole point is that it reads as a single rising thought, and a
+   half-pixel is invisible where a bent line is not. */
 .note-dots .note-dot:nth-child(3) {
   width: 16px;
   height: 16px;
-  transform: translateY(-8px);
+  transform: translateY(-8.5px);
 }
 .note-dots:hover .note-dot,
 .note-dots[aria-expanded='true'] .note-dot {
@@ -5734,12 +5714,6 @@
   flex: none;
   color: var(--accent);
   align-self: center;
-}
-.perm-foot {
-  margin: 3px 6px 1px;
-  font-size: var(--text-xs);
-  line-height: 1.45;
-  color: var(--text-tertiary);
 }
 
 /* ---- Session overview ----------------------------------------------------
@@ -6559,13 +6533,26 @@
      one axis. */
   --composer-measure: 820px;
 }
-.session-chat-pane :is(.chat-log, .composer, .scroll-bottom-slot, .session-note-list) {
+/* The pending-note strip rides the same lanes as the box it hangs over. It
+   used to keep its own (`--chat-leading-gutter` on the left, `--sp-6` +
+   `--panel-lane` on the right) and its rail its own 900px measure, while the
+   composer under it is inset by `--session-inset` and capped at
+   `--composer-measure` (820). Two centrings of different widths meant the
+   trail drifted off the pet's head by up to ±26px depending on the window —
+   left of it on a wide pane, right of it on a mid one — and the bubbles read
+   as a random cluster rather than as the panda thinking. */
+.session-chat-pane :is(.chat-log, .composer, .scroll-bottom-slot, .session-note-list, .note-strip) {
   padding-inline: var(--session-inset);
 }
 .session-chat-pane :is(.chat-log > *, .scroll-bottom-inner) {
   max-width: min(100%, max(var(--session-measure), 86%));
   min-width: 0;
   margin-inline: auto;
+}
+/* The rail is the composer's column, so `--pet-lane` (54px, set on
+   `.note-strip`) is measured from the same left edge the pet stands on. */
+.session-chat-pane .note-rail {
+  max-width: min(100%, var(--composer-measure));
 }
 .session-chat-pane .composer > * {
   max-width: min(100%, var(--composer-measure));
@@ -6576,16 +6563,9 @@
 .new-chat-pane {
   overflow-y: auto;
   --composer-measure: 760px;
-  /* The two washes behind the box are the page's only colour, so they carry
-     the whole mood of an empty console: wide enough to reach the edges of a
-     laptop pane, and mixed here rather than taken straight from `--glow-*`
-     — those are tuned for small cards, and at this size they read as a faint
-     smudge. Alpha carries the depth; the hues stay the tokens' own. */
-  --hero-wash-blue: light-dark(rgb(126 168 232 / 32%), rgb(96 142 208 / 22%));
-  --hero-wash-violet: light-dark(rgb(192 158 219 / 28%), rgb(158 118 184 / 20%));
   background:
-    radial-gradient(ellipse min(44vw, 560px) 200px at 33% 57%, var(--hero-wash-blue), transparent),
-    radial-gradient(ellipse min(42vw, 530px) 195px at 70% 59%, var(--hero-wash-violet), transparent),
+    radial-gradient(ellipse min(44vw, 520px) 190px at 32% 55%, var(--glow-blue), transparent),
+    radial-gradient(ellipse min(42vw, 490px) 185px at 70% 57%, var(--glow-violet), transparent),
     var(--bg);
   caret-color: var(--text);
 }
@@ -6596,45 +6576,156 @@
      that centre puts the composer low on a laptop window. The auto margins
      split what is left over, so the lift is doubled into the bottom padding —
      `--hero-lift` is the number to turn. */
-  --hero-lift: 98px;
+  --hero-lift: 92px;
   margin-block: auto;
   padding-block: 24px calc(24px + var(--hero-lift) * 2);
 }
-/* The hero: the wordmark in the lettering the product ships, with the pet
-   standing where the "O" was (see `HeroLockup` — the panda is part of the
-   artwork now, so there is no second element to place or align). It replaces
-   the greeting line and the plate the pet used to stand on: the page's top
-   half had nothing in it once the prompts left, and the lockup is the one
-   thing here that can be large without repeating what the composer says. */
+/* The hero: the wordmark, with the panda's head standing where the "O" was
+   (see `HeroLockup` — the head is drawn into the lettering, so there is no
+   second element to place or align). It replaces the greeting line and the
+   plate the pet used to stand on: the page's top half had nothing in it once
+   the prompts left, and the lockup is the one thing here that can be large
+   without repeating what the composer says. */
 .new-chat-intro {
   display: flex;
   justify-content: center;
-  /* The gap is what puts the composer on the page's glow band: the form is
-     centred, so every px added here lifts the wordmark by half a px and drops
-     the box by half — `--hero-lift` above is set two-for-one against it to
-     keep the wordmark where it is while the box travels the whole distance. */
-  margin-bottom: 127px;
-}
-/* The pet's face in the wordmark: a cut from the brand sheet laid over the gap
-   the O left. Its box is a percentage of the lockup, so it follows the wordmark
-   at any width; the numbers are the O's slot measured against the 240.15×35
-   cut, with the portrait 22% taller than the caps and its chin a little under
-   the baseline — the proportions the artwork itself uses. */
-.hero-lockup { position: relative; }
-.panda-lockup .hero-pet {
-  position: absolute;
-  left: 0.7%;
-  top: 13.15%;
-  width: 16.4%;
-  aspect-ratio: 166 / 150;
-  pointer-events: none;
+  /* Move the wordmark down within the existing space above the setup strip. */
+  padding-top: 24px;
+  margin-bottom: 152px;
 }
 /* The cut is ink on transparent. On night the ink has to become the page's
-   light and the face its dark, which is exactly what inverting does to a
-   black-on-transparent bitmap — no second asset to keep in step. */
-[data-theme='dark'] .panda-lockup .hero-pet { filter: invert(1); }
+   light, which is exactly what inverting does to a black-on-transparent
+   bitmap — no second asset to keep in step. */
+[data-theme='dark'] .panda-lockup .hero-wordmark { filter: invert(1); }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme='light']) .panda-lockup .hero-pet { filter: invert(1); }
+  :root:not([data-theme='light']) .panda-lockup .hero-wordmark { filter: invert(1); }
+}
+/* ---- The setup strip ------------------------------------------------------
+   The three picks a first message settles — directory, people, machine — on
+   one line directly above the box, which is Codex's shape: the picks are the
+   composer's header, not a toolbar floating in the page. The strip rides the
+   composer's own column (`.composer > *` caps it at `--composer-measure`), so
+   its left and right edges line up with the box below and the two read as one
+   control.
+
+   No border, no raised fill: Codex's strip is a faint grey band on the page,
+   and a second bordered card under a bordered box read as two boxes with only
+   the lower one for typing in. The band is the page's own ink at 3.5%
+   (`--surface-alpha-sm`) — one shade off white in the day, one shade up from
+   the near-black at night — and the chips inside carry the type weight.
+
+   The three picks arrive as three different markups (the directory brings its
+   own pill, the roster and node bring buttons), so the strip is where they
+   lose their chrome and share one height, one radius and one type size. The
+   directory pick's name is the folder's last segment, the roster's is the
+   hired names, the node's is the machine or 自动 — each says what is picked,
+   which is the thing a glyph in the page head could not do. */
+.composer-setup,
+.session-chat-pane .composer > .composer-setup {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  /* Inset by the box's own corner radius (20px each side), so the strip's
+     vertical edges land exactly where the box's top corners finish. Codex's
+     band does the same: narrower than the field, and the two edges line up
+     with the curve instead of floating somewhere inside it. `.composer > *`
+     caps children at `min(100%, var(--composer-measure))` with `(0, 2, 0)`
+     specificity, so overriding `max-width` here keeps the 20px inset on
+     wide viewports instead of clamping the strip back to the box's width. */
+  width: calc(100% - 40px);
+  max-width: calc(var(--composer-measure, 760px) - 40px);
+  margin-inline: auto;
+  /* Square bottom corners, flush against the box: the strip is a tab rising
+     out of the field, not a separate pill hovering above it. Rounded bottom
+     corners were what made the last pass read as "a bar with two little
+     feet" — with them squared, the box's own top edge is what the strip grows
+     out of. */
+  margin-bottom: 0;
+  /* 3 + 28 + 3 = 34px: the strip is a lip on the field's top edge, not a
+     second toolbar. At 44px it read as a bar of its own; the picks are
+     short labels, so the band only needs to hold the chip's own height. */
+  padding: 3px 6px;
+  border-radius: 14px 14px 0 0;
+  background: var(--surface-alpha-sm);
+}
+.composer-setup .workdir-btn,
+.composer-setup .setup-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 1 auto;
+  height: 28px;
+  min-width: 0;
+  max-width: min(280px, 100%);
+  padding: 0 10px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  /* 78% of the page's ink, not `--text-secondary`: Codex's picks read as
+     near-black labels on the band, and the secondary grey at this size made
+     the row look disabled. A picked value still steps up to full ink. */
+  color: color-mix(in srgb, var(--text) 78%, transparent);
+  font: inherit;
+  font-size: var(--text-md);
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+/* The directory pick's inner button is the chip's real target (see
+   `.workdir-btn`); inside the strip it fills the chip's height so the glyph,
+   the name and the caret sit on one baseline with the other two picks. */
+.composer-setup .workdir-btn .workdir-open {
+  height: 100%;
+  gap: 8px;
+}
+/* One glyph size across the three picks: the directory's mark is drawn at the
+   footer chip's 13px (it is a caption down there), and the roster and node
+   marks are 14px — on one row those two sizes read as two weights. 16px is
+   Codex's size for this row. */
+.composer-setup .workdir-glyph,
+.composer-setup .setup-chip > svg:first-child {
+  width: 16px;
+  height: 16px;
+}
+/* The band is grey, so hover cannot reuse `--bg-hover` (it is the band's own
+   value in the day theme and would vanish). A wash of the page's ink works in
+   both themes: 7% darkens the light band, lightens the night one. */
+.composer-setup .workdir-btn:hover:not(.is-disabled),
+.composer-setup .setup-chip:hover,
+.composer-setup .setup-chip[aria-expanded='true'] {
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+  color: var(--text);
+}
+/* A pick is a fact, not a placeholder: the name sits at full ink while the
+   empty pick's "选择…" stays a step quieter. */
+.composer-setup .workdir-btn.has-value,
+.composer-setup .setup-chip.has-value {
+  color: var(--text);
+}
+.composer-setup .setup-chip-label,
+.composer-setup .workdir-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* No caret on this row: Codex's picks have none, and a chevron on a chip that
+   sits on a band reads as a dropdown menu rather than a place to pick. The
+   directory chip keeps its caret in the composer's footer (a thread's
+   read-only pick), where the arrow still says "this opens something". */
+.composer-setup .setup-chip-caret,
+.composer-setup .workdir-caret {
+  display: none;
+}
+/* The directory chip's bubble opens downward from the strip, not sideways:
+   sideways was the footer's answer (the footer's right half was empty), and
+   here it would paint the full path across the roster and node picks. */
+.composer-setup .workdir-btn[data-tip]:hover::after,
+.composer-setup .workdir-btn[data-tip]:focus-visible::after {
+  left: 0;
+  right: auto;
+  bottom: auto;
+  top: calc(100% + 6px);
+  transform: none;
 }
 .new-chat-pane .composer-box {
   padding-top: 12px;
@@ -6647,89 +6738,12 @@
   border-color: color-mix(in srgb, var(--task-blue) 58%, var(--border));
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--task-blue) 12%, transparent);
 }
-/* The directory pick left the box: it is a header glyph now, left of the
-   roster. The composer's top row went with it, so the box is just a field
-   again — and the height that row used to take is handed to the field itself
-   (`.new-chat-pane .composer-input` below), because a shorter box reads as a
-   smaller composer rather than as a tidier one. */
-.roster-trigger {
-  border: 0;
-  border-radius: 8px;
-  background: var(--surface-alpha-sm);
-  color: var(--text-secondary);
-  font-size: var(--text-sm);
-}
-/* The field takes back the 44px the header row used to occupy (36px control +
-   its 8px gap), so the new-chat composer keeps the height it had: the space
-   is now room to write in instead of a strip of controls above the text. */
+/* The directory pick and the roster used to be header glyphs, and the box's
+   top row went with them; the field took that 44px back (36px control + its
+   8px gap) so the new-chat composer kept the height it had. The picks live on
+   the setup strip now, and the field still owns that height — the strip is a
+   sibling above the box, not a row inside it. */
 .new-chat-pane .composer-input { min-height: 96px; }
-/* The directory pick is a header glyph on this page, left of the roster: one
-   square at the bar's tool size, no pill and no name — the path lives in the
-   bubble and the accessible name. It stands with the other two answers a
-   first message needs: who works on it, and which machine runs it. */
-.chat-head-tools .workdir-pick {
-  display: flex;
-  align-items: center;
-  flex: none;
-}
-.chat-head-tools .workdir-btn.icon-only {
-  width: var(--head-tool);
-  height: var(--head-tool);
-  padding: 0;
-  border: 0;
-  border-radius: 10px;
-  background: transparent;
-  justify-content: center;
-}
-.chat-head-tools .workdir-btn.icon-only .workdir-open {
-  width: 100%;
-  height: 100%;
-  justify-content: center;
-  color: var(--text-secondary);
-}
-.chat-head-tools .workdir-btn.icon-only:hover:not(.is-disabled) {
-  background: var(--bg-hover);
-  border-color: transparent;
-}
-.chat-head-tools .workdir-btn.icon-only:hover:not(.is-disabled) .workdir-open,
-.chat-head-tools .workdir-btn.icon-only .workdir-open[aria-expanded="true"] {
-  color: var(--text);
-}
-/* The clear affordance is gone: the card's own first row ("自动（跟随项目）")
-   is where a pick is dropped now, and a cross that appears under the pointer
-   over the very glyph that opens the picker was one mis-aimed click away from
-   erasing the folder instead of changing it. */
-.chat-head-tools .workdir-pick:has(.workdir-open[aria-expanded="true"]) .workdir-btn.icon-only { background: var(--bg-hover); }
-/* The chip's bubble opened sideways, which in this bar would have run over the
-   roster and node marks. Header tools explain themselves below, right-aligned
-   to the bar's edge. */
-.chat-head-tools .workdir-btn[data-tip]:hover::after,
-.chat-head-tools .workdir-btn[data-tip]:focus-visible::after {
-  left: auto;
-  right: 0;
-  bottom: auto;
-  top: calc(100% + 6px);
-  transform: none;
-}
-.roster-trigger {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 32px;
-  padding: 3px 9px;
-}
-.roster-count {
-  display: inline-grid;
-  place-items: center;
-  min-width: 16px;
-  height: 16px;
-  padding-inline: 3px;
-  border-radius: 5px;
-  background: var(--text);
-  color: var(--bg);
-  font-size: var(--text-xs);
-  font-variant-numeric: tabular-nums;
-}
 /* The card hangs off a button that lives at the tools row's right end now, so
    it opens upward (that row is the box's last line) and to the left — anchored
    left it would walk off the pane on a narrow window. */
@@ -7203,6 +7217,24 @@
 .session-round-report-head .msg-copy { margin-inline-start: auto; opacity: 1; }
 .session-round-copy { float: right; margin-inline-start: 6px; }
 .session-round-report-links { margin-block: 4px 8px; }
+/* The control row of a task that is still running: 查看任务 →, 发消息到任务 and
+   取消任务. It is its own row rather than the report's link strip, because the
+   send composer that opens under it is a block, not a link: sharing the strip
+   meant the composer's `flex-basis: 100%` pushed cancel onto a third line and
+   left the three controls reading as unrelated fragments. Cancel keeps the far
+   end (order 2) away from the two the reader reaches for, and the composer
+   drops below them (order 3) without reordering the DOM the keyboard follows. */
+.session-round-job-acts {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  margin-block: 2px 8px;
+  font-size: var(--text-xs);
+}
+.session-round-job-acts .chain-toggle { min-height: 26px; font-size: inherit; }
+.session-round-job-acts .task-send { order: 3; margin-block: 8px 4px; }
+.session-round-job-acts .task-cancel { order: 2; margin-inline-start: auto; }
 .session-round-files { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 10px; }
 .session-round-files li { max-width: 100%; min-width: 0; }
 .session-round-files button { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-height: 32px; overflow-wrap: anywhere; text-align: start; color: var(--accent-2); }
@@ -7272,5 +7304,4 @@
 .history-count { font-size: var(--text-xs); color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
 .thread-group-head .history-caret { flex: none; opacity: .65; transition: transform var(--dur-fast); }
 .thread-group-head[aria-expanded=true] .history-caret { transform: rotate(90deg); }
-.thread-item.active .thread-title { font-weight: 600; }
 .bubble-slot-row.slot-status .status-line { padding: 4px 9px; border-radius: 8px; background: color-mix(in srgb,var(--task-blue) 7%,var(--bg-raised)); color: var(--text-secondary); }

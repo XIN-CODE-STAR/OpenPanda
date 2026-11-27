@@ -4,6 +4,8 @@ package commander
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -121,6 +123,46 @@ func TestTaskFailureDoesNotFallBack(t *testing.T) {
 	}
 }
 
+func TestOrdinaryUnmeteredFailureDoesNotSwitchAgents(t *testing.T) {
+	for _, tc := range []struct {
+		name, message, session string
+	}{
+		{"minted checkpoint", "Wrote report; its sample data had insufficient rows", "started"},
+		{"no checkpoint", "Wrote report; its sample data had insufficient rows", ""},
+		{"auth words in completed work", "Wrote report; inputs include an unauthorized host", "started"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newTwoAgentRouter()
+			plan, err := r.Route([]string{"coding"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "work")
+			r.SetAdapterRunner(func(_ context.Context, adapter, _, _ string) AgentResult {
+				f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = f.WriteString(adapter + "\n")
+				closeErr := f.Close()
+				if err != nil || closeErr != nil {
+					t.Fatalf("record execution: %v %v", err, closeErr)
+				}
+				if adapter == "alpha.py" {
+					return AgentResult{ExitCode: 1, Result: tc.message, SessionID: tc.session}
+				}
+				return AgentResult{OK: true, Result: "alternate succeeded"}
+			})
+			res := r.Execute(context.Background(), plan, "run once", "", false)
+			executions, err := os.ReadFile(path)
+			if err != nil || strings.TrimSpace(string(executions)) != "alpha.py" ||
+				res.OK || res.Stdout != tc.message || res.SessionID != tc.session {
+				t.Fatalf("unexpected fallback: result=%+v executions=%q error=%v", res, executions, err)
+			}
+		})
+	}
+}
+
 // TestAgentFallbackEligibility pins the dispatch/task split directly, including
 // the empty-diagnosis case that used to produce "exec failed: " with nothing
 // after it.
@@ -132,6 +174,7 @@ func TestAgentFallbackEligibility(t *testing.T) {
 	}{
 		{"not signed in", AgentResult{Result: "Not logged in · Please run /login", ExitCode: 1}, true},
 		{"out of funds", AgentResult{Result: "provider failure: Upstream request failed: Insufficient account funds", ExitCode: 1}, true},
+		{"short login refusal with a minted id", AgentResult{Result: "Not logged in · Please run /login", ExitCode: 1, SessionID: "startup"}, true},
 		{"binary missing", AgentResult{Result: "claude binary not found", ExitCode: 127}, true},
 		{"unknown model", AgentResult{Result: "unrecognized_model: deepseek-v9", ExitCode: 1}, true},
 		// dsh words its credential failure with underscores and a singular

@@ -1527,21 +1527,15 @@ func (r *repl) cmdAsk(arg string) {
 	r.askMode(arg, "")
 }
 
-// cmdModeGoal/cmdModePlan/cmdModeSpec run one ask under a slash-mode lens:
-// /goal refines the goal, /plan requests a staged plan, /spec writes a
-// specification. Empty arguments print the mode's usage line instead of
-// sending an empty prompt.
+// cmdModeGoal applies a persistent goal command through the session service.
 func (r *repl) cmdModeGoal(arg string) {
-	message, prompt, err := r.modeCommand("goal", arg)
+	message, _, err := r.modeCommand("goal", arg)
 	if err != nil {
 		r.outln(err.Error())
 		return
 	}
 	if message != "" {
 		r.outln(message)
-	}
-	if prompt != "" {
-		r.ask(prompt)
 	}
 }
 
@@ -1555,7 +1549,7 @@ func (r *repl) cmdModePlan(arg string) {
 		r.outln(message)
 	}
 	if prompt != "" {
-		r.ask(prompt)
+		r.askMode(prompt, "plan")
 	}
 }
 

@@ -124,7 +124,7 @@ def main():
     # node — the invocation row carries argv shape (the prompt is inside argv
     # and must not be re-logged), the result row the bounded output.
     harness.emit_event("tool_use", id="agy", name="agy",
-                       input={"argc": len(cmd) - 1})
+                       input={"argc": len(cmd) - 1}, phase="spawn")
     if req.resume:
         # A resumed run's conversation id is known up front; announce it so
         # a mid-run kill still reports the checkpoint the Go side latched.

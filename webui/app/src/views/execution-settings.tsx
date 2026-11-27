@@ -92,12 +92,12 @@ export function useExecutionSettings(): ExecutionController {
   }
 
   async function save() {
-    if (!form || saving) return
+    if (!form || !dirty || saving) return
     setSaving(true)
     setError('')
     try {
       const next = await api.putExecutionSettings(form)
-      setForm(next)
+      setForm((current) => current === form ? next : current)
       setSaved(JSON.stringify(next))
       setNotice(t('execution.saved'))
     } catch (e: unknown) {
@@ -154,8 +154,8 @@ export function ExecutionLimitsSection({ ctrl }: { ctrl: ExecutionController }) 
 
 /** One agent's three settings, rendered inside that agent's own disclosure.
  *  The two model fields keep their comma-separated native ids; the cap keeps
- *  0 = shared. Nothing here is saved on its own — the tab's save bar owns the
- *  single PUT, exactly as before. */
+ *  0 = shared. Nothing here is saved on its own — the sheet's one action bar
+ *  owns the single PUT, exactly as before. */
 export function AgentExecutionFields({ ctrl, agent }: { ctrl: ExecutionController; agent: string }) {
   const current = ctrl.form
   if (!current) return <p class="hint" role="status">{ctrl.error || t('common.loading')}</p>
@@ -179,35 +179,6 @@ export function AgentExecutionFields({ ctrl, agent }: { ctrl: ExecutionControlle
           onInput={(event) => ctrl.setAgentLimit(agent, (event.target as HTMLInputElement).value)} />
       </label>
       <p class="item-settings-note agent-settings-boundary">{t('execution.nativeBoundary')}</p>
-    </div>
-  )
-}
-
-/** The single action bar for the whole policy. Sticky at the foot of the
- *  pane, so editing a field inside a row's menu never hides the two verbs. */
-export function ExecutionSaveBar({ ctrl }: { ctrl: ExecutionController }) {
-  if (!ctrl.form) return null
-  return (
-    <div class="policy-actions execution-save-bar">
-      {ctrl.error && <p class="gate-error" role="alert">{ctrl.error}</p>}
-      {ctrl.notice && <p class="hint" role="status">{ctrl.notice}</p>}
-      <div class="policy-actions-bar">
-        <span class={`policy-actions-state${ctrl.dirty ? ' dirty' : ''}`} role="status">
-          {ctrl.dirty && (
-            <>
-              <span class="policy-actions-dot" aria-hidden="true" />
-              {t('policy.unsaved')}
-            </>
-          )}
-        </span>
-        <button class="btn ghost" type="button" disabled={!ctrl.dirty || ctrl.saving} onClick={ctrl.discard}>
-          {t('policy.discard')}
-        </button>
-        <button class="btn primary" type="button" disabled={!ctrl.dirty || ctrl.saving}
-          onClick={() => void ctrl.save()}>
-          {t('common.save')}{ctrl.saving ? '…' : ''}
-        </button>
-      </div>
     </div>
   )
 }

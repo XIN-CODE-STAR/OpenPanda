@@ -8,7 +8,7 @@ import { Icon } from '../../components/icons'
 import { t } from '../../i18n'
 
 export type GoalPhase = 'ready' | 'running' | 'review' | 'paused' | 'finished' | 'interrupted' | 'cancelled' | 'blocked' | 'usage_limited' | 'budget_limited'
-export interface ComposerGoal { id: string; text: string; phase: GoalPhase; round?: string; rounds?: number; waitingFor?: string; tokens?: number; tokenBudget?: number; reason?: string }
+export interface ComposerGoal { id: string; text: string; phase: GoalPhase; round?: string; rounds?: number; waitingFor?: string; waitingRound?: string; tokens?: number; tokenBudget?: number; reason?: string }
 export function goalActive(goal?: ComposerGoal): boolean { return goal?.phase === 'running' || goal?.phase === 'review' }
 export function goalNeedsMoreBudget(goal: ComposerGoal): boolean {
   return goal.tokenBudget != null && (goal.tokens ?? 0) >= goal.tokenBudget
@@ -19,7 +19,7 @@ function present(goal?: ServerGoal): ComposerGoal | undefined {
     id: goal.id,
     text: goal.objective,
     phase: goal.status === 'active' ? 'running' : goal.status === 'complete' ? 'finished' : goal.status,
-    round: goal.round_id, rounds: goal.rounds, waitingFor: goal.waiting_for,
+    round: goal.round_id, rounds: goal.rounds, waitingFor: goal.waiting_for, waitingRound: goal.waiting_round,
     tokens: goal.tokens,
     tokenBudget: goal.token_budget,
     reason: goal.reason,

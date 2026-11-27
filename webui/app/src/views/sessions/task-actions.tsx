@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { useEffect, useState } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import { api, isTaskStalled, type ApprovalScope, type ClarifySpec, type Task } from '../../api/client'
 import { ClarifyCard } from '../../components/clarify-card'
 import { confirmDialog } from '../../components/confirm'
+import { Icon } from '../../components/icons'
 import { ScopeSelect } from '../../components/scope-select'
 import { isActiveState } from '../../components/task-activity'
 import { isStalledReview, TaskFailureNotice, taskReviewLabel } from '../../components/task-failure'
@@ -257,6 +258,25 @@ export function TaskQuickSend({ taskId, hint }: { taskId: string; hint?: Task | 
   const [text, setText] = useState('')
   const [images, setImages] = useState<File[]>([])
   const [busy, setBusy] = useState(false)
+  const area = useRef<HTMLTextAreaElement>(null)
+  const picker = useRef<HTMLInputElement>(null)
+
+  // The field grows with the message instead of scrolling inside one line: a
+  // steer is a sentence or three, and proofreading it through a 20px window is
+  // how the wrong instruction gets sent. Capped, so a pasted log does not take
+  // the whole card.
+  useEffect(() => {
+    const el = area.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${Math.min(el.scrollHeight, 132)}px`
+  }, [text, open])
+  // Opening lands the caret in the field: the click that opened the composer
+  // was already the intent to type. Separate from the autosize above so typing
+  // never steals focus back from a control the reader just tabbed to.
+  useEffect(() => {
+    if (open) area.current?.focus()
+  }, [open])
 
   if (!task || ['done', 'failed', 'cancelled', 'expired'].includes(task.state)) return null
 
@@ -282,34 +302,109 @@ export function TaskQuickSend({ taskId, hint }: { taskId: string; hint?: Task | 
     }
   }
 
+  // Collapsed, this is one quiet link in the card's control row — the same
+  // weight as 执行过程 and 查看任务 beside it. It used to be a bordered `btn`,
+  // which made one of the three equal-weight links wear a box.
   if (!open) {
     return (
-      <button class="btn small" onClick={() => setOpen(true)}>
+      <button type="button" class="chain-toggle task-send-open" onClick={() => setOpen(true)}>
+        <Icon name="message" size={14} />
         {t('sessions.msgSend')}
       </button>
     )
   }
+  // Open, it is a composer of its own rather than four controls sharing the
+  // row with the card's links: the message on top, the attachments and the two
+  // modes under it, and one line that says what the modes do. The old markup
+  // put a native `<input type=file>` between the link and the buttons — the
+  // picker's own 250px chrome ("选择文件 未选择任何文件") split the row into
+  // three wrapped fragments, and neither mode was ever explained.
+  const empty = busy || (!text.trim() && !images.length)
   return (
-    <div class="task-quick-send">
-      {task.session_id && <input type="file" accept="image/*" multiple disabled={busy}
-        aria-label={t('detail.msgAttachImage')} onChange={e => setImages(Array.from(e.currentTarget.files ?? []))} />}
-      <input
-        class="input"
-        type="text"
+    <div class="task-send" role="group" aria-label={t('sessions.msgSend')}>
+      <textarea
+        ref={area}
+        class="task-send-input"
+        rows={1}
         placeholder={t('detail.msgPlaceholder')}
+        aria-label={t('detail.msgPlaceholder')}
         value={text}
-        onInput={(e) => setText((e.target as HTMLInputElement).value)}
+        disabled={busy}
+        onInput={(e) => setText(e.currentTarget.value)}
         onKeyDown={(e) => {
-          if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) void deliver(false)
+          if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
+            e.preventDefault()
+            void deliver(false)
+          }
           if (e.key === 'Escape') setOpen(false)
         }}
       />
-      <button class="btn small" disabled={busy || (!text.trim() && !images.length)} onClick={() => deliver(false)}>
-        {t('detail.msgQueue')}
-      </button>
-      <button class="btn small primary" disabled={busy || (!text.trim() && !images.length)} onClick={() => deliver(true)}>
-        {t('detail.msgInject')}
-      </button>
+      <div class="task-send-bar">
+        <div class="task-send-tools">
+          {task.session_id && (
+            <>
+              <input
+                ref={picker}
+                type="file"
+                accept="image/*"
+                multiple
+                hidden
+                onChange={(e) => {
+                  const picked = Array.from(e.currentTarget.files ?? [])
+                  setImages((prev) => [...prev, ...picked])
+                  // Cleared so re-picking the same file still fires onChange.
+                  e.currentTarget.value = ''
+                }}
+              />
+              <button
+                type="button"
+                class="icon-btn task-send-attach"
+                disabled={busy}
+                title={t('detail.msgAttachImage')}
+                aria-label={t('detail.msgAttachImage')}
+                onClick={() => picker.current?.click()}
+              >
+                <Icon name="image" size={15} />
+              </button>
+            </>
+          )}
+          {images.map((file, i) => (
+            <span class="task-send-chip" key={`${file.name}-${i}`}>
+              <span class="task-send-chip-name">{file.name}</span>
+              <button
+                type="button"
+                class="task-send-chip-x"
+                aria-label={t('common.remove')}
+                title={t('common.remove')}
+                onClick={() => setImages((prev) => prev.filter((_, j) => j !== i))}
+              >
+                <Icon name="x" size={11} />
+              </button>
+            </span>
+          ))}
+        </div>
+        <div class="task-send-actions">
+          <button type="button" class="btn small" disabled={empty} onClick={() => void deliver(false)}>
+            {t('detail.msgQueue')}
+          </button>
+          <button type="button" class="btn small primary" disabled={empty} onClick={() => void deliver(true)}>
+            {t('detail.msgInject')}
+          </button>
+          {/* The composer is a block of its own now, so it needs its own way
+              out — Escape works, but a keyboard-only exit is not an affordance
+              you can see. */}
+          <button
+            type="button"
+            class="icon-btn task-send-close"
+            title={t('common.close')}
+            aria-label={t('common.close')}
+            onClick={() => setOpen(false)}
+          >
+            <Icon name="x" size={14} />
+          </button>
+        </div>
+      </div>
+      <p class="task-send-hint">{t('detail.msgHint')}</p>
     </div>
   )
 }
@@ -334,5 +429,9 @@ export function TaskCancel({ task }: { task: Task }) {
     }
   }
 
-  return <button type="button" class="btn small" disabled={busy} onClick={cancel}>{t('detail.cancelTask')}</button>
+  // Quiet red, not a filled danger button: cancelling sits in the same row as
+  // the card's links, and a solid red slab there shouted louder than the run
+  // it belongs to. It keeps the colour on hover and focus, which is where the
+  // warning is due.
+  return <button type="button" class="btn small ghost danger task-cancel" disabled={busy} onClick={cancel}>{t('detail.cancelTask')}</button>
 }

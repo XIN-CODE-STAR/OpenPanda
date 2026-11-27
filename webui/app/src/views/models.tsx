@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import {
   api,
   type AddModelRequest,
+  type ModelImportResult,
   type ModelEntry,
   type ModelRef,
   type ModelRoster,
@@ -19,7 +20,7 @@ import { useModalFocus } from '../components/modal-focus'
 import { confirmDialog } from '../components/confirm'
 import { Icon } from '../components/icons'
 import { toast, toastError } from '../components/toast'
-import { ProviderLogo } from '../brand/providers'
+import { ProviderLogo, hasProviderMark } from '../brand/providers'
 import { DiscoverSheet } from './model-discover'
 import { CCSwitchSheet } from './model-ccswitch'
 import { needsPlaintextConsent } from './model-endpoint'
@@ -30,6 +31,7 @@ import {
   connImported,
   connName,
   copyAlias,
+  derivedConnName,
   groupConnections,
   hostOf,
   isLoopbackURL,
@@ -177,6 +179,12 @@ export function ModelsSection() {
     // write here — add, edit, remove, switch, import, copy — is announced so
     // that card re-reads instead of staying on the set it saw at page load.
     notifyModelSaved()
+  }
+
+  function imported(result: ModelImportResult) {
+    if (result.added > 0) toast(t('models.discover.imported', { n: result.added }), 'success')
+    if (result.activation_failed) toastError(t('models.discover.activationFailed'))
+    if (result.added || result.labeled || result.completed_ids?.length) afterWrite()
   }
 
   async function switchTo(e: ModelEntry) {
@@ -360,32 +368,14 @@ export function ModelsSection() {
       {discovering && (
         <DiscoverSheet
           onClose={() => setDiscovering(false)}
-          onDone={(n, skipped) => {
-            setDiscovering(false)
-            toast(t('models.discover.imported', { n }), 'success')
-            // A row the endpoint refused is the one thing this sheet must not
-            // report as success: it was found in a config, not proven to work.
-            if (skipped?.length) {
-              const reason = skipped[0]!.length > 120 ? `${skipped[0]!.slice(0, 120)}…` : skipped[0]!
-              toastError(t('models.discover.skipped', { n: skipped.length, reason }))
-            }
-            afterWrite()
-          }}
+          onDone={imported}
         />
       )}
 
       {ccswitchOpen && (
         <CCSwitchSheet
           onClose={() => setCcsOpen(false)}
-          onDone={(n, skipped) => {
-            setCcsOpen(false)
-            toast(t('models.discover.imported', { n }), 'success')
-            if (skipped?.length) {
-              const reason = skipped[0]!.length > 120 ? `${skipped[0]!.slice(0, 120)}…` : skipped[0]!
-              toastError(t('models.discover.skipped', { n: skipped.length, reason }))
-            }
-            afterWrite()
-          }}
+          onDone={imported}
         />
       )}
 
@@ -461,16 +451,24 @@ function ConnectionTile(props: {
   const c = props.conn
   const name = connName(c, props.providers)
   const host = connHost(c)
-  const imported = connImported(c)
+  const importLabel = connImported(c) ? t(c.source === 'ccswitch' ? 'models.ccswitch.trigger' : 'models.localImport') : ''
   const localHost = isLoopbackURL(c.baseURL)
   // The card is ringed when one of its models is the live one: the answer to
   // "where is the request going" has to be visible before opening anything.
   const live = c.members.some((m) => m.entry.active)
+  // The tile carries the vendor's mark. A relay has none, so it keeps the
+  // neutral gateway glyph: the name underneath is what tells two relays apart,
+  // and a monogram there made two cards speak a different visual language than
+  // the three beside them.
+  const mark = c.provider || c.apiType
   return (
     <div class={`model-conn${live ? ' live' : ''}`} tabindex={0}>
       <span class="model-conn-face">
         <span class="model-conn-logo">
-          <ProviderLogo id={c.provider || c.apiType} size={56} />
+          {/* The relay glyph is two dots and a bar across the full grid: at a
+              vendor mark's size it reads as a barbell, so it sits a couple of
+              pixels larger and lets the tile do the framing. */}
+          <ProviderLogo id={mark} size={hasProviderMark(mark) ? 30 : 34} />
         </span>
         <span class="model-conn-name" title={name}>
           {name}
@@ -482,10 +480,7 @@ function ConnectionTile(props: {
         )}
         <span class="model-conn-count">{t('models.modelCount', { n: c.members.length })}</span>
         {live && <span class="model-conn-live">{t('models.inUse')}</span>}
-        {/* The badge the discover sheet earns: this row was not typed here, a
-            tool on this machine already held its endpoint and key. It sits
-            opposite "使用中" so the two never fight for the same corner. */}
-        {imported && <span class="model-conn-imported">{t('models.localImport')}</span>}
+        {importLabel && importLabel !== name && <span class="model-conn-imported">{importLabel}</span>}
       </span>
 
       <div class="model-conn-models">
@@ -830,6 +825,10 @@ function ModelSheet(props: {
   const [showKey, setShowKey] = useState(false)
   const [baseURL, setBaseURL] = useState(conn?.baseURL ?? pre?.baseURL ?? '')
   const [apiType, setApiType] = useState(conn?.apiType ?? pre?.apiType ?? initial?.api_type ?? 'openai')
+  // The connection's own name, the one thing that tells two relays apart when
+  // both would otherwise read "自定义 / 中转站 · 本地端点". Opens on the stored
+  // name; empty keeps the derived one (the placeholder says which).
+  const [customName, setCustomName] = useState(conn?.customName ?? pre?.customName ?? '')
   // Consent to reach a plain-http endpoint. Opens on what is stored: an edit
   // that never mentions the field must not silently revoke a waiver the rows
   // were configured with.
@@ -947,6 +946,9 @@ function ModelSheet(props: {
       model: draft.model.trim() || undefined,
       alias: draft.alias.trim() || undefined,
       api_key: apiKey.trim() || undefined,
+      // Every row of the connection carries the name, so a new row on a named
+      // connection is not the one nameless member of the group.
+      conn_name: customName.trim(),
     }
     // Only restate the endpoint when it is not the catalogue's own — a
     // restated one is harmless, but sending it keeps a relay under a known
@@ -1198,6 +1200,9 @@ function ModelSheet(props: {
       model: d.model.trim(),
       alias: d.alias.trim() || undefined,
       api_key: apiKey.trim() || undefined,
+      // The connection has no record of its own, so the name is restated on
+      // every row the save touches — that is how a rename reaches the card.
+      conn_name: customName.trim(),
       thinking: d.thinking,
       no_auth: noAuth,
     }
@@ -1270,10 +1275,13 @@ function ModelSheet(props: {
     : pre
       ? t('models.addModelTitle')
       : t('models.addConnection')
+  // The subtitle names the thing being edited, so it says what the card will
+  // say: the user's own name when there is one, the vendor otherwise.
+  const named = customName.trim()
   const subtitle = conn
-    ? `${conn.providerLabel || t('models.customProvider')} · ${conn.baseURL || t('models.customEndpoint')}`
+    ? `${named || conn.providerLabel || t('models.customProvider')} · ${conn.baseURL || t('models.customEndpoint')}`
     : pre
-      ? `${pre.providerLabel || t('models.customProvider')} · ${pre.baseURL || t('models.customEndpoint')}`
+      ? `${named || pre.providerLabel || t('models.customProvider')} · ${pre.baseURL || t('models.customEndpoint')}`
       : t('models.pickProviderShort')
 
   const keyPlaceholder = conn
@@ -1373,6 +1381,28 @@ function ModelSheet(props: {
                 <span class="wizard-provider-type">
                   {provider.id === 'custom' ? apiType : provider.api_type}
                 </span>
+              </div>
+
+              {/* What the card is called. Without it every relay on this page
+                  is "自定义 / 中转站" and a loopback one adds "本地端点" — a wall
+                  of identical cards nobody can pick from. Empty keeps the
+                  derived name, which the placeholder spells out. */}
+              <div class="wizard-field">
+                <div class="wizard-label-row">
+                  <label for="ms-conn-name">{t('models.connName')}</label>
+                </div>
+                <input
+                  id="ms-conn-name"
+                  class="input"
+                  value={customName}
+                  maxLength={60}
+                  onInput={(e) => setCustomName((e.target as HTMLInputElement).value)}
+                  placeholder={derivedConnName(
+                    conn ?? pre ?? { provider: provider.id, source: '' },
+                    props.providers,
+                  )}
+                />
+                <p class="wizard-help">{t('models.connNameHelp')}</p>
               </div>
 
               {ownerOffer && (

@@ -122,6 +122,14 @@ const relay = (
   </>
 )
 
+/** Whether this id has a mark of its own, rather than falling back to the
+ *  neutral relay glyph. A card that knows the difference can print a monogram
+ *  instead: the relay says "some gateway", which is exactly what two unnamed
+ *  relays have in common. */
+export function hasProviderMark(id: string): boolean {
+  return !!marks[aliases[id] ?? id]
+}
+
 /** The mark for a provider id. Decorative: the label beside it already names
  *  the vendor, so the glyph stays out of the accessibility tree. */
 export function ProviderLogo({ id, size = 20 }: { id: string; size?: number }) {

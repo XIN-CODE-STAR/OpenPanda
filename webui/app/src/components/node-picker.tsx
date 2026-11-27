@@ -13,13 +13,13 @@ import { Icon } from './icons'
  *  problem was not the control but the sentence: "自动（最佳节点）" is a
  *  15-character label sitting in the header for a decision you make rarely,
  *  and a native select cannot show what the choice *means* — which machine is
- *  local, which is offline, which one the scheduler would pick. So the header
- *  keeps a single glyph (the network mark) and the card behind it carries the
- *  list.
+ *  local, which is offline, which one the scheduler would pick. So the trigger
+ *  is a worded chip on the new-chat page — the picked machine's name, or 自动 —
+ *  and a bare glyph in the header, and the card behind it carries the list.
  *
  *  The card is the roster's and the directory pick's twin: a right-edge sheet
  *  with its own scrim, the same width band, the same head and the same row
- *  rhythm (`node-dialog` in chat.css). The three glyphs stand in one row, so
+ *  rhythm (`node-dialog` in chat.css). The three picks stand in one row, so
  *  the three cards must not disagree about what a pick looks like — this one
  *  used to be a popover hanging under the bar, which made the third pick the
  *  only one that behaved like a menu. */
@@ -36,7 +36,7 @@ export function NodePicker(props: {
   open?: boolean
   /** Render only the list, as a page inside the side dock. No trigger button
    *  and no floating card: the dock head owns the button and its body owns the
-   *  surface. Omitted, this stays the header card workspace.tsx uses. */
+   *  surface. Omitted, this stays the chip + card the new-chat page uses. */
   inline?: boolean
 }) {
   const [selfOpen, setSelfOpen] = useState(false)
@@ -48,6 +48,9 @@ export function NodePicker(props: {
   }
   const picked = props.nodes.find((n) => n.id === props.value)
   const current = picked ? picked.name || picked.id : t('sessions.nodeAuto')
+  // The chip has room for a name, not for a sentence: "自动（最佳节点）" is a
+  // tooltip's job, and the row is one line of small print.
+  const chipLabel = picked ? picked.name || picked.id : t('sessions.nodeAutoShort')
 
   // The card is a modal, the same way the roster and the directory pick are:
   // it takes its own layer with a scrim behind it, so a click outside is a
@@ -132,18 +135,19 @@ export function NodePicker(props: {
       {!props.inline && (
         <button
           type="button"
-          class={`icon-btn tip-down node-pick-btn${open ? ' open' : ''}${props.value ? ' pinned' : ''}`}
-          /* The tip is the control's name, not the current choice: the choice is
-             already spelled out by the card behind it, and a header tooltip that
-             changes with the selection reads as a status line rather than a
-             label. The selection is still announced to assistive tech below. */
-          data-tip={open ? undefined : t('sessions.nodeBtn')}
+          class={`node-chip setup-chip${props.value ? ' has-value' : ''}${open ? ' open' : ''}`}
+          /* The tip is the control's name, not the current choice: the choice
+             is already the chip's label, and a tooltip that changed with the
+             selection would read as a status line rather than a label. The
+             selection is still announced to assistive tech below. */
+          data-tip={open ? undefined : t('sessions.nodePick')}
           aria-label={`${t('sessions.nodePick')}: ${current}`}
           aria-haspopup="dialog"
           aria-expanded={open}
           onClick={() => setOpen(!open)}
         >
-          <Icon name="git-fork" size={19} />
+          <Icon name="git-fork" size={16} />
+          <span class="setup-chip-label">{chipLabel}</span>
         </button>
       )}
       {props.inline ? (

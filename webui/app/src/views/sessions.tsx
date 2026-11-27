@@ -40,7 +40,7 @@ import { ClarifyCard } from '../components/clarify-card'
 import { buildCommands } from '../components/palette'
 import { rankWords } from '../components/fuzzy'
 import { goalArgument, goalBudget, goalCommand } from '../components/goal-command'
-import { composerIntent, reconcileTranscript, threadBusy, patchStreaming, slashAtCaret, slashWords, planArgument, type ComposerMode } from '../components/chatstate'
+import { composerIntent, reconcileTranscript, threadBusy, patchStreaming, slashAtCaret, slashWords, planArgument, planCommand, type ComposerMode } from '../components/chatstate'
 import { atQuery, expandFileRefs, exportMarkdown, exportFilename, fileLabel, withAttachments } from '../components/attach'
 import { isLiveSession } from '../components/session-guard'
 import { sortSessions, turnsChanged } from '../components/session-list'
@@ -61,6 +61,7 @@ import { HeroLockup } from '../brand/panda'
 import { ComposerPet } from '../components/composer-pet'
 import { OrchestrateCard } from '../components/orchestrate'
 import { DirButton } from '../components/dir-picker'
+import { lastPathSegment } from '../components/dir-utils'
 import { ModelSelect } from '../components/model-select'
 import { SessionRail } from '../components/session-rail'
 import { agentContextSamples, type ContextAgentView } from '../components/session-rail-stats'
@@ -79,7 +80,7 @@ import {
 } from '../components/composer-editor'
 import { dragHasFiles, livePillKeys, useComposerAttachments } from './sessions/use-composer-attachments'
 import { ComposerInput, type CompletionItem } from './sessions/composer-input'
-import { QueuedNotes } from './sessions/queued-notes'
+import { QueuedNotes, noteCardKey } from './sessions/queued-notes'
 import { fmtSize, type PendingAttachment } from './sessions/attachment-pills'
 import { AttachMenu } from './sessions/attach-menu'
 import { GoalPane, goalActive, legacyGoalFor, useComposerGoals, type ComposerGoal } from './sessions/goal-bar'
@@ -123,10 +124,17 @@ function promptLabel(text: string): string {
   return line.length > 60 ? `${line.slice(0, 60)}…` : line
 }
 
+export type SessionGitOperation = { id: string; kind: 'merge' | 'revert' }
+
 /** The sessions view: a thread rail on the left (codex / claude code style)
  * and one worktree-isolated conversation on the right, streaming over SSE. */
 export function SessionsView({
   activeId,
+  gitOperation,
+  lastGitChange,
+  runGitOperation,
+  confirmingPlan,
+  runPlanConfirmation,
   tourActive,
   project,
   ws,
@@ -134,6 +142,11 @@ export function SessionsView({
   onLogout,
 }: {
   activeId: string | null
+  gitOperation: SessionGitOperation | null
+  lastGitChange: SessionGitOperation | null
+  runGitOperation(operation: SessionGitOperation, perform: () => Promise<boolean>): Promise<void>
+  confirmingPlan: boolean
+  runPlanConfirmation(sid: string, perform: () => Promise<void>): Promise<void>
   tourActive: boolean
   project?: string | null
   /** The workspace a brand-new thread was handed in from (the history's
@@ -166,11 +179,18 @@ export function SessionsView({
   const [liveFrom, setLiveFrom] = useState(0)
   const msgsRef = useRef<ChatMsg[]>([])
   const turnStartRef = useRef(0)
-  const [input, setInput] = useState('')
+  // Async sends may acknowledge an earlier draft after the editor has changed.
+  const draftRevision = useRef(Symbol())
+  const [input, updateInput] = useState('')
+  const setInput = useCallback((value: string) => {
+    draftRevision.current = Symbol()
+    updateInput(value)
+  }, [])
   // Notes typed mid-turn that no round has folded yet — the bubbles on the
   // pet's cheek. A queue with no list is a queue the user cannot see, correct,
   // or take back, so hovering the bubbles opens the list.
   const [notes, setNotes] = useState<SessionNote[]>([])
+  const noteRead = useRef(0)
   // Whether that list is showing. It is a hover/focus disclosure, not a mode:
   // the queue is invisible until the pointer (or the caret) asks for it.
   const [notesOpen, setNotesOpen] = useState(false)
@@ -529,6 +549,7 @@ export function SessionsView({
   // Stop instead of swapping back to Send while that job is running.
   const busy = threadBusy(localBusy, activeId, session, liveIds.length)
   const goalAction = useRef<string | null>(null)
+  const goalReply = useRef<{ sid: string; round: string } | null>(null)
   const [pendingGoalAction, setPendingGoalAction] = useState<string | null>(null)
   const { goal, completionDismissed, onMessageAccepted, failed: controlFailed, state: controlState, refresh: refreshControl, apply: applyControl, goalFor } = useComposerGoals(activeId, session?.operation, Boolean(pendingGoalAction))
   const legacyGoal = activeId && !goal ? legacyGoalFor(activeId) : undefined
@@ -544,17 +565,28 @@ export function SessionsView({
     controlState.proposal_version > controlState.confirmed_version
     ? { text: controlState.proposal, version: controlState.proposal_version, resumesGoal: Boolean(controlState.goal?.paused_by_plan) }
     : null
-  // Both doors of the proposal card open the same dock pane; this only says
-  // whether the note field takes focus on the way in.
-  const [reviewVersion, setReviewVersion] = useState<number | null>(null)
+  const [planDrafts, setPlanDrafts] = useState<Record<string, string>>({})
+  function changePlanDraft(sid: string, note: string) {
+    setPlanDrafts(previous => {
+      const next = { ...previous }
+      if (note) next[sid] = note
+      else delete next[sid]
+      return next
+    })
+  }
   // `/goal` and `/plan` are picks, not prefixes: choosing one takes the token
   // out of the editor and leaves a chip beside the actions, so the draft is
   // the objective and nothing repeats the command. The goal bar is the
   // published goal's own readout — it has no draft preview, because a bar
   // sitting there before the task exists reads as a second composer.
-  const [armed, setArmed] = useState<ComposerMode | null>(null)
+  const [armed, updateArmed] = useState<ComposerMode | null>(null)
+  function setArmed(mode: ComposerMode | null) {
+    draftRevision.current = Symbol()
+    updateArmed(mode)
+  }
   const draftSession = useRef(activeId)
   const drafts = useRef(new Map<string, {
+    revision: symbol
     text: string
     nodes: Node[]
     mode: ComposerMode | null
@@ -594,7 +626,7 @@ export function SessionsView({
     if (!busy && notes.length === 0) return
     const id = setInterval(() => void refreshNotes(), 4000)
     return () => clearInterval(id)
-  }, [activeId, busy, notes.length])
+  }, [activeId, busy, notes.length, session?.id])
   // A queue that empties takes its popover with it: leaving `notesOpen` true
   // would pop the list open again the next time a note is queued, without the
   // pointer ever coming near the bubbles.
@@ -641,6 +673,8 @@ export function SessionsView({
   }, [notes.length, notesOpen])
   const [pickedDir, setPickedDir] = useState('')
   const [defaultProject, setDefaultProject] = useState('')
+  const { data: ctxInfo } = useAsync(() => api.contextInfo(), [])
+  const defaultWorkDir = (ctxInfo?.work_dir ?? '').trim()
   const draftProject = ws || project || defaultProject
   // The project a picked directory resolved to. It outranks the route's
   // project, so a directory chosen on the new-chat page really is where the
@@ -656,12 +690,8 @@ export function SessionsView({
    *  matches the thread on screen — see refreshDiff. */
   const [diffFor, setDiffFor] = useState<string | null>(null)
   const [diffError, setDiffError] = useState('')
-  // The thread a merge/revert is running for, or null. Carrying the id (not a
-  // bare bool) keeps the spinner on the panel that started it: switching
-  // threads mid-merge must not paint "merging" over a list the operation never
-  // touched.
-  const [merging, setMerging] = useState<string | null>(null)
-  const [reverting, setReverting] = useState<string | null>(null)
+  const merging = gitOperation?.kind === 'merge' ? gitOperation.id : null
+  const reverting = gitOperation?.kind === 'revert' ? gitOperation.id : null
   const scroller = useRef<HTMLDivElement>(null)
   const composer = useRef<HTMLDivElement>(null)
   // The in-flight ask, so the stop button can abort it.
@@ -674,11 +704,7 @@ export function SessionsView({
   // to this id; it never scans old transcript task references.
   const inflightOperation = useRef<string | null>(null)
   const stopRequested = useRef(false)
-  // Notes the finished turn never read, as the server reported them. They are
-  // parked server-side, so this is only the trigger to open the continuation
-  // turn — the text itself is drained by the server, which is what keeps a
-  // reload or a second tab from delivering the same words twice.
-  const queuedTurn = useRef('')
+  const checkingResume = useRef(false)
   // The note set the last automatic resume opened a turn for, plus how many
   // times and when. A continuation that cannot drain its notes (the server
   // refused, the turn died first) would otherwise ask again the moment it
@@ -856,7 +882,8 @@ export function SessionsView({
   const contextProject = pickedDir
     ? threadProjects.find((p) => p.work_dir === pickedDir)?.name || ''
     : draftProject
-  const draftDir = pickedDir || threadProjects.find((p) => p.name === draftProject)?.work_dir || ''
+  const projectDir = threadProjects.find((p) => p.name === draftProject)?.work_dir || ''
+  const draftDir = pickedDir || projectDir
 
   // Live rail: the panel pushes a 'sessions' fingerprint slot on the change
   // feed, so a thread created/pinned/deleted on another tab, device, or the
@@ -941,7 +968,6 @@ export function SessionsView({
     invalidateSessionReads()
     // The pane belongs to the thread that produced the proposal; switching
     // threads takes the column back instead of showing another session's plan.
-    setReviewVersion(null)
     if (dockTab === 'goal') {
       setDockOpen(false)
       setDockTab('')
@@ -956,6 +982,7 @@ export function SessionsView({
     // the draft typed in the thread being left.
     if (previous && el && (text || armed || pending.length)) {
       drafts.current.set(previous, {
+        revision: draftRevision.current,
         text,
         nodes: Array.from(el.childNodes, (node) => node.cloneNode(true)),
         mode: armed,
@@ -978,10 +1005,13 @@ export function SessionsView({
       else el.replaceChildren()
       autoGrow(el)
     }
-    setInput(next?.text ?? '')
+    // Returning to an unedited draft must keep the identity of the text
+    // submitted before navigation, so its eventual receipt can clear it.
+    draftRevision.current = next?.revision ?? Symbol()
+    updateInput(next?.text ?? '')
     setCaret(next?.text.length ?? 0)
     setPending(next?.attachments ?? [])
-    setArmed(next?.mode ?? null)
+    updateArmed(next?.mode ?? null)
     setCompleteCursor(0)
     setCompleteDismissed('')
   }, [activeId])
@@ -1293,61 +1323,41 @@ export function SessionsView({
     setDiffError('')
   }, [activeId])
 
-  // Refresh the change badge whenever a reply finishes or the thread changes.
+  // A completed operation can belong to an earlier mount of this view.
+  const gitChange = lastGitChange?.id === activeId ? lastGitChange : null
   useEffect(() => {
     void refreshDiff(activeId)
-  }, [activeId, busy])
+  }, [activeId, busy, gitChange])
 
-  async function mergeChanges() {
-    // The button belongs to the list on screen. If the reader switched between
-    // the paint and the click, that list is not the current thread's — and
-    // merging the thread on screen would merge a worktree the button never
-    // described.
-    const id = diffFor === activeId ? activeId : null
-    if (!id || merging !== null || reverting !== null) return
-    setMerging(id)
-    setDiffError('')
-    try {
-      await api.sessionMerge(id)
-      // The reader may have left this thread while git worked. Its list is no
-      // longer on screen; refreshing it would overwrite the thread now shown
-      // (diffFor) and cancel that thread's own in-flight read. The switch back
-      // refetches through the activeId effect.
-      if (activeIdRef.current === id) await refreshDiff(id)
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      // The panel on screen is not the one that failed; a toast names the
-      // failure without painting it under another thread's list.
-      if (activeIdRef.current === id) setDiffError(msg)
-      else toastError(msg)
-    } finally {
-      setMerging(null)
-    }
+  function mergeChanges() {
+    return changeWorktree('merge')
   }
 
-  async function revertMerge() {
+  function revertMerge() {
+    return changeWorktree('revert')
+  }
+
+  async function changeWorktree(kind: SessionGitOperation['kind']) {
     const id = diffFor === activeId ? activeId : null
-    if (!id || reverting !== null || merging !== null) return
-    // Destructive — a merge at HEAD resets the checkout; ask first, like
-    // the task revert on the detail page already does.
-    const ok = await confirmDialog({
-      title: t('sessions.revertConfirmTitle'),
-      message: t('sessions.revertConfirmMsg'),
-      confirmLabel: t('sessions.revert'),
+    if (!id) return
+    await runGitOperation({ id, kind }, async () => {
+      if (kind === 'revert' && !await confirmDialog({
+        title: t('sessions.revertConfirmTitle'),
+        message: t('sessions.revertConfirmMsg'),
+        confirmLabel: t('sessions.revert'),
+      })) return false
+      setDiffError('')
+      try {
+        if (kind === 'merge') await api.sessionMerge(id)
+        else await api.sessionRevert(id)
+        return true
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (scroller.current && activeIdRef.current === id) setDiffError(msg)
+        else toastError(msg)
+        return false
+      }
     })
-    if (!ok) return
-    setReverting(id)
-    setDiffError('')
-    try {
-      await api.sessionRevert(id)
-      if (activeIdRef.current === id) await refreshDiff(id)
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      if (activeIdRef.current === id) setDiffError(msg)
-      else toastError(msg)
-    } finally {
-      setReverting(null)
-    }
   }
 
   function newChat() {
@@ -1473,11 +1483,25 @@ export function SessionsView({
    *  like any other attachment, and its mention is handed to the note. Refusing
    *  them (the old behaviour) meant the one gesture that most needs a note — "look
    *  at this while you work" — was the one gesture that could not be made. */
-  const noteSending = useRef(false)
+  const noteSending = useRef(new Set<string>())
+  function clearSentDraft(revision: symbol) {
+    if (draftRevision.current !== revision) return
+    setInput('')
+    setArmed(null)
+    clearPending()
+    setCompleteDismissed('')
+  }
+
+  function clearAcceptedDraft(sid: string, revision: symbol) {
+    if (activeIdRef.current === sid) clearSentDraft(revision)
+    else if (drafts.current.get(sid)?.revision === revision) drafts.current.delete(sid)
+  }
+
   async function sendIntoRunningTurn(text: string, tray: PendingAttachment[], target?: string) {
     const sid = activeId
-    if (!sid || (!text && tray.length === 0) || noteSending.current) return
-    noteSending.current = true
+    if (!sid || (!text && tray.length === 0) || noteSending.current.has(sid)) return
+    const revision = draftRevision.current
+    noteSending.current.add(sid)
     const acknowledgeGoal = onMessageAccepted(sid)
     try {
       // Upload before the note so a failed upload leaves the draft intact.
@@ -1494,14 +1518,8 @@ export function SessionsView({
       const r = target ? await api.sendTaskMessage(target, text, true, attachments)
         : await api.sendSessionMessage(sid, text, false, attachments)
       acknowledgeGoal?.()
+      clearAcceptedDraft(sid, revision)
       if (activeIdRef.current !== sid) return
-      // Only clear once the server accepted it: a refused note is still the
-      // user's text, and losing it to an optimistic clear costs more than the
-      // round trip.
-      setInput('')
-      editorClear(composer.current)
-      setPending([])
-      setCompleteDismissed('')
       // The server's own words when it has a caveat (no queue consumer, or an
       // inject that could not interrupt), else the plain outcome.
       if (r.warning) toast(r.warning)
@@ -1510,30 +1528,31 @@ export function SessionsView({
     } catch (err) {
       toastError(err)
     } finally {
-      noteSending.current = false
+      noteSending.current.delete(sid)
     }
   }
 
   /** The pending strip's list: notes no round has folded yet. Polled rather
    *  than pushed — the round loop's consumption is a row stamp, not an event
    *  every surface subscribes to, and a 4s tick costs one small GET. */
-  async function refreshNotes() {
+  async function refreshNotes(resume = true, immediate = false) {
     // Read the CURRENT thread, not the render this function closed over: the
     // old comparison compared a stale value to itself, so a slow reply for the
     // thread just left could install its notes under the new one.
     const sid = activeIdRef.current
+    const request = ++noteRead.current
     if (!sid) {
       setNotes([])
       return
     }
     try {
       const r = await api.sessionNotes(sid)
-      if (activeIdRef.current === sid) {
+      if (request === noteRead.current && scroller.current && activeIdRef.current === sid) {
         setNotes(r.notes)
         // The strip is also the fallback's trigger: a note parked by a turn
         // whose continuation never started is still listed here, and nothing
         // else would ever open a turn for it.
-        resumeParkedNotes(sid, r.notes)
+        if (resume) void resumeParkedNotes(sid, r.notes, immediate)
       }
     } catch {
       // A note list is advisory: a failed read must not paint an error over
@@ -1541,32 +1560,13 @@ export function SessionsView({
     }
   }
 
-  /** Open the continuation turn for notes no round read.
-   *
-   *  `queued_turn` fires once, on the turn's way out. A note accepted in the
-   *  window between the last round and that exit — or a frame lost with the
-   *  stream — leaves the strip holding text nothing will read, which is the
-   *  "queued" that never runs. The notes endpoint is the durable truth, so a
-   *  turn that ends without the frame asks it once. Board rows are left
-   *  alone (the executor reads those).
-   *
-   *  `immediate` marks the turn's own exit, which is the one attempt that must
-   *  not wait: the strip's poll calls it too, so a note stranded by a lost
-   *  frame, a closed tab or a continuation that died before it started still
-   *  gets a turn — just not on every tick. */
-  function resumeParkedNotes(sid: string, listed: SessionNote[], immediate = false) {
+  /** Board notes belong to the executor. The console only resumes notes
+   *  parked by a finished conversation turn, once the session is idle. */
+  async function resumeParkedNotes(sid: string, listed: SessionNote[], immediate: boolean) {
     const pend = listed.filter((n) => !n.durable)
-    if (pend.length === 0) return
-    if (inflight.current || activeIdRef.current !== sid) return
-    const goal = goalFor(sid)
-    if (goal?.phase === 'paused' || goal?.phase === 'cancelled' || (goal && goalAction.current === goal.id)) return
-    // A turn is already streaming this thread: the note just queued belongs
-    // to it, and opening a second ask would cancel the one being watched.
-    if (inflightSid.current === sid) return
-    if (noteEditing.current) return
-    // A hidden tab keeps the note parked: the console is not being watched,
-    // so a turn opened now would spend tokens on an answer nobody sees.
-    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+    const canResume = () => scroller.current && activeIdRef.current === sid && sessionRef.current?.id === sid &&
+      !inflight.current && !noteEditing.current && document.visibilityState !== 'hidden'
+    if (pend.length === 0 || checkingResume.current || !canResume()) return
     const key = pend.map((n) => n.key).join(',')
     const clock = resumeRetry.current
     if (clock.key !== key) {
@@ -1574,21 +1574,26 @@ export function SessionsView({
       clock.at = 0
       clock.tries = 0
     }
-    if (!immediate) {
-      if (clock.tries >= 3 || Date.now() - clock.at < RESUME_RETRY_MS) return
-    }
-    clock.at = Date.now()
-    clock.tries += 1
-    void send(undefined, pend.map((n) => n.text).join('\n\n'), sid)
-  }
-
-  async function resumeLeftoverNotes(sid: string) {
+    if (clock.tries >= 3 || (!immediate && Date.now() - clock.at < RESUME_RETRY_MS)) return
+    const reads = sessionReads.current
+    checkingResume.current = true
     try {
-      const r = await api.sessionNotes(sid)
-      resumeParkedNotes(sid, r.notes, true)
+      // The queue can return before the session loads, or keep a snapshot
+      // after another browser has started a turn. Read fresh state before
+      // asking the server to claim the queue.
+      const [snapshot, control] = await Promise.all([readSession(sid), refreshControl(sid)])
+      if (!snapshot || sessionReads.current !== reads || !canResume()) return
+      if (snapshot.operation?.status === 'running' || control.implementation) return
+      const goal = goalFor(sid)
+      if (goal?.phase === 'paused' || goal?.phase === 'cancelled' || goal?.waitingFor === 'input' ||
+          (goal && goalAction.current === goal.id)) return
+      clock.at = Date.now()
+      clock.tries += 1
+      void send(undefined, '', sid)
     } catch {
-      // A failed read leaves the notes where they are; the next turn's own
-      // start drains them server-side.
+      // Leave the notes queued until a fresh state read succeeds.
+    } finally {
+      checkingResume.current = false
     }
   }
 
@@ -1597,7 +1602,7 @@ export function SessionsView({
     const sid = activeId
     if (!sid) return
     try {
-      const r = await api.promoteSessionNote(sid, n.key)
+      const r = await api.promoteSessionNote(sid, n.key, n.task_id)
       if (r.warning) toast(r.warning)
       else if (r.status === 'interrupted') toast(t('sessions.noteInjected'))
       else toast(t('sessions.noteQueuedAhead'))
@@ -1612,7 +1617,7 @@ export function SessionsView({
     const sid = activeId
     if (!sid) return
     try {
-      await api.deleteSessionNote(sid, n.key)
+      await api.deleteSessionNote(sid, n.key, n.task_id)
       toast(t('sessions.noteDropped'))
       void refreshNotes()
     } catch (e) {
@@ -1625,7 +1630,7 @@ export function SessionsView({
    *  has not read it yet sees only the corrected wording. */
   function beginEditNote(n: SessionNote) {
     noteEditing.current = true
-    setEditingNote(n.key)
+    setEditingNote(noteCardKey(n))
     setNoteDraft(n.text)
   }
 
@@ -1649,7 +1654,7 @@ export function SessionsView({
       return
     }
     try {
-      await api.editSessionNote(sid, n.key, text, attachments)
+      await api.editSessionNote(sid, n.key, text, attachments, n.task_id)
       cancelEditNote()
       toast(t('sessions.noteEdited'))
       void refreshNotes()
@@ -1658,24 +1663,50 @@ export function SessionsView({
     }
   }
 
-  async function send(e?: Event, queued?: string, intoSid?: string, revision = false, sidebarObjective?: string, planVersion?: number) {
+  async function send(e?: Event, providedText?: string, intoSid?: string, revision = false, sidebarObjective?: string, planVersion?: number) {
     e?.preventDefault()
     // A continuation turn carries its own prompt: the words came from the
     // notes the last turn never read, not from the composer. The draft and the
     // tray on screen belong to whatever the user types next, so they are left
     // untouched — clearing them here would eat text typed while the answer was
     // still streaming.
-    const fromComposer = queued === undefined && sidebarObjective === undefined
+    const resumeQueued = providedText !== undefined && !revision
+    const fromComposer = providedText === undefined && sidebarObjective === undefined
     if (tourActive && (fromComposer || sidebarObjective !== undefined)) return
     if (fromComposer && loading) return
-    const typed = (queued ?? input).trim()
+    const typed = (providedText ?? input).trim()
     // An armed chip owns the whole draft; a continuation is never a command.
     const intent = fromComposer ? composerIntent(armed, typed) : { goalText: null, planText: null }
     let goalText = sidebarObjective ?? intent.goalText
     const budget = goalText && sidebarObjective === undefined ? goalBudget(goalText) : undefined
     if (budget?.invalid) { toast(t('sessions.goal.invalidBudget')); return }
     if (budget) goalText = budget.text
-    const planText = revision ? typed : intent.planText
+    let planText = revision ? typed : intent.planText
+    if (!armed && fromComposer && planText) {
+      const command = planCommand(planText)
+      if (command.action === 'invalid') { toast(command.usage); return }
+      if (command.action === 'ask') {
+        planText = command.prompt
+      } else {
+        const sid = activeIdRef.current
+        if (!sid) { toast(t('sessions.plan.noProposal')); return }
+        let applied = false
+        if (command.action === 'show') {
+          try {
+            const state = await refreshControl(sid)
+            if (sid !== activeIdRef.current) return
+            if (!state.proposal) { toast(t('sessions.plan.noProposal')); return }
+            openPlan()
+            applied = true
+          } catch (error) { toastError(error) }
+        } else {
+          if (busy || inflight.current) { toast(t('sessions.plan.busy')); return }
+          applied = await confirmProposal({ sid, version: command.version }, 'command')
+        }
+        if (applied && sid === activeIdRef.current && composer.current && editorTextOf(composer.current).trim() === typed) removeModeCommand(true)
+        return
+      }
+    }
     // A bare `/goal` is a pick, not a send: the token leaves the editor and
     // the chip carries the mode until the task is published. The same words
     // with the chip already armed mean the objective is still empty.
@@ -1727,7 +1758,7 @@ export function SessionsView({
       !fromComposer ? [] : el0 ? pending.filter((p) => livePillKeys(el0).has(p.key)) : pending
     // A tray-only send is a real send: dropping a screenshot and hitting Enter
     // is the whole point, and the prompt then carries nothing but the file.
-    if (!raw && tray.length === 0) return
+    if (!resumeQueued && !raw && tray.length === 0) return
     // A slash line is a command, never a prompt — the REPL's rule. It is
     // checked before the busy guard because a command acts on the console, not
     // on the running turn: a job can hold this thread for minutes, and folding
@@ -1744,6 +1775,9 @@ export function SessionsView({
     // A continuation is never a mid-turn note: it starts the turn the previous
     // one ended without, so the busy guard (and its "type an addition" path)
     // does not apply — `busy` is still true in this closure's finally.
+    // File expansion, uploads and the first HTTP round trip reserve the
+    // composer before there is a server operation that can accept a note.
+    if (fromComposer && inflight.current && !inflightOperation.current) return
     if (fromComposer && (busy || inflight.current)) {
       if (liveIds.length > 1) { toast(t('sessions.pickTaskForNote')); return }
       void sendIntoRunningTurn(raw, tray, liveIds[0])
@@ -1752,6 +1786,7 @@ export function SessionsView({
     // Snapshot the completion at send time so a goal that finishes during
     // this turn (or an automatic continuation) keeps its completion readout.
     const acknowledgeGoal = fromComposer && activeId ? onMessageAccepted(activeId) : undefined
+    const sentRevision = draftRevision.current
     // Claim the slot before the async file expansion — a second Enter during
     // the /api/fs/read round-trips must not start a parallel ask.
     const ctrl = new AbortController()
@@ -1769,6 +1804,7 @@ export function SessionsView({
      *  somewhere to render instead of needing a toast. */
     let announced = false
     let streamFailed = false
+    let resumeConflict = false
     // The optimistic bubbles' keys live out here so the catch can drop them
     // when the server refused the turn before writing anything (a stale plan
     // revision is the case that matters: no error bubble belongs in a
@@ -1872,7 +1908,7 @@ export function SessionsView({
       // thread is named so a relative path resolves against its worktree, the
       // same base the files pane shows; without it the expansion read the
       // same-named file from the node's default tree.
-      const expanded = sidebarObjective !== undefined ? { prompt: raw, attached: [] } : await expandFileRefs(
+      const expanded = resumeQueued || sidebarObjective !== undefined ? { prompt: raw, attached: [] } : await expandFileRefs(
         withAttachments(raw, [...mentions, ...refs]),
         (p) => api.fsRead(p, id ?? undefined),
       )
@@ -1902,16 +1938,7 @@ export function SessionsView({
       const live = () => inflight.current === ctrl && isLiveSession(sid, activeIdRef.current)
       if (goalTarget) {
         await api.controlConversation(sid, { action: 'create', objective: prompt, token_budget: budget?.tokens })
-        if (fromComposer && live()) {
-          setArmed((mode) => mode === armed ? null : mode)
-          if (composer.current && editorTextOf(composer.current).trim() === typed) {
-            setInput('')
-            clearPending()
-          }
-        } else if (fromComposer) {
-          const draft = drafts.current.get(sid)
-          if (draft && draft.mode === armed && draft.text.trim() === typed && draft.attachments === pending) drafts.current.delete(sid)
-        }
+        if (fromComposer) clearAcceptedDraft(sid, sentRevision)
         if (sidebarObjective !== undefined) setGoalDrafts(previous => { const next = { ...previous }; delete next[sid]; return next })
         if (live() && (fromComposer || sidebarObjective !== undefined)) showGoalPanel()
         await refreshControl(sid)
@@ -1919,16 +1946,13 @@ export function SessionsView({
       }
       userKey = localMsgId()
       replyKey = localMsgId()
-      if (live()) {
+      function showTurn(operationId?: string) {
+        if (!live() || announced) return
         setBusy(true)
         // A continuation has no composer draft behind it: the text came from
         // the parked notes, and whatever is in the editor now was typed after
         // this turn started — it must survive.
-        if (fromComposer) {
-          setInput('')
-          setArmed(null)
-          clearPending()
-        }
+        if (fromComposer) clearSentDraft(sentRevision)
         // Sending is an explicit "show me the answer", so re-pin the view.
         pinned.current = true
         setIsPinned(true)
@@ -1937,9 +1961,8 @@ export function SessionsView({
         // once a second until it lands.
         turnStartRef.current = Date.now()
         setLiveFrom(turnStartRef.current)
-        setMsgs((ms) => [
-          ...ms,
-          {
+        setMsgs((ms) => {
+          const user: ChatMsg[] = resumeQueued ? [] : [{
             role: 'user',
             text: raw,
             files: attached.length ? attached : undefined,
@@ -1948,11 +1971,12 @@ export function SessionsView({
             // refetch that follows.
             ts: Math.floor(Date.now() / 1000),
             k: userKey,
-          },
-          { role: 'assistant', text: '', streaming: true, k: replyKey },
-        ])
+          }]
+          return [...ms, ...user, { role: 'assistant', text: '', streaming: true, k: replyKey, operation_id: operationId }]
+        })
         announced = true
       }
+      if (!resumeQueued) showTurn()
 
       // Aim every delta at the bubble actually streaming. A refetch racing
       // the stream can leave a stale message at the tail; patching the tail
@@ -2006,17 +2030,23 @@ export function SessionsView({
           onQuestion: (spec, operationID) => {
             if (live()) setClarify({ sessionID: sid, operationID, spec })
           },
-          // The turn ended before a round could read what was queued behind it.
-          // The server parked those notes; remember them so the finally below
-          // opens the continuation turn instead of letting them evaporate.
-          onQueuedTurn: (text) => {
-            queuedTurn.current = text
-          },
           onOperation: (operationID) => {
             if (operationID) acknowledgeGoal?.()
             if (inflight.current === ctrl && inflightSid.current === sid) {
               inflightOperation.current = operationID
-              if (live()) setMsgs(ms => ms.map(m => m.k === userKey || m.k === replyKey ? { ...m, operation_id: operationID } : m))
+              if (resumeQueued && operationID) {
+                // The server has persisted this user turn before sending the
+                // operation frame, so the user's text can come from that turn.
+                showTurn(operationID)
+                void readSession(sid).then(s => {
+                  const turn = s?.turns.find(turn => turn.role === 'user' && turn.operation_id === operationID)
+                  if (!live() || !turn) return
+                  const user = hydrateTurns([turn], () => userKey)
+                  setMsgs(ms => ms.some(m => m.k === userKey) ? ms : ms.flatMap(m => m.k === replyKey ? [...user, m] : [m]))
+                }).catch(() => {})
+              } else if (live()) {
+                setMsgs(ms => ms.map(m => m.k === userKey || m.k === replyKey ? { ...m, operation_id: operationID } : m))
+              }
               if (stopRequested.current) {
                 void api.cancelSession(sid, operationID).then(() => ctrl.abort()).catch(toastError)
               }
@@ -2081,6 +2111,7 @@ export function SessionsView({
           onError: (message, code, info) => {
             streamFailed = true
             flushStream()
+            if (resumeQueued && !announced && live()) toastError(message)
             patch((m) => ({
               ...m,
               status: undefined,
@@ -2100,22 +2131,22 @@ export function SessionsView({
         // The roster as the composer shows it, every turn: the pick can be
         // edited mid-thread, and the ask carries the answer rather than
         // trusting whatever the session stored before the edit landed.
-        team,
+        resumeQueued ? undefined : team,
         // The permission policy as the picker shows it. The session PATCH
         // keeps it across reloads; sending it here keeps this turn honest
         // even if the patch has not landed yet.
-        permission,
-        // A continuation: the server drains its parked notes as this turn's
-        // input, so the prompt above is display only and cannot double-post.
-        queued !== undefined && !revision,
+        resumeQueued ? undefined : permission,
+        resumeQueued,
         planText !== null ? 'plan' : undefined,
         // Only a revision names the version it is revising: a stale tab must
         // not retire a proposal it never saw.
         revision ? planVersion : undefined,
+        providedText === undefined && planText === null && goalReply.current?.sid === sid &&
+          goalReply.current.round === goalFor(sid)?.waitingRound ? goalReply.current.round : undefined,
       )
       flushStream()
       patch((m) => ({ ...m, streaming: false, status: undefined }))
-      finishTurn()
+      if (announced) finishTurn()
       return !streamFailed
     } catch (err) {
       // Whatever streamed before the failure is the user's only copy of it.
@@ -2127,6 +2158,10 @@ export function SessionsView({
         setMsgs((ms) => ms.filter((m) => m.k !== userKey && m.k !== replyKey))
         toast(t('sessions.plan.changed'), 'info')
         if (id) void refreshControl(id).catch(() => {})
+        return false
+      }
+      if (resumeQueued && err instanceof ApiError && err.status === 409) {
+        resumeConflict = true
         return false
       }
       if (!announced) {
@@ -2249,19 +2284,9 @@ export function SessionsView({
           }
         }).catch(() => {})
       }
-      // What the turn owed: notes it ended without any round reading. The
-      // server parked them, and this is the turn that opens with them — the
-      // composer used to print "queued" and then let them vanish at the end of
-      // the answer. A stopped turn is the one exception: the user asked for
-      // quiet, so the notes stay parked for the next thing they send.
-      const owed = ownsFlight ? queuedTurn.current : ''
-      if (ownsFlight) queuedTurn.current = ''
-      // The continuation goes back into the thread this turn belonged to —
-      // `id`, not the `activeId` this render closed over. On the
-      // create-then-send path that prop is still null (the navigation has
-      // not re-rendered this closure), so reading it here minted a second
-      // thread and posted the queued words there, leaving the original
-      // strip waiting forever.
+      // Re-read the queue after the stream closes, even if the last SSE frame
+      // was missed. A conflict means another browser may own the turn or may
+      // already have consumed the queue, so refresh without starting again.
       if (
         ownsFlight &&
         !ctrl.signal.aborted &&
@@ -2269,14 +2294,8 @@ export function SessionsView({
         !inflight.current &&
         isLiveSession(id, activeIdRef.current)
       ) {
-        if (owed) void send(undefined, owed, id)
-        // `queued_turn` is a single shot, and the window between a turn's
-        // last round and the handler's exit can accept a note after the
-        // leftovers were already parked. When the frame does not arrive, the
-        // notes endpoint is the truth: ask it once and resume what it still
-        // holds, instead of leaving the strip to wait for a round that will
-        // never come.
-        else void resumeLeftoverNotes(id)
+        void refreshNotes(!resumeConflict, true)
+        if (resumeConflict) void refreshControl(id).catch(() => {})
       }
     }
   }
@@ -2387,20 +2406,30 @@ export function SessionsView({
     finally { goalAction.current = null; setPendingGoalAction(null) }
   }
 
-  async function confirmProposal(review: { sid: string; version: number }) {
+  async function confirmProposal(review: { sid: string; version: number }, source: 'review' | 'command' = 'review') {
     const { sid, version } = review
-    if (sid !== activeIdRef.current || proposal?.version !== version || busy || inflight.current) return
-    try {
-      await api.controlConversation(sid, { action: 'confirm', version })
-    } catch (error) {
-      if (!(error instanceof ApiError) || error.status !== 409) {
-        toastError(error)
-        return
+    if (sid !== activeIdRef.current || (source === 'review' && proposal?.version !== version) || busy || inflight.current) return false
+    let applied = false
+    await runPlanConfirmation(sid, async () => {
+      try {
+        const state = await api.controlConversation(sid, { action: 'confirm', version })
+        applyControl(sid, state)
+        changePlanDraft(sid, '')
+        if (sid === activeIdRef.current) setDockTab(current => current === 'plan' ? '' : current)
+        applied = true
+      } catch (error) {
+        if (!(error instanceof ApiError) || error.status !== 409) {
+          toastError(error)
+          return
+        }
+        if (sid === activeIdRef.current) {
+          toast(t(error.code === 'plan_implementation_unsettled' ? 'sessions.plan.previousActive' : 'sessions.plan.changed'), 'info')
+        }
+        // Keep the reader in the pane so they can review the current version.
+        await refreshControl(sid).catch(() => {})
       }
-      toast(t('sessions.plan.changed'), 'info')
-    }
-    if (sid === activeIdRef.current) setDockTab('')
-    void refreshControl(sid).catch(() => {})
+    })
+    return applied
   }
 
   async function adjustPlan(note: string): Promise<boolean> {
@@ -2427,8 +2456,7 @@ export function SessionsView({
     void refreshControl(sid).catch(() => {})
   }
 
-  function openPlan(review: boolean) {
-    setReviewVersion(review && proposal ? proposal.version : null)
+  function openPlan() {
     setDockTab('plan')
     setDockOpen(true)
   }
@@ -2705,9 +2733,6 @@ export function SessionsView({
     return false
   }
 
-  // The new-chat page: nothing open, nothing to read. The footer's directory
-  // pick and the keyboard legend are that page's furniture only — a thread
-  // that exists already knows where it runs, and the legend has been read.
   const newChatPage = !activeId && msgs.length === 0 && !loading
   // 新对话页没有右侧栏。这一页还没有线程：栏里的每一页（文件、页面、侧聊）都无从
   // 谈起，而唯一与这一页有关的那个决定 —— 在哪台机器上跑 —— 原本也锁在栏的工具
@@ -2828,10 +2853,10 @@ export function SessionsView({
   const projection = projectTaskRounds(msgs, sessionTasks, openOperation)
   const selectedReport = reportSelection && projection.rounds.find(round => round.key === reportSelection.key && round.settled)
   const reportShown = dockShown && dockTab === 'report' && !!selectedReport
-  // The proposal owns the pane only while it exists. Confirming it (or the
-  // session switching away) leaves `''` behind, so the column falls back to
-  // the overview instead of holding a document that is no longer confirmed.
-  const planShown = dockShown && dockTab === 'plan' && !!proposal
+  // Keep the plan selected while a revision replaces its proposal. If the
+  // proposal disappears and there is no planning turn, show the overview.
+  const planSelected = dockTab === 'plan' && (!!proposal || (busy && !!controlState?.planning))
+  const planShown = dockShown && planSelected
   // A round can settle from a task-list update before its report turn arrives.
   // Follow that layout change only if the reader was already at the bottom.
   const roundLayout = projection.rounds.map(round => `${round.key}:${round.settled}:${round.jobs.length}`).join('|')
@@ -2924,12 +2949,9 @@ export function SessionsView({
               点开的是它自己的概览浮层（三段事实各带去处）；浮层只在点开时
               盖住右上角，点外面就收起，所以 log、输入框和跳转箭头不会长期
               被挡。超长的改动文字仍先在条内的小框里滚动。导出、节点和编排
-              卡都搬进了栏的头部，所以这条 bar 不再重复它们。新对话页反过来：
-              那一页没有栏，也没有线程可概览，要答的是两个问题——"在哪台机器上
-              跑"和"谁来干"，所以这里站的是节点按钮和员工选择本身：设备不再锁
-              在栏的工具页后面，也没有一个点了会打开空栏的折叠按钮。员工选择
-              原本在输入框上方，和目录按钮挤在一行；它和节点按钮是同一类决定
-              （这一轮怎么派），搬过来并排，输入框那一行就只剩目录。 */}
+              卡都搬进了栏的头部，所以这条 bar 不再重复它们。新对话页没有栏，
+              也没有线程可概览，右侧不留工具：这一页要答的三个问题（在哪跑、
+              谁来干、哪台机器）都落在输入框上方的 setup 行里，头部只剩标题。 */}
           <div class="chat-head-tools">
             {showRail && (
               <SessionRail
@@ -2948,46 +2970,20 @@ export function SessionsView({
                 onOpenQueue={() => navigateView('control')}
               />
             )}
-            {newChatPage ? (
-              <>
-                {/* The three things a first message has to settle sit in one
-                    row, left to right: where it runs in (folder), who works on
-                    it (people), which machine runs it (node). All glyphs —
-                    the composer's top row went with them, so the box is just
-                    a field again. */}
-                <DirButton
-                  tourTarget="workdir"
-                  iconOnly
-                  /* The pick, not the resolved folder: with a project open the
-                     two differ, and the card must show "自动（跟随项目）" ticked
-                     while nothing has been picked by hand. `draftDir` stays the
-                     answer to "where does this run" — the label reads it. */
-                  value={pickedDir}
-                  tip={draftDir}
-                  label={draftDir ? t('sessions.chooseDir') : draftProject || t('sessions.optionalDir')}
-                  onChange={setPickedDir}
-                  hint={t('sessions.hint')}
-                  disabled={busy}
-                />
-                <RosterPicker value={team} onChange={pickTeam} onManage={tourActive ? undefined : () => navigateView('settings:agents')} />
-                <NodePicker nodes={nodes} value={nodePref} onPick={setNodePref} />
-              </>
-            ) : (
+            {!newChatPage && !dockShown && (
               /* Open, the column carries the fold control in its own head, so
                  this one steps aside: two `panel-right` glyphs on the same row
                  were the same button twice. */
-              !dockShown && (
-                <button
-                  type="button"
-                  class="icon-btn tip-down"
-                  data-tip={t('dock.expand')}
-                  aria-label={t('dock.expand')}
-                  aria-expanded={false}
-                  onClick={() => setDockOpen(true)}
-                >
-                  <Icon name="panel-right" size={19} />
-                </button>
-              )
+              <button
+                type="button"
+                class="icon-btn tip-down"
+                data-tip={t('dock.expand')}
+                aria-label={t('dock.expand')}
+                aria-expanded={false}
+                onClick={() => setDockOpen(true)}
+              >
+                <Icon name="panel-right" size={19} />
+              </button>
             )}
           </div>
         </header>
@@ -3157,25 +3153,10 @@ export function SessionsView({
           dropNote={dropNote}
         />
 
-        {/* A finished plan waits on the lane above the box, not inside it:
-            the proposal is the reply's product, so it belongs between the
-            transcript and the composer — the same shelf the clarify card
-            takes — and the box stays one control with nothing bolted under
-            its send row. The full text and the confirmation stay in the
-            dialog the bar opens. */}
-        {activeId && proposal && (
-          <PlanProposalDock
-            version={proposal.version}
-            text={proposal.text}
-            onOpen={() => openPlan(false)}
-            onReview={() => openPlan(true)}
-          />
-        )}
-
         {/* A confirmed plan runs as a background round. Without this line the
             composer showed nothing at all between "开始实施" and the first
             transcript message, which is exactly what a hang looks like. */}
-        {activeId && !proposal && controlState?.implementation && (
+        {activeId && controlState?.implementation && (
           <PlanRunningDock
             phase={controlState.implementation.phase}
             detail={controlState.implementation.detail}
@@ -3197,10 +3178,47 @@ export function SessionsView({
         {/* Textarea and actions share one bordered box so the composer reads
             as a single control rather than a field with a toolbar loose
             underneath it — the focus ring belongs to the whole thing. */}
-        <form class="composer" onSubmit={send}>
+        <form class={`composer${proposal && activeId ? ' has-plan-proposal' : ''}`} onSubmit={send}>
           {newChatPage && <div class="new-chat-intro">
             <HeroLockup width={400} />
           </div>}
+          {/* The three answers a first message needs — where it runs (folder),
+              who works on it (people), which machine runs it (node) — sit on
+              one strip directly above the box, the way Codex puts its machine
+              and workspace picks there. The strip is the box's own header: it
+              shares the composer's width, so the two read as one control with
+              the picks on top rather than as a toolbar floating in the page.
+              They were glyphs in the page head; a glyph says nothing about
+              *which* folder or machine is picked, and this row has the room to
+              say it. A thread that already exists keeps its own furniture —
+              the strip is the new-chat page's alone. */}
+          {newChatPage && (
+            <div class="composer-setup">
+              <DirButton
+                tourTarget="workdir"
+                /* The pick, not the resolved folder: with a project open the
+                   two differ, and the card must show "自动（默认目录）" ticked
+                   while nothing has been picked by hand. `draftDir` stays the
+                   answer to "where does this run" — the label reads it. */
+                value={pickedDir}
+                autoDir={projectDir || defaultWorkDir}
+                tip={draftDir || (defaultWorkDir ? `${t('sessions.workdirAuto')} · ${defaultWorkDir}` : '')}
+                /* Empty is the resting answer, so the chip names the field
+                   ("工作目录"), not the gesture ("选择工作目录") — the gesture is
+                   what the hover tip and the dialog title already say. */
+                label={draftDir ? lastPathSegment(draftDir) : t('sessions.workdirPick')}
+                onChange={setPickedDir}
+                hint={t('sessions.hint')}
+                disabled={busy}
+              />
+              <RosterPicker
+                value={team}
+                onChange={pickTeam}
+                onManage={tourActive ? undefined : () => navigateView('settings:agents')}
+              />
+              <NodePicker nodes={nodes} value={nodePref} onPick={setNodePref} />
+            </div>
+          )}
           <div
             class={`composer-box${busy ? ' composer-running' : ''}${dropping ? ' composer-dropping' : ''}`}
             onDragOver={(e) => {
@@ -3223,14 +3241,17 @@ export function SessionsView({
               addFiles([...(e.dataTransfer?.files ?? [])])
             }}
           >
-            {/* The pet lives above the box; the working directory used to sit
-                up here too, as a lone chip in an otherwise empty header. It
-                rides the tools row now, beside the model switch, where the
-                answer to "where does this run" sits with the answer to "who
-                answers it". */}
+            {/* The proposal shares the pet's row, outside the input box's
+                edge. Its only action is to open the document for reading. */}
             {!newChatPage && (
               <div class="composer-head">
                 <ComposerPet working={busy} team={team} onTeam={pickTeam} onManage={() => navigateView('settings:agents')} />
+                {activeId && proposal && <PlanProposalDock
+                  version={proposal.version}
+                  text={proposal.text}
+                  expanded={planShown}
+                  onOpen={openPlan}
+                />}
               </div>
             )}
             {dropping && <div class="attach-drop-hint">{t('sessions.attachDrop')}</div>}
@@ -3281,7 +3302,32 @@ export function SessionsView({
                   {!dockShown && <span class="goal-trigger-phase">{t(shownGoal.waitingFor === 'input' && goalActive(shownGoal) ? 'goal.waitInput' : 'sessions.goal.state.' + shownGoal.phase)}</span>}
                 </button>
               )}
-              {(armed === 'plan' || controlState?.planning) && <button type="button" class="composer-goal-trigger composer-plan-trigger" aria-pressed={armed === 'plan'} title={t(armed === 'plan' && !controlState?.planning ? 'sessions.plan.hint' : 'sessions.plan.exit')} onClick={() => { if (controlState?.planning) void exitPlanning(); setArmed(null); if (planArgument(input) !== null) removeModeCommand() }}><Icon name="lightbulb" size={16} />{t('sessions.plan.label')}</button>}
+              {/* The chip's one press leaves plan mode, so the tooltip says
+                  that instead of repeating what the mode does — the box's
+                  placeholder already carries the hint while the mode is armed.
+                  A bulb alone read as a status badge, so a × fades in on hover
+                  to promise the press. */}
+              {(armed === 'plan' || controlState?.planning) && (
+                <button
+                  type="button"
+                  class="composer-goal-trigger composer-plan-trigger"
+                  aria-pressed={armed === 'plan'}
+                  title={t('sessions.plan.exit')}
+                  onClick={() => {
+                    if (controlState?.planning) void exitPlanning()
+                    setArmed(null)
+                    if (planArgument(input) !== null) removeModeCommand()
+                  }}
+                >
+                  <Icon name="lightbulb" size={16} />
+                  {t('sessions.plan.label')}
+                  {/* Decoration only: the whole chip is the button, so the ×
+                      has nothing of its own to do. */}
+                  <span class="plan-chip-x" aria-hidden="true">
+                    <Icon name="x" size={12} />
+                  </span>
+                </button>
+              )}
               {/* The model switch, immediately left of Send — the row's right
                   edge is where you reach for before sending, and "which model"
                   is the one more thing that decision wants asked. WorkBuddy's
@@ -3307,24 +3353,6 @@ export function SessionsView({
             </div>
 
           </div>
-          {/* The new-chat page ends at the composer. Three example prompts
-              used to sit under the box; they read as a second toolbar under
-              the one control the page is asking you to use, so the greeting
-              above the box is the only invitation now. */}
-          {!newChatPage && (
-            <div class="composer-foot">
-              {/* Display, not a control: a thread's directory is fixed by its
-                  project row, so the pick is disabled and shows where this
-                  conversation runs — the same slot 新对话 uses to choose. */}
-              <DirButton
-                value={threadDir}
-                onChange={() => {}}
-                label={t('sessions.threadDir')}
-                disabled
-              />
-              <p class="composer-shortcut-hint">{t('sessions.sendShortcut')}</p>
-            </div>
-          )}
         </form>
         {/* The pill's floating copy and its lightbox. Fixed-position and
             outside the box, so neither the composer's own edge nor the
@@ -3352,7 +3380,7 @@ export function SessionsView({
           the same file, the same page, the same side conversation. */}
       <Dock
         open={dockShown}
-        tab={dockTab}
+        tab={dockTab === 'plan' && !planSelected ? '' : dockTab}
         width={dockW}
         env={dockEnv}
         badges={{ changes: shownDiff?.changes.length ?? 0 }}
@@ -3444,7 +3472,11 @@ export function SessionsView({
       >
         {dockShown && dockTab === 'goal' && <section id="goal-panel" class="goal-panel">
           {activeId && !controlState ? <p role="status">{t(controlFailed ? 'goal.reconnecting' : 'common.loading')}</p> : <GoalPane key={activeId ?? 'draft'} goal={shownGoal} draft={goalDrafts[activeId ?? '']} editing={!!shownGoal && editingGoal === shownGoal.id}
-            onReply={() => { setDockOpen(false); composer.current?.focus() }}
+            onReply={() => {
+              goalReply.current = activeId && shownGoal?.waitingRound ? { sid: activeId, round: shownGoal.waitingRound } : null
+              setDockOpen(false)
+              composer.current?.focus()
+            }}
             onDraft={text => setGoalDrafts(previous => ({ ...previous, [activeId ?? '']: text }))}
             onEdit={() => { if (shownGoal) setEditingGoal(shownGoal.id) }} onCancelEdit={() => { setEditingGoal(''); setGoalDrafts(previous => { const next = { ...previous }; delete next[activeId ?? '']; return next }) }}
             pending={savingGoal || !!pendingGoalAction} canStart={!busy}
@@ -3467,21 +3499,25 @@ export function SessionsView({
             decision row stays at the foot of the pane, so "read it", "say
             what to change" and "start" are one surface rather than a modal
             the reader has to dismiss first. */}
-        {planShown && proposal && activeId && (
+        {planShown && activeId && (
           <div class="dock-pane">
-            <PlanPane
-              key={activeId + proposal.version}
-              onReview={() => setReviewVersion(proposal.version)}
-              onDismiss={() => setReviewVersion(null)}
+            {proposal ? <PlanPane
+              key={`${activeId}:${proposal.version}`}
               version={proposal.version}
               text={proposal.text}
               resumesGoal={proposal.resumesGoal}
               busy={busy}
-              review={reviewVersion === proposal.version}
+              confirming={confirmingPlan}
+              note={planDrafts[activeId] ?? ''}
+              onNote={note => changePlanDraft(activeId, note)}
               onAdjust={adjustPlan}
-              onConfirm={() => confirmProposal({ sid: activeId, version: proposal.version })}
-              onClose={() => setDockTab('')}
-            />
+              onConfirm={async () => { await confirmProposal({ sid: activeId, version: proposal.version }) }}
+              onClose={() => {
+                setDockTab('')
+                setDockOpen(false)
+                document.getElementById('plan-proposal-trigger')?.focus({ preventScroll: true })
+              }}
+            /> : <div class="plan-pane-body" role="status">{t('common.loading')}</div>}
           </div>
         )}
         {/* The three tool pages. They are panes like files/browser/side, not
@@ -3546,8 +3582,8 @@ export function SessionsView({
               session={session?.id ?? null}
               diff={shownDiff}
               error={diffError}
-              merging={merging === activeId}
-              reverting={reverting === activeId}
+              merging={merging !== null && merging === activeId}
+              reverting={reverting !== null && reverting === activeId}
               blocked={
                 (merging !== null && merging !== activeId) ||
                 (reverting !== null && reverting !== activeId)

@@ -8,7 +8,62 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/Xustalis/OpenPanda/internal/config"
+	"github.com/Xustalis/OpenPanda/internal/ledger"
 )
+
+func TestPeerOfflineEpisodeSurvivesReadsAndChangesAfterRecovery(t *testing.T) {
+	db := newTestDB(t)
+	const addr = "192.168.1.20:7836"
+	const peer = "episode-peer"
+	if err := ledger.RecordPeerAddr(db, addr, peer); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO employee_cache(id,status,last_seen) VALUES(?, 'offline', 123)`, peer); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{}
+	cfg.Network.Peers = []config.PeerEntry{{Addr: addr}}
+	h := New(Deps{DB: db, Cfg: cfg, Token: testToken, StaticDir: t.TempDir()})
+	readPeer := func() map[string]any {
+		t.Helper()
+		code, view := doJSON(t, h, authedReq(http.MethodGet, "/api/peers", nil))
+		rows, _ := view["peers"].([]any)
+		if code != http.StatusOK || len(rows) != 1 {
+			t.Fatalf("list peers: %d %v", code, view)
+		}
+		return rows[0].(map[string]any)
+	}
+	first := readPeer()
+	firstID, _ := first["offline_id"].(string)
+	if firstID == "" || first["online"] != false {
+		t.Fatalf("first episode: %v", first)
+	}
+	if _, err := db.Exec(`UPDATE employee_cache SET status='offline', last_seen=124 WHERE id=?`, peer); err != nil {
+		t.Fatal(err)
+	}
+	if next := readPeer(); next["offline_id"] != firstID || next["last_seen"] == first["last_seen"] {
+		t.Fatalf("same outage must keep the id through a last_seen update: %v", next)
+	}
+	if err := ledger.MarkOnline(db, peer); err != nil {
+		t.Fatal(err)
+	}
+	if recovery := readPeer(); recovery["online"] != true || recovery["offline_id"] != nil {
+		t.Fatalf("recovery: %v", recovery)
+	}
+	if _, err := db.Exec(`UPDATE employee_cache SET status='offline', last_seen=123 WHERE id=?`, peer); err != nil {
+		t.Fatal(err)
+	}
+	second := readPeer()
+	secondID, _ := second["offline_id"].(string)
+	if secondID == "" || secondID == firstID || second["last_seen"] != first["last_seen"] {
+		t.Fatalf("second episode with equal timestamp: first=%v second=%v", first, second)
+	}
+	if next := readPeer(); next["offline_id"] != secondID {
+		t.Fatalf("re-read changed current episode: %v", next)
+	}
+}
 
 // TestPeersListEditRemove walks the dial-list management surface the device
 // card uses: list what is configured, rename an entry in place, refuse a

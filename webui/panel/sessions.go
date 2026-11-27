@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -577,7 +578,9 @@ func (h *handler) sessionRevert(w http.ResponseWriter, r *http.Request) {
 	subject, err := wt.Revert(r.Context(), id)
 	if err != nil {
 		switch {
-		case errors.Is(err, sessions.ErrRevertDirty):
+		case errors.Is(err, sessions.ErrRevertDirty), errors.Is(err, sessions.ErrInvalidMergeRecord),
+			errors.Is(err, sessions.ErrMergeInProgress), errors.Is(err, sessions.ErrRevertConflict),
+			errors.Is(err, sessions.ErrRevertInProgress):
 			writeErr(w, http.StatusConflict, err)
 		case errors.Is(err, sessions.ErrNotFound):
 			writeErr(w, http.StatusNotFound, err)
@@ -617,7 +620,7 @@ func (h *handler) sessionMerge(w http.ResponseWriter, r *http.Request) {
 	}
 	subject, err := wt.Merge(r.Context(), id, req.Message)
 	if err != nil {
-		if errors.Is(err, sessions.ErrMergeConflict) {
+		if errors.Is(err, sessions.ErrMergeConflict) || errors.Is(err, sessions.ErrMergeInProgress) || errors.Is(err, sessions.ErrRevertInProgress) {
 			writeErr(w, http.StatusConflict, err)
 			return
 		}
@@ -641,6 +644,12 @@ type sessionOperation struct {
 }
 
 func (h *handler) registerSessionAsk(id string, cancel context.CancelFunc) (sessionOperation, error) {
+	return h.claimSessionAsk(id, cancel, false)
+}
+
+var errSessionAskActive = errors.New("session already has an active turn")
+
+func (h *handler) claimSessionAsk(id string, cancel context.CancelFunc, idleOnly bool) (sessionOperation, error) {
 	operationID, err := util.UUIDv7()
 	if err != nil {
 		return sessionOperation{}, err
@@ -650,12 +659,16 @@ func (h *handler) registerSessionAsk(id string, cancel context.CancelFunc) (sess
 		h.askMu.Unlock()
 		return sessionOperation{}, errSessionDeleting
 	}
+	old, exists := h.activeAsks[id]
+	if idleOnly && (len(h.askLive[id]) != 0 || exists) {
+		h.askMu.Unlock()
+		return sessionOperation{}, errSessionAskActive
+	}
 	if h.activeAsks == nil {
 		h.activeAsks = make(map[string]sessionOperation)
 	}
 	h.askGeneration++
 	op := sessionOperation{generation: h.askGeneration, operationID: operationID, cancel: cancel, done: make(chan struct{})}
-	old, exists := h.activeAsks[id]
 	h.activeAsks[id] = op
 	if h.askLive == nil {
 		h.askLive = make(map[string]map[uint64]sessionOperation)
@@ -940,7 +953,7 @@ func (h *handler) sessionCancel(w http.ResponseWriter, r *http.Request) {
 		var err error
 		cancelled, err = eng.Conversations(h.sessions).StopOperation(r.Context(), id, req.OperationID)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err)
+			writeConversationError(w, err)
 			return
 		}
 	}
@@ -1299,7 +1312,8 @@ type sessionAskRequest struct {
 	// PlanVersion is the proposal version a plan revision was written against.
 	// Absent (0) is a fresh plan request; a revision that names a version the
 	// store has already replaced is refused instead of retiring the newer text.
-	PlanVersion int64 `json:"plan_version,omitempty"`
+	PlanVersion int64  `json:"plan_version,omitempty"`
+	ReplyTo     string `json:"reply_to,omitempty"`
 	// Node is the composer's environment pick: the preferred executor node
 	// (id or name) for any task this ask spawns. Empty lets the scheduler
 	// route by capability, which is also the right behavior for plans.
@@ -1448,6 +1462,10 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 	// it shares the thread's history snapshot, work dir and permission
 	// policy, and nothing else.
 	side := req.Side
+	if req.ResumeQueued && side {
+		writeErr(w, http.StatusBadRequest, errors.New("queued notes belong to the main conversation"))
+		return
+	}
 	// Who may take this turn's work. The composer sends what is on screen;
 	// a client that knows nothing about rosters (or a resumed thread) gets
 	// the session's own team, so the pick survives a reload and a second
@@ -1472,6 +1490,54 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		permission = req.PermissionMode
+	}
+
+	// A queued continuation is not an answer to a Plan or Goal question.
+	input := new(askengine.AskInput)
+	if req.ResumeQueued && req.ReplyTo != "" {
+		writeErr(w, http.StatusBadRequest, errors.New("a queued continuation cannot answer a clarification"))
+		return
+	}
+	if !req.ResumeQueued {
+		input, err = eng.ReserveAskInput(r.Context(), req.Prompt, askengine.AskScope{
+			SessionID: sessID, Mode: req.Mode, ReplyTo: req.ReplyTo, Side: side,
+		})
+		if err != nil {
+			if errors.Is(err, conversation.ErrConflict) {
+				writeErr(w, http.StatusConflict, err)
+			} else {
+				writeErr(w, http.StatusInternalServerError, err)
+			}
+			return
+		}
+		defer input.Close()
+	}
+
+	// The model run belongs to the panel lifetime. A continuation reserves the
+	// empty main slot before it can claim notes from a previous or live queue.
+	baseCtx := h.serviceCtx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	execCtx, cancel := context.WithCancel(baseCtx)
+	defer cancel()
+	opKey := sess.ID
+	if side {
+		opKey += sideOperationSuffix
+	}
+	var op sessionOperation
+	if req.ResumeQueued {
+		op, err = h.claimSessionAsk(opKey, cancel, true)
+		if err != nil {
+			code := http.StatusInternalServerError
+			if errors.Is(err, errSessionAskActive) || errors.Is(err, errSessionDeleting) {
+				code = http.StatusConflict
+			}
+			writeErr(w, code, err)
+			return
+		}
+		defer h.unregisterSessionAsk(opKey, op)
+		req.Prompt = ""
 	}
 
 	// Only now take the notes a finished turn parked: every check above can
@@ -1584,6 +1650,27 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 			state.ConfirmedVersion >= req.PlanVersion ||
 			strings.TrimSpace(state.Proposal) == "" {
 			writeErr(w, http.StatusConflict, conversation.ErrConflict)
+			return
+		}
+	}
+
+	// The round is read back in this console, so it records the console's
+	// language, with the saved locale and engine locale as fallbacks.
+	roundLocale := i18n.Parse(req.Locale)
+	if roundLocale == "" {
+		roundLocale = h.locale()
+	}
+	if roundLocale == "" {
+		roundLocale = eng.Locale()
+	}
+	if req.ResumeQueued {
+		if err := h.store.BeginIdleAskRound(execCtx, op.operationID, sess.ID, string(roundLocale)); err != nil {
+			if errors.Is(err, core.ErrConflict) {
+				writeErr(w, http.StatusConflict, err)
+			} else {
+				log.From(r.Context()).Warn("create automatic continuation round", "session", sess.ID, "err", err)
+				writeErr(w, http.StatusInternalServerError, errors.New("create round failed"))
+			}
 			return
 		}
 	}
@@ -1741,54 +1828,30 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 	// non-empty workDir for both keeps the memory wall (§17.2) intact —
 	// personal memory never enters a session prompt.
 	workDir := eng.SessionWorkDir(sess)
-	// Run under the panel lifetime, not the HTTP connection. Only the matching
-	// operation ID can cancel this generation through the explicit stop API.
-	baseCtx := h.serviceCtx
-	if baseCtx == nil {
-		baseCtx = context.Background()
-	}
-	execCtx, cancel := context.WithCancel(baseCtx)
-	defer cancel()
-	// The operation key separates the side channel from the thread it sits
-	// beside. registerSessionAsk is one slot per key and cancels the previous
-	// holder, so a side ask filed under the thread's own id would stop the
-	// turn the user is watching. The suffix mirrors the TUI's
-	// sideSessionSuffix: the same conversation has one name on both surfaces.
-	opKey := sess.ID
-	if side {
-		opKey = sess.ID + sideOperationSuffix
-	}
-	op, err := h.registerSessionAsk(opKey, cancel)
-	if err != nil {
-		// A delete owns this thread now: the row is going away, so there is
-		// nothing for the turn to attach to and no console that could stop it.
-		message := "create operation failed"
-		if errors.Is(err, errSessionDeleting) {
-			message = errSessionDeleting.Error()
+	if !req.ResumeQueued {
+		op, err = h.registerSessionAsk(opKey, cancel)
+		if err != nil {
+			message := "create operation failed"
+			if errors.Is(err, errSessionDeleting) {
+				message = errSessionDeleting.Error()
+			}
+			send("error", map[string]string{"message": message})
+			return
 		}
-		send("error", map[string]string{"message": message})
-		return
+		defer h.unregisterSessionAsk(opKey, op)
+		beginRound := h.store.BeginAskRound
+		if side {
+			beginRound = h.store.BeginSideAskRound
+		}
+		if err := beginRound(execCtx, op.operationID, sess.ID, string(roundLocale)); err != nil {
+			send("error", map[string]string{"message": "create round failed"})
+			return
+		}
 	}
 	askStarted := time.Now()
 	// Persist the dispatch boundary before the entry model can submit work.
 	// A unique operation, rather than session ID, separates overlapping asks.
 	roundID := op.operationID
-	// The round is read back in this console, so it records the console's
-	// language: the client sends its own, the persisted ui.locale is the
-	// fallback for a client that predates the field, and the engine locale —
-	// the CLI's — is the last resort.
-	roundLocale := i18n.Parse(req.Locale)
-	if roundLocale == "" {
-		roundLocale = h.locale()
-	}
-	if roundLocale == "" {
-		roundLocale = eng.Locale()
-	}
-	if err := h.store.BeginAskRound(execCtx, roundID, sess.ID, string(roundLocale)); err != nil {
-		send("error", map[string]string{"message": "create round failed"})
-		h.unregisterSessionAsk(opKey, op)
-		return
-	}
 	roundCtx, stopRound := context.WithCancel(execCtx)
 	roundStatus := "interrupted"
 	guard.Go(nil, "panel: ask round lease", nil, func() {
@@ -1809,7 +1872,6 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 		defer closeCancel()
 		_ = h.store.CloseAskRound(closeCtx, roundID, roundStatus)
 	}()
-	defer h.unregisterSessionAsk(opKey, op)
 	// The steer queue lives exactly as long as the turn that drains it. Notes
 	// still in it when the turn ends are not dropped: a note typed into the
 	// last round has no later boundary to land on, and throwing it away made
@@ -1861,7 +1923,13 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 			}
 			switch finalOperation.Status {
 			case core.StateFailed, core.StateCancelled:
-				h.carryNotes(sess.ID, consumedSteer)
+				// A turn that dispatched work has answered the note: the model
+				// read it and acted on it, and the task's own failure is not the
+				// directive going unread. Carrying it again would repeat the
+				// instruction at the top of the next turn.
+				if finalOperation.TaskID == "" {
+					h.carryNotes(sess.ID, consumedSteer)
+				}
 			}
 		}()
 	}
@@ -1889,7 +1957,11 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 	// treats this frame as "the message was accepted" — it is what dismisses a
 	// completed goal — so sending it first made a failed turn write look like a
 	// delivered message: the goal disappeared with no bubble to replace it.
-	if !send("operation", map[string]string{"operation_id": op.operationID}) {
+	operationEvent := map[string]string{"operation_id": op.operationID}
+	if sideChatID != "" {
+		operationEvent["side_chat"] = sideChatID
+	}
+	if !send("operation", operationEvent) {
 		// The operation remains detached from the failed response writer and
 		// continues to persist its final task/session result.
 	}
@@ -2005,6 +2077,8 @@ func (h *handler) sessionAsk(w http.ResponseWriter, r *http.Request) {
 	out, err := eng.AskTurnsScoped(execCtx, history, req.Prompt, askengine.AskScope{
 		Mode:           req.Mode,
 		PlanVersion:    req.PlanVersion,
+		ReplyTo:        req.ReplyTo,
+		InputReply:     input,
 		PersonalMemory: true,
 		RoundID:        roundID,
 		Project:        sess.Project,
@@ -2283,31 +2357,21 @@ const (
 	maxUploadBodyBytes = 4*maxUploadFileBytes + (1 << 20)
 )
 
-// sessionUploadDir returns the directory a session's uploads live in,
-// creating it on demand. With a worktree it is <worktree>/.openpanda/uploads
+// sessionUploadDir returns the directory a session's uploads live in.
+// With a worktree it is <worktree>/.openpanda/uploads
 // — inside the worktree, so it rides the session's own lifecycle: deleting a
 // thread deletes its uploads with it, which is the per-session cleanup.
 // Without a worktree (a work path that is not a repository) it falls back to
 // a per-session directory under the work path, which the panel deletes with
 // the thread instead.
-func (h *handler) sessionUploadDir(sess *sessions.Session) (string, error) {
+func sessionUploadDir(sess *sessions.Session, workPath string) (string, error) {
 	if sess.Worktree != "" {
-		dir := filepath.Join(sess.Worktree, ".openpanda", "uploads")
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return "", err
-		}
-		return dir, nil
+		return filepath.Abs(filepath.Join(sess.Worktree, ".openpanda", "uploads"))
 	}
-	var workPath string
-	h.readCfg(func(c *config.Config) { workPath = c.Storage.WorkPath })
 	if workPath == "" {
 		return "", errors.New("session has no worktree and no work path")
 	}
-	dir := filepath.Join(workPath, ".openpanda", "uploads", sess.ID)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
-	}
-	return dir, nil
+	return filepath.Abs(filepath.Join(workPath, ".openpanda", "uploads", sess.ID))
 }
 
 // removeSessionUploads deletes a session's fallback uploads directory — the
@@ -2333,7 +2397,7 @@ type uploadedFile struct {
 	Name string `json:"name"`
 	Path string `json:"path"` // absolute — what /api/fs/read accepts
 	// Mention is what the composer inserts: a path the fs endpoints resolve —
-	// work-path relative when the file sits inside it (the same shape the
+	// session-cwd relative when the file sits inside it (the same shape the
 	// @file completion types), absolute otherwise.
 	Size    int64  `json:"size"`
 	Mention string `json:"mention"`
@@ -2348,8 +2412,14 @@ func (h *handler) uploadSessionFile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, errors.New("no such session"))
 		return
 	}
-	dir, err := h.sessionUploadDir(sess)
+	var workPath string
+	h.readCfg(func(c *config.Config) { workPath = c.Storage.WorkPath })
+	dir, err := sessionUploadDir(sess, workPath)
 	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
@@ -2360,17 +2430,32 @@ func (h *handler) uploadSessionFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var workPath string
-	h.readCfg(func(c *config.Config) { workPath = c.Storage.WorkPath })
+	cwd := h.sessionCwd(sess.ID)
+	if cwd == "" {
+		cwd = workPath
+	}
 
-	out := []uploadedFile{}
+	// Parse the whole batch outside the visible uploads before publishing
+	// anything. A later bad part must not leave earlier files behind.
+	staging, err := os.MkdirTemp(dir, ".batch-")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, errors.New("save failed"))
+		return
+	}
+	defer os.RemoveAll(staging)
+	var out []uploadedFile
 	for {
 		part, err := mr.NextPart()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, errors.New("bad multipart body"))
+			var over *http.MaxBytesError
+			if errors.As(err, &over) {
+				writeErr(w, http.StatusRequestEntityTooLarge, fmt.Errorf("upload exceeds %d MiB per request", over.Limit>>20))
+			} else {
+				writeErr(w, http.StatusBadRequest, errors.New("bad multipart body"))
+			}
 			return
 		}
 		if part.FormName() != "file" {
@@ -2395,11 +2480,7 @@ func (h *handler) uploadSessionFile(w http.ResponseWriter, r *http.Request) {
 			part.Close()
 			continue
 		}
-		// Timestamp prefix: two uploads of the same name must not overwrite
-		// each other mid-conversation.
-		stamped := fmt.Sprintf("%d-%s", time.Now().UnixMilli(), name)
-
-		dst, err := os.OpenFile(filepath.Join(dir, stamped), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		dst, err := os.OpenFile(filepath.Join(staging, strconv.Itoa(len(out))), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, errors.New("save failed"))
 			return
@@ -2407,7 +2488,6 @@ func (h *handler) uploadSessionFile(w http.ResponseWriter, r *http.Request) {
 		n, copyErr := io.Copy(dst, io.LimitReader(part, maxUploadFileBytes+1))
 		closeErr := dst.Close()
 		if copyErr != nil || closeErr != nil || n > maxUploadFileBytes {
-			_ = os.Remove(filepath.Join(dir, stamped))
 			var over *http.MaxBytesError
 			switch {
 			case n > maxUploadFileBytes:
@@ -2424,30 +2504,75 @@ func (h *handler) uploadSessionFile(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-		abs := filepath.Join(dir, stamped)
-		out = append(out, uploadedFile{
-			Name:    stamped,
-			Path:    abs,
-			Mention: h.uploadMention(workPath, abs),
-			Size:    n,
-		})
+		out = append(out, uploadedFile{Name: name, Size: n})
 	}
 	if len(out) == 0 {
 		writeErr(w, http.StatusBadRequest, errors.New("no file parts"))
 		return
 	}
-	h.trimSessionUploads(dir)
+	if err := h.publishSessionUploads(r.Context(), dir, staging, cwd, out); err != nil {
+		writeErr(w, http.StatusInternalServerError, errors.New("save failed"))
+		return
+	}
 	writeJSON(w, map[string]any{"files": out})
 }
 
+// Serialize publishing and pruning within the panel. Body reads and staging
+// still run concurrently. Exclusive reservations protect names across panels.
+var sessionUploadPublishMu sync.Mutex
+
+func (h *handler) publishSessionUploads(ctx context.Context, dir, staging, cwd string, files []uploadedFile) (err error) {
+	sessionUploadPublishMu.Lock()
+	defer sessionUploadPublishMu.Unlock()
+	defer func() {
+		if err != nil {
+			for _, file := range files {
+				if file.Path != "" {
+					_ = os.Remove(file.Path)
+				}
+			}
+		}
+	}()
+	stamp := time.Now().UnixMilli()
+	for i := range files {
+		file := &files[i]
+		for {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			name := fmt.Sprintf("%d-%s", stamp, file.Name)
+			stamp++
+			path := filepath.Join(dir, name)
+			reservation, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+			if errors.Is(err, os.ErrExist) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			file.Name, file.Path = name, path
+			if err := reservation.Close(); err != nil {
+				return err
+			}
+			break
+		}
+		if err := os.Rename(filepath.Join(staging, strconv.Itoa(i)), file.Path); err != nil {
+			return err
+		}
+		file.Mention = uploadMention(cwd, file.Path)
+	}
+	h.trimSessionUploads(dir, files)
+	return nil
+}
+
 // uploadMention renders the path the composer inserts for an uploaded file:
-// work-path relative when the file sits inside it, absolute otherwise. Both
-// resolve through /api/fs/read, and a relative mention stays short.
-func (h *handler) uploadMention(workPath, abs string) string {
-	if workPath == "" {
+// relative to the session's cwd when the file sits inside it, absolute otherwise.
+// Both resolve through /api/fs/read, and a relative mention stays short.
+func uploadMention(cwd, abs string) string {
+	if cwd == "" {
 		return abs
 	}
-	rabs, err := filepath.Abs(workPath)
+	rabs, err := filepath.Abs(cwd)
 	if err != nil {
 		return abs
 	}
@@ -2464,10 +2589,36 @@ func (h *handler) uploadMention(workPath, abs string) string {
 	return filepath.ToSlash(rel)
 }
 
+// resolveLegacyUpload keeps uploads already saved as node-relative mentions
+// readable. Limit the translation to this session's exact old upload path.
+func (h *handler) resolveLegacyUpload(id, cwd, reqPath string) string {
+	id = strings.TrimSpace(id)
+	if cwd == "" || h.sessions == nil || !sessions.ValidID(id) || !filepath.IsLocal(reqPath) {
+		return reqPath
+	}
+	parent := filepath.Dir(reqPath)
+	slashParent := "/" + filepath.ToSlash(parent)
+	if !strings.HasSuffix(slashParent, "/.openpanda/uploads") &&
+		!strings.HasSuffix(slashParent, "/.openpanda/uploads/"+id) {
+		return reqPath
+	}
+	sess, err := h.sessions.Get(id)
+	if err != nil {
+		return reqPath
+	}
+	var workPath string
+	h.readCfg(func(c *config.Config) { workPath = c.Storage.WorkPath })
+	dir, err := sessionUploadDir(sess, workPath)
+	if err != nil || filepath.Clean(uploadMention(workPath, dir)) != parent {
+		return reqPath
+	}
+	return filepath.Join(dir, filepath.Base(reqPath))
+}
+
 // trimSessionUploads keeps a session's uploads under its total budget by
-// dropping the oldest files first. Best-effort: a failed trim is not a failed
-// upload.
-func (h *handler) trimSessionUploads(dir string) {
+// dropping the oldest prior uploads first. Files about to be returned to
+// this request are kept even if they were staged before another batch finished.
+func (h *handler) trimSessionUploads(dir string, justPublished []uploadedFile) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
@@ -2491,10 +2642,17 @@ func (h *handler) trimSessionUploads(dir string) {
 	if total <= maxUploadTotalBytes {
 		return
 	}
+	keep := make(map[string]bool, len(justPublished))
+	for _, file := range justPublished {
+		keep[file.Name] = true
+	}
 	sort.Slice(files, func(i, j int) bool { return files[i].mod.Before(files[j].mod) })
 	for _, f := range files {
 		if total <= maxUploadTotalBytes {
 			return
+		}
+		if keep[f.name] {
+			continue
 		}
 		if os.Remove(filepath.Join(dir, f.name)) == nil {
 			total -= f.size

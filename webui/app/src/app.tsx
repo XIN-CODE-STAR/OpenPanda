@@ -9,12 +9,11 @@ import { isSelfNodeUp } from './format/node-status'
 import { isTeamRoute, navigate, parseHash, type Route } from './nav'
 import { onTeamFeatureChange } from './features'
 import { lazy, Suspense } from 'preact/compat'
-import { SessionsView } from './views/sessions'
+import { SessionsView, type SessionGitOperation } from './views/sessions'
 import { installClickFeedback } from './components/click-feedback'
-import { NavigationMarker } from './components/navigation-marker'
 import { SidebarHistory } from './views/sidebar-history'
 import type { TourPhase } from './views/onboarding-guide'
-import { OnboardingBanner } from './views/onboarding'
+import { ModelNotice, OnboardingBanner, useOnboardingState } from './views/onboarding'
 
 // Only the thread shell is on the first-paint path. The boards, settings and
 // the graph are route-scoped; splitting them keeps the initial bundle from
@@ -113,8 +112,40 @@ export function App() {
   // connected" and left the reader on the token page with the URL token
   // already stripped — unable to retry, unable to get in.
   const [authed, setAuthed] = useState<boolean>(currentToken() !== '')
+  const [onboarding, setOnboarding] = useOnboardingState(authed)
   const [gateError, setGateError] = useState('')
   const [menuOpen, setMenuOpen] = useState(false)
+  const gitOperationRef = useRef<SessionGitOperation | null>(null)
+  const [gitOperation, setGitOperation] = useState<SessionGitOperation | null>(null)
+  const [lastGitChange, setLastGitChange] = useState<SessionGitOperation | null>(null)
+
+  // The chat can unmount while a request is still running.
+  async function runSessionGitOperation(operation: SessionGitOperation, perform: () => Promise<boolean>) {
+    if (gitOperationRef.current) return
+    gitOperationRef.current = operation
+    setGitOperation(operation)
+    try {
+      if (await perform()) setLastGitChange(operation)
+    } finally {
+      gitOperationRef.current = null
+      setGitOperation(null)
+    }
+  }
+  const confirmingPlans = useRef(new Set<string>())
+  const [planConfirmations, setPlanConfirmations] = useState<ReadonlySet<string>>(new Set())
+
+  async function runPlanConfirmation(sid: string, perform: () => Promise<void>) {
+    const pending = confirmingPlans.current
+    if (pending.has(sid)) return
+    pending.add(sid)
+    setPlanConfirmations(new Set(pending))
+    try {
+      await perform()
+    } finally {
+      pending.delete(sid)
+      setPlanConfirmations(new Set(pending))
+    }
+  }
   const [tourPhase, setTourPhase] = useState<TourPhase>(null)
   const railOpen = tourPhase ? tourPhase === 'navigation' : menuOpen
   const sidebar = useRef<HTMLElement>(null)
@@ -211,6 +242,7 @@ export function App() {
 
   // 任务详情 is a drill-down of the board, so it keeps 队列·任务·项目 lit on the rail.
   const active: string = route.view === 'detail' ? 'control' : route.view === 'work' ? 'team' : route.view
+  const newChatActive = route.view === 'sessions' && !route.id
   const reviewCount = useReviewCount()
   const logout = () => {
     setMenuOpen(false)
@@ -246,28 +278,12 @@ export function App() {
             head the heaviest thing in a column whose whole job is to be quiet
             enough to scan. */}
         <div class="sidebar-head">
-          <div class="sidebar-workspace"><span class="sidebar-brand-mark"><PandaMark size={23} /></span>
+          <div class="sidebar-workspace">
             <span class="sidebar-workspace-name">
               Open<b>Panda</b>
             </span>
           </div>
           <div class="sidebar-head-actions">
-            {/* 通知 and 搜索: the two things you reach for from wherever you
-                are. The bell replaced the 设置 → 提醒 tab, and it opens a card
-                rather than a page (see components/notifications.tsx). */}
-            <NotificationBell />
-            <button
-              type="button"
-              class="icon-btn"
-              title={`${t('palette.trigger')} ${shortcutKeys(chordOf('search', bindings)).join(' ')}`}
-              aria-label={t('palette.trigger')}
-              onClick={() => {
-                setMenuOpen(false)
-                openPalette()
-              }}
-            >
-              <Icon name="search" />
-            </button>
             <button
               type="button"
               class="icon-btn mobile-menu-btn"
@@ -282,16 +298,30 @@ export function App() {
         </div>
         <div class="sidebar-panel" id="sidebar-panel">
         <div class="nav-quick">
-          <NavigationMarker active={active} />
           <button
             type="button"
-            class="nav-item nav-new-chat"
+            class={`nav-item nav-new-chat${newChatActive ? ' active' : ''}`}
+            aria-current={newChatActive ? 'page' : undefined}
             data-tour-target="new-chat"
             onClick={() => navigate({ view: 'sessions', id: null })}
           >
             <Icon name="square-pen" />
             <span class="nav-label">{t('sessions.new')}</span>
             {chordOf('chat', bindings) && <kbd class="nav-key">{shortcutKeys(chordOf('chat', bindings)).join(' ')}</kbd>}
+          </button>
+          <button
+            type="button"
+            class="nav-search"
+            title={`${t('palette.trigger')} ${shortcutKeys(chordOf('search', bindings)).join(' ')}`}
+            aria-label={t('palette.trigger')}
+            onClick={() => {
+              setMenuOpen(false)
+              openPalette()
+            }}
+          >
+            <Icon name="search" />
+            <span class="nav-search-label">{t('palette.trigger')}</span>
+            {chordOf('search', bindings) && <kbd class="nav-key">{shortcutKeys(chordOf('search', bindings)).join(' ')}</kbd>}
           </button>
           <a
             href="#/workspace"
@@ -304,7 +334,7 @@ export function App() {
           </a>
           <div class={`nav-item nav-destination${active === 'control' ? ' active' : ''}`}>
             <a href="#/control" data-tour-target="control" class="nav-destination-link" aria-current={active === 'control' ? 'page' : undefined}>
-              <Icon name="kanban" />
+              <Icon name="list-checks" />
               <span class="nav-label">{t('nav.control')}</span>
             </a>
             {reviewCount > 0 && (
@@ -315,7 +345,7 @@ export function App() {
                 aria-label={`${t('queue.col.review')} · ${reviewCount}`}
                 onClick={() => navigate({ view: 'control', tab: 'queue', review: true })}
               >
-                {reviewCount}
+                {reviewCount > 99 ? '99+' : reviewCount}
               </button>
             )}
           </div>
@@ -367,9 +397,15 @@ export function App() {
               something a gear already says, and the icon matches the head's
               search button. 断开连接 is not here any more: it is a session
               verb, and the sheet that describes the session is where it now
-              lives (设置 → 通用 → 连接). */}
+              lives (设置 → 通用 → 连接). The update chip stacks above the row
+              when the updater has news, so "what I run" and "what I could
+              run" read as one block. The no-model card is the same kind of
+              standing fact and stacks there too, above the update chip. */}
+          <ModelNotice state={onboarding} />
+          <UpdateNotice />
           <div class="sidebar-foot">
-            <SidebarNode />
+            <SidebarNode current={active === 'profile'} />
+            <NotificationBell />
             <a
               href="#/settings"
               class={`icon-btn sidebar-gear${active === 'settings' ? ' active' : ''}`}
@@ -384,12 +420,16 @@ export function App() {
         </div>
       </aside>
       <main class="main">
-        <OnboardingBanner onPhase={setTourPhase} />
-        <UpdateBanner />
+        <OnboardingBanner state={onboarding} onState={setOnboarding} onPhase={setTourPhase} />
         <Suspense fallback={<div class="view-loading" aria-busy="true" />}>
         {base.view === 'sessions' && (
           <SessionsView
             activeId={base.id}
+            gitOperation={gitOperation}
+            lastGitChange={lastGitChange}
+            runGitOperation={runSessionGitOperation}
+            confirmingPlan={base.id !== null && planConfirmations.has(base.id)}
+            runPlanConfirmation={runPlanConfirmation}
             tourActive={tourPhase !== null}
             project={base.project ?? null}
             ws={base.ws ?? null}
@@ -447,52 +487,61 @@ export function App() {
   )
 }
 
-/** Paints a soft "updates paused" banner at the top of every view when the
- *  updater has backed off to idle (403 / rate limit / network offline).
- *  Also paints a "new version available" pill in the rare case a check
- *  succeeded and found one. Both are non-blocking — the banner is
- *  dismissible and collapses automatically after 15 seconds. */
-function UpdateBanner() {
+/** The rail's update chip: "a newer build exists" (or "the update check gave
+ *  up") is a standing fact about this node, so it lives with the other
+ *  standing facts in the rail's tail — directly above the node chip, at the
+ *  same width — instead of as a full-width bar across the top of every view.
+ *  Up there it pushed the page down for news nobody had asked to read, and
+ *  the changelog it carried ran the length of the window; here it is a
+ *  two-line teaser beside the version it would replace.
+ *
+ *  It used to collapse itself after 15 seconds. A chip in the rail is not
+ *  competing with the page the way a top banner was, and a notice that hides
+ *  on its own is a notice nobody reads — so it stays until dismissed, and
+ *  设置 → 系统 still owns the full state either way. */
+function UpdateNotice() {
   const { data: self } = useAsync(() => api.self(), [])
   const [dismissed, setDismissed] = useState(false)
   const up: UpdateStatus | undefined = self?.update
-  useEffect(() => {
-    if (!up) return
-    const id = setTimeout(() => setDismissed(true), 15000)
-    return () => clearTimeout(id)
-  }, [up?.stage, up?.error, up?.latest, up?.degraded])
   if (!up || dismissed) return null
   const paused = up.degraded || (up.stage === 'idle' && !!up.error)
   if (!paused && !up.available) return null
+  const close = (
+    <button
+      class="rail-update-close"
+      onClick={() => setDismissed(true)}
+      aria-label={t('ui.update.degraded.close')}
+    >×</button>
+  )
   if (paused) {
     return (
-      <div class="banner banner-warn update-banner" role="status">
-        <Icon name="bell-off" class="banner-ico" />
-        <span class="banner-body">
-          <strong>{t('ui.update.degraded.title')}</strong>
-          <span class="banner-sub">
-            {up.error || t('ui.update.degraded.sub')}
-          </span>
-        </span>
-        <a class="banner-link" href="#/system">{t('ui.update.degraded.cta')}</a>
-        <button
-          class="banner-close"
-          onClick={() => setDismissed(true)}
-          aria-label={t('ui.update.degraded.close')}
-        >×</button>
+      <div class="rail-update rail-update-warn" role="status">
+        <div class="rail-update-head">
+          <Icon name="bell-off" class="rail-update-ico" />
+          <span class="rail-update-title">{t('ui.update.degraded.title')}</span>
+          {close}
+        </div>
+        <p class="rail-update-sub">{up.error || t('ui.update.degraded.sub')}</p>
+        <a class="rail-update-cta" href="#/system">{t('ui.update.degraded.cta')}</a>
       </div>
     )
   }
-  // New version available is a rarer, softer path.
+  // New version available is a rarer, softer path. The updater's `notes` is a
+  // changelog index — "**Release notes:** English · [简体中文](…)" followed by
+  // the whole section — so it stays on 设置 → 系统, where UpdateNotes renders it
+  // as a fold-out. In a 255px rail it was three lines of markdown punctuation
+  // and a truncated GitHub URL; the one-line summary says more.
   return (
-    <div class="banner banner-info update-banner" role="status">
-      <Icon name="sparkles" class="banner-ico" />
-      <span class="banner-body">
-        <strong>{t('ui.update.available.title', { version: displayVersion(up.latest, up.latest_codename) })}</strong>
-        <span class="banner-sub">{up.notes ?? t('ui.update.available.sub')}</span>
-      </span>
-      <a class="banner-link" href="#/system">{t('ui.update.available.cta')}</a>
-      <button class="banner-close" onClick={() => setDismissed(true)} aria-label={t('ui.update.degraded.close')}>×</button>
+    <div class="rail-update rail-update-info" role="status">
+      <div class="rail-update-head">
+        <Icon name="download" class="rail-update-ico" />
+        <span class="rail-update-title">
+          {t('ui.update.available.title', { version: displayVersion(up.latest, up.latest_codename) })}
+        </span>
+        {close}
+      </div>
+      <p class="rail-update-sub">{t('ui.update.available.sub')}</p>
+      <a class="rail-update-cta" href="#/system">{t('ui.update.available.cta')}</a>
     </div>
   )
 }
@@ -504,7 +553,7 @@ function UpdateBanner() {
  *  calendar. It used to point at Settings → System, which answered "what am
  *  I on" but buried the identity two tabs deep and had nothing to say about
  *  what this node had actually been doing. */
-function SidebarNode() {
+function SidebarNode({ current }: { current: boolean }) {
   useLocaleRerender()
   const { data: self } = useAsync(() => api.self(), [])
   if (!self) return null
@@ -521,12 +570,16 @@ function SidebarNode() {
     <a
       href="#/profile"
       class="sidebar-node"
+      aria-current={current ? 'page' : undefined}
       title={`${name} · ${t(up ? 'sidebar.node.up' : 'sidebar.node.down')}`}
     >
-      <span class={`dot${up ? '' : ' off'}`} aria-hidden />
+      <span class="sidebar-brand-mark">
+        <PandaMark size={19} />
+        <span class={`dot${up ? '' : ' off'}`} aria-hidden />
+      </span>
       <span class="mono sidebar-node-name">{name}</span>
       <span class="ver mono" title={displayVersion(self.version, self.codename)}>
-        {displayVersion(self.version, self.codename)}
+        {displayVersion(self.version)}
       </span>
     </a>
   )

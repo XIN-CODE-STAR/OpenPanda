@@ -147,7 +147,19 @@ func TestSideAskIsStoredServerSide(t *testing.T) {
 		t.Errorf("second side turn = %+v", chat.Turns[1])
 	}
 	if chat.Operation == nil || chat.Operation.Status == core.StateRunning {
-		t.Errorf("side operation did not settle: %+v", chat.Operation)
+		t.Fatalf("side operation did not settle: %+v", chat.Operation)
+	}
+	// If the stream ends early, the browser uses this chat identity to read
+	// the accepted operation even after another tab selects a different chat.
+	_, data, found := strings.Cut(rr.Body.String(), "event: operation\ndata: ")
+	line, _, _ := strings.Cut(data, "\n")
+	var accepted struct {
+		OperationID string `json:"operation_id"`
+		ChatID      string `json:"side_chat"`
+	}
+	if !found || json.Unmarshal([]byte(line), &accepted) != nil ||
+		accepted.OperationID != chat.Operation.ID || accepted.ChatID != chat.ID {
+		t.Fatalf("operation acceptance = %+v, want operation %q in chat %q", accepted, chat.Operation.ID, chat.ID)
 	}
 
 	// The reconnect surface returns the same conversation.

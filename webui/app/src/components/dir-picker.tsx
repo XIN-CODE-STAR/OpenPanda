@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { Fragment } from 'preact'
+import { useSyncExternalStore } from 'preact/compat'
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks'
-import { api, type DirectoryListing } from '../api/client'
+import { api, currentToken, type DirectoryListing } from '../api/client'
 import { locale, t } from '../i18n'
 import { relativeTime } from '../format/time'
 import { layerAboveOwnsEscape } from './card-dismiss'
+import { createDirFavorites } from './dir-favorites'
 import { Icon } from './icons'
 import { lastPathSegment, suggestProjectName } from './dir-utils'
 import {
@@ -14,12 +16,33 @@ import {
   normDir,
   pathEnterTarget,
   pathLike,
+  pathQueryRows,
   splitPathQuery,
   type DirGroupKey,
   type WorkdirRow,
 } from './dir-rows'
 import { useModalFocus } from './modal-focus'
 import { toast, toastError } from './toast'
+
+// The two workdir pickers share the node's favorites. A queued write from a
+// closed picker can finish after navigation, but only with the same login.
+let favoritesToken = ''
+let favoritesStore: ReturnType<typeof createDirFavorites> | undefined
+
+function dirFavorites() {
+  const token = currentToken()
+  if (!favoritesStore || token !== favoritesToken) {
+    favoritesToken = token
+    favoritesStore = createDirFavorites(
+      async () => currentToken() === token ? (await api.prefs())?.favorites ?? [] : [],
+      async (path, favorite) => {
+        if (currentToken() !== token) throw new Error('session changed')
+        return (await api.setFavorite(path, favorite))?.favorites ?? []
+      },
+    )
+  }
+  return favoritesStore
+}
 
 export interface DirPickerProps {
   value?: string
@@ -161,8 +184,8 @@ export function DirButton({
   label,
   hint,
   tip,
+  autoDir,
   disabled = false,
-  iconOnly = false,
 }: {
   value?: string
   onChange: (path: string) => void
@@ -175,11 +198,9 @@ export function DirButton({
    *  Without it a pick inherited from the project reads as "choose a folder",
    *  which is the opposite of what will happen. */
   tip?: string
+  /** Resolved path used when "自动" (default directory) is active. */
+  autoDir?: string
   disabled?: boolean
-  /** Glyph only — no name, no caret, no pill. The new-chat header wants one
-   *  square button there, and what the chip used to spell out (which folder,
-   *  or "choose one") moves into the bubble and the accessible name. */
-  iconOnly?: boolean
 }) {
   const pick = useDirPick(onChange, disabled)
   const [open, setOpen] = useState(false)
@@ -187,14 +208,8 @@ export function DirButton({
   /** null while the list is in flight: an empty menu and a loading menu must
    *  not look alike, or "no workspaces yet" flashes on every open. */
   const [spaces, setSpaces] = useState<WorkdirRow[] | null>(null)
-  /** Starred folders, server-side (one settings row — see projects.Favorites).
-   *  Kept as the raw list so the card can show the star order the server
-   *  keeps, not an order it invented. */
-  const [favorites, setFavorites] = useState<string[]>([])
-  /** The newest star write. Every response carries the whole list, so two
-   *  toggles in flight can land out of order — applying the older answer made
-   *  a star vanish until the card was reopened. Only the newest one wins. */
-  const favSeq = useRef(0)
+  const stars = dirFavorites()
+  const favorites = useSyncExternalStore(stars.subscribe, stars.snapshot)
   const box = useRef<HTMLDivElement>(null)
   const dialog = useRef<HTMLDialogElement>(null)
 
@@ -234,23 +249,12 @@ export function DirButton({
       .catch(() => {
         if (alive) setSpaces([])
       })
-    // The stars ride along with the list rather than gating it: a node that
-    // cannot answer /api/prefs still gets a usable picker, just without the
-    // favourite band. A toggle that landed first owns the list from then on,
-    // so this answer is only applied while no write has been made.
-    const seq = favSeq.current
-    api
-      .prefs()
-      .then((p) => {
-        if (alive && seq === favSeq.current) setFavorites(p?.favorites ?? [])
-      })
-      .catch(() => {
-        if (alive && seq === favSeq.current) setFavorites([])
-      })
+    // Preference reads are independent of the project listing.
+    void stars.refresh().catch(() => {})
     return () => {
       alive = false
     }
-  }, [open])
+  }, [open, stars])
 
   // Escape still stops here so it cannot also reach the thread drawer behind
   // the card. The click-outside half moved to the dialog's own scrim (see the
@@ -333,17 +337,7 @@ export function DirButton({
         .listDirectories(parts.base)
         .then((res) => {
           if (!alive) return
-          const prefix = parts.prefix.toLowerCase()
-          // `?? []`: an empty folder answers `directories: null` from older
-          // panels, and filtering null threw before the card could paint —
-          // the empty directory then read as "does not exist or unreadable".
-          const found: WorkdirRow[] = (res.directories ?? [])
-            .filter((d) => !prefix || d.name.toLowerCase().startsWith(prefix))
-            .map((d) => ({ name: d.name, dir: d.path }))
-          // A trailing separator means "this folder": offer it above its
-          // children so Enter takes the path that was typed.
-          if (parts.self) found.unshift({ name: lastPathSegment(parts.self), dir: parts.self })
-          setPathRows(found)
+          setPathRows(pathQueryRows(q, parts, res))
           setPathRowsFor(q)
           setPathError('')
         })
@@ -364,33 +358,17 @@ export function DirButton({
    *  this node has filed work under. The first row of the project list is
    *  always "no pick" — the same shape the roster's "自动" row gives, and the
    *  answer to "what happens if I choose nothing" without leaving the card. */
-  const folderRows = pathMode ? (pathRows ?? []) : rows
+  // A create action belongs only to the query that produced it.
+  const pathItems = pathRowsFor === query.trim() ? pathRows : pathRows?.filter((r) => !r.create)
+  const folderRows = pathMode ? (pathItems ?? []) : rows
   const listed = pathMode ? pathRows !== null : spaces !== null
-
-  // Path mode, and the leaf that was typed is not in the parent's listing:
-  // offer to make it. One level only — the parent was just listed, so it
-  // exists — which is also what makes the server's breadth rule meaningful.
-  const typed = query.trim().replace(/[\\/]+$/, '')
-  const canCreate =
-    pathMode &&
-    pathRows !== null &&
-    !pathError &&
-    !!typed &&
-    // A bare drive is not a folder to create: `D:` is drive-relative, and a
-    // mkdir on it would land in whatever directory the daemon last used on
-    // that drive. Enter on it takes the root instead (pathEnterTarget).
-    !/^[A-Za-z]:$/.test(typed) &&
-    !/[\\/]$/.test(query.trim()) &&
-    !folderRows.some((r) => normDir(r.dir) === normDir(typed))
 
   /** The project list in the card's three bands. Path mode has no bands: what
    *  is listed there is a filesystem, and "recently used" is not a property of
    *  a folder the console has never opened. */
   const groups = pathMode ? [] : groupRows(folderRows, shownFavorites)
   const items: WorkdirRow[] = pathMode
-    ? (canCreate
-      ? [...folderRows, { name: lastPathSegment(typed), dir: typed, create: true }]
-      : folderRows)
+    ? folderRows
     : [{ name: '', dir: '', auto: true }, ...groups.flatMap((g) => g.rows)]
   /** Where each row sits in the keyboard's flat order, so the grouped render
    *  and the ↑↓ cursor agree even though the groups are drawn separately. */
@@ -436,20 +414,9 @@ export function DirButton({
    *  round-trip reads as broken, and the server answers with the whole list, so
    *  the card ends up holding exactly what the store holds. */
   async function toggleFav(dir: string) {
-    const on = !isFav(dir)
-    const before = favorites
-    const seq = ++favSeq.current
-    setFavorites(
-      on
-        ? [dir, ...before.filter((f) => favoriteKey(f) !== favoriteKey(dir))]
-        : before.filter((f) => favoriteKey(f) !== favoriteKey(dir)),
-    )
     try {
-      const res = await api.setFavorite(dir, on)
-      // An older answer describes a list a newer toggle already replaced.
-      if (seq === favSeq.current) setFavorites(res?.favorites ?? [])
+      await stars.toggle(dir)
     } catch {
-      if (seq === favSeq.current) setFavorites(before)
       toast(t('sessions.workdirFavFail'), 'error')
     }
   }
@@ -477,8 +444,8 @@ export function DirButton({
    *  can see the folder they just made. */
   async function createAndPick(dir: string) {
     try {
-      await api.mkdir(dir)
-      choose(dir)
+      const res = await api.mkdir(dir)
+      choose(res.path)
     } catch {
       toast(t('sessions.workdirMkdirFail'), 'error')
     }
@@ -537,13 +504,15 @@ export function DirButton({
           {/* The name is usually the folder's own name, which is exactly why the
               path earns the second line: two `panda` folders on two drives are
               one name. */}
-          <span class="wd-row-path">{r.auto ? t('sessions.workdirAutoHint') : r.dir}</span>
+          <span class="wd-row-path">
+            {r.auto
+              ? (autoDir ? t('sessions.workdirAutoCurrent', { dir: autoDir }) : t('sessions.workdirAutoHint'))
+              : r.dir}
+          </span>
           {r.description && <span class="wd-row-desc">{r.description}</span>}
         </span>
-        {/* The row's right column: the stamp on top, the star under it, both
-            against the same right edge — one column, so the star sits directly
-            below the time rather than beside it. The actions take the stamp's
-            slot on hover, which is why the stamp fades instead of moving. */}
+        {/* The actions take the stamp's space on hover. Rows without a stamp
+            fit the actions beside the star. */}
         <span class="wd-row-side">
           {r.updated && <span class="wd-row-when">{relativeTime(r.updated, locale())}</span>}
           {!r.auto && !r.create && (
@@ -597,13 +566,11 @@ export function DirButton({
   return (
     <div class="workdir-pick" ref={box} data-tour-target={tourTarget}>
       <div
-        class={`workdir-btn${iconOnly ? ' icon-only' : ''}${value ? ' has-value' : ''}${disabled ? ' is-disabled' : ''}`}
+        class={`workdir-btn${value ? ' has-value' : ''}${disabled ? ' is-disabled' : ''}`}
         /* The bubble is where the whole path lives: the label shows the folder
-           on its own, so hovering is how you check *which* folder. The
-           glyph-only form has no label at all, so the bubble also carries the
-           name of the control while the pick is empty. Nothing while the card
-           is up: the card lists every path. */
-        data-tip={!open ? (value || tip || (iconOnly ? label : undefined)) : undefined}
+           on its own, so hovering is how you check *which* folder. Nothing
+           while the card is up: the card lists every path. */
+        data-tip={!open ? (value || tip) : undefined}
       >
         <button
           type="button"
@@ -616,21 +583,20 @@ export function DirButton({
           onClick={() => (open ? close() : setOpen(true))}
         >
           {/* The rail's working-directory mark, at the rail's own size: the
-              header's closed folder would read as a second title down here.
-              Glyph-only, it takes the size of the tools it stands beside. */}
-          <Icon name={iconOnly ? 'folder' : 'folder-open'} size={iconOnly ? 19 : 13} class="workdir-glyph" />
-          {!iconOnly && <span class="workdir-path">{value ? lastPathSegment(value) : label}</span>}
+              header's closed folder would read as a second title down here. */}
+          <Icon name="folder-open" size={13} class="workdir-glyph" />
+          <span class="workdir-path">{value ? lastPathSegment(value) : label}</span>
           {/* The caret is the whole difference between "opens a dialog" and
               "opens a card", and it costs 12px of a chip that already ends in
-              a hairline. A lone glyph has no room for it. */}
-          {!iconOnly && <Icon name="chevron-down" size={12} class="workdir-caret" />}
+              a hairline. */}
+          <Icon name="chevron-down" size={12} class="workdir-caret" />
         </button>
       </div>
       {/* The card is the roster's twin — a right-edge sheet with its own
-          scrim — so the two picks in the header behave the same way. The
+          scrim — so the two picks on the setup strip behave the same way. The
           popover form it had (a 340px menu hanging off a chip) only worked
-          while the trigger sat in the composer's footer; from the top bar it
-          had no side to hang from. */}
+          while the trigger sat in the composer's footer; from the strip above
+          the box it had no side to hang from. */}
       <dialog
         ref={dialog}
         class="wd-dialog"
@@ -670,6 +636,11 @@ export function DirButton({
                 autoFocus
                 onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
                 onKeyDown={(e) => {
+                  // An IME's confirm key is an Enter too. Committing here would
+                  // take the highlighted row (or mint a folder) while the
+                  // candidate the person is still choosing has not been
+                  // composed into the field.
+                  if (e.isComposing || e.keyCode === 229) return
                   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
                     e.preventDefault()
                     const step = e.key === 'ArrowDown' ? 1 : -1
@@ -726,7 +697,7 @@ export function DirButton({
                       nobody has filed work under is still a row in the card,
                       and the empty state under it would contradict what is
                       on screen. */}
-                  {folderRows.length === 0 && !canCreate && groups.length === 0 && (
+                  {folderRows.length === 0 && groups.length === 0 && (
                     <p class="wd-empty">
                       {pathMode
                         ? t('sessions.workdirNoMatch')

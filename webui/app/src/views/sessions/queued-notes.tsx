@@ -24,6 +24,10 @@ interface QueuedNotesProps {
   dropNote(note: SessionNote): Promise<void>
 }
 
+export function noteCardKey(note: SessionNote): string {
+  return note.task_id ? `${note.task_id}/${note.key}` : note.key
+}
+
 /** Queued notes stay editable until the running turn consumes them. */
 export function QueuedNotes({
   notes, notesOpen, setNotesOpen, noteBubbles, noteList, noteRoom, noteEdges,
@@ -82,7 +86,7 @@ export function QueuedNotes({
                   data-below={noteEdges.below ? 'true' : 'false'}
                 >
                   {notes.map((n, i) => (
-                    <div class="note-row" key={n.key} role="listitem" data-mode={n.mode}>
+                    <div class="note-row" key={noteCardKey(n)} role="listitem" data-mode={n.mode}>
                       <span class="note-index" aria-hidden="true">
                         {i + 1}
                       </span>
@@ -91,7 +95,7 @@ export function QueuedNotes({
                           ? t('sessions.noteModeInject')
                           : t('sessions.noteModeQueue')}
                       </span>
-                      {editingNote === n.key ? (
+                      {editingNote === noteCardKey(n) ? (
                         // Editing in place: the row stays where it is in
                         // the queue, so a note already queued ahead of an
                         // inject keeps both its position and its mode.
@@ -127,7 +131,7 @@ export function QueuedNotes({
                         </span>
                       )}
                       <span class="note-actions">
-                        {editingNote === n.key ? (
+                        {editingNote === noteCardKey(n) ? (
                           <>
                             <button
                               type="button"

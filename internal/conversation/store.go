@@ -40,6 +40,7 @@ type Goal struct {
 	CompletionRequested bool   `json:"completion_requested"`
 	PausedByPlan        bool   `json:"paused_by_plan"`
 	WaitingFor          string `json:"waiting_for,omitempty"`
+	WaitingRound        string `json:"waiting_round,omitempty"`
 	CreatedAt           int64  `json:"created_at"`
 	UpdatedAt           int64  `json:"updated_at"`
 }
@@ -51,10 +52,8 @@ type State struct {
 	Proposal         string `json:"proposal,omitempty"`
 	ConfirmedVersion int64  `json:"confirmed_version"`
 	Goal             *Goal  `json:"goal,omitempty"`
-	// Implementation is the live phase of a confirmed proposal that is being
-	// executed right now, nil otherwise. It is not stored in this table: the
-	// service fills it from the session's running operation so the console
-	// has something to say between "confirm" and the first transcript line.
+	// Implementation tracks an unsettled confirmed proposal. The service
+	// enriches a running implementation with progress from the session operation.
 	Implementation *Implementation `json:"implementation,omitempty"`
 }
 
@@ -70,11 +69,11 @@ type Implementation struct {
 
 type Store struct{ DB *sql.DB }
 
-const goalColumns = "id,session_id,objective,status,reason,generation,round_id,lease_owner,lease_until,rounds,tokens,token_budget,blocker,blocked_streak,empty_streak,completion_requested,paused_by_plan,waiting_for,created_at,updated_at"
+const goalColumns = "id,session_id,objective,status,reason,generation,round_id,lease_owner,lease_until,rounds,tokens,token_budget,blocker,blocked_streak,empty_streak,completion_requested,paused_by_plan,waiting_for,waiting_round,created_at,updated_at"
 
 func scanGoal(row interface{ Scan(...any) error }) (*Goal, error) {
 	g := new(Goal)
-	err := row.Scan(&g.ID, &g.SessionID, &g.Objective, &g.Status, &g.Reason, &g.Generation, &g.RoundID, &g.LeaseOwner, &g.LeaseUntil, &g.Rounds, &g.Tokens, &g.TokenBudget, &g.Blocker, &g.BlockedStreak, &g.EmptyStreak, &g.CompletionRequested, &g.PausedByPlan, &g.WaitingFor, &g.CreatedAt, &g.UpdatedAt)
+	err := row.Scan(&g.ID, &g.SessionID, &g.Objective, &g.Status, &g.Reason, &g.Generation, &g.RoundID, &g.LeaseOwner, &g.LeaseUntil, &g.Rounds, &g.Tokens, &g.TokenBudget, &g.Blocker, &g.BlockedStreak, &g.EmptyStreak, &g.CompletionRequested, &g.PausedByPlan, &g.WaitingFor, &g.WaitingRound, &g.CreatedAt, &g.UpdatedAt)
 	return g, err
 }
 
@@ -92,7 +91,9 @@ func (s *Store) Get(ctx context.Context, sid string) (State, error) {
 	}
 	if st.ConfirmedVersion > 0 {
 		var run Implementation
-		err = s.DB.QueryRowContext(ctx, "SELECT round_id,status FROM conversation_plan_runs WHERE session_id=? AND version=? AND status IN ('pending','running')", sid, st.ConfirmedVersion).Scan(&run.Round, &run.Phase)
+		err = s.DB.QueryRowContext(ctx, `SELECT round_id,status FROM conversation_plan_runs
+WHERE session_id=? AND status IN ('pending','running','waiting_input')
+ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'waiting_input' THEN 1 ELSE 2 END,version LIMIT 1`, sid).Scan(&run.Round, &run.Phase)
 		if err == nil {
 			st.Implementation = &run
 		} else if !errors.Is(err, sql.ErrNoRows) {
@@ -179,7 +180,7 @@ WHERE session_id=?`, enabled, enabled, enabled, sid); err != nil {
 		return err
 	}
 	if enabled {
-		if _, err = tx.ExecContext(ctx, "UPDATE conversation_goals SET status='paused',paused_by_plan=1,updated_at=? WHERE session_id=? AND status='active'", time.Now().UnixMilli(), sid); err != nil {
+		if err = pauseGoalForPlanning(ctx, tx, sid); err != nil {
 			return err
 		}
 	}
@@ -187,6 +188,16 @@ WHERE session_id=?`, enabled, enabled, enabled, sid); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+func pauseGoalForPlanning(ctx context.Context, tx *sql.Tx, sid string) error {
+	_, err := tx.ExecContext(ctx, "UPDATE conversation_goals SET status='paused',paused_by_plan=1,updated_at=? WHERE session_id=? AND status='active'", time.Now().UnixMilli(), sid)
+	return err
+}
+
+type PlanDraft struct {
+	Version, Generation int64
+	ContinuesGoal       bool
 }
 
 // BeginPlanningRequest retires the previous proposal as soon as a new turn
@@ -202,30 +213,12 @@ WHERE session_id=?`, enabled, enabled, enabled, sid); err != nil {
 // checked in the same statement that retires the text, so the answer cannot go
 // stale between the check and the write.
 func (s *Store) BeginPlanningRequest(ctx context.Context, sid string, expected ...int64) (version, generation int64, err error) {
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, 0, err
+	var revision int64
+	if len(expected) > 0 {
+		revision = expected[0]
 	}
-	defer tx.Rollback()
-	query := `UPDATE conversation_controls
-SET mode_generation=mode_generation+1,proposal=''
-WHERE session_id=? AND planning=1 AND deleted=0`
-	args := []any{sid}
-	if len(expected) > 0 && expected[0] > 0 {
-		query += " AND proposal_version=? AND confirmed_version<? AND proposal!=''"
-		args = append(args, expected[0], expected[0])
-	}
-	err = tx.QueryRowContext(ctx, query+" RETURNING proposal_version,mode_generation", args...).Scan(&version, &generation)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, 0, ErrConflict
-	}
-	if err != nil {
-		return 0, 0, err
-	}
-	if err = event(ctx, tx, sid, "plan_invalidated", version); err != nil {
-		return 0, 0, err
-	}
-	return version, generation, tx.Commit()
+	draft, err := s.BeginPlan(ctx, sid, false, revision)
+	return draft.Version, draft.Generation, err
 }
 
 // BeginRevision enters planning mode and retires the named proposal in one
@@ -239,36 +232,58 @@ func (s *Store) BeginRevision(ctx context.Context, sid string, expected int64) (
 	if expected <= 0 {
 		return 0, 0, ErrInvalid
 	}
+	draft, err := s.BeginPlan(ctx, sid, true, expected)
+	return draft.Version, draft.Generation, err
+}
+
+// BeginPlan admits one read-only planning turn. An explicit request may enter
+// planning, while a follow-up must still be in planning. A revision must
+// name the current, unconfirmed proposal before any state can change.
+func (s *Store) BeginPlan(ctx context.Context, sid string, enter bool, expected int64) (PlanDraft, error) {
+	var draft PlanDraft
+	if expected < 0 {
+		return draft, ErrInvalid
+	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, 0, err
+		return draft, err
 	}
 	defer tx.Rollback()
-	if err = ensure(ctx, tx, sid); err != nil {
-		return 0, 0, err
+	if enter {
+		if err = ensure(ctx, tx, sid); err != nil {
+			return draft, err
+		}
 	}
-	err = tx.QueryRowContext(ctx, `UPDATE conversation_controls
+	query := `UPDATE conversation_controls
 SET planning=1, mode_generation=mode_generation+1, proposal=''
-WHERE session_id=? AND deleted=0 AND proposal_version=? AND confirmed_version<? AND proposal!=''
-RETURNING proposal_version,mode_generation`, sid, expected, expected).Scan(&version, &generation)
+WHERE session_id=? AND deleted=0 AND (planning=1 OR ?)`
+	args := []any{sid, enter}
+	if expected > 0 {
+		query += " AND proposal_version=? AND confirmed_version<? AND proposal!=''"
+		args = append(args, expected, expected)
+	}
+	err = tx.QueryRowContext(ctx, query+" RETURNING proposal_version,mode_generation", args...).Scan(&draft.Version, &draft.Generation)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, 0, ErrConflict
+		return PlanDraft{}, ErrConflict
 	}
 	if err != nil {
-		return 0, 0, err
+		return PlanDraft{}, err
 	}
-	// Entering planning pauses the running goal, exactly as SetPlanning(true)
-	// does: the plan is about to replace the objective's course.
-	if _, err = tx.ExecContext(ctx, "UPDATE conversation_goals SET status='paused',paused_by_plan=1,updated_at=? WHERE session_id=? AND status='active'", time.Now().UnixMilli(), sid); err != nil {
-		return 0, 0, err
+	if enter {
+		if err = pauseGoalForPlanning(ctx, tx, sid); err != nil {
+			return PlanDraft{}, err
+		}
+		if err = event(ctx, tx, sid, "mode", map[string]bool{"planning": true}); err != nil {
+			return PlanDraft{}, err
+		}
 	}
-	if err = event(ctx, tx, sid, "mode", map[string]bool{"planning": true}); err != nil {
-		return 0, 0, err
+	if err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM conversation_goals WHERE session_id=? AND status='paused' AND paused_by_plan=1)", sid).Scan(&draft.ContinuesGoal); err != nil {
+		return PlanDraft{}, err
 	}
-	if err = event(ctx, tx, sid, "plan_invalidated", version); err != nil {
-		return 0, 0, err
+	if err = event(ctx, tx, sid, "plan_invalidated", draft.Version); err != nil {
+		return PlanDraft{}, err
 	}
-	return version, generation, tx.Commit()
+	return draft, tx.Commit()
 }
 
 func (s *Store) SaveProposal(ctx context.Context, sid, text string, expected ...int64) (int64, error) {
@@ -317,6 +332,9 @@ func (s *Store) SaveProposal(ctx context.Context, sid, text string, expected ...
 // text (SetPlanning), which is what keeps a superseded proposal from being
 // confirmed by the mode that replaced it.
 func (s *Store) Confirm(ctx context.Context, sid string, version int64) (string, error) {
+	if version <= 0 {
+		return "", ErrInvalid
+	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return "", err
@@ -334,6 +352,13 @@ func (s *Store) Confirm(ctx context.Context, sid string, version int64) (string,
 	if text == "" {
 		return "", ErrConflict
 	}
+	var busy bool
+	if err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM conversation_plan_runs WHERE session_id=? AND status IN ('pending','running','waiting_input'))", sid).Scan(&busy); err != nil {
+		return "", err
+	}
+	if busy {
+		return "", ErrWaiting
+	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO conversation_plan_runs(session_id,version,proposal,goal_id,goal_generation) VALUES(?,?,?,COALESCE((SELECT id FROM conversation_goals WHERE session_id=? AND status='paused' AND paused_by_plan=1),''),COALESCE((SELECT generation FROM conversation_goals WHERE session_id=? AND status='paused' AND paused_by_plan=1),0))`, sid, version, text, sid, sid); err != nil {
 		return "", err
 	}
@@ -344,71 +369,114 @@ func (s *Store) Confirm(ctx context.Context, sid string, version int64) (string,
 }
 
 func (s *Store) Create(ctx context.Context, sid, objective string, budget *int64) (*Goal, error) {
+	created, _, err := s.ReplaceGoal(ctx, sid, objective, budget)
+	return created, err
+}
+
+// ReplaceGoal returns the exact goal it revoked, including any round claimed
+// before the transaction took the writer lock.
+func (s *Store) ReplaceGoal(ctx context.Context, sid, objective string, budget *int64) (created, previous *Goal, err error) {
 	objective = strings.TrimSpace(objective)
 	if objective == "" || len(objective) > 200000 {
-		return nil, fmt.Errorf("%w: a nonempty objective of at most 200000 bytes is required", ErrInvalid)
+		return nil, nil, fmt.Errorf("%w: a nonempty objective of at most 200000 bytes is required", ErrInvalid)
 	}
 	if budget != nil && *budget <= 0 {
-		return nil, fmt.Errorf("%w: token budget must be positive", ErrInvalid)
+		return nil, nil, fmt.Errorf("%w: token budget must be positive", ErrInvalid)
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer tx.Rollback()
 	if err = ensure(ctx, tx, sid); err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	previous, err = scanGoal(tx.QueryRowContext(ctx, "SELECT "+goalColumns+" FROM conversation_goals WHERE session_id=? AND status!='cleared'", sid))
+	if errors.Is(err, sql.ErrNoRows) {
+		previous = nil
+	} else if err != nil {
+		return nil, nil, err
+	}
+	if err = sealGoalRound(ctx, tx, previous); err != nil {
+		return nil, nil, err
 	}
 	now := time.Now().UnixMilli()
 	id, err := util.UUIDv7()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if _, err = tx.ExecContext(ctx, "UPDATE conversation_plan_runs SET status='cancelled' WHERE session_id=? AND goal_id!='' AND status IN ('pending','running','waiting_input')", sid); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if _, err = tx.ExecContext(ctx, "UPDATE conversation_goals SET status='cleared',generation=generation+1,round_id='',lease_owner='',lease_until=0,updated_at=? WHERE session_id=? AND status!='cleared'", now, sid); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	status := "active"
 	var planning bool
 	if err = tx.QueryRowContext(ctx, "SELECT planning FROM conversation_controls WHERE session_id=?", sid).Scan(&planning); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if planning {
 		status = "paused"
 	}
-	if _, err = tx.ExecContext(ctx, "INSERT INTO conversation_goals(id,session_id,objective,status,token_budget,paused_by_plan,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", id, sid, objective, status, budget, planning, now, now); err != nil {
-		return nil, err
+	created, err = scanGoal(tx.QueryRowContext(ctx, "INSERT INTO conversation_goals(id,session_id,objective,status,token_budget,paused_by_plan,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) RETURNING "+goalColumns, id, sid, objective, status, budget, planning, now, now))
+	if err != nil {
+		return nil, nil, err
 	}
 	if err = event(ctx, tx, sid, "goal", map[string]string{"id": id, "status": status}); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err = tx.Commit(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	st, err := s.Get(ctx, sid)
-	return st.Goal, err
+	return created, previous, nil
+}
+
+func sealGoalRound(ctx context.Context, tx *sql.Tx, goal *Goal) error {
+	if goal == nil || goal.RoundID == "" {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx, "UPDATE ask_rounds SET status='stopped',closed_at=? WHERE round_id=? AND session_id=? AND status='open'", time.Now().Unix(), goal.RoundID, goal.SessionID)
+	return err
 }
 
 // Control is a trusted user action. Models only get Report below, so they
 // cannot change the objective, resume a paused goal or raise its budget.
 func (s *Store) Control(ctx context.Context, sid, id, action, objective string, budget *int64) error {
+	_, err := s.ControlGoal(ctx, sid, id, action, objective, budget, "")
+	return err
+}
+
+// ControlGoal returns the pre-transition goal so the caller can signal its
+// runner and cancel the right task tree. An operation-scoped stop also checks
+// that the specified round is still the one the user is stopping.
+func (s *Store) ControlGoal(ctx context.Context, sid, id, action, objective string, budget *int64, expectedRound string) (*Goal, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback()
 	if err = ensure(ctx, tx, sid); err != nil {
-		return err
+		return nil, err
 	}
 	g, err := scanGoal(tx.QueryRowContext(ctx, "SELECT "+goalColumns+" FROM conversation_goals WHERE session_id=? AND id=? AND status!='cleared'", sid, id))
 	if errors.Is(err, sql.ErrNoRows) {
-		return ErrConflict
+		return nil, ErrConflict
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
+	if expectedRound != "" && g.RoundID != expectedRound {
+		var linked bool
+		err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM conversation_plan_runs WHERE session_id=? AND round_id=? AND goal_id=? AND goal_generation=? AND status IN ('running','waiting_input'))", sid, expectedRound, id, g.Generation).Scan(&linked)
+		if err != nil {
+			return nil, err
+		}
+		if !linked {
+			return nil, ErrConflict
+		}
+	}
+	previous := *g
 	switch action {
 	case "pause":
 		g.Status = "paused"
@@ -423,15 +491,15 @@ func (s *Store) Control(ctx context.Context, sid, id, action, objective string, 
 			resumeBudget = budget
 		}
 		if resumeBudget != nil && g.Tokens >= *resumeBudget {
-			return fmt.Errorf("%w: explicit budget increase required", ErrInvalid)
+			return nil, fmt.Errorf("%w: explicit budget increase required", ErrInvalid)
 		}
 		// Explicitly continuing the goal also leaves planning. Fence any
 		// in-flight proposal producer; merely leaving planning never resumes.
 		if _, err = tx.ExecContext(ctx, "UPDATE conversation_controls SET mode_generation=mode_generation+CASE WHEN planning=1 THEN 1 ELSE 0 END,planning=0 WHERE session_id=?", sid); err != nil {
-			return err
+			return nil, err
 		}
 		if err = event(ctx, tx, sid, "mode", map[string]bool{"planning": false}); err != nil {
-			return err
+			return nil, err
 		}
 		g.Status = "active"
 		g.BlockedStreak = 0
@@ -446,7 +514,7 @@ func (s *Store) Control(ctx context.Context, sid, id, action, objective string, 
 	case "edit":
 		objective = strings.TrimSpace(objective)
 		if objective == "" || len(objective) > 200000 {
-			return fmt.Errorf("%w: a nonempty objective of at most 200000 bytes is required", ErrInvalid)
+			return nil, fmt.Errorf("%w: a nonempty objective of at most 200000 bytes is required", ErrInvalid)
 		}
 		g.Objective = objective
 		g.Generation++
@@ -460,30 +528,46 @@ func (s *Store) Control(ctx context.Context, sid, id, action, objective string, 
 			g.Status = "paused"
 		}
 	default:
-		return fmt.Errorf("%w: unknown goal control", ErrInvalid)
+		return nil, fmt.Errorf("%w: unknown goal control", ErrInvalid)
 	}
 	if budget != nil {
 		if *budget <= 0 {
-			return fmt.Errorf("%w: token budget must be positive", ErrInvalid)
+			return nil, fmt.Errorf("%w: token budget must be positive", ErrInvalid)
 		}
 		g.TokenBudget = budget
 	}
 	if g.Status == "active" && g.TokenBudget != nil && g.Tokens >= *g.TokenBudget {
 		g.Status = "budget_limited"
 	}
-	_, err = tx.ExecContext(ctx, "UPDATE conversation_goals SET objective=?,status=?,generation=?,token_budget=?,blocked_streak=?,blocker=?,empty_streak=?,completion_requested=?,paused_by_plan=?,round_id=?,lease_owner=?,lease_until=?,waiting_for='',reason='',updated_at=? WHERE id=?", g.Objective, g.Status, g.Generation, g.TokenBudget, g.BlockedStreak, g.Blocker, g.EmptyStreak, g.CompletionRequested, g.PausedByPlan, g.RoundID, g.LeaseOwner, g.LeaseUntil, time.Now().UnixMilli(), id)
+	// A pause or resume changes execution eligibility. The pending question
+	// still belongs to the same objective and generation.
+	if g.Generation != previous.Generation {
+		g.WaitingFor, g.WaitingRound = "", ""
+	}
+	if g.WaitingFor == "" {
+		g.Reason = ""
+	}
+	if action != "resume" {
+		if err = sealGoalRound(ctx, tx, &previous); err != nil {
+			return nil, err
+		}
+	}
+	_, err = tx.ExecContext(ctx, "UPDATE conversation_goals SET objective=?,status=?,generation=?,token_budget=?,blocked_streak=?,blocker=?,empty_streak=?,completion_requested=?,paused_by_plan=?,round_id=?,lease_owner=?,lease_until=?,waiting_for=?,waiting_round=?,reason=?,updated_at=? WHERE id=?", g.Objective, g.Status, g.Generation, g.TokenBudget, g.BlockedStreak, g.Blocker, g.EmptyStreak, g.CompletionRequested, g.PausedByPlan, g.RoundID, g.LeaseOwner, g.LeaseUntil, g.WaitingFor, g.WaitingRound, g.Reason, time.Now().UnixMilli(), id)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if action == "clear" || action == "stop" || action == "edit" {
 		if _, err = tx.ExecContext(ctx, "UPDATE conversation_plan_runs SET status='cancelled' WHERE goal_id=? AND status IN ('pending','running','waiting_input')", id); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if err = event(ctx, tx, sid, "goal", g); err != nil {
-		return err
+		return nil, err
 	}
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &previous, nil
 }
 
 func (s *Store) DeleteSession(ctx context.Context, sid string) error {
@@ -499,6 +583,12 @@ func (s *Store) DeleteSession(ctx context.Context, sid string) error {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, "UPDATE conversation_goals SET status='cleared',generation=generation+1,round_id='',lease_owner='',lease_until=0 WHERE session_id=?", sid); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE ask_round_removed_tasks
+		SET title='',result_json='{}',plan_id='',stage_id='',plan_final=0,updated_at=0
+		WHERE round_id IN (SELECT round_id FROM ask_rounds WHERE session_id=?)
+		AND (title!='' OR result_json!='{}' OR plan_id!='' OR stage_id!='' OR updated_at!=0)`, sid); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -555,7 +645,7 @@ func (s *Store) Claim(ctx context.Context, g *Goal, owner, locale string) (strin
 }
 
 func (s *Store) Renew(ctx context.Context, g *Goal, owner string) error {
-	result, err := s.DB.ExecContext(ctx, "UPDATE conversation_goals SET lease_until=? WHERE id=? AND generation=? AND round_id=? AND lease_owner=? AND status IN ('active','paused')", time.Now().UnixMilli()+60000, g.ID, g.Generation, g.RoundID, owner)
+	result, err := s.DB.ExecContext(ctx, "UPDATE conversation_goals SET lease_until=? WHERE id=? AND generation=? AND round_id=? AND lease_owner=? AND status IN ('active','paused') AND EXISTS(SELECT 1 FROM ask_rounds WHERE round_id=conversation_goals.round_id AND status='open')", time.Now().UnixMilli()+60000, g.ID, g.Generation, g.RoundID, owner)
 	if err != nil {
 		return err
 	}
@@ -564,6 +654,145 @@ func (s *Store) Renew(ctx context.Context, g *Goal, owner string) error {
 		return ErrConflict
 	}
 	return nil
+}
+
+type InputWait struct {
+	RoundID    string
+	owner      string
+	plan       int64
+	goal       string
+	generation int64
+}
+
+func (s *Store) PublishGoalQuestion(ctx context.Context, g *Goal, persist func() error) error {
+	return s.publishQuestion(ctx, g.RoundID, "closed", persist, `UPDATE conversation_goals
+		SET waiting_for='input',waiting_round=?,reason='waiting for user input',completion_requested=0,updated_at=?
+		WHERE id=? AND generation=? AND round_id=? AND status IN ('active','paused','budget_limited')`,
+		g.RoundID, time.Now().UnixMilli(), g.ID, g.Generation, g.RoundID)
+}
+
+func (s *Store) PublishPlanQuestion(ctx context.Context, sid, round string, version int64, persist func() error) error {
+	return s.publishQuestion(ctx, round, "stopped", persist, `UPDATE conversation_plan_runs SET status='waiting_input'
+		WHERE session_id=? AND version=? AND round_id=? AND status='running'`, sid, version, round)
+}
+
+// Holding the writer transaction across transcript publication makes the
+// dispatch seal and the waiting question available together to a replying ask.
+// persist must only write the session file, not a database checkpoint.
+func (s *Store) publishQuestion(ctx context.Context, round, status string, persist func() error, update string, args ...any) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, update, args...)
+	if err = oneInputRow(result, err); err != nil {
+		return err
+	}
+	result, err = tx.ExecContext(ctx, `UPDATE ask_rounds SET status=?,closed_at=? WHERE round_id=? AND status='open'`,
+		status, time.Now().Unix(), round)
+	if err = oneInputRow(result, err); err != nil {
+		return err
+	}
+	if persist != nil {
+		if err = persist(); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// ReserveInput assigns the latest question, or the named question, to one
+// replying ask. Selection and ownership serialize on the SQLite writer.
+func (s *Store) ReserveInput(ctx context.Context, sid, replyTo string) (InputWait, error) {
+	var wait InputWait
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return wait, err
+	}
+	defer tx.Rollback()
+	err = tx.QueryRowContext(ctx, `
+		SELECT w.round_id,w.version,w.goal_id,w.generation
+		FROM (
+			SELECT round_id,version,'' AS goal_id,0 AS generation FROM conversation_plan_runs
+			WHERE session_id=? AND status='waiting_input'
+			UNION ALL
+			SELECT waiting_round,0,id,generation FROM conversation_goals
+			WHERE session_id=? AND waiting_for='input' AND status IN ('active','paused','budget_limited')
+		) w JOIN ask_rounds a ON a.round_id=w.round_id
+		WHERE a.session_id=? AND a.status!='open' AND (?='' OR w.round_id=?)
+		AND NOT EXISTS(SELECT 1 FROM conversation_controls WHERE session_id=a.session_id AND (planning=1 OR deleted=1))
+		ORDER BY a.closed_at DESC,w.round_id DESC LIMIT 1`, sid, sid, sid, replyTo, replyTo).
+		Scan(&wait.RoundID, &wait.plan, &wait.goal, &wait.generation)
+	if errors.Is(err, sql.ErrNoRows) {
+		if replyTo != "" {
+			return wait, ErrConflict
+		}
+		return wait, nil
+	}
+	if err != nil {
+		return wait, err
+	}
+	wait.owner, err = util.UUIDv7()
+	if err != nil {
+		return wait, err
+	}
+	now := time.Now()
+	result, err := tx.ExecContext(ctx, `INSERT INTO conversation_input_replies(round_id,owner,lease_until) VALUES(?,?,?)
+		ON CONFLICT(round_id) DO UPDATE SET owner=excluded.owner,lease_until=excluded.lease_until
+		WHERE conversation_input_replies.lease_until<?`, wait.RoundID, wait.owner, now.Add(core.AskRoundLease).UnixMilli(), now.UnixMilli())
+	if err = oneInputRow(result, err); err != nil {
+		return wait, err
+	}
+	return wait, tx.Commit()
+}
+
+func (s *Store) RenewInput(ctx context.Context, wait InputWait) error {
+	now := time.Now()
+	result, err := s.DB.ExecContext(ctx, `UPDATE conversation_input_replies SET lease_until=?
+		WHERE round_id=? AND owner=? AND lease_until>=?`, now.Add(core.AskRoundLease).UnixMilli(), wait.RoundID, wait.owner, now.UnixMilli())
+	return oneInputRow(result, err)
+}
+
+func (s *Store) ReleaseInput(ctx context.Context, wait InputWait) error {
+	_, err := s.DB.ExecContext(ctx, "DELETE FROM conversation_input_replies WHERE round_id=? AND owner=?", wait.RoundID, wait.owner)
+	return err
+}
+
+func (s *Store) ResolveInput(ctx context.Context, sid string, wait InputWait) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `DELETE FROM conversation_input_replies WHERE round_id=? AND owner=? AND lease_until>=?`,
+		wait.RoundID, wait.owner, time.Now().UnixMilli())
+	if err = oneInputRow(result, err); err != nil {
+		return err
+	}
+	if wait.plan > 0 {
+		result, err = tx.ExecContext(ctx, `UPDATE conversation_plan_runs SET status='pending',round_id=''
+			WHERE session_id=? AND version=? AND round_id=? AND status='waiting_input'`, sid, wait.plan, wait.RoundID)
+	} else {
+		result, err = tx.ExecContext(ctx, `UPDATE conversation_goals SET waiting_for='',waiting_round='',reason='',updated_at=?
+		WHERE session_id=? AND id=? AND generation=? AND waiting_round=? AND waiting_for='input'`,
+			time.Now().UnixMilli(), sid, wait.goal, wait.generation, wait.RoundID)
+	}
+	if err = oneInputRow(result, err); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func oneInputRow(result sql.Result, err error) error {
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err == nil && count != 1 {
+		return ErrConflict
+	}
+	return err
 }
 
 func (s *Store) Report(ctx context.Context, g *Goal, status, reason string) error {
@@ -593,7 +822,7 @@ func (s *Store) Report(ctx context.Context, g *Goal, status, reason string) erro
 			return ErrConflict
 		}
 		var pending bool
-		if err := tx.QueryRowContext(ctx, `WITH RECURSIVE members(id) AS (SELECT task_id FROM ask_round_tasks WHERE round_id=? UNION SELECT t.task_id FROM tasks t JOIN members m ON t.parent_id=m.id) SELECT EXISTS(SELECT 1 FROM tasks JOIN members ON task_id=members.id WHERE state NOT IN ('done','failed','cancelled','expired'))`, g.RoundID).Scan(&pending); err != nil {
+		if err := tx.QueryRowContext(ctx, core.AskRoundMembersSQL+` SELECT EXISTS(SELECT 1 FROM tasks JOIN members ON task_id=members.id WHERE state NOT IN ('done','failed','cancelled','expired'))`, g.RoundID).Scan(&pending); err != nil {
 			return err
 		}
 		if pending {
@@ -691,14 +920,11 @@ func (s *Store) Settle(ctx context.Context, g *Goal, taskTokens int64) error {
 	}
 	defer tx.Rollback()
 	var tokens int64
-	// Read task metrics under the same write transaction that seals the ledger.
-	// A pre-transaction sum can miss a metric that saw settled=0 just before us.
-	err = tx.QueryRowContext(ctx, `UPDATE conversation_goal_rounds SET settled=1,task_tokens=MAX(?,(
- WITH RECURSIVE members(id) AS (SELECT task_id FROM ask_round_tasks WHERE round_id=?
- UNION SELECT t.task_id FROM tasks t JOIN members m ON t.parent_id=m.id)
- SELECT COALESCE(SUM(MAX(0,COALESCE(tokens,0))),0) FROM delegation_metrics
- WHERE task_id IN (SELECT id FROM members) AND usage_source!='ask'))
- WHERE round_id=? AND goal_id=? AND settled=0 RETURNING entry_tokens+task_tokens`, taskTokens, g.RoundID, g.RoundID, g.ID).Scan(&tokens)
+	// Metrics update this ledger in the same transaction as each record.
+	err = tx.QueryRowContext(ctx, `UPDATE conversation_goal_rounds SET settled=1,task_tokens=MAX(?3,task_tokens)
+		WHERE round_id=?1 AND goal_id=?2 AND settled=0
+		AND NOT EXISTS(`+core.AskRoundMembersSQL+` SELECT 1 FROM tasks JOIN members ON task_id=members.id WHERE state NOT IN ('done','failed','cancelled','expired'))
+		RETURNING entry_tokens+task_tokens`, g.RoundID, g.ID, taskTokens).Scan(&tokens)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrConflict
 	}
@@ -708,7 +934,15 @@ func (s *Store) Settle(ctx context.Context, g *Goal, taskTokens int64) error {
 	// Charge the immutable goal identity even after revocation. Only its current
 	// round may clear execution state or finish the goal; implementation rounds
 	// share this ledger without taking over the autonomous round pointer.
-	_, err = tx.ExecContext(ctx, `UPDATE conversation_goals SET tokens=tokens+?,status=CASE WHEN status='active' AND round_id=? AND completion_requested=1 THEN 'complete' WHEN status='active' AND token_budget IS NOT NULL AND tokens+?>=token_budget THEN 'budget_limited' ELSE status END,blocked_streak=CASE WHEN round_id!=? OR EXISTS(SELECT 1 FROM conversation_events WHERE session_id=? AND kind='goal_blocked' AND payload=?) THEN blocked_streak ELSE 0 END,lease_owner=CASE WHEN round_id=? THEN '' ELSE lease_owner END,lease_until=CASE WHEN round_id=? THEN 0 ELSE lease_until END,round_id=CASE WHEN round_id=? THEN '' ELSE round_id END,updated_at=? WHERE id=?`, tokens, g.RoundID, tokens, g.RoundID, g.SessionID, fmt.Sprintf("%q", g.RoundID), g.RoundID, g.RoundID, g.RoundID, time.Now().UnixMilli(), g.ID)
+	_, err = tx.ExecContext(ctx, `UPDATE conversation_goals SET tokens=tokens+?,
+		status=CASE WHEN status='active' AND round_id=?2 AND completion_requested=1 AND waiting_for='' THEN 'complete'
+			WHEN status='active' AND token_budget IS NOT NULL AND tokens+?1>=token_budget THEN 'budget_limited' ELSE status END,
+		completion_requested=CASE WHEN round_id=?2 AND (status!='active' OR waiting_for!='') THEN 0 ELSE completion_requested END,
+		blocked_streak=CASE WHEN round_id!=?2 OR EXISTS(SELECT 1 FROM conversation_events WHERE session_id=?3 AND kind='goal_blocked' AND payload=?4) THEN blocked_streak ELSE 0 END,
+		lease_owner=CASE WHEN round_id=?2 THEN '' ELSE lease_owner END,
+		lease_until=CASE WHEN round_id=?2 THEN 0 ELSE lease_until END,
+		round_id=CASE WHEN round_id=?2 THEN '' ELSE round_id END,updated_at=?5 WHERE id=?6`,
+		tokens, g.RoundID, g.SessionID, fmt.Sprintf("%q", g.RoundID), time.Now().UnixMilli(), g.ID)
 	if err != nil {
 		return err
 	}

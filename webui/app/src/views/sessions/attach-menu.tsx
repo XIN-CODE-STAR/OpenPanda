@@ -165,7 +165,7 @@ export function AttachMenu({
           setView('root')
         }}
       >
-        +
+        <Icon name="plus" size={20} />
       </button>
       {open && (
         <div class="attach-menu" role="menu">

@@ -177,6 +177,8 @@ func (h *EngineHolder) ReadConfig(fn func(*config.Config)) {
 // Close releases the current engine's resources (DB handle, scheduler core,
 // MCP server). The holder must not be used afterwards.
 func (h *EngineHolder) Close() {
+	h.reloadMu.Lock()
+	defer h.reloadMu.Unlock()
 	h.mu.Lock()
 	old := h.engine
 	h.engine = nil

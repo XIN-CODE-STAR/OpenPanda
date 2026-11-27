@@ -16,8 +16,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Xustalis/OpenPanda/internal/executil"
+	"github.com/Xustalis/OpenPanda/internal/fslock"
 )
 
 // worktreeDir is the directory (inside the repo) where session worktrees
@@ -36,6 +38,9 @@ var ErrNotARepo = errors.New("sessions: work path is not a git repository")
 // ErrMergeConflict is returned by Merge when the session branch cannot be
 // merged cleanly; the merge is aborted and the repository left untouched.
 var ErrMergeConflict = errors.New("sessions: merge conflict (aborted, your checkout is unchanged)")
+
+// ErrMergeInProgress protects a merge already started in the checkout.
+var ErrMergeInProgress = errors.New("sessions: a Git merge is already in progress in the checkout")
 
 // maxDiffBytes caps the diff payload returned to the panel — a huge generated
 // diff would otherwise stall the browser.
@@ -453,10 +458,21 @@ func (w *Worktrees) Diff(ctx context.Context, id string) (string, error) {
 // neither — overwriting premerge with the previous merge commit would erase
 // the only copy of the rollback target.
 func (w *Worktrees) Merge(ctx context.Context, id string, message string) (string, error) {
+	release, err := w.lockMergeState(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	if err := w.ensureExists(id); err != nil {
 		return "", err
 	}
+	if _, err := requireIdleGitOperation(ctx, w.repo); err != nil {
+		return "", err
+	}
 	wt := w.Path(id)
+	if _, err := requireIdleGitOperation(ctx, wt); err != nil {
+		return "", err
+	}
 	// Commit uncommitted session work on its branch first. The commit identity
 	// is fixed via -c flags so a machine without git user.name configured can
 	// still merge.
@@ -477,20 +493,62 @@ func (w *Worktrees) Merge(ctx context.Context, id string, message string) (strin
 		}
 	}
 	preSHA := w.revParse(ctx, "HEAD")
-	merge := executil.CommandContext(ctx, "git", "-C", w.repo, "-c", "user.name=OpenPanda", "-c", "user.email=openpanda@localhost", "merge", "--no-ff", "--no-edit", Branch(id))
+	branchSHA := w.revParse(ctx, Branch(id))
+	if preSHA == "" || branchSHA == "" {
+		return "", fmt.Errorf("sessions: cannot resolve the merge parents")
+	}
+	state, err := requireIdleGitOperation(ctx, w.repo)
+	if err != nil {
+		return "", err
+	}
+	headRef, err := w.checkoutRef(ctx)
+	if err != nil {
+		return "", err
+	}
+	// Keep the index's conflict entries even if rerere knows a resolution.
+	// Automatic staging would hide that this invocation created a conflict.
+	merge := executil.CommandContext(ctx, "git", "-C", w.repo, "-c", "user.name=OpenPanda", "-c", "user.email=openpanda@localhost", "merge", "--no-ff", "--no-edit", "--no-rerere-autoupdate", Branch(id))
 	if out, err := merge.CombinedOutput(); err != nil {
-		abort := executil.CommandContext(ctx, "git", "-C", w.repo, "merge", "--abort")
-		_, _ = abort.CombinedOutput()
-		if strings.Contains(strings.ToUpper(string(out)), "CONFLICT") ||
-			strings.Contains(string(out), "nothing to commit") {
-			return "", ErrMergeConflict
+		// Git exits 128 when it refuses an existing merge. Only clean up a
+		// conflict created by this invocation for these two commits.
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 1 {
+			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			pending, readErr := os.ReadFile(state.mergeHead)
+			if readErr == nil && strings.TrimSpace(string(pending)) == branchSHA &&
+				w.revParse(cleanup, "HEAD") == preSHA {
+				unmerged, listErr := executil.CommandContext(cleanup, "git", "-C", w.repo, "ls-files", "--unmerged", "-z").Output()
+				if listErr == nil && len(unmerged) > 0 {
+					abort := executil.CommandContext(cleanup, "git", "-C", w.repo, "merge", "--abort")
+					if abortOut, abortErr := abort.CombinedOutput(); abortErr != nil {
+						return "", fmt.Errorf("sessions: abort conflicted session merge: %s", wrapErr(abortErr, abortOut))
+					}
+					return "", ErrMergeConflict
+				}
+			}
 		}
 		return "", fmt.Errorf("sessions: git merge: %s", wrapErr(err, out))
 	}
-	if mergedSHA := w.revParse(ctx, "HEAD"); mergedSHA != "" && mergedSHA != preSHA {
-		w.writeRef(ctx, mergedRef(id), mergedSHA)
-		if preSHA != "" {
-			w.writeRef(ctx, premergeRef(id), preSHA)
+	// Finish bookkeeping even if the request ends after Git commits the
+	// merge. A retry only sees an up-to-date branch once HEAD is advanced.
+	recordCtx, cancelRecord := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancelRecord()
+	mergedSHA := w.revParse(recordCtx, "HEAD")
+	if mergedSHA != preSHA {
+		parents := w.parents(recordCtx, mergedSHA)
+		if len(parents) != 2 || parents[0] != preSHA || parents[1] != branchSHA {
+			return "", fmt.Errorf("sessions: checkout changed during merge; cannot record its rollback")
+		}
+		record := executil.CommandContext(recordCtx, "git", "-C", w.repo, "update-ref", "--stdin")
+		record.Stdin = strings.NewReader(fmt.Sprintf("update %s %s\nupdate %s %s\n", mergedRef(id), mergedSHA, premergeRef(id), preSHA))
+		if out, err := record.CombinedOutput(); err != nil {
+			restoreCtx, cancelRestore := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer cancelRestore()
+			// A timeout may have landed just after the transaction committed.
+			if w.revParse(restoreCtx, mergedRef(id)) != mergedSHA || w.revParse(restoreCtx, premergeRef(id)) != preSHA {
+				return "", w.restoreUnrecordedMerge(restoreCtx, headRef, preSHA, mergedSHA, wrapErr(err, out))
+			}
 		}
 	}
 	subject, err := executil.CommandContext(ctx, "git", "-C", w.repo, "log", "-1", "--format=%s").Output()
@@ -498,6 +556,30 @@ func (w *Worktrees) Merge(ctx context.Context, id string, message string) (strin
 		return "", nil // merge succeeded; subject is cosmetic
 	}
 	return strings.TrimSpace(string(subject)), nil
+}
+
+func (w *Worktrees) checkoutRef(ctx context.Context) (string, error) {
+	out, err := executil.CommandContext(ctx, "git", "-C", w.repo, "rev-parse", "--symbolic-full-name", "HEAD").Output()
+	if err != nil {
+		return "", fmt.Errorf("sessions: resolve checkout reference: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (w *Worktrees) restoreUnrecordedMerge(ctx context.Context, headRef, preSHA, mergedSHA, recordError string) error {
+	currentRef, err := w.checkoutRef(ctx)
+	if err != nil || currentRef != headRef || w.revParse(ctx, "HEAD") != mergedSHA {
+		return fmt.Errorf("sessions: record merge rollback: %s; checkout changed before it could be restored", recordError)
+	}
+	if _, err := requireIdleGitOperation(ctx, w.repo); err != nil {
+		return fmt.Errorf("sessions: record merge rollback: %s; %w", recordError, err)
+	}
+	// Git merge permits unrelated local edits. Reset only the merge's
+	// changes, and let Git refuse to overwrite newly conflicting edits.
+	if out, err := executil.CommandContext(ctx, "git", "-C", w.repo, "reset", "--merge", preSHA).CombinedOutput(); err != nil {
+		return fmt.Errorf("sessions: record merge rollback: %s; restore checkout: %s", recordError, wrapErr(err, out))
+	}
+	return fmt.Errorf("sessions: record merge rollback: %s; checkout restored", recordError)
 }
 
 // mergedRef / premergeRef are the rollback bookkeeping refs a successful
@@ -519,6 +601,15 @@ var ErrNothingToRevert = errors.New("sessions: no recorded merge to revert")
 // both rollback paths (reset --hard, git revert) would entangle it.
 var ErrRevertDirty = errors.New("sessions: checkout has uncommitted changes — commit or stash them first")
 
+// ErrRevertConflict is returned once a failed session revert has been aborted.
+var ErrRevertConflict = errors.New("sessions: revert could not be applied (aborted, your checkout is unchanged)")
+
+// ErrRevertInProgress protects an existing sequencer operation or rebase.
+var ErrRevertInProgress = errors.New("sessions: a Git revert, cherry-pick or rebase is already in progress in the checkout")
+
+// ErrInvalidMergeRecord is returned for inconsistent rollback references.
+var ErrInvalidMergeRecord = errors.New("sessions: recorded merge does not match its rollback target")
+
 // Revert undoes a previously recorded session Merge. When HEAD is still the
 // merge commit the rollback is a clean `git reset --hard <pre-merge>`; when
 // later commits sit on top it becomes a `git revert -m 1` of the merge commit
@@ -527,21 +618,37 @@ func (w *Worktrees) Revert(ctx context.Context, id string) (string, error) {
 	if !ValidID(id) {
 		return "", ErrNotFound
 	}
+	release, err := w.lockMergeState(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	merged := w.revParse(ctx, mergedRef(id))
 	if merged == "" {
 		return "", ErrNothingToRevert
 	}
+	state, err := requireIdleGitOperation(ctx, w.repo)
+	if err != nil {
+		return "", err
+	}
 	dirty, err := executil.CommandContext(ctx, "git", "-C", w.repo, "status", "--porcelain").Output()
-	if err == nil && strings.TrimSpace(string(dirty)) != "" {
+	if err != nil {
+		return "", fmt.Errorf("sessions: check checkout before revert: %w", err)
+	}
+	if strings.TrimSpace(string(dirty)) != "" {
 		return "", ErrRevertDirty
 	}
 	head := w.revParse(ctx, "HEAD")
+	parents := w.parents(ctx, merged)
 	pre := w.revParse(ctx, premergeRef(id))
-	if pre == "" {
-		// Bookkeeping from an older build: the merge commit's first parent IS
-		// the pre-merge state by definition.
-		pre = w.revParse(ctx, merged+"^1")
+	if len(parents) == 0 || (pre != "" && pre != parents[0]) {
+		return "", ErrInvalidMergeRecord
 	}
+	if len(parents) > 1 && w.revParse(ctx, Branch(id)) != "" && !w.isAncestor(ctx, parents[1], Branch(id)) {
+		return "", ErrInvalidMergeRecord
+	}
+	// Older records may omit the first parent reference.
+	pre = parents[0]
 	switch {
 	case head == merged && pre != "":
 		// Nothing landed on top of the merge — erasing it is exact.
@@ -553,11 +660,27 @@ func (w *Worktrees) Revert(ctx context.Context, id string) (string, error) {
 		// follow-up commits stay intact. A non-merge commit (a fast-forward
 		// recorded before --no-ff) reverts plainly.
 		argv := []string{"-C", w.repo, "-c", "user.name=OpenPanda", "-c", "user.email=openpanda@localhost", "revert", "--no-edit"}
-		if len(w.parents(ctx, merged)) > 1 {
+		if len(parents) > 1 {
 			argv = append(argv, "-m", "1")
 		}
 		argv = append(argv, merged)
 		if out, err := executil.CommandContext(ctx, "git", argv...).CombinedOutput(); err != nil {
+			var exit *exec.ExitError
+			if errors.As(err, &exit) && exit.ExitCode() == 1 {
+				// The request can end during Git's failure handling. Keep the
+				// lock while restoring the checkout, with a bounded cleanup.
+				cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+				defer cancel()
+				pending, readErr := os.ReadFile(state.revertHead)
+				if readErr == nil && strings.TrimSpace(string(pending)) == merged &&
+					w.revParse(cleanup, "HEAD") == head {
+					abort := executil.CommandContext(cleanup, "git", "-C", w.repo, "revert", "--abort")
+					if abortOut, abortErr := abort.CombinedOutput(); abortErr != nil {
+						return "", fmt.Errorf("sessions: abort failed session revert: %s", wrapErr(abortErr, abortOut))
+					}
+					return "", ErrRevertConflict
+				}
+			}
 			return "", fmt.Errorf("sessions: git revert: %s", wrapErr(err, out))
 		}
 	default:
@@ -580,8 +703,48 @@ func (w *Worktrees) revParse(ctx context.Context, rev string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func (w *Worktrees) writeRef(ctx context.Context, ref, sha string) {
-	_ = executil.CommandContext(ctx, "git", "-C", w.repo, "update-ref", ref, sha).Run()
+type gitOperationState struct {
+	mergeHead  string
+	revertHead string
+}
+
+// A manual operation reserves its own index and worktree until the user
+// finishes it. Git stores these markers in the checkout's private git dir,
+// including when the checkout is a linked worktree.
+func requireIdleGitOperation(ctx context.Context, checkout string) (gitOperationState, error) {
+	out, err := executil.CommandContext(ctx, "git", "-C", checkout, "rev-parse", "--absolute-git-dir").Output()
+	if err != nil {
+		return gitOperationState{}, fmt.Errorf("sessions: resolve checkout git directory: %w", err)
+	}
+	gitDir := strings.TrimRight(string(out), "\r\n")
+	for _, name := range []string{"MERGE_HEAD", "REVERT_HEAD", "CHERRY_PICK_HEAD", "sequencer", "rebase-merge", "rebase-apply"} {
+		if _, err := os.Lstat(filepath.Join(gitDir, name)); err == nil {
+			if name == "MERGE_HEAD" {
+				return gitOperationState{}, ErrMergeInProgress
+			}
+			return gitOperationState{}, ErrRevertInProgress
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return gitOperationState{}, fmt.Errorf("sessions: inspect %s: %w", name, err)
+		}
+	}
+	return gitOperationState{
+		mergeHead:  filepath.Join(gitDir, "MERGE_HEAD"),
+		revertHead: filepath.Join(gitDir, "REVERT_HEAD"),
+	}, nil
+}
+
+// lockMergeState shares the Git common directory across independently opened
+// Worktrees, linked checkouts, and the CLI and panel processes.
+func (w *Worktrees) lockMergeState(ctx context.Context) (func(), error) {
+	gitDir, err := w.commonGitDir(ctx)
+	if err != nil {
+		return nil, err
+	}
+	release, err := fslock.AcquireStrict(ctx, filepath.Join(gitDir, "openpanda-session-merge.lock"))
+	if err != nil {
+		return nil, fmt.Errorf("sessions: lock merge state: %w", err)
+	}
+	return release, nil
 }
 
 func (w *Worktrees) isAncestor(ctx context.Context, anc, desc string) bool {
@@ -751,19 +914,24 @@ func (w *Worktrees) Remove(ctx context.Context, id string) error {
 	return nil
 }
 
-// excludeWorktreeDir appends the worktree directory to .git/info/exclude (not
-// the user's .gitignore) so it stays out of git status without touching
-// tracked files.
-func (w *Worktrees) excludeWorktreeDir() error {
-	// --git-common-dir, not --git-dir: inside a linked worktree the latter is
-	// the worktree's own admin dir, whose info/exclude does not apply.
-	admin, err := exec.Command("git", "-C", w.repo, "rev-parse", "--git-common-dir").Output()
+func (w *Worktrees) commonGitDir(ctx context.Context) (string, error) {
+	admin, err := executil.CommandContext(ctx, "git", "-C", w.repo, "rev-parse", "--git-common-dir").Output()
 	if err != nil {
-		return fmt.Errorf("sessions: rev-parse --git-dir: %w", err)
+		return "", fmt.Errorf("sessions: rev-parse --git-common-dir: %w", err)
 	}
 	gitDir := strings.TrimSpace(string(admin))
 	if !filepath.IsAbs(gitDir) {
 		gitDir = filepath.Join(w.repo, gitDir)
+	}
+	return gitDir, nil
+}
+
+// excludeWorktreeDir adds the runtime directory to the repository's local Git
+// excludes. The common directory also covers linked worktrees.
+func (w *Worktrees) excludeWorktreeDir() error {
+	gitDir, err := w.commonGitDir(context.Background())
+	if err != nil {
+		return err
 	}
 	excludePath := filepath.Join(gitDir, "info", "exclude")
 	existing, _ := os.ReadFile(excludePath)

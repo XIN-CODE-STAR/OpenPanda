@@ -58,65 +58,49 @@ export interface DockFilesProps {
 }
 
 export function DockFiles(props: DockFilesProps) {
-  const [dir, setDir] = useState('')
-  const [entries, setEntries] = useState<FsFileEntry[] | null>(null)
-  const [root, setRoot] = useState('')
-  const [err, setErr] = useState('')
-  const [file, setFile] = useState<{ path: string; line: number } | null>(null)
+  const workspace = useMemo(() => ({ session: props.session }), [props.session, props.resetSignal])
+  const [position, setPosition] = useState<{ workspace: typeof workspace; dir: string } | null>(null)
+  const [workspaceRoot, setWorkspaceRoot] = useState<{ workspace: typeof workspace; path: string } | null>(null)
+  const [opened, setOpened] = useState<{ workspace: typeof workspace; file: { path: string; line: number } } | null>(null)
+  const dir = position?.workspace === workspace ? position.dir : ''
+  const root = workspaceRoot?.workspace === workspace ? workspaceRoot.path : ''
+  const file = opened?.workspace === workspace ? opened.file : null
+  const listingRequest = useMemo(() => ({ workspace, dir }), [workspace, dir])
+  const [loaded, setLoaded] = useState<{ request: typeof listingRequest; entries: FsFileEntry[]; error?: string } | null>(null)
+  // Old rows must stop being clickable in the render that changes the path.
+  const listing = loaded?.request === listingRequest ? loaded : null
+  const entries = listing?.entries ?? null
+  const err = listing?.error ?? ''
+
+  const setDir = (dir: string) => setPosition({ workspace, dir })
+  const openFile = (path: string, line: number) => setOpened({ workspace, file: { path, line } })
 
   // A transcript click wins over whatever the panel was showing. The request
   // object is rebuilt per click, so clicking the same path twice re-opens it.
   useEffect(() => {
-    if (props.request) setFile(props.request)
+    if (props.request) setOpened({ workspace, file: props.request })
   }, [props.request])
-
-  // A thread switch starts over here: root of the tree, nothing open. The
-  // bar's own button does the same by hand (see .df-root below).
-  //
-  // The first run is skipped: a pane mounting *because* something asked for a
-  // file (the change panel's 打开文件, a transcript click) arrives with a
-  // request in the same render, and the reset would wipe it. A fresh mount is
-  // already at the root with nothing open, so there is nothing to reset.
-  const seenReset = useRef(props.resetSignal ?? 0)
-  useEffect(() => {
-    const signal = props.resetSignal ?? 0
-    if (signal === seenReset.current) return
-    seenReset.current = signal
-    setFile(null)
-    setDir('')
-    setRoot('')
-  }, [props.resetSignal])
-
-  // The tree is the thread's own workspace, so a different thread is a
-  // different root. Clearing both here — not just the directory — keeps the
-  // previous thread's path from sitting in the bar until the new listing
-  // lands, which would name a workspace this thread never worked in.
-  useEffect(() => {
-    setDir('')
-    setRoot('')
-  }, [props.session])
 
   useEffect(() => {
     let live = true
-    setErr('')
+    const { workspace, dir } = listingRequest
     api
-      .fsFiles(dir || undefined, props.session ?? undefined)
+      .fsFiles(dir || undefined, workspace.session ?? undefined)
       .then((r) => {
         if (!live) return
-        setEntries(r.entries ?? [])
+        setLoaded({ request: listingRequest, entries: r.entries ?? [] })
         // The bar names the workspace, not wherever the reader walked to:
         // `dir` below the root is shown in place of it.
-        if (!dir) setRoot(r.current)
+        if (!dir) setWorkspaceRoot({ workspace, path: r.current })
       })
       .catch((e: unknown) => {
         if (!live) return
-        setErr(e instanceof Error ? e.message : String(e))
-        setEntries([])
+        setLoaded({ request: listingRequest, entries: [], error: e instanceof Error ? e.message : String(e) })
       })
     return () => {
       live = false
     }
-  }, [dir, props.session])
+  }, [listingRequest])
 
   const parentOf = (path: string): string => {
     const clean = path.replace(/[\\/]+$/, '')
@@ -148,8 +132,8 @@ export function DockFiles(props: DockFilesProps) {
         path={file.path}
         line={file.line}
         session={props.session}
-        onBack={() => setFile(null)}
-        onNavigate={(path, line) => setFile({ path, line })}
+        onBack={() => setOpened(null)}
+        onNavigate={openFile}
         onInsert={props.onInsert}
       />
     )
@@ -189,7 +173,8 @@ export function DockFiles(props: DockFilesProps) {
 
       {err !== '' && <p class="df-note is-error">{err}</p>}
 
-      <div class="df-list">
+      <div class="df-list" aria-busy={entries === null}>
+        {entries === null && <p class="df-note dim" role="status">{t('common.loading')}</p>}
         {entries !== null && entries.length === 0 && err === '' && (
           <p class="df-note dim">{t('dockFiles.empty')}</p>
         )}
@@ -210,7 +195,7 @@ export function DockFiles(props: DockFilesProps) {
             key={e.path}
             type="button"
             class="df-row"
-            onClick={() => setFile({ path: e.path, line: 0 })}
+            onClick={() => openFile(e.path, 0)}
             title={e.path}
           >
             <Icon

@@ -139,6 +139,24 @@ test('withAttachments output is recognised by expandFileRefs', async () => {
   assert.deepEqual(attached, ['up/1-notes.md'])
 })
 
+test('upload mentions with spaces expand the exact path once', async () => {
+  const upload = String.raw`D:\Team workspace\.openpanda\uploads\1-session notes.md`
+  const cited = 'docs/release notes.txt,'
+  const binary = 'shots/a screenshot.png'
+  const seen: string[] = []
+  const body = withAttachments('Review @README.md, and @missing.', [upload, cited, binary, upload])
+  const { prompt, attached } = await expandFileRefs(body, async (path) => {
+    seen.push(path)
+    if (path === 'missing') throw new Error('not a file')
+    return { content: path === binary ? 'image bytes' : `body for ${path}` }
+  })
+  assert.deepEqual(seen, ['README.md', 'missing', upload, cited, binary])
+  assert.deepEqual(attached, ['README.md', upload, cited, binary])
+  assert.ok(prompt.includes(`body for ${upload}`))
+  assert.ok(prompt.includes(`body for ${cited}`))
+  assert.ok(!prompt.includes('image bytes'))
+})
+
 test('exportMarkdown renders roles and thought details', async () => {
   // Role names come from the i18n dictionary — pin English so the export
   // does not depend on the machine locale the test happens to run under.

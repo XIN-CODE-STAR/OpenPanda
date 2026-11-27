@@ -496,6 +496,7 @@ type progressWriter struct {
 	evSink     AgentEventFunc
 	tools      *toolCounter // nil when the caller does not need tool tracking
 	onActivity func()       // set before Start; read-only afterwards
+	onDelivery func()       // receipt from the one-shot adapter
 	// onOutput fires only when the CLI itself speaks — a non-protocol stderr
 	// line or a real agent event. The adapter's own spawn bookkeeping and
 	// silence heartbeats prove the process is alive (onActivity) but not that
@@ -574,12 +575,20 @@ func (a *activityWriter) String() string { return a.capture.String() }
 // in partial by Write until its newline arrives).
 func (w *progressWriter) line(b []byte) {
 	var probe struct {
-		Type string `json:"type"`
-		Note string `json:"note"`
-		Kind string `json:"kind"`
+		Type  string `json:"type"`
+		Note  string `json:"note"`
+		Kind  string `json:"kind"`
+		Stage string `json:"stage"`
 	}
 	if err := json.Unmarshal(b, &probe); err == nil {
 		switch probe.Type {
+		case "prompt_delivered":
+			// Earlier harness builds acknowledged JSON parsing. They still
+			// get the result/work fallback, but that frame cannot stamp a note.
+			if probe.Stage == "agent" && w.onDelivery != nil {
+				w.onDelivery()
+			}
+			return
 		case "progress":
 			note := strings.TrimSpace(probe.Note)
 			if note == "" {
@@ -1070,6 +1079,9 @@ type AdapterRequest struct {
 	// turns: the request is followed by line-framed {"type":"user","text"}
 	// turn inputs and each turn produces one result envelope (Phase 6).
 	Session bool `json:"session,omitempty"`
+	// PromptReceipt opts into a control frame when the prompt reaches the
+	// child agent. Older adapters may return only a result.
+	PromptReceipt bool `json:"prompt_receipt,omitempty"`
 }
 
 // UsageDetail is the structured token breakdown an adapter reports alongside
@@ -1423,7 +1435,7 @@ func adapterSupportsSession(agent, adapter string) bool {
 // directory with a minimal environment (see security.Sandbox). stderr is
 // split through progressWriter: NDJSON progress lines go to the context's
 // sink, the rest is retained for failure diagnosis.
-func runAdapterProcess(ctx context.Context, name string, prompt string, cwd string, env []string) AgentResult {
+func runAdapterProcess(ctx context.Context, name string, prompt string, cwd string, env []string) (out AgentResult) {
 	// adapter: "generic" (no .py) is the built-in template executor: same
 	// contract as generic.py — argv expansion, exit-code mapping, sandbox —
 	// implemented natively so a node without a Python interpreter can still
@@ -1437,6 +1449,9 @@ func runAdapterProcess(ctx context.Context, name string, prompt string, cwd stri
 	if refusal != nil {
 		return *refusal
 	}
+	req.PromptReceipt = true
+	deliveryCtx := ctx
+	deliver := sync.OnceFunc(func() { PromptDelivered(deliveryCtx) })
 	// {env:NAME} placeholders in a generic template resolve inside the
 	// adapter's own environment — which the sandbox filters down to the
 	// allow-list plus whatever the caller injected, so a custom name like
@@ -1465,7 +1480,7 @@ func runAdapterProcess(ctx context.Context, name string, prompt string, cwd stri
 		if pool := sessionPoolOf(ctx); pool != nil {
 			req.Session = true
 			key := AgentName(ctx) + "|" + name
-			if res, ok := pool.turn(ctx, key, name, req, cwd, env); ok {
+			if res, ok := pool.turn(ctx, key, name, req, cwd, env, deliver); ok {
 				return res
 			}
 			req.Session = false
@@ -1622,6 +1637,16 @@ func runAdapterProcess(ctx context.Context, name string, prompt string, cwd stri
 	stderr.tools = tools
 	stderr.onActivity = alive
 	stderr.onOutput = touch
+	var promptAccepted atomic.Bool
+	resultReceived := false
+	stderr.onDelivery = func() {
+		promptAccepted.Store(true)
+		deliver()
+	}
+	defer func() {
+		out.promptAccepted = promptAccepted.Load()
+		out.outcomeUnconfirmed = out.promptAccepted && !resultReceived
+	}()
 	stderr.sink = progressSink
 	stderr.evSink = AgentEvents(ctx)
 	stderr.adapterName = name
@@ -1667,14 +1692,15 @@ func runAdapterProcess(ctx context.Context, name string, prompt string, cwd stri
 	}
 
 	emitExecutionProfile(ctx, adapterExecutionProfile(ctx, name, req, cmd.Env, "one_shot"))
-	// Start and Wait rather than Run: the successful spawn is the moment the
-	// prompt is handed over, and only the caller knows what that moment means
-	// (the round stamps its steer notes read). A run that never starts must not
-	// announce a delivery — no script, no interpreter, no process.
-	err = cmd.Start()
-	if err == nil {
-		PromptDelivered(ctx)
-		err = cmd.Wait()
+	if err := beginPromptHandoff(ctx); err != nil {
+		return AgentResult{ExitCode: 1, Result: err.Error()}
+	}
+	err = waitResult(cmd, cmd.Run())
+	workObserved := stderr.toolCalls.Load() > 0
+	if workObserved {
+		// A legacy adapter can prove it read the prompt even if it exits
+		// without a result envelope.
+		deliver()
 	}
 	if err != nil {
 		actMu.Lock()
@@ -1689,15 +1715,15 @@ func runAdapterProcess(ctx context.Context, name string, prompt string, cwd stri
 		checkpoint := stderr.session()
 		if wasStalled {
 			if wasStartup {
-				return AgentResult{OK: false, Result: fmt.Sprintf("adapter stalled: no output ever received for %v (startup grace)", adapterStartupGrace), ExitCode: 124, SessionID: checkpoint, WorkObserved: stderr.toolCalls.Load() > 0}
+				return AgentResult{OK: false, Result: fmt.Sprintf("adapter stalled: no output ever received for %v (startup grace)", adapterStartupGrace), ExitCode: 124, SessionID: checkpoint, WorkObserved: workObserved}
 			}
-			return AgentResult{OK: false, Result: fmt.Sprintf("adapter stalled: no progress or output received for %v (silence timeout)", silenceLimit), ExitCode: 124, SessionID: checkpoint, WorkObserved: stderr.toolCalls.Load() > 0}
+			return AgentResult{OK: false, Result: fmt.Sprintf("adapter stalled: no progress or output received for %v (silence timeout)", silenceLimit), ExitCode: 124, SessionID: checkpoint, WorkObserved: workObserved}
 		}
 		if wasCapped {
-			return AgentResult{OK: false, Result: "agent tool-call budget exhausted: the run kept calling tools past its fuse and was killed before it could loop indefinitely", ExitCode: 124, SessionID: checkpoint, WorkObserved: stderr.toolCalls.Load() > 0}
+			return AgentResult{OK: false, Result: "agent tool-call budget exhausted: the run kept calling tools past its fuse and was killed before it could loop indefinitely", ExitCode: 124, SessionID: checkpoint, WorkObserved: workObserved}
 		}
 		if ctx.Err() == context.DeadlineExceeded {
-			return AgentResult{OK: false, Result: "adapter timed out (hard limit)", ExitCode: 124, SessionID: checkpoint, WorkObserved: stderr.toolCalls.Load() > 0}
+			return AgentResult{OK: false, Result: "adapter timed out (hard limit)", ExitCode: 124, SessionID: checkpoint, WorkObserved: workObserved}
 		}
 		code := 1
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -1707,14 +1733,13 @@ func runAdapterProcess(ctx context.Context, name string, prompt string, cwd stri
 		if msg == "" {
 			msg = err.Error()
 		}
-		return AgentResult{OK: false, Result: security.Redact(msg), ExitCode: code, SessionID: checkpoint, WorkObserved: stderr.toolCalls.Load() > 0}
+		return AgentResult{OK: false, Result: security.Redact(msg), ExitCode: code, SessionID: checkpoint, WorkObserved: workObserved}
 	}
 
-	var out AgentResult
-	out.ExitCode = 0
 	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
-		return AgentResult{OK: false, Result: security.Redact(fmt.Sprintf("adapter output not JSON: %s", stdout.String())), ExitCode: 1, SessionID: stderr.session(), WorkObserved: stderr.toolCalls.Load() > 0}
+		return AgentResult{OK: false, Result: security.Redact(fmt.Sprintf("adapter output not JSON: %s", stdout.String())), ExitCode: 1, SessionID: stderr.session(), WorkObserved: workObserved}
 	}
+	resultReceived = true
 	// A well-behaved adapter returns JSON; scrub anything secret-shaped it may
 	// have echoed into the result before it enters the task/log pipeline.
 	out.Result = security.Redact(out.Result)
@@ -1724,7 +1749,13 @@ func runAdapterProcess(ctx context.Context, name string, prompt string, cwd stri
 		// the announced handle so a follow-up round can still resume it.
 		out.SessionID = stderr.session()
 	}
-	out.WorkObserved = stderr.toolCalls.Load() > 0
+	out.WorkObserved = workObserved
+	// Existing adapter installations can still return their original
+	// envelope. Success or observed work confirms delivery at completion
+	// when the adapter has no receipt protocol.
+	if out.OK || out.hasWorkEvidence() {
+		deliver()
+	}
 	return out
 }
 
@@ -1745,7 +1776,7 @@ var transientStatusRE = regexp.MustCompile(`\b(?:500|502|503|504)\b`)
 // output is not a provider envelope. A CLI that reports neither still falls back
 // on the text patterns below, unchanged — there is nothing better to key on.
 func replayableFailure(ar AgentResult) bool {
-	if ar.OK || ar.hasWorkEvidence() || ar.SessionID != "" || ar.ExitCode == 124 {
+	if ar.OK || ar.promptAccepted || ar.hasWorkEvidence() || ar.SessionID != "" || ar.ExitCode == 124 {
 		return false
 	}
 	return len(ar.Result) <= 4000
@@ -1870,20 +1901,34 @@ func (p *AgentSessions) drop(key string) {
 	delete(p.live, key)
 	p.mu.Unlock()
 	if s != nil {
-		s.kill()
+		s.stop()
 	}
 }
 
-// CloseAll kills every live session. Idempotent; called when the task's
+// discard removes only this generation of a keyed session.
+func (p *AgentSessions) discard(key string, s *agentSession) {
+	p.mu.Lock()
+	if p.live[key] == s {
+		delete(p.live, key)
+	}
+	p.mu.Unlock()
+	s.stop()
+}
+
+// CloseAll stops and reaps every live session. Called when the task's
 // supervision loop finishes — whatever the verdict.
 func (p *AgentSessions) CloseAll() {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.shut = true
-	for _, s := range p.live {
+	live := p.live
+	p.live = nil
+	p.mu.Unlock()
+	for _, s := range live {
 		s.kill()
 	}
-	p.live = map[string]*agentSession{}
+	for _, s := range live {
+		<-s.exited
+	}
 }
 
 // turn runs one prompt on the keyed session: spawning it when none exists,
@@ -1894,7 +1939,7 @@ func (p *AgentSessions) CloseAll() {
 // session path could not produce a result (spawn failure, dead process,
 // undecodable envelope) — the caller then falls back to a one-shot spawn,
 // which is where the old-CLI degradation lives.
-func (p *AgentSessions) turn(ctx context.Context, key, adapter string, req AdapterRequest, cwd string, env []string) (AgentResult, bool) {
+func (p *AgentSessions) turn(ctx context.Context, key, adapter string, req AdapterRequest, cwd string, env []string, deliver func()) (AgentResult, bool) {
 	p.mu.Lock()
 	if p.shut {
 		p.mu.Unlock()
@@ -1909,17 +1954,20 @@ func (p *AgentSessions) turn(ctx context.Context, key, adapter string, req Adapt
 		if err != nil {
 			return AgentResult{}, false
 		}
+		ns.turnMu.Lock()
 		p.mu.Lock()
 		if p.shut {
 			p.mu.Unlock()
-			ns.kill()
+			ns.turnMu.Unlock()
+			ns.stop()
 			return AgentResult{}, false
 		}
 		if prev := p.live[key]; prev != nil {
 			// A concurrent turn won the spawn race; a loser cannot just drop
 			// its process — kill it and serve the prompt on the winner's.
 			p.mu.Unlock()
-			ns.kill()
+			ns.turnMu.Unlock()
+			ns.stop()
 			s = prev
 		} else {
 			p.live[key] = ns
@@ -1930,7 +1978,9 @@ func (p *AgentSessions) turn(ctx context.Context, key, adapter string, req Adapt
 	}
 	// Serialize turns per session: the stdout decoder is not concurrent-safe,
 	// and a second send must not interleave between this turn's envelope.
-	s.turnMu.Lock()
+	if !fresh {
+		s.turnMu.Lock()
+	}
 	defer s.turnMu.Unlock()
 	// The silence watchdog only guards an in-flight turn: between rounds a
 	// session is meant to sit idle, and each turn's pre-first-byte window is
@@ -1941,17 +1991,23 @@ func (p *AgentSessions) turn(ctx context.Context, key, adapter string, req Adapt
 	s.turnSeen.Store(false)
 	s.lastAct.Store(time.Now().UnixNano())
 	defer s.inTurn.Store(false)
-	if fresh {
-		// Turn 0's prompt rode inside the launch request, so a session that
-		// came up carrying it is the hand-off.
-		PromptDelivered(ctx)
+	toolCallsBeforeTurn := s.stderr.toolCalls.Load()
+	if err := beginPromptHandoff(ctx); err != nil {
+		if fresh {
+			p.discard(key, s)
+		}
+		return AgentResult{ExitCode: 1, Result: err.Error()}, true
 	}
-	if !fresh {
+	var sendErr error
+	if fresh {
+		sendErr = s.send(req)
+	} else {
 		if s.isDead() {
 			// A dead session's agent conversation still exists on the CLI's
 			// side: respawning with --resume (req.Resume already carries the
 			// id the last turn returned) continues it one-shot.
 			sessionFallbackNote(ctx, "session process already exited")
+			p.discard(key, s)
 			return AgentResult{}, false
 		}
 		// A pooled CLI keeps its process, but its next turn belongs to the
@@ -1959,16 +2015,16 @@ func (p *AgentSessions) turn(ctx context.Context, key, adapter string, req Adapt
 		s.stderr.mu.Lock()
 		s.stderr.evSink = AgentEvents(ctx)
 		s.stderr.mu.Unlock()
-		if err := s.send(req.Prompt); err != nil {
-			sessionFallbackNote(ctx, "session stdin is closed")
-			s.kill()
-			p.mu.Lock()
-			delete(p.live, key)
-			p.mu.Unlock()
-			return AgentResult{}, false
-		}
-		// The follow-up line is on the adapter's stdin: it has the prompt.
-		PromptDelivered(ctx)
+		sendErr = s.send(struct {
+			Type          string `json:"type"`
+			Text          string `json:"text"`
+			PromptReceipt bool   `json:"prompt_receipt,omitempty"`
+		}{"user", req.Prompt, req.PromptReceipt})
+	}
+	if sendErr != nil {
+		sessionFallbackNote(ctx, "session stdin is closed")
+		p.discard(key, s)
+		return AgentResult{}, false
 	}
 	if !fresh {
 		// Follow-up messages do not reconfigure a running CLI. Report the
@@ -1977,8 +2033,6 @@ func (p *AgentSessions) turn(ctx context.Context, key, adapter string, req Adapt
 		profile.Transport = "session_turn"
 		emitExecutionProfile(ctx, profile)
 	}
-	// Turn 0's prompt rode inside the request line — nothing to send for a
-	// fresh session.
 	// The per-turn hard limit mirrors the one-shot path: the advertised
 	// budget plus wind-down grace, and never under the global default. The
 	// adapter's own per-turn watchdog normally fires first; this bound
@@ -1989,9 +2043,13 @@ func (p *AgentSessions) turn(ctx context.Context, key, adapter string, req Adapt
 	}
 	turnCtx, cancel := context.WithTimeout(ctx, hard)
 	defer cancel()
-	res := s.await(turnCtx)
+	res := s.await(turnCtx, deliver)
 	res.Injected = s.profile.ModelInjection
-	res.WorkObserved = s.stderr.toolCalls.Load() > 0
+	toolCalls := s.stderr.toolCalls.Load()
+	if res.OK || res.hasWorkEvidence() || toolCalls > toolCallsBeforeTurn {
+		deliver()
+	}
+	res.WorkObserved = toolCalls > 0
 	if ctx.Err() != nil && !s.isDead() {
 		// The caller aborted this turn while the CLI was mid-generation (a
 		// user inject's round cancel, a task cancel). The session cannot be
@@ -2000,10 +2058,7 @@ func (p *AgentSessions) turn(ctx context.Context, key, adapter string, req Adapt
 		// conversation resumes from the last completed turn via --resume.
 		// The per-turn hard limit does NOT land here (the parent is still
 		// live); it keeps its existing envelope-returning behavior.
-		s.kill()
-		p.mu.Lock()
-		delete(p.live, key)
-		p.mu.Unlock()
+		p.discard(key, s)
 		return AgentResult{}, false
 	}
 	if !res.OK && (s.isDead() || res.SessionDead) {
@@ -2014,10 +2069,7 @@ func (p *AgentSessions) turn(ctx context.Context, key, adapter string, req Adapt
 		// cmd.Wait() settles the exit marker when the adapter kills the
 		// CLI on its way out, so the adapter also reports the verdict
 		// in-band via session_dead.
-		s.kill()
-		p.mu.Lock()
-		delete(p.live, key)
-		p.mu.Unlock()
+		p.discard(key, s)
 		// A timeout, checkpoint, billed work or real tool call means this
 		// is an interrupted execution, not a session compatibility probe.
 		// Return all evidence to core's bounded recovery loop; discarding it
@@ -2061,9 +2113,11 @@ type agentSession struct {
 	profile AdapterExecutionProfile // immutable launch facts, retained across turns
 	cmd     *exec.Cmd
 	stdin   io.WriteCloser
+	stdout  *os.File
 	dec     *json.Decoder
 	stderr  *progressWriter
 	cancel  context.CancelFunc
+	exited  chan struct{}
 	dead    atomic.Bool
 	lastAct atomic.Int64 // unixnano; the silence watchdog's clock
 	// inTurn marks the send→await window: the silence kill applies only while
@@ -2078,16 +2132,10 @@ type agentSession struct {
 	turnMu sync.Mutex
 }
 
-// startAgentSession spawns the adapter with stdin held open, writes the
-// request line (req.Session is already true), and returns the process ready
-// for its first turn's envelope. spawnCtx bounds the session's lifetime
-// (the task's execution context — a task abort kills the process); turnCtx
-// is this round's context, used only for the progress/event sinks.
+// startAgentSession spawns the adapter with stdin held open. The caller
+// writes the request once it owns the session's first turn. spawnCtx bounds
+// the process lifetime; turnCtx supplies the progress and event sinks.
 func startAgentSession(spawnCtx, turnCtx context.Context, name string, req AdapterRequest, cwd string, env []string) (*agentSession, error) {
-	reqJSON, err := json.Marshal(req)
-	if err != nil {
-		return nil, err
-	}
 	path, err := adapterScript(name)
 	if err != nil {
 		return nil, err
@@ -2106,18 +2154,24 @@ func startAgentSession(spawnCtx, turnCtx context.Context, name string, req Adapt
 		cancel()
 		return nil, err
 	}
-	stdout, err := cmd.StdoutPipe()
+	// Wait closes a StdoutPipe as soon as the process exits. Keep the read
+	// end ourselves so await can still drain a receipt and result already
+	// written by a fast-exiting adapter.
+	stdout, childOutput, err := os.Pipe()
 	if err != nil {
+		_ = stdin.Close()
 		cancel()
 		return nil, err
 	}
+	defer childOutput.Close()
+	cmd.Stdout = childOutput
 	stderr := &progressWriter{adapterName: name, tools: &toolCounter{}}
 	if sink, ok := turnCtx.Value(progressKey{}).(ProgressFunc); ok {
 		stderr.sink = sink
 	}
 	stderr.evSink = AgentEvents(turnCtx)
 	s := &agentSession{
-		cmd: cmd, stdin: stdin, stderr: stderr, cancel: cancel,
+		cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr, cancel: cancel,
 		dec: json.NewDecoder(stdout),
 	}
 	s.lastAct.Store(time.Now().UnixNano())
@@ -2136,29 +2190,26 @@ func startAgentSession(spawnCtx, turnCtx context.Context, name string, req Adapt
 	}
 	cmd.Stderr = stderr
 	// WaitDelay matches the one-shot path: a detached grandchild inheriting
-	// the pipes must not wedge Wait (and with it the dead marker) forever.
+	// stderr must not wedge Wait (and with it the dead marker) forever.
 	cmd.WaitDelay = 5 * time.Second
 	if err := security.NewSandbox(cwd).ApplyPolicy(cmd,
 		adapterSandboxPolicy(AgentName(turnCtx), name, cwd), env...); err != nil {
-		cancel()
+		_ = stdin.Close()
+		s.kill()
 		return nil, err
 	}
 	if err := cmd.Start(); err != nil {
-		cancel()
+		_ = stdin.Close()
+		s.kill()
 		return nil, err
 	}
+	s.exited = make(chan struct{})
 	s.profile = adapterExecutionProfile(turnCtx, name, req, cmd.Env, "session_start")
 	emitExecutionProfile(turnCtx, s.profile)
-	if _, err := stdin.Write(append(reqJSON, '\n')); err != nil {
-		// Cancel triggers the group kill via the ctx watcher, but only Wait
-		// reaps the process — without it the adapter stays a zombie.
-		cancel()
-		_ = cmd.Wait()
-		return nil, err
-	}
 	// Process exit → dead: the adapter exits when the CLI dies or stdin
 	// closes, and a dead session never serves another turn.
 	guard.Go(nil, "commander: session exit watcher", nil, func() {
+		defer close(s.exited)
 		_ = cmd.Wait()
 		s.dead.Store(true)
 	})
@@ -2228,9 +2279,9 @@ func (s *agentSession) watchSilence(ctx context.Context, limit, heartbeat, start
 	}
 }
 
-// send writes one follow-up turn message to the adapter's stdin.
-func (s *agentSession) send(text string) error {
-	msg, err := json.Marshal(map[string]string{"type": "user", "text": text})
+// send writes the initial request or a follow-up turn message to the adapter's stdin.
+func (s *agentSession) send(request any) error {
+	msg, err := json.Marshal(request)
 	if err != nil {
 		return err
 	}
@@ -2238,22 +2289,29 @@ func (s *agentSession) send(text string) error {
 	return err
 }
 
-// await reads the next result envelope off the session's stdout: one JSON
-// object per turn, decoded straight into the wire shape. A decode failure or
-// EOF marks the session dead and reports a non-OK result so the caller can
-// decide between trusting it and falling back to a one-shot spawn.
-func (s *agentSession) await(ctx context.Context) AgentResult {
-	done := make(chan struct{})
-	defer close(done)
-	guard.Go(nil, "commander: await cancel watcher", nil, func() {
-		select {
-		case <-ctx.Done():
-			s.kill()
-		case <-done:
+// await reads a turn's optional receipt and result from the same stream, so
+// the receipt is handled before another turn can take ownership of the session.
+// A decode failure or EOF marks the session dead.
+func (s *agentSession) await(ctx context.Context, deliver func()) AgentResult {
+	stop := context.AfterFunc(ctx, s.kill)
+	defer stop()
+	type turnFrame struct {
+		Type  string `json:"type"`
+		Stage string `json:"stage"`
+		AgentResult
+	}
+	var frame turnFrame
+	promptAccepted := false
+	err := s.dec.Decode(&frame)
+	for err == nil && frame.Type == "prompt_delivered" {
+		if frame.Stage == "agent" {
+			promptAccepted = true
+			deliver()
 		}
-	})
-	var res AgentResult
-	if err := s.dec.Decode(&res); err != nil {
+		frame = turnFrame{}
+		err = s.dec.Decode(&frame)
+	}
+	if err != nil {
 		s.dead.Store(true)
 		code := 1
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -2269,10 +2327,14 @@ func (s *agentSession) await(ctx context.Context) AgentResult {
 		}
 		return AgentResult{
 			OK: false, ExitCode: code,
-			Result:    security.Redact("adapter session ended: " + detail),
-			SessionID: s.stderr.session(),
+			Result:             security.Redact("adapter session ended: " + detail),
+			SessionID:          s.stderr.session(),
+			promptAccepted:     promptAccepted,
+			outcomeUnconfirmed: promptAccepted,
 		}
 	}
+	res := frame.AgentResult
+	res.promptAccepted = promptAccepted
 	res.Result = security.Redact(res.Result)
 	if res.SessionID == "" {
 		res.SessionID = s.stderr.session()
@@ -2291,4 +2353,14 @@ func (s *agentSession) isDead() bool { return s.dead.Load() }
 func (s *agentSession) kill() {
 	s.dead.Store(true)
 	s.cancel()
+	if s.stdout != nil {
+		_ = s.stdout.Close()
+	}
+}
+
+// stop gives the caller back the work directory only after the adapter
+// process has exited and its standard streams have closed.
+func (s *agentSession) stop() {
+	s.kill()
+	<-s.exited
 }

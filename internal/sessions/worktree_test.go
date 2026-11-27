@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newGitRepo creates a temporary git repository with one commit and a git
@@ -178,6 +179,121 @@ func TestWorktreeMergeRevert(t *testing.T) {
 	if _, err := w.Revert(ctx, id); !errors.Is(err, ErrNothingToRevert) {
 		t.Fatalf("third revert err = %v, want ErrNothingToRevert", err)
 	}
+}
+
+func TestWorktreeMergeBookkeepingFailureRestoresCheckout(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	repo := newGitRepo(t)
+	w, err := OpenWorktrees(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	const id = "retry-merge"
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	write := func(path, content string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func(path, content string) {
+		t.Helper()
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != content {
+			t.Fatalf("%s = %q, %v; want %q", path, got, err, content)
+		}
+	}
+	git("config", "core.autocrlf", "false")
+	tracked := filepath.Join(repo, "local.txt")
+	write(tracked, "tracked base\n")
+	git("add", "local.txt")
+	git("-c", "user.name=T", "-c", "user.email=t@t", "commit", "-m", "track local")
+	base := git("rev-parse", "HEAD")
+	if _, err := w.Ensure(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	sessionFile := filepath.Join(w.Path(id), "session.txt")
+	mergedFile := filepath.Join(repo, "session.txt")
+	write(sessionFile, "session change\n")
+	write(tracked, "unstaged edit\n")
+	untracked := filepath.Join(repo, "untracked.txt")
+	write(untracked, "untracked edit\n")
+
+	common, err := w.commonGitDir(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock := filepath.Join(common, filepath.FromSlash(mergedRef(id))+".lock")
+	if err := os.MkdirAll(filepath.Dir(lock), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(lock, "")
+	if _, err := w.Merge(ctx, id, "retryable merge"); err == nil || !strings.Contains(err.Error(), "record merge rollback") {
+		t.Fatalf("merge with a locked record = %v", err)
+	}
+	if head := git("rev-parse", "HEAD"); head != base {
+		t.Fatalf("failed merge changed HEAD to %s, want %s", head, base)
+	}
+	if _, err := os.Stat(mergedFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed merge left a file in the checkout: %v", err)
+	}
+	check(tracked, "unstaged edit\n")
+	check(untracked, "untracked edit\n")
+	check(sessionFile, "session change\n")
+	if pre := w.revParse(ctx, premergeRef(id)); pre != "" {
+		t.Fatalf("failed merge partially wrote the rollback references: %s", pre)
+	}
+
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Merge(ctx, id, "retryable merge"); err != nil {
+		t.Fatalf("retry merge: %v", err)
+	}
+	check(mergedFile, "session change\n")
+	check(tracked, "unstaged edit\n")
+	check(untracked, "untracked edit\n")
+
+	// A failed update to a session with an earlier merge must leave the
+	// earlier pair available for Revert, even when the other ref is locked.
+	previousMerge := git("rev-parse", "HEAD")
+	write(filepath.Join(w.Path(id), "another.txt"), "another session change\n")
+	lock = filepath.Join(common, filepath.FromSlash(premergeRef(id))+".lock")
+	write(lock, "")
+	if _, err := w.Merge(ctx, id, "update the merge"); err == nil || !strings.Contains(err.Error(), "record merge rollback") {
+		t.Fatalf("new merge with a locked record = %v", err)
+	}
+	if head := git("rev-parse", "HEAD"); head != previousMerge {
+		t.Fatalf("failed update changed HEAD to %s, want %s", head, previousMerge)
+	}
+	if w.revParse(ctx, mergedRef(id)) != previousMerge || w.revParse(ctx, premergeRef(id)) != base {
+		t.Fatal("failed update modified the previous pair of rollback references")
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	git("restore", "local.txt")
+	git("add", "untracked.txt")
+	git("-c", "user.name=T", "-c", "user.email=t@t", "commit", "-m", "keep followup")
+	if _, err := w.Revert(ctx, id); err != nil {
+		t.Fatalf("revert after retry: %v", err)
+	}
+	if _, err := os.Stat(mergedFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("revert after retry left a file in the checkout: %v", err)
+	}
+	check(untracked, "untracked edit\n")
 }
 
 // TestWorktreeStat covers the merge preview: line counts, sensitive-path
@@ -818,5 +934,81 @@ func TestWorktreeForkContinuesAfterFailedEntry(t *testing.T) {
 	}
 	if got, err := os.ReadFile(filepath.Join(childPath, "z-good.txt")); err != nil || string(got) != "must copy after error" {
 		t.Fatalf("later file lost after a failed entry: %q err=%v (forkErr=%v)", got, err, forkErr)
+	}
+}
+
+func TestWorktreeRevertRefusesInconsistentMergeRecord(t *testing.T) {
+	repo := newGitRepo(t)
+	w, err := OpenWorktrees(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	base := w.revParse(ctx, "HEAD")
+	for _, id := range []string{"first", "second"} {
+		dir, err := w.Ensure(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, id+".txt"), []byte(id+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Merge(ctx, id, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// An older process could have stamped the second merge onto the first
+	// session while keeping the first session's actual pre-merge HEAD.
+	tip := w.revParse(ctx, "HEAD")
+	gitIn(t, repo, "update-ref", mergedRef("first"), tip)
+	gitIn(t, repo, "update-ref", premergeRef("first"), base)
+	if _, err := w.Revert(ctx, "first"); err == nil {
+		t.Error("reverted a merge with inconsistent bookkeeping")
+	}
+	if after := w.revParse(ctx, "HEAD"); after != tip {
+		t.Fatalf("reverting the first session changed HEAD: got %s, want %s", after, tip)
+	}
+}
+
+func TestWorktreeMutationsWaitAcrossHandles(t *testing.T) {
+	repo := newGitRepo(t)
+	first, err := OpenWorktrees(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := OpenWorktrees(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	dir, err := first.Ensure(ctx, "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "fixture.txt"), []byte("change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	release, err := first.lockMergeState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	wait, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	if _, err := second.Merge(wait, "fixture", "merge fixture"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("merge through another handle while locked: %v", err)
+	}
+	waitRevert, cancelRevert := context.WithTimeout(ctx, time.Second)
+	defer cancelRevert()
+	if _, err := second.Revert(waitRevert, "fixture"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("revert through another handle while locked: %v", err)
+	}
+	release()
+	if _, err := second.Merge(ctx, "fixture", "merge after release"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.Revert(ctx, "fixture"); err != nil {
+		t.Fatal(err)
 	}
 }

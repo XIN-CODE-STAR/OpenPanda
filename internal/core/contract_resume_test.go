@@ -48,8 +48,17 @@ func TestContractOnlyTurnCapResumesCheckpointOnce(t *testing.T) {
 			if !finish && task.State == StateDone {
 				t.Fatal("unfinished task completed")
 			}
-			if !finish && !task.NeedsFollowup() {
-				t.Fatalf("lost incomplete evidence: %s", task.ResultJSON)
+			// The turn-cap park is parked for changed input (a bigger budget
+			// or a narrower scope), not continuable as-is: continue's requeue
+			// CAS accepts accept_work alone, so advertising it would only fail.
+			// What must survive is the evidence that work remains — the
+			// disposition names the fix, and the result keeps the marker the
+			// console renders beside it.
+			if !finish && task.ApprovalDisposition != ApprovalNeedsChangedInput {
+				t.Fatalf("lost incomplete evidence: disposition=%s result=%s", task.ApprovalDisposition, task.ResultJSON)
+			}
+			if !finish && task.NeedsFollowup() {
+				t.Fatalf("a changed-input park must not offer continue: %s", task.ResultJSON)
 			}
 		})
 	}

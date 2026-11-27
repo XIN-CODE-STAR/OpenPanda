@@ -33,6 +33,7 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/config"
 	"github.com/Xustalis/OpenPanda/internal/configsync"
 	"github.com/Xustalis/OpenPanda/internal/contract"
+	"github.com/Xustalis/OpenPanda/internal/conversation"
 	"github.com/Xustalis/OpenPanda/internal/core"
 	"github.com/Xustalis/OpenPanda/internal/defense"
 	"github.com/Xustalis/OpenPanda/internal/entry"
@@ -851,6 +852,7 @@ func (e *Engine) localeNow() (i18n.Locale, bool) {
 
 // Result is the outcome of one Ask call.
 type Result struct {
+	incompleteAnswer      bool
 	PlanProposal          bool
 	ProposalBody          string
 	ProposalVersion       int64
@@ -1042,8 +1044,18 @@ func (r *Result) Tokens() int64 {
 // and server serving. The ctx spawns the new server; the engine's own
 // lifetime is unchanged.
 func (e *Engine) SetMCPCommand(ctx context.Context, cmd string) error {
+	return e.ConfigureMCPCommand(ctx, cmd, nil)
+}
+
+// ConfigureMCPCommand validates the replacement before running persist and
+// publishes it only after persistence succeeds. Until then the current
+// registry and server remain live.
+func (e *Engine) ConfigureMCPCommand(ctx context.Context, cmd string, persist func() error) error {
 	e.regMu.Lock()
 	defer e.regMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	reg := buildToolRegistry(e, e.hermes, e.projects, e.remind)
 	var client *mcp.Client
@@ -1060,6 +1072,15 @@ func (e *Engine) SetMCPCommand(ctx context.Context, cmd string) error {
 		if err := registerMCPTools(ctx, reg, client); err != nil {
 			client.Close()
 			return fmt.Errorf("askengine: register MCP tools: %w", err)
+		}
+	}
+
+	if persist != nil {
+		if err := persist(); err != nil {
+			if client != nil {
+				_ = client.Close()
+			}
+			return err
 		}
 	}
 
@@ -2018,19 +2039,18 @@ func (e *Engine) ApplySandboxPolicy() string {
 	return backend
 }
 
-// SetRouterPolicy re-applies the injection and routing policy to the engine's
-// scheduler core, so a policy edited at runtime (the console's settings view)
-// takes effect without a restart. A no-op on an engine with no card, which has no
-// router to configure.
-func (e *Engine) SetRouterPolicy(injection config.InjectionConfig, routing config.RoutingConfig) {
+// RefreshRouterPolicy re-applies the current injection and routing policy
+// after a config edit. Read it here under both locks so an earlier request
+// cannot reinstall the snapshot it held before a concurrent save.
+func (e *Engine) RefreshRouterPolicy() {
 	e.schedMu.Lock()
 	defer e.schedMu.Unlock()
+	e.cfgMu.Lock()
+	defer e.cfgMu.Unlock()
+	injection, routing := e.cfg.Injection, e.cfg.Routing
 	if sched := e.sched.Load(); sched != nil {
 		sched.SetRouterPolicy(injection, routing)
 	}
-	e.cfgMu.Lock()
-	defer e.cfgMu.Unlock()
-	e.cfg.Injection, e.cfg.Routing = injection, routing
 	e.appliedRuntime.Injection, e.appliedRuntime.Routing = injection, routing
 }
 
@@ -2069,6 +2089,7 @@ func (e *Engine) Project() (string, string) {
 // the Engine's ambient project or the scheduler Core's default directory.
 type AskScope struct {
 	confirmedImplementation bool
+	goalRound               bool
 	reviewedPlan            *entry.PlanSpec
 	planRevision            *proposalRevision
 	// PlanVersion is the proposal version the console was reviewing when it
@@ -2076,6 +2097,10 @@ type AskScope struct {
 	// request, which retires whatever proposal was there).
 	PlanVersion   int64
 	goalObjective string
+	// ReplyTo identifies a durable clarification when the client names one.
+	ReplyTo string
+	// InputReply is required when the surface admits a reply before writing its transcript.
+	InputReply *AskInput
 	// RoundID names a persisted dispatch boundary, independently of approval SessionID.
 	RoundID string
 	Project string
@@ -2269,12 +2294,9 @@ func (t *usageTracker) final(in, out int64) {
 
 // AskTurnsScoped is the session-aware ask with request-scoped project/workspace.
 func (e *Engine) AskTurnsScoped(ctx context.Context, history []entry.Turn, prompt string, scope AskScope, authorize bool, cb StreamCallbacks) (res *Result, err error) {
-	// Exact, explicit user directives grant tool creation for this request only.
-	for _, prefix := range []string{"/goal ", "create goal: ", "创建目标："} {
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(prompt)), prefix) {
-			scope.goalObjective = strings.TrimSpace(strings.TrimSpace(prompt)[len(prefix):])
-			break
-		}
+	background := scope.confirmedImplementation || scope.goalRound
+	if scope.ReplyTo != "" && (background || scope.Side || scope.Mode != "" || scope.SessionID == "" || e.db == nil) {
+		return nil, conversation.ErrConflict
 	}
 	ctx, requestUsage := entry.TrackRequestUsage(ctx)
 	if scope.SessionID != "" && !scope.Side && e.db != nil {
@@ -2283,25 +2305,44 @@ func (e *Engine) AskTurnsScoped(ctx context.Context, history []entry.Turn, promp
 		if stateErr != nil {
 			return nil, stateErr
 		}
+		if !background && scope.Mode == "" {
+			input := scope.InputReply
+			if input == nil {
+				input, err = e.ReserveAskInput(ctx, prompt, scope)
+				if err != nil {
+					return nil, err
+				}
+			}
+			if input.wait.RoundID != "" {
+				defer input.Close()
+				if input.leaseCtx.Err() != nil {
+					return nil, conversation.ErrConflict
+				}
+				if err = input.store.RenewInput(ctx, input.wait); err != nil {
+					return nil, err
+				}
+				// This answer was admitted before a later mode change.
+				state.Planning = false
+				var unbind func()
+				ctx, unbind = input.bind(ctx)
+				defer unbind()
+				defer func() {
+					if err == nil && ctx.Err() == nil && res != nil && !res.NeedsClarification &&
+						!res.NeedsApproval && !res.EmptyResponse && !res.incompleteAnswer && !res.Denied && res.ExitCode == 0 {
+						err = input.store.ResolveInput(ctx, scope.SessionID, input.wait)
+					}
+				}()
+			}
+			if !state.Planning {
+				scope.goalObjective = input.goalObjective
+			}
+		}
 		if scope.PermissionMode == "" {
 			if st := conversations.sessionStore(); st != nil {
 				if sess, loadErr := st.Get(scope.SessionID); loadErr == nil {
 					scope.PermissionMode = sess.PermissionMode
 				}
 			}
-		}
-		defer func() {
-			if err == nil && res != nil && !res.NeedsClarification && !res.EmptyResponse {
-				_, _ = e.db.ExecContext(context.WithoutCancel(ctx), "UPDATE conversation_plan_runs SET status='pending',round_id='' WHERE session_id=? AND status='waiting_input' AND round_id!=?", scope.SessionID, scope.RoundID)
-			}
-		}()
-		if state.Goal != nil && state.Goal.WaitingFor == "input" && (scope.RoundID == "" || scope.RoundID != state.Goal.RoundID) {
-			waitingGoal := *state.Goal
-			defer func() {
-				if err == nil && res != nil && !res.NeedsClarification && !res.EmptyResponse {
-					_, _ = e.db.ExecContext(context.WithoutCancel(ctx), "UPDATE conversation_goals SET waiting_for='',reason='' WHERE id=? AND generation=? AND waiting_for='input'", waitingGoal.ID, waitingGoal.Generation)
-				}
-			}()
 		}
 		if scope.RoundID == "" {
 			roundID, roundErr := util.UUIDv7()
@@ -2334,38 +2375,18 @@ func (e *Engine) AskTurnsScoped(ctx context.Context, history []entry.Turn, promp
 				_ = e.TaskStore().CloseAskRound(context.WithoutCancel(ctx), roundID, status)
 			}()
 		}
-		if scope.Mode == "plan" && !state.Planning {
-			if scope.PlanVersion > 0 {
-				// Entering planning and retiring the named proposal is one
-				// transaction: done as two statements, a confirmation landing
-				// between them left the session in planning mode with the
-				// proposal blanked even though the revision was refused.
-				version, generation, err := conversations.store.BeginRevision(ctx, scope.SessionID, scope.PlanVersion)
-				if err != nil {
+		if !background && (state.Planning || scope.Mode == "plan") {
+			if !state.Planning && scope.PlanVersion == 0 {
+				if _, err := conversations.sessionStore().Get(scope.SessionID); err != nil {
 					return nil, err
 				}
-				state.Planning = true
-				scope.Mode = "plan"
-				// A plan that interrupts a running goal carries that fact into
-				// the confirmation prompt, which is what the operator's hint
-				// restates.
-				scope.planRevision = &proposalRevision{version: version, generation: generation, continuesGoal: state.Goal != nil && state.Goal.PausedByPlan}
-			} else {
-				if err := conversations.SetPlanning(ctx, scope.SessionID, true); err != nil {
-					return nil, err
-				}
-				state.Planning = true
 			}
-		}
-		if state.Planning && scope.planRevision == nil {
-			version, generation, err := conversations.store.BeginPlanningRequest(ctx, scope.SessionID, scope.PlanVersion)
+			draft, err := conversations.store.BeginPlan(ctx, scope.SessionID, scope.Mode == "plan", scope.PlanVersion)
 			if err != nil {
 				return nil, err
 			}
 			scope.Mode = "plan"
-			// A plan that interrupts a running goal carries that fact into the
-			// confirmation prompt, which is what the operator's hint restates.
-			scope.planRevision = &proposalRevision{version: version, generation: generation, continuesGoal: state.Goal != nil && state.Goal.PausedByPlan}
+			scope.planRevision = &proposalRevision{version: draft.Version, generation: draft.Generation, continuesGoal: draft.ContinuesGoal}
 		}
 	}
 	if scope.SessionID != "" && scope.RoundID != "" && !scope.Side && e.db != nil {
@@ -2879,9 +2900,8 @@ func (e *Engine) AskTurnsScoped(ctx context.Context, history []entry.Turn, promp
 			// in the Answer would bury the executed-tool summary under DSML or
 			// parse-error soup — the user-facing text stays protocol-free.
 			return &Result{
-				Kind:    "answer",
-				Answer:  digest + loopInterruptionNotice(effectiveLocale),
-				Warning: reason,
+				Kind: "answer", Answer: digest + loopInterruptionNotice(effectiveLocale),
+				Warning: reason, incompleteAnswer: true,
 			}, nil
 		}
 		return nil, err
@@ -3506,6 +3526,7 @@ rounds:
 		return e.startClassifiedPlan(ctx, final.Plan, scope, authorize, cb)
 	}
 	answer := final.Answer
+	incomplete := false
 	if strings.TrimSpace(answer) == "" {
 		// Convergence produced no text. Try the compact transcript before
 		// degrading to the tool digest: the user asked for an answer, and one
@@ -3520,13 +3541,14 @@ rounds:
 			// The executed tools are the only truth available, so fall back
 			// to their digest rather than handing the user a blank turn.
 			answer = toolResultsDigest(toolDigest, effectiveLocale)
+			incomplete = true
 		}
 	}
 	if lastTask != nil {
 		lastTask.Answer = answer
 		return budgetAdvisory(finalizeLastTask(lastTask)), nil
 	}
-	return budgetAdvisory(&Result{Kind: "answer", Answer: answer}), nil
+	return budgetAdvisory(&Result{Kind: "answer", Answer: answer, incompleteAnswer: incomplete}), nil
 }
 
 // WorkPath returns the configured workspace panel sessions execute in,

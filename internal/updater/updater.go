@@ -396,10 +396,11 @@ func (m *Manager) Cancel() {
 		m.errMsg = ""
 		return
 	}
-	if m.staged != nil {
-		os.RemoveAll(m.staged.dir)
-		m.staged = nil
+	if m.staged == nil {
+		return
 	}
+	os.RemoveAll(m.staged.dir)
+	m.staged = nil
 	m.latest = ""
 	m.latestCodename = ""
 	m.notes = ""

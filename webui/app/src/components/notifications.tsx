@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import type { ComponentChildren } from 'preact'
+import { createPortal } from 'preact/compat'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import {
   ApiError,
@@ -94,24 +95,50 @@ const SECTION_LABEL: Record<Kind, string> = {
 }
 
 const READ_KEY = 'openpanda.notifications-read'
+const READ_PREFIX = READ_KEY + ':'
+const READ_LIMIT = 300
 
-function loadRead(): Set<string> {
+function loadLegacyRead(): string[] {
   try {
-    const raw = localStorage.getItem(READ_KEY)
-    if (!raw) return new Set()
-    const arr: unknown = JSON.parse(raw)
-    if (!Array.isArray(arr)) return new Set()
-    return new Set(arr.filter((v): v is string => typeof v === 'string'))
+    const arr: unknown = JSON.parse(localStorage.getItem(READ_KEY) ?? '[]')
+    return Array.isArray(arr) ? arr.filter((v): v is string => typeof v === 'string') : []
   } catch {
-    return new Set()
+    return []
   }
 }
 
-function saveRead(ids: Set<string>): void {
+function readReceiptKeys(): string[] {
+  const receipts: { key: string; at: number }[] = []
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i)
+    if (!key?.startsWith(READ_PREFIX)) continue
+    const at = localStorage.getItem(key)
+    if (at !== null) receipts.push({ key, at: Number(at) || 0 })
+  }
+  return receipts.sort((a, b) => a.at - b.at || a.key.localeCompare(b.key)).map(({ key }) => key)
+}
+
+function loadRead(): Set<string> {
+  const ids = new Set(loadLegacyRead())
   try {
-    // Bounded: the tail is what matters, and a set that grows forever would
-    // eventually cost more to parse than the list is worth.
-    localStorage.setItem(READ_KEY, JSON.stringify([...ids].slice(-300)))
+    for (const key of readReceiptKeys()) {
+      const id = key.slice(READ_PREFIX.length)
+      ids.delete(id)
+      ids.add(id)
+    }
+  } catch {
+    /* local storage may be disabled */
+  }
+  return new Set([...ids].slice(-READ_LIMIT))
+}
+
+function saveRead(ids: string[]): void {
+  try {
+    // An independent key per receipt lets simultaneous tabs mark different
+    // rows without a read-modify-write of another tab's receipts.
+    const at = String(Date.now())
+    for (const id of ids) localStorage.setItem(READ_PREFIX + id, at)
+    for (const key of readReceiptKeys().slice(0, -READ_LIMIT)) localStorage.removeItem(key)
   } catch {
     /* private mode: unread counts simply reset on the next load */
   }
@@ -148,7 +175,11 @@ function buildItems(
     // A dial-list entry that has never been seen is a typo waiting to happen,
     // not a device that went away — only a peer with a last_seen can be "off".
     if (p.online || !p.last_seen) continue
-    items.push({ id: `peer-off:${p.addr}`, kind: 'device', type: 'offline', peer: p })
+    const episode = p.offline_id ?? p.last_seen
+    // The database upgrade marks outages already in progress so they keep
+    // the browser's existing address-based read key until the peer recovers.
+    const id = episode === 'legacy' ? `peer-off:${p.addr}` : `peer-off:${p.addr}:${episode}`
+    items.push({ id, kind: 'device', type: 'offline', peer: p })
   }
   for (const r of reminders ?? []) {
     // A recurring reminder never retires, so it never becomes a row of its own:
@@ -186,6 +217,13 @@ export function NotificationBell() {
   // while the window sits open. A 30s beat re-renders them without re-fetching.
   const [now, setNow] = useState(() => Date.now())
   const [read, setRead] = useState<Set<string>>(loadRead)
+  useEffect(() => {
+    function onStorage(e: StorageEvent) {
+      if (e.key === null || e.key === READ_KEY || e.key.startsWith(READ_PREFIX)) setRead(loadRead())
+    }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [])
   const sheet = useRef<HTMLDialogElement>(null)
   const change = useChangeSignal()
 
@@ -285,27 +323,18 @@ export function NotificationBell() {
   const unread = items.filter((it) => !read.has(it.id)).length
   const label = unread ? `${t('notifications.title')} (${unread})` : t('notifications.title')
 
-  function markRead(id: string) {
-    if (read.has(id)) return
-    const next = new Set(read)
-    next.add(id)
-    setRead(next)
-    saveRead(next)
-  }
-
-  function markAll() {
-    if (unread === 0) return
-    const next = new Set(read)
-    for (const it of items) next.add(it.id)
-    setRead(next)
-    saveRead(next)
+  function markRead(ids: string[]) {
+    const added = ids.filter((id) => !read.has(id))
+    if (!added.length) return
+    setRead((previous) => new Set([...previous, ...added]))
+    saveRead(added)
   }
 
   return (
     <div class="notif-bell">
       <button
         type="button"
-        class={`icon-btn tip-down${open ? ' open' : ''}`}
+        class={`icon-btn${open ? ' open' : ''}`}
         data-tip={open ? undefined : t('notifications.title')}
         aria-label={label}
         aria-haspopup="dialog"
@@ -320,7 +349,8 @@ export function NotificationBell() {
         )}
       </button>
 
-      {open && (
+      {/* Global entry points can open this while the mobile rail is hidden. */}
+      {open && createPortal(
         <dialog
           ref={sheet}
           class="notif-dialog"
@@ -348,13 +378,14 @@ export function NotificationBell() {
             unread={unread}
             checking={checking}
             checkedAt={checkedAt}
-            onMarkRead={markRead}
-            onMarkAll={markAll}
+            onMarkRead={(id) => markRead([id])}
+            onMarkAll={() => markRead(items.map((it) => it.id))}
             onChanged={() => setReload((v) => v + 1)}
             onRecheck={() => void checkSystem()}
             onClose={() => setOpen(false)}
           />
-        </dialog>
+        </dialog>,
+        document.body,
       )}
     </div>
   )

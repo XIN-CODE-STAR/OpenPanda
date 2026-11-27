@@ -366,6 +366,7 @@ func New(d Deps) http.Handler {
 		mux.HandleFunc("GET /api/settings/execution", h.getExecutionSettings)
 		mux.HandleFunc("PUT /api/settings/execution", h.putExecutionSettings)
 		mux.HandleFunc("PUT /api/settings/app", h.putAppSettings)
+		mux.HandleFunc("PATCH /api/settings/app", h.putAppSettings)
 	}
 	mux.HandleFunc("GET /api/settings/mcp", h.getMCPSettings)
 	mux.HandleFunc("PUT /api/settings/mcp", h.putMCPSettings)

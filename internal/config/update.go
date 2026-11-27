@@ -51,6 +51,44 @@ func UpdateSectionFieldBool(path string, section []string, key string, value boo
 	return writeDoc(path, root)
 }
 
+// SectionFieldUpdate changes one field in a nested config section. Value
+// accepts a string, int or []string, using the same removal and YAML type
+// rules as the corresponding single-field updater.
+type SectionFieldUpdate struct {
+	Section []string
+	Key     string
+	Value   any
+}
+
+// UpdateSectionFields applies a group of edits to one document and persists
+// them in a single atomic write, preserving unrelated fields and comments.
+func UpdateSectionFields(path string, fields []SectionFieldUpdate) error {
+	if len(fields) == 0 {
+		return nil
+	}
+	root, top, err := loadDocForUpdate(path)
+	if err != nil {
+		return err
+	}
+	for _, field := range fields {
+		m, err := sectionMapping(path, top, field.Section)
+		if err != nil {
+			return err
+		}
+		switch value := field.Value.(type) {
+		case string:
+			setMapField(m, field.Key, value)
+		case int:
+			setMapIntField(m, field.Key, value)
+		case []string:
+			setMapListField(m, field.Key, value)
+		default:
+			return fmt.Errorf("config %s: unsupported value for %s", path, field.Key)
+		}
+	}
+	return writeDoc(path, root)
+}
+
 // setMapBoolField upserts key: <bool> in mapping node m.
 func setMapBoolField(m *yaml.Node, key string, value bool) {
 	valStr := "false"
@@ -96,7 +134,11 @@ func locateSection(path string, section []string) (*yaml.Node, *yaml.Node, error
 	if err != nil {
 		return nil, nil, err
 	}
-	m := top
+	m, err := sectionMapping(path, top, section)
+	return m, root, err
+}
+
+func sectionMapping(path string, m *yaml.Node, section []string) (*yaml.Node, error) {
 	for _, name := range section {
 		child := mappingValue(m, name)
 		if child == nil {
@@ -105,11 +147,11 @@ func locateSection(path string, section []string) (*yaml.Node, *yaml.Node, error
 			m.Content = append(m.Content, keyNode, child)
 		}
 		if child.Kind != yaml.MappingNode {
-			return nil, nil, fmt.Errorf("config %s: %s is not a mapping", path, name)
+			return nil, fmt.Errorf("config %s: %s is not a mapping", path, name)
 		}
 		m = child
 	}
-	return m, root, nil
+	return m, nil
 }
 
 // UpdateSectionList persists one string-list field inside a (possibly nested)
@@ -122,6 +164,11 @@ func UpdateSectionList(path string, section []string, key string, values []strin
 		return err
 	}
 
+	setMapListField(m, key, values)
+	return writeDoc(path, root)
+}
+
+func setMapListField(m *yaml.Node, key string, values []string) {
 	// Drop any existing entry for the key first (a duplicate key would be a
 	// parse error on reload).
 	for i := 0; i+1 < len(m.Content); i += 2 {
@@ -140,8 +187,6 @@ func UpdateSectionList(path string, section []string, key string, values []strin
 			&yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Content: items},
 		)
 	}
-
-	return writeDoc(path, root)
 }
 
 // loadDocForUpdate reads the config at path into a yaml.Node document for an

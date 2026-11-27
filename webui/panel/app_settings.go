@@ -44,6 +44,21 @@ type memoryLimitsJSON struct {
 	Project int `json:"project"`
 }
 
+// On PATCH each field is optional, including the individual memory limits.
+// A supplied empty preferred_agents list clears the routing preference.
+type appSettingsPatchJSON struct {
+	InjectionModel  *string   `json:"injection_model"`
+	PreferredAgents *[]string `json:"preferred_agents"`
+	MemoryLimits    struct {
+		User    *int `json:"user"`
+		Memory  *int `json:"memory"`
+		Project *int `json:"project"`
+	} `json:"memory_limits"`
+	ApprovalMode *string `json:"approval_mode"`
+	ToolsPolicy  *string `json:"tools_policy"`
+	SandboxMode  *string `json:"sandbox_mode"`
+}
+
 // sandboxJSON reports the confinement actually in effect. Mode is writable
 // (PUT, sandbox_mode); backend and active are read-only facts — the platform
 // provides whatever backend it has (seatbelt/bwrap/""), and the UI must not
@@ -88,190 +103,209 @@ func (h *handler) getAppSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
-// putAppSettings serves PUT /api/settings/app — validate the policy groups,
-// persist them to config.yaml with comments preserved (one comment-preserving
-// config.UpdateSection* write per field), then refresh the in-memory config
-// the engine shares so the next task already routes/injects/approves with the
-// new policy. No restart needed.
-//
-// sandbox_mode rides the same request and the same critical section as the
-// rest: it is the one policy whose runtime half lives outside the config —
-// the process-wide base policy every subprocess launch reads — so after the
-// write the handler re-enters commander.ApplyFromConfig through the engine,
-// with the engine's own config/card paths, exactly as a restart would.
+// putAppSettings keeps PUT's full-form contract for older consoles. PATCH
+// applies only the fields the user edited, so a stale form never replaces
+// another editor's unrelated changes.
 func (h *handler) putAppSettings(w http.ResponseWriter, r *http.Request) {
 	if h.cfg == nil {
 		writeErr(w, http.StatusServiceUnavailable, errors.New("config not loaded"))
 		return
 	}
-	var req appSettingsJSON
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, errors.New("invalid JSON body"))
+	req, err := decodeAppSettings(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-
-	injection := strings.TrimSpace(req.InjectionModel)
-	switch injection {
-	case config.InjectionModelAuto, config.InjectionModelAlways, config.InjectionModelNever:
-	default:
-		writeErr(w, http.StatusBadRequest, errors.New("injection_model must be auto, always, or never"))
+	if err := req.validate(); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	approval := strings.TrimSpace(req.ApprovalMode)
-	switch approval {
-	case config.ApprovalModeAlways, config.ApprovalModeOnRequest, config.ApprovalModeNever:
-	default:
-		writeErr(w, http.StatusBadRequest, errors.New("approval_mode must be always, on-request, or never"))
+	edits := req.configEdits()
+	if len(edits) == 0 {
+		h.getAppSettings(w, r)
 		return
 	}
-	// An absent tools_policy keeps the current one rather than failing: a client
-	// written before this field existed still saves the rest of the policy.
-	tools := strings.TrimSpace(req.ToolsPolicy)
-	if tools == "" {
-		h.readCfg(func(c *config.Config) { tools = c.Routing.NormalizedToolsPolicy() })
-	}
-	switch tools {
-	case config.ToolsPolicyMinimal, config.ToolsPolicyExtended:
-	default:
-		writeErr(w, http.StatusBadRequest, errors.New("tools_policy must be minimal or extended"))
-		return
-	}
-	// An absent sandbox_mode keeps the configured mode, same rule as
-	// tools_policy. "off" is a value here, not an absence: it is how
-	// confinement gets turned back off, so only "" means "unchanged".
-	sandboxMode := strings.TrimSpace(req.SandboxMode)
-	sandboxChanged := sandboxMode != ""
-	if sandboxChanged {
-		parsed, err := config.ParseSandboxMode(sandboxMode)
-		if err != nil {
-			writeErr(w, http.StatusBadRequest, err)
-			return
-		}
-		sandboxMode = parsed
-	}
-	limits := req.MemoryLimits
-	if limits.User <= 0 || limits.Memory <= 0 || limits.Project <= 0 {
-		writeErr(w, http.StatusBadRequest, errors.New("memory_limits values must be positive"))
-		return
-	}
-	agents := make([]string, 0, len(req.PreferredAgents))
-	seen := map[string]bool{}
-	for _, name := range req.PreferredAgents {
-		name = strings.TrimSpace(name)
-		if name == "" || seen[name] {
-			continue
-		}
-		if err := memory.ValidateName(name); err != nil {
-			writeErr(w, http.StatusBadRequest, errors.New("preferred_agents contains an invalid agent name"))
-			return
-		}
-		seen[name] = true
-		agents = append(agents, name)
-	}
-	if len(agents) > 16 {
-		writeErr(w, http.StatusBadRequest, errors.New("preferred_agents holds at most 16 entries"))
-		return
-	}
-
-	// Persist field by field and move the in-memory config in the same
-	// critical section: UpdateSection* is a whole-document read-modify-write,
-	// so a concurrent save (another endpoint, an embedded REPL's /config)
-	// would interleave it into a lost update without the lock covering both.
-	var inj config.InjectionConfig
-	var routing config.RoutingConfig
-	var workPath string
-	err := h.mutateCfgErr(func(c *config.Config) error {
+	err = h.mutateCfgErr(func(c *config.Config) error {
 		if h.configPath != "" {
-			if err := config.UpdateSectionField(h.configPath, []string{"injection"}, "model", injection); err != nil {
+			if err := config.UpdateSectionFields(h.configPath, edits); err != nil {
 				return err
-			}
-			if err := config.UpdateSectionList(h.configPath, []string{"routing"}, "preferred_agents", agents); err != nil {
-				return err
-			}
-			for _, lim := range []struct {
-				key   string
-				value int
-			}{
-				{"user", limits.User},
-				{"memory", limits.Memory},
-				{"project", limits.Project},
-			} {
-				if err := config.UpdateSectionFieldInt(h.configPath, []string{"memory", "limits"}, lim.key, lim.value); err != nil {
-					return err
-				}
-			}
-			if err := config.UpdateSectionField(h.configPath, []string{"approval"}, "mode", approval); err != nil {
-				return err
-			}
-			if err := config.UpdateSectionField(h.configPath, []string{"routing"}, "tools_policy", tools); err != nil {
-				return err
-			}
-			// Only when it actually differs: the modal save writes every field,
-			// and rewriting the mode would churn the file for nothing.
-			if sandboxChanged && c.Sandbox.NormalizedMode() != sandboxMode {
-				if err := config.UpdateSectionField(h.configPath, []string{"sandbox"}, "mode", sandboxMode); err != nil {
-					return err
-				}
 			}
 		}
-		c.Injection.Model = injection
-		c.Routing.PreferredAgents = agents
-		c.Memory.Limits.User = limits.User
-		c.Memory.Limits.Memory = limits.Memory
-		c.Memory.Limits.Project = limits.Project
-		c.Approval.Mode = approval
-		c.Routing.ToolsPolicy = tools
-		if sandboxChanged {
-			c.Sandbox.Mode = sandboxMode
-		}
-		// Snapshot the copies SetRouterPolicy installs: reading c.Routing
-		// after mutateCfg returned would race the next mutation.
-		inj = c.Injection
-		routing = c.Routing
-		workPath = c.Storage.WorkPath
+		req.apply(c)
 		return nil
 	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	// Routing and injection are read by the router, which holds its own copy, so a
-	// change here has to re-enter it or it waits for a restart.
 	if eng := h.currentEngine(); eng != nil {
-		eng.SetRouterPolicy(inj, routing)
-		// sandbox.mode makes no diff outside this process: every subprocess
-		// launch reads the process-wide base policy, which only a restart —
-		// or this call — rewrites. The engine owns the config/card paths the
-		// startup install used, so asking it is what keeps the deny list
-		// identical to a restart's.
-		if sandboxChanged {
+		if req.InjectionModel != nil || req.PreferredAgents != nil || req.ToolsPolicy != nil {
+			eng.RefreshRouterPolicy()
+		}
+		if req.SandboxMode != nil {
+			// Runtime subprocesses read the process-wide base policy.
 			eng.ApplySandboxPolicy()
 		}
-	} else if sandboxChanged {
-		// Degraded static panel (no engine): same install, with this handler's
-		// paths. cardPath() resolves them the way the card API does — the
-		// configured CardPath, then the config's effective one — so the deny
-		// list still covers the card the startup call protected. Resolved
-		// before readCfg: cardPath() takes the same read lock internally.
+	} else if req.SandboxMode != nil {
 		cardPath := h.cardPath()
 		h.readCfg(func(c *config.Config) {
 			commander.ApplyFromConfig(c, h.configPath, cardPath)
 		})
 	}
 
-	// The response echoes the live state, which now includes the new mode.
-	var sbMode string
-	var sbBackend string
-	h.readCfg(func(c *config.Config) {
-		sbMode = c.Sandbox.NormalizedMode()
-		sbBackend = security.Backend()
-	})
-	writeJSON(w, appSettingsJSON{
-		InjectionModel:  injection,
-		PreferredAgents: agents,
-		MemoryLimits:    limits,
-		ApprovalMode:    approval,
-		ToolsPolicy:     tools,
-		Sandbox:         &sandboxJSON{WorkPath: workPath, Mode: sbMode, Backend: sbBackend, Active: sbMode != "off" && sbBackend != ""},
-	})
+	h.getAppSettings(w, r)
+}
+
+func decodeAppSettings(r *http.Request) (*appSettingsPatchJSON, error) {
+	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	if r.Method == http.MethodPatch {
+		dec.DisallowUnknownFields()
+		var patch *appSettingsPatchJSON
+		if err := dec.Decode(&patch); err != nil || patch == nil || dec.Decode(new(any)) != io.EOF {
+			return nil, errors.New("invalid JSON body")
+		}
+		return patch, nil
+	}
+	var full appSettingsJSON
+	if err := dec.Decode(&full); err != nil {
+		return nil, errors.New("invalid JSON body")
+	}
+	req := &appSettingsPatchJSON{
+		InjectionModel:  &full.InjectionModel,
+		PreferredAgents: &full.PreferredAgents,
+		ApprovalMode:    &full.ApprovalMode,
+	}
+	req.MemoryLimits.User = &full.MemoryLimits.User
+	req.MemoryLimits.Memory = &full.MemoryLimits.Memory
+	req.MemoryLimits.Project = &full.MemoryLimits.Project
+	// These were added after PUT shipped. Older forms leave them unchanged.
+	if strings.TrimSpace(full.ToolsPolicy) != "" {
+		req.ToolsPolicy = &full.ToolsPolicy
+	}
+	if strings.TrimSpace(full.SandboxMode) != "" {
+		req.SandboxMode = &full.SandboxMode
+	}
+	return req, nil
+}
+
+func (req *appSettingsPatchJSON) validate() error {
+	if req.InjectionModel != nil {
+		*req.InjectionModel = strings.TrimSpace(*req.InjectionModel)
+		switch *req.InjectionModel {
+		case config.InjectionModelAuto, config.InjectionModelAlways, config.InjectionModelNever:
+		default:
+			return errors.New("injection_model must be auto, always, or never")
+		}
+	}
+	if req.ApprovalMode != nil {
+		*req.ApprovalMode = strings.TrimSpace(*req.ApprovalMode)
+		switch *req.ApprovalMode {
+		case config.ApprovalModeAlways, config.ApprovalModeOnRequest, config.ApprovalModeNever:
+		default:
+			return errors.New("approval_mode must be always, on-request, or never")
+		}
+	}
+	if req.ToolsPolicy != nil {
+		*req.ToolsPolicy = strings.TrimSpace(*req.ToolsPolicy)
+		switch *req.ToolsPolicy {
+		case config.ToolsPolicyMinimal, config.ToolsPolicyExtended:
+		default:
+			return errors.New("tools_policy must be minimal or extended")
+		}
+	}
+	if req.SandboxMode != nil {
+		parsed, err := config.ParseSandboxMode(strings.TrimSpace(*req.SandboxMode))
+		if err != nil {
+			return err
+		}
+		*req.SandboxMode = parsed
+	}
+	limits := req.MemoryLimits
+	for _, limit := range []*int{limits.User, limits.Memory, limits.Project} {
+		if limit != nil && *limit <= 0 {
+			return errors.New("memory_limits values must be positive")
+		}
+	}
+	if req.PreferredAgents == nil {
+		return nil
+	}
+	agents := make([]string, 0, len(*req.PreferredAgents))
+	seen := map[string]bool{}
+	for _, name := range *req.PreferredAgents {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] {
+			continue
+		}
+		if err := memory.ValidateName(name); err != nil {
+			return errors.New("preferred_agents contains an invalid agent name")
+		}
+		seen[name] = true
+		agents = append(agents, name)
+	}
+	if len(agents) > 16 {
+		return errors.New("preferred_agents holds at most 16 entries")
+	}
+	*req.PreferredAgents = agents
+	return nil
+}
+
+func (req appSettingsPatchJSON) configEdits() []config.SectionFieldUpdate {
+	var edits []config.SectionFieldUpdate
+	for _, field := range []struct {
+		section string
+		key     string
+		value   *string
+	}{
+		{"injection", "model", req.InjectionModel},
+		{"approval", "mode", req.ApprovalMode},
+		{"routing", "tools_policy", req.ToolsPolicy},
+		{"sandbox", "mode", req.SandboxMode},
+	} {
+		if field.value != nil {
+			edits = append(edits, config.SectionFieldUpdate{Section: []string{field.section}, Key: field.key, Value: *field.value})
+		}
+	}
+	if req.PreferredAgents != nil {
+		edits = append(edits, config.SectionFieldUpdate{Section: []string{"routing"}, Key: "preferred_agents", Value: *req.PreferredAgents})
+	}
+	for _, limit := range []struct {
+		key   string
+		value *int
+	}{
+		{"user", req.MemoryLimits.User},
+		{"memory", req.MemoryLimits.Memory},
+		{"project", req.MemoryLimits.Project},
+	} {
+		if limit.value != nil {
+			edits = append(edits, config.SectionFieldUpdate{Section: []string{"memory", "limits"}, Key: limit.key, Value: *limit.value})
+		}
+	}
+	return edits
+}
+
+func (req appSettingsPatchJSON) apply(c *config.Config) {
+	if req.InjectionModel != nil {
+		c.Injection.Model = *req.InjectionModel
+	}
+	if req.PreferredAgents != nil {
+		c.Routing.PreferredAgents = *req.PreferredAgents
+	}
+	if req.ApprovalMode != nil {
+		c.Approval.Mode = *req.ApprovalMode
+	}
+	if req.ToolsPolicy != nil {
+		c.Routing.ToolsPolicy = *req.ToolsPolicy
+	}
+	if req.SandboxMode != nil {
+		c.Sandbox.Mode = *req.SandboxMode
+	}
+	if req.MemoryLimits.User != nil {
+		c.Memory.Limits.User = *req.MemoryLimits.User
+	}
+	if req.MemoryLimits.Memory != nil {
+		c.Memory.Limits.Memory = *req.MemoryLimits.Memory
+	}
+	if req.MemoryLimits.Project != nil {
+		c.Memory.Limits.Project = *req.MemoryLimits.Project
+	}
 }

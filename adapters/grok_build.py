@@ -221,7 +221,8 @@ def main():
     # invocation row records argv shape only (the prompt is inside argv and
     # must not be re-logged), the result row the bounded output.
     harness.emit_event("tool_use", id="grok", name="grok",
-                       input={"argc": len(argv("streaming-json", session)) - 1})
+                       input={"argc": len(argv("streaming-json", session)) - 1},
+                       phase="spawn")
     # Announce the session before the run: grok creates it lazily, and a run
     # killed before its result envelope (stall, hard limit) still leaves a
     # checkpoint the Go side latched.

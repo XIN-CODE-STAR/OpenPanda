@@ -67,6 +67,15 @@ func TestConversationControlAPISharedStateAndVersionConflict(t *testing.T) {
 	if err != nil || terminalState.Planning || terminalState.Goal.ID != goal.ID {
 		t.Fatalf("shared state: %+v %v", terminalState, err)
 	}
+	call(`{"action":"mode","planning":true}`, 200)
+	if _, err := stateStore.SaveProposal(context.Background(), sess.ID, "version three"); err != nil {
+		t.Fatal(err)
+	}
+	conflict := httptest.NewRecorder()
+	h.ServeHTTP(conflict, authedReq(http.MethodPost, "/api/sessions/"+sess.ID+"/control", strings.NewReader(`{"action":"confirm","version":3}`)))
+	if conflict.Code != http.StatusConflict || conflict.Header().Get("X-OpenPanda-Error") != "plan_implementation_unsettled" {
+		t.Fatalf("previous implementation conflict: %d %s %v", conflict.Code, conflict.Body.String(), conflict.Header())
+	}
 	payload, _ = json.Marshal(map[string]any{"action": "clear", "goal_id": goal.ID})
 	cleared := call(string(payload), 200)
 	if cleared.Goal != nil {

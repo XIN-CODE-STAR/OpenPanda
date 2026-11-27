@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import {
   api,
+  currentToken,
   type ModelRoster,
   type OnboardingPatch,
   type OnboardingState,
@@ -11,13 +12,14 @@ import {
 import { useLocaleRerender } from '../hooks'
 import { loadLocale, locale, localeNames, locales, setLocale, t, type Locale } from '../i18n'
 import { toast } from '../components/toast'
+import { Icon } from '../components/icons'
 import { TermsContent } from '../components/terms'
 import { ModelPicker } from '../components/model-picker'
 import { useModalFocus } from '../components/modal-focus'
 import { ProviderCard } from '../components/provider-card'
 import { navigate, parseHash } from '../nav'
 import { onboardingGate } from '../utils/onboarding'
-import { MODEL_SAVED_EVENT, notifyModelSaved } from '../model-events'
+import { notifyModelSaved, onModelSaved } from '../model-events'
 import { needsPlaintextConsent } from './model-endpoint'
 import { GuideTour, type TourPhase } from './onboarding-guide'
 
@@ -41,22 +43,47 @@ type TourControls = {
   onPhase(phase: TourPhase): void
 }
 
-export function OnboardingBanner(tourControls: TourControls) {
-  useLocaleRerender()
+/** The app shares the same onboarding snapshot across both gate surfaces. */
+export function useOnboardingState(enabled: boolean) {
+  const token = enabled ? currentToken() : ''
   const [state, setState] = useState<OnboardingState | null>(null)
+  const revision = useRef(0)
+  const acceptSnapshot = useCallback((result: OnboardingState) => {
+    if (!token || token !== currentToken()) return
+    // A GET begun before a saved change can finish after its response.
+    ++revision.current
+    setState(result)
+  }, [token])
+  useEffect(() => {
+    setState(null)
+    if (!token) return
+    let alive = true
+    async function check() {
+      const mine = ++revision.current
+      try {
+        const result = await api.getOnboarding()
+        if (alive && mine === revision.current) setState(result)
+      } catch {
+        // Keep the last successful state if a background refresh fails.
+      }
+    }
+    void check()
+    const unsubscribe = onModelSaved(check)
+    return () => {
+      alive = false
+      unsubscribe()
+    }
+  }, [token])
+  return [state, acceptSnapshot] as const
+}
+
+export function OnboardingBanner({ state, onState, onPhase }: {
+  state: OnboardingState | null
+  onState(result: OnboardingState): void
+} & TourControls) {
+  useLocaleRerender()
   const [open, setOpen] = useState(false)
   const dismissing = useRef(false)
-
-  useEffect(() => {
-    const check = () =>
-      api
-        .getOnboarding()
-        .then(setState)
-        .catch(() => setState(null)) // views surface their own errors
-    void check()
-    window.addEventListener(MODEL_SAVED_EVENT, check)
-    return () => window.removeEventListener(MODEL_SAVED_EVENT, check)
-  }, [])
 
   const gate = state ? onboardingGate(state) : null
   const termsOnly = gate?.termsOnly ?? false
@@ -80,7 +107,7 @@ export function OnboardingBanner(tourControls: TourControls) {
     if (dismissing.current) return
     dismissing.current = true
     try {
-      setState(await api.postOnboarding({ onboarded: true }))
+      onState(await api.postOnboarding({ onboarded: true }))
       setOpen(false)
     } catch (error) {
       toast(error instanceof Error ? error.message : String(error), 'error')
@@ -89,42 +116,30 @@ export function OnboardingBanner(tourControls: TourControls) {
     }
   }
 
-  const showBanner = !open && banner !== 'none'
-  // The model banner points at the page that owns models: 设置 → 模型. It used
-  // to raise the wizard on its model step, which is a second, narrower copy of
-  // that page — the provider grid without the connections already registered,
-  // the key reuse, CC Switch or discovery beside it. Only the consent banner
-  // still opens the wizard: language → terms → guide → approval has no home in
-  // the settings sheet.
+  // Only the consent case is still a bar across the top of the pane. The
+  // no-model case moved to the rail's tail (`ModelNotice`): it is a standing
+  // fact about this node — the same kind as "a newer build exists" — and it
+  // belongs beside the node chip, not pushing every page down for a notice the
+  // user has already read.
+  const showBanner = !open && banner === 'terms'
   return (
     <>
       {showBanner && (
         <div class="onboarding-banner" role="status">
-          <span class="onboarding-banner-text">
-            {t(banner === 'terms' ? 'onboarding.termsBanner' : 'onboarding.banner')}
-          </span>
-          {banner === 'terms' ? (
-            <button class="btn primary small" onClick={() => setOpen(true)}>
-              {t('onboarding.termsCta')}
-            </button>
-          ) : (
-            <button
-              class="btn primary small"
-              onClick={() => navigate({ view: 'settings', tab: 'models' })}
-            >
-              {t('onboarding.cta')}
-            </button>
-          )}
+          <span class="onboarding-banner-text">{t('onboarding.termsBanner')}</span>
+          <button class="btn primary small" onClick={() => setOpen(true)}>
+            {t('onboarding.termsCta')}
+          </button>
         </div>
       )}
       {open && (
         <OnboardingWizard
           state={state}
           termsOnly={termsOnly}
-          {...tourControls}
+          onPhase={onPhase}
           onClose={dismiss}
           onDone={result => {
-            setState(result)
+            onState(result)
             setOpen(false)
           }}
         />
@@ -133,10 +148,43 @@ export function OnboardingBanner(tourControls: TourControls) {
   )
 }
 
+/** "No model configured" as a card in the rail's tail.
+ *
+ *  It used to be a full-width bar at the top of every view, which pushed the
+ *  page down to say something the reader had already been told and could not
+ *  act on from there anyway. It now sits where the update chip sits — directly
+ *  above the node chip, at the rail's width — because both are standing facts
+ *  about this node ("what I run" / "what I could run"), not news about the page
+ *  underneath. The card takes the update chip's own material and the paused
+ *  check's amber: a node with no model cannot answer, which is the same class
+ *  of news as a check that gave up.
+ *
+ *  No dismiss: the condition clears itself the moment a model is saved, and a
+ *  rail card is quiet enough not to nag. */
+export function ModelNotice({ state }: { state: OnboardingState | null }) {
+  useLocaleRerender()
+  const gate = state ? onboardingGate(state) : null
+  if (gate?.banner !== 'model') return null
+  return (
+    <div class="rail-update rail-update-model" role="status">
+      <div class="rail-update-model-main">
+        <Icon name="alert" class="rail-update-ico" />
+        <div class="rail-update-model-text">
+          <span class="rail-update-title">{t('ui.model.title')}</span>
+          <p class="rail-update-sub">{t('ui.model.sub')}</p>
+        </div>
+      </div>
+      <a class="rail-update-cta" href="#/settings/models">
+        {t('onboarding.cta')}
+      </a>
+    </div>
+  )
+}
+
 /** The first-run wizard, plus the terms-only pass. The model step lives at the
  *  end of the tour (a fresh install has no other place to land), but it is not
  *  a standalone destination: "already onboarded, still no model" is a settings
- *  job, and its banner CTA opens 设置 → 模型 instead of this modal. */
+ *  job, and the rail's no-model card opens 设置 → 模型 instead of this modal. */
 function OnboardingWizard(props: {
   state: OnboardingState
   termsOnly: boolean

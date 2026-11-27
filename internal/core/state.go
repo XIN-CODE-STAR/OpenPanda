@@ -328,15 +328,22 @@ type Task struct {
 
 // NeedsFollowup reports whether reviewed work can be continued rather than
 // accepted. Older MAX reviews may have parked before this flag was set.
+//
+// The disposition gate is load-bearing, not cosmetic: continuing IS a requeue,
+// and RequeueForContinue's compare-and-swap only accepts an accept_work park.
+// A result carrying needs_followup while the row is parked for changed input
+// (a model-config refusal, an exhausted turn budget) is therefore not
+// continuable — surfacing the action would only guarantee a failed CAS. The
+// result marker and the disposition are written by different call sites, so
+// this predicate is where they are reconciled.
 func (t Task) NeedsFollowup() bool {
-	if t.State != StateReview {
+	if t.State != StateReview || t.ApprovalDisposition != ApprovalAcceptWork {
 		return false
 	}
 	if needsFollowupResult(t.ResultJSON) {
 		return true
 	}
-	return t.ApprovalDisposition == ApprovalAcceptWork &&
-		(t.stalledReviewResult() || t.ObjectiveApprovalError() != nil)
+	return t.stalledReviewResult() || t.ObjectiveApprovalError() != nil
 }
 
 // Older stalled results may have been parked without needs_followup.

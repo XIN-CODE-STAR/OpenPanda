@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"testing"
@@ -215,5 +216,28 @@ func TestGenericNativeModelPlaceholder(t *testing.T) {
 	argv, _ := expandGenericTemplate(AdapterRequest{Cmd: "agent --model {model} {prompt}", Model: "selected-model", Prompt: "work"})
 	if !slices.Equal(argv, []string{"agent", "--model", "selected-model", "work"}) {
 		t.Fatalf("model placeholder: %v", argv)
+	}
+}
+
+// A clean exit whose pipes are still held by a detached grandchild surfaces as
+// exec.ErrWaitDelay. Reporting that as a spawn failure sends the task to the
+// next agent and runs its side effects twice; the command itself succeeded.
+func TestWaitResultTreatsErrWaitDelayAsSuccess(t *testing.T) {
+	ok := exec.Command(os.Args[0], "-test.run=^$")
+	if err := ok.Run(); err != nil {
+		t.Fatalf("helper run: %v", err)
+	}
+	if err := waitResult(ok, exec.ErrWaitDelay); err != nil {
+		t.Fatalf("a clean exit behind a held pipe = %v, want nil", err)
+	}
+	// A real failure still fails, whatever WaitDelay says. The test binary
+	// rejects an unknown flag and exits non-zero.
+	failed := exec.Command(os.Args[0], "-test.run=^$", "-test.definitely-not-a-flag")
+	_ = failed.Run()
+	if err := waitResult(failed, exec.ErrWaitDelay); err == nil {
+		t.Fatal("a failed process was reported as success")
+	}
+	if err := waitResult(ok, nil); err != nil {
+		t.Fatalf("nil error changed to %v", err)
 	}
 }

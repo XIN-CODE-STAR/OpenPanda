@@ -11,6 +11,7 @@ import {
   connName,
   connRefs,
   copyAlias,
+  derivedConnName,
   groupConnections,
   hostOf,
   isLoopbackURL,
@@ -198,6 +199,38 @@ test('a hand-written relay keeps the short label and hides its port', () => {
   assert.equal(connImported(c), false)
 })
 
+test('a name the user typed outranks the derived one', () => {
+  setLocale('en')
+  // Two relays on loopback ports are the same card without a name: same
+  // "Custom endpoint" heading, same "Local endpoint" line. The stored name is
+  // the only thing on the face that tells them apart.
+  const conns = groupConnections(
+    response([
+      entry({ provider: 'custom', base_url: 'http://127.0.0.1:3065', conn_name: '公司中转' }),
+    ]),
+  )
+  const c = conns[0]!
+  assert.equal(c.customName, '公司中转')
+  assert.equal(connName(c, [provider('custom', '自定义 / 中转站 (custom base_url)')]), '公司中转')
+  // The derived heading is still what an empty field would produce — the edit
+  // form paints it as the placeholder.
+  assert.equal(derivedConnName(c, []), 'Custom endpoint')
+})
+
+test('a nameless row does not hide a name its siblings carry', () => {
+  setLocale('en')
+  // A copy made by an older console lands without the field; the group keeps
+  // the name the other row of the same account already has.
+  const conns = groupConnections(
+    response([
+      entry({ alias: 'a', model: 'm-1' }),
+      entry({ alias: 'b', model: 'm-2', conn_name: '公司中转' }),
+    ]),
+  )
+  assert.equal(conns.length, 1)
+  assert.equal(conns[0]!.customName, '公司中转')
+})
+
 test('one imported row labels the whole account', () => {
   const conns = groupConnections(
     response([
@@ -207,6 +240,16 @@ test('one imported row labels the whole account', () => {
   )
   assert.equal(conns.length, 1)
   assert.equal(conns[0]!.source, 'opencode')
+})
+
+test('CC Switch connections keep the provider name and remain recognizable without one', () => {
+  setLocale('en')
+  const [connection] = groupConnections(response([
+    entry({ provider: 'custom', base_url: 'https://relay.invalid/v1', source: 'ccswitch', conn_name: 'My relay' }),
+  ]))
+  assert.ok(connImported(connection!))
+  assert.equal(connName(connection!, []), 'My relay')
+  assert.equal(derivedConnName(connection!, []), 'CC Switch')
 })
 
 test('loopback detection covers localhost, v4 and v6', () => {

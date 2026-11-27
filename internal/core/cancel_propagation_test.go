@@ -4,6 +4,8 @@ package core
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -84,4 +86,80 @@ func TestCancelPropagatesDownstream(t *testing.T) {
 	}
 	tk, _ := leaf.store.Get(ctx, taskID)
 	t.Fatalf("leaf task state = %s, want cancelled (cancel did not propagate)", tk.State)
+}
+
+func TestOfflineCancelSurvivesTaskRemoval(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		remove func(context.Context, *TaskStore, string) error
+	}{
+		{"keep", nil},
+		{"delete", func(ctx context.Context, s *TaskStore, id string) error {
+			_, err := s.Delete(ctx, id)
+			return err
+		}},
+		{"clear queue", func(ctx context.Context, s *TaskStore, _ string) error {
+			_, _, err := s.ClearQueue(ctx)
+			return err
+		}},
+		{"retention", func(ctx context.Context, s *TaskStore, _ string) error {
+			_, err := s.DeleteSettledBefore(ctx, time.Now().Unix()+1)
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			root := newCore(t, "cancel-owner")
+			leaf := newCore(t, "cancel-executor")
+			must := func(err error) {
+				t.Helper()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			must(root.Register(ctx))
+			must(leaf.Register(ctx))
+			chain := []string{root.nodeID, leaf.nodeID}
+			task, err := root.store.Create(ctx, "", "", "cancel while offline", root.nodeID, chain[:1])
+			must(err)
+			must(root.store.Queue(ctx, task.TaskID, root.nodeID))
+			must(root.store.Dispatch(ctx, task.TaskID, root.nodeID, leaf.nodeID))
+			_, err = leaf.store.CreateFromRemote(ctx, task.TaskID, task.Title, leaf.nodeID, task.AttemptID, chain)
+			must(err)
+			must(leaf.store.Queue(ctx, task.TaskID, leaf.nodeID))
+			must(leaf.store.Dispatch(ctx, task.TaskID, leaf.nodeID, leaf.nodeID))
+			must(leaf.store.Accept(ctx, task.TaskID, leaf.nodeID))
+
+			// The owner's dispatch and the executor's running copy are already
+			// recorded. Leave them unlinked until after cancellation and board
+			// removal so a real hello exercises delivery in place of a mock.
+			_, err = root.CancelTree(ctx, task.TaskID)
+			must(err)
+			pending := func() int {
+				t.Helper()
+				var count int
+				must(root.db.QueryRowContext(ctx, "SELECT count(*) FROM cancel_outbox WHERE task_id=?", task.TaskID).Scan(&count))
+				return count
+			}
+			if count := pending(); count != 1 {
+				t.Fatalf("cancel while disconnected parked %d rows, want 1", count)
+			}
+			if tc.remove != nil {
+				must(tc.remove(ctx, root.store, task.TaskID))
+				if _, err := root.store.Get(ctx, task.TaskID); !errors.Is(err, sql.ErrNoRows) {
+					t.Fatalf("local task remained after removal: %v", err)
+				}
+			}
+			if count := pending(); count != 1 {
+				t.Fatalf("cancel custody after removal = %d, want 1", count)
+			}
+			leafAddr := startListen(t, ctx, leaf, "127.0.0.1:0")
+			must(root.DialPeer(ctx, leafAddr))
+			waitState(t, ctx, leaf.store, task.TaskID, StateCancelled)
+			if count := pending(); count != 0 {
+				t.Fatalf("delivered cancel still parked: %d rows", count)
+			}
+		})
+	}
 }

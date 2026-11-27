@@ -403,6 +403,7 @@ function ChatBubble(props: {
                 onOpenTask={onOpenTask}
                 onPreviewTask={onPreviewTask}
                 tasksById={tasksById}
+                session={props.session}
               />
               {batch.map((b) => (
                 <DispatchBlock
@@ -411,6 +412,7 @@ function ChatBubble(props: {
                   onOpenTask={onOpenTask}
                   onPreviewTask={onPreviewTask}
                   tasksById={tasksById}
+                  session={props.session}
                 />
               ))}
             </>
@@ -509,8 +511,11 @@ function DispatchBlock(props: {
   /** Open a finished task's page in the dock's browser panel. */
   onPreviewTask?: (task: Task) => void
   tasksById?: Map<string, Task>
+  /** The thread this block belongs to; relative image paths in its tool rows
+   *  resolve against that thread's worktree. */
+  session?: string | null
 }) {
-  const { msg, onOpenTask, onPreviewTask, tasksById } = props
+  const { msg, onOpenTask, onPreviewTask, tasksById, session } = props
   const [chainOpen, setChainOpen] = useState(false)
   const chainId = useId()
   // The thread's list is polled once per frame already; reading this block's
@@ -554,7 +559,7 @@ function DispatchBlock(props: {
             </a>
           </div>
           <div id={chainId} hidden={!chainOpen}>
-            {chainOpen && <TaskChain taskId={msg.ref} active={task ? isActiveState(task.state) : false} />}
+            {chainOpen && <TaskChain taskId={msg.ref} active={task ? isActiveState(task.state) : false} session={session} />}
           </div>
           {/* The task's output, where the result is read: the file list, the
               downloads, and the page view on the preview origin. It hangs off
@@ -735,11 +740,11 @@ export function RunSummaryRow({ run, onOpenTask }: { run: RunSummary; onOpenTask
 }
 
 /** The task log stays subscribed while the dispatch's process is open. */
-function TaskChain({ taskId, active }: { taskId: string; active: boolean }) {
+function TaskChain({ taskId, active, session }: { taskId: string; active: boolean; session?: string | null }) {
   const change = useChangeSignal()
   const { events, error } = useTaskEvents(taskId, change)
   if (error) return <p class="dim chain-empty">{t('common.error')} ({error})</p>
   const steps = taskSteps(events, active)
   if (steps.length === 0) return <p class="dim chain-empty">{t('sessions.chainEmpty')}</p>
-  return <ExecutionSteps scope={'task:' + taskId} steps={steps} hideTitle />
+  return <ExecutionSteps scope={'task:' + taskId} steps={steps} hideTitle session={session} />
 }

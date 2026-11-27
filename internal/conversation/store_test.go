@@ -44,6 +44,156 @@ func TestGoalAndInteractiveRoundClaimsExcludeEachOther(t *testing.T) {
 	}
 }
 
+func TestClarificationReservationFencesExpiredOwner(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "clarification.db")
+	first := &Store{DB: testdb.OpenFile(t, path)}
+	otherDB, err := storage.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer otherDB.Close()
+	second := &Store{DB: otherDB}
+	const sid = "question-thread"
+	goal, err := first.Create(ctx, sid, "Collect the fixture directory", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goal.RoundID, err = first.Claim(ctx, goal, "goal-controller", "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = first.PublishGoalQuestion(ctx, goal, nil); err != nil {
+		t.Fatal(err)
+	}
+	old, err := first.ReserveInput(ctx, sid, goal.RoundID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = second.ReserveInput(ctx, sid, goal.RoundID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("independent client shared a live reservation: %v", err)
+	}
+	if _, err = first.DB.Exec("UPDATE conversation_input_replies SET lease_until=0 WHERE round_id=?", goal.RoundID); err != nil {
+		t.Fatal(err)
+	}
+	now, err := second.ReserveInput(ctx, sid, goal.RoundID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = first.ResolveInput(ctx, sid, old); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expired reply resolved the new owner's question: %v", err)
+	}
+	if err = first.ReleaseInput(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	if err = second.ResolveInput(ctx, sid, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = first.ReserveInput(ctx, sid, goal.RoundID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("resolved question accepted another answer: %v", err)
+	}
+}
+
+func TestGoalCanPublishQuestionAfterLateUsageReachesBudget(t *testing.T) {
+	ctx := context.Background()
+	s := &Store{DB: testdb.Open(t)}
+	tasks := core.NewTaskStore(s.DB, nil)
+	const sid = "budgeted-questions"
+	budget := int64(10)
+	goal, err := s.Create(ctx, sid, "Verify all fixtures", &budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goal.RoundID, err = s.Claim(ctx, goal, "goal-controller", "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := tasks.Create(core.WithAskRound(ctx, goal.RoundID), "", "", "Check one fixture", "fixture", []string{"fixture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = tasks.ForceFail(ctx, task.TaskID, "The fixture needs user input"); err != nil {
+		t.Fatal(err)
+	}
+	if err = tasks.CloseAskRound(ctx, goal.RoundID, "closed"); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Settle(ctx, goal, 0); err != nil {
+		t.Fatal(err)
+	}
+	goal.RoundID, err = s.Claim(ctx, goal, "goal-controller", "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = tasks.RecordDelegationMetric(ctx, task.TaskID, "origin", "fixture", nil, false, 10, 10); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.PublishGoalQuestion(ctx, goal, nil); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := s.ReserveInput(ctx, sid, goal.RoundID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.ResolveInput(ctx, sid, reply); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Settle(ctx, goal, 0); err != nil {
+		t.Fatal(err)
+	}
+	state, err := s.Get(ctx, sid)
+	if err != nil || state.Goal.Status != "budget_limited" || state.Goal.Tokens != budget || state.Goal.RoundID != "" {
+		t.Fatalf("reply changed the exhausted budget or left the round open: %+v err=%v", state.Goal, err)
+	}
+}
+
+func TestDeleteSessionErasesRemovedTaskEvidence(t *testing.T) {
+	ctx := context.Background()
+	s := &Store{DB: testdb.Open(t)}
+	tasks := core.NewTaskStore(s.DB, nil)
+	const sid = "deleted-goal-thread"
+	goal, err := s.Create(ctx, sid, "Verify the fixture", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goal.RoundID, err = s.Claim(ctx, goal, "goal-controller", "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	finishTask := func(title string) string {
+		t.Helper()
+		task, err := tasks.Create(core.WithAskRound(ctx, goal.RoundID), "", "", title, "fixture", []string{"fixture"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = s.DB.Exec(`UPDATE tasks SET state='done', result_json='{"stdout":"Fixture result."}' WHERE task_id=?`, task.TaskID); err != nil {
+			t.Fatal(err)
+		}
+		return task.TaskID
+	}
+	before, after := finishTask("first fixture"), finishTask("second fixture")
+	if _, err = tasks.Delete(ctx, before); err != nil {
+		t.Fatal(err)
+	}
+	var captured string
+	if err = s.DB.QueryRow("SELECT title FROM ask_round_removed_tasks WHERE task_id=?", before).Scan(&captured); err != nil || captured != "first fixture" {
+		t.Fatalf("missing evidence before session deletion: %q %v", captured, err)
+	}
+	if err = s.DeleteSession(ctx, sid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tasks.Delete(ctx, after); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{before, after} {
+		var state, title, result string
+		err = s.DB.QueryRow("SELECT state,title,result_json FROM ask_round_removed_tasks WHERE task_id=?", id).Scan(&state, &title, &result)
+		if err != nil || state != "done" || title != "" || result != "{}" {
+			t.Fatalf("session deletion left task evidence or removed its verdict: state=%s title=%q result=%s err=%v", state, title, result, err)
+		}
+	}
+}
+
 func TestGoalClaimAcrossProcesses(t *testing.T) {
 	ctx := context.Background()
 	if path := os.Getenv("PANDA_GOAL_CLAIM_FIXTURE"); path != "" {

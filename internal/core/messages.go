@@ -183,6 +183,12 @@ func BoardScopes(t Task) []string {
 // PutTaskMessage upserts one slot on a scope board. Stale arrivals (a fan-out
 // copy landing after the sender already posted newer) lose to the seq guard.
 func (s *TaskStore) PutTaskMessage(ctx context.Context, m TaskMessage) error {
+	return putTaskMessage(ctx, s.db, m)
+}
+
+func putTaskMessage(ctx context.Context, db interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, m TaskMessage) error {
 	if m.Scope == "" || m.Sender == "" {
 		return fmt.Errorf("task message needs scope and sender")
 	}
@@ -204,14 +210,14 @@ func (s *TaskStore) PutTaskMessage(ctx context.Context, m TaskMessage) error {
 			attach = string(raw)
 		}
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO task_messages
+	_, err := db.ExecContext(ctx, `INSERT INTO task_messages
 		(scope, sender, rcpt, sender_seq, sender_label, grade, body, attachments, sent_at, recv_at, consumed_at, expires_at)
 		VALUES (?,?,?,?,?,?,?,?,?,?,0,?)
 		ON CONFLICT(scope, sender, rcpt) DO UPDATE SET
 			sender_seq=excluded.sender_seq, sender_label=excluded.sender_label,
 			grade=excluded.grade, body=excluded.body, attachments=excluded.attachments,
 			sent_at=excluded.sent_at,
-			recv_at=excluded.recv_at, consumed_at=0, expires_at=excluded.expires_at
+			recv_at=excluded.recv_at, consumed_at=0, handoff_id='', expires_at=excluded.expires_at
 		WHERE excluded.sender_seq > task_messages.sender_seq`,
 		m.Scope, m.Sender, m.Rcpt, m.SenderSeq, m.SenderLabel, m.Grade, m.Body,
 		attach, m.SentAt, recv, expires)
@@ -224,13 +230,22 @@ func (s *TaskStore) PutTaskMessage(ctx context.Context, m TaskMessage) error {
 // and carry on. Guarded by (scope, sender, sender_seq) so a slow write can
 // never mark a newer post as read.
 func (s *TaskStore) MarkTaskMessageConsumed(ctx context.Context, scope, sender string, seq int64) error {
-	if s == nil || scope == "" || sender == "" {
-		return nil
-	}
-	_, err := s.db.ExecContext(ctx, `UPDATE task_messages SET consumed_at=?
-		WHERE scope=? AND sender=? AND sender_seq=? AND consumed_at=0`,
-		time.Now().Unix(), scope, sender, seq)
+	_, err := s.markTaskMessageConsumed(ctx, scope, sender, seq, "")
 	return err
+}
+
+func (s *TaskStore) markTaskMessageConsumed(ctx context.Context, scope, sender string, seq int64, handoffID string) (bool, error) {
+	if s == nil || scope == "" || sender == "" {
+		return false, nil
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE task_messages SET consumed_at=?, handoff_id=''
+		WHERE scope=? AND sender=? AND sender_seq=? AND consumed_at=0 AND (?='' OR handoff_id=?)`,
+		time.Now().Unix(), scope, sender, seq, handoffID, handoffID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // PendingNoteCounts reports, per task id, how many user notes on that task's
@@ -350,6 +365,9 @@ func (c *Core) drainTaskMessages(ctx context.Context, task Task, seen msgSeen) [
 			if m.Grade == MsgGradeSteer {
 				continue // a user inject: delivered as the round's directive, not folded context
 			}
+			if isUserSender(m.Sender) {
+				continue // user notes stay mutable until the agent prompt is handed off
+			}
 			k := msgSlotKey(m)
 			if seen[k] >= m.SenderSeq {
 				continue
@@ -385,6 +403,9 @@ func (c *Core) formatBoardLine(ctx context.Context, m TaskMessage) string {
 	}
 	age := time.Since(time.Unix(m.SentAt, 0)).Round(time.Second)
 	line := fmt.Sprintf("from=%s grade=%s ago=%s: %s", from, m.Grade, age, m.Body)
+	if isUserSender(m.Sender) {
+		return line
+	}
 	return clipRunes(line, 600)
 }
 

@@ -16,6 +16,15 @@
    smallest type in the product while being the most-scanned surface in it. */
 
 .sidebar {
+  --sidebar-current-bg:
+    radial-gradient(ellipse 85% 140% at 15% 50%, color-mix(in srgb, var(--glow-blue) 36%, transparent), transparent 76%),
+    radial-gradient(ellipse 85% 140% at 88% 50%, color-mix(in srgb, var(--glow-violet) 38%, transparent), transparent 76%),
+    linear-gradient(125deg,
+      color-mix(in srgb, var(--task-blue) 3%, var(--bg-raised)),
+      color-mix(in srgb, var(--task-violet) 3%, var(--bg-raised)));
+  --sidebar-current-border: color-mix(in srgb, var(--task-blue) 10%, var(--border-soft));
+  --sidebar-dot-a: light-dark(#96b5de, #9dbbe8);
+  --sidebar-dot-b: light-dark(#d4adc9, #d4b6de);
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);
@@ -71,7 +80,9 @@
   align-items: center;
   gap: 6px;
   min-width: 0;
-  padding: 4px 0;
+  /* 7px keeps the head at the 37px it was when the mark sat in a 28px tile:
+     dropping the tile must not walk 新对话 up the column with it. */
+  padding: 7px 0;
   color: var(--text-secondary);
   /* 19px is 1.27× the rail's 15px rows: the name is the one label in the
      column that is not a destination, and at 17px its capitals came out
@@ -170,33 +181,42 @@
   color: var(--text);
   text-decoration: none;
 }
-.nav-item.active {
-  background: var(--surface-alpha-md);
+.sidebar :is(.nav-item.active, .thread-item.active, .sidebar-node[aria-current='page']) {
+  position: relative;
+  background: var(--sidebar-current-bg);
   color: var(--text);
-  font-weight: 550;
-  /* A quiet inset hairline gives the selected row a finished edge without
-     turning its leading border into a second accent. */
-  box-shadow: inset 0 0 0 1px var(--hairline-xs);
+}
+.sidebar :is(.nav-item.active:not(.nav-new-chat), .thread-item.active, .sidebar-node[aria-current='page']) {
+  box-shadow: inset 0 0 0 1px var(--sidebar-current-border), var(--shadow-xs);
+}
+.nav-item.active,
+.thread-item.active .thread-title,
+.sidebar-node[aria-current='page'] .sidebar-node-name {
+  font-weight: 600;
 }
 .nav-item.active svg {
   opacity: 1;
-  color: var(--text);
 }
 .nav-badge {
-  margin-left: auto;
-  min-width: 18px;
-  padding: 1px 6px;
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
   border-radius: var(--radius-pill);
   background: var(--semantic-warn-soft);
   color: var(--semantic-warn);
-  font-size: var(--text-sm);
+  font-size: 9.5px;
   font-weight: 650;
+  line-height: 15px;
+  font-variant-numeric: tabular-nums;
   text-align: center;
   border: 0;
   cursor: pointer;
 }
 
-.nav-destination { padding: 0; gap: 0; }
+.nav-destination { position: relative; padding: 0; gap: 0; }
 .nav-destination-link {
   display: flex;
   align-items: center;
@@ -207,27 +227,64 @@
   border-radius: inherit;
   color: inherit;
 }
+.nav-destination:has(.nav-badge) .nav-destination-link { padding-right: 26px; }
 .nav-destination-link:hover { text-decoration: none; }
-.nav-destination .nav-badge { margin-right: 10px; }
-.nav-destination :is(a, button):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sidebar :is(.nav-item:not(.nav-destination), .nav-destination-link, .nav-search, .nav-badge,
+  .thread-group-head, .thread-item, .sidebar-node, .sidebar-gear):focus-visible {
+  outline: 2px solid var(--text-secondary);
+  outline-offset: -2px;
+  box-shadow: none;
+}
 
 /* Separate the new conversation action from the destinations below it. */
-.nav-quick .nav-new-chat {
-  justify-content: center;
+.nav-new-chat {
   min-height: 38px;
-  margin-bottom: 6px;
+  margin-bottom: 4px;
   color: var(--text-primary);
   border: 1px solid var(--border);
   background: var(--bg-raised);
 }
-.nav-quick .nav-new-chat:hover {
-  background: var(--bg-hover);
+.sidebar .nav-new-chat.active {
+  border-color: var(--sidebar-current-border);
+  box-shadow: var(--shadow-xs);
 }
-.history-label {
-  margin: 4px 10px 8px;
-  color: var(--text-tertiary);
-  font-size: var(--text-xs);
-  font-weight: 500;
+/* The search is a row like the others: it opens a dialog, it is not a field,
+   and a boxed input sitting between four flat rows read as a form control that
+   was never there. Same metrics as .nav-item so the five lines share one
+   rhythm; the box comes back only on hover, the way a row's wash does. */
+.nav-search {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 10px;
+  margin-bottom: 6px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-lg);
+  font-weight: 450;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.nav-search svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  opacity: 0.85;
+}
+.nav-search-label {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.nav-search:hover {
+  background: var(--surface-alpha-sm);
+  color: var(--text);
 }
 .nav-quick {
   display: flex;
@@ -247,18 +304,21 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 10px;
+  padding: 4px 8px;
   margin-bottom: 4px;
   border-radius: var(--radius-sm);
   font-size: var(--text-md);
   color: var(--text-secondary);
 }
+/* A 7px dot with a 3px halo is a 13px disc: beside the 16px brand mark it
+   read as a second logo, and the two circles fought for the same glance.
+   The halo is gone and the dot is one step smaller — it is a state LED, not
+   a second mark. */
 .sidebar-node .dot {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
-  background: var(--good);
-  box-shadow: 0 0 0 3px var(--good-soft);
+  background: linear-gradient(135deg, var(--sidebar-dot-a), var(--sidebar-dot-b));
   flex: none;
 }
 .sidebar-node .dot.off {
@@ -274,7 +334,7 @@
   background: transparent;
   border: 1px solid var(--text-tertiary);
 }
-.shell:has(.new-chat-pane) .sidebar :is(.experimental-badge, .notif-bell-dot) {
+.shell:has(.new-chat-pane) .sidebar :is(.experimental-badge, .notif-bell-dot, .nav-badge) {
   background: var(--bg-inset);
   border-color: var(--border);
   color: var(--text-secondary);
@@ -291,26 +351,32 @@ a.sidebar-node {
 a.sidebar-node:hover {
   background: var(--bg-hover);
 }
+/* `flex: 0 1 auto`, not `1 1 auto`: growing let the name eat the whole slack
+   and then pin the version to its 52% ceiling, which is why a three-letter
+   node name was still costing the version half the row (`v0.1….`). The
+   version's own `margin-left: auto` already pushes it to the right edge, so
+   the name only has to be as wide as its text. */
 .sidebar-node .sidebar-node-name {
-  flex: 1 1 auto;
-  min-width: 72px;
+  flex: 0 1 auto;
+  min-width: 36px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--text);
+  font-weight: 500;
 }
-/* The version is the row's secondary fact. It used to be `flex: none`, so a
-   long codename (v0.0.12-preview Constellation) claimed the whole 255px row
-   and squeezed the node name to zero width. Let it truncate instead; the full
-   string stays available in the span's title. */
+/* The version is the row's secondary fact. Keep the short version tag intact
+   while allowing unexpectedly long dev strings to truncate gracefully. */
 .sidebar-node .ver {
   margin-left: auto;
   flex: 0 1 auto;
   min-width: 0;
-  max-width: 52%;
+  max-width: 60%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-tertiary);
+  font-size: var(--text-xs);
 }
 
 /* The footer is one row: the node chip takes the slack, the gear keeps its
@@ -330,12 +396,14 @@ a.sidebar-node:hover {
   min-width: 0;
   margin-bottom: 0;
 }
+.sidebar-foot .notif-bell,
 .sidebar-foot .sidebar-gear {
   flex: none;
 }
 .sidebar-foot .sidebar-gear.active {
-  background: var(--bg-active);
+  background: var(--sidebar-current-bg);
   color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--sidebar-current-border);
 }
 
 /* ---- Main column ---------------------------------------------------------- */
@@ -385,7 +453,6 @@ a.sidebar-node:hover {
   container-type: inline-size;
   container-name: reading;
 }
-.main:has(> .chat) > .banner,
 .main:has(> .chat) > .onboard-banner {
   margin: var(--sp-3) var(--sp-4) 0;
 }
@@ -410,11 +477,8 @@ a.sidebar-node:hover {
   flex-direction: column;
   overflow: hidden;
 }
-.main:has(> .ws-page) > .banner,
 .main:has(> .ws-page) > .onboard-banner,
-.main:has(> .control-section) > .banner,
 .main:has(> .control-section) > .onboard-banner,
-.main:has(> .profile) > .banner,
 .main:has(> .profile) > .onboard-banner {
   margin: var(--sp-3) var(--sp-4) 0;
 }
@@ -877,12 +941,64 @@ a.sidebar-node:hover {
   margin-left: auto;
 }
 
-.sidebar-brand-mark { display: grid; place-items: center; flex: none; width: 28px; height: 28px; border: 1px solid var(--border-soft); border-radius: 8px; color: var(--text); background: var(--bg-raised); box-shadow: var(--shadow-xs); --brand: var(--task-violet); --brand-star: var(--text); }
+/* The mark lives at the tail of the rail, beside the node name — echoing the
+   new-chat page's soft blue-pink gradient inside a compact 28px badge. */
+.sidebar-brand-mark {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background:
+    radial-gradient(circle at 22% 24%, color-mix(in srgb, var(--glow-blue) 38%, transparent), transparent 72%),
+    radial-gradient(circle at 78% 78%, color-mix(in srgb, var(--glow-violet) 40%, transparent), transparent 72%),
+    var(--bg-chrome);
+  border: 1px solid color-mix(in srgb, var(--task-blue) 10%, var(--border-soft));
+  --brand: color-mix(in srgb, var(--task-blue) 62%, var(--text-secondary));
+  --brand-star: color-mix(in srgb, var(--task-violet) 58%, var(--text-secondary));
+}
+/* The state dot sits on the badge's lower-right corner with a crisp ring so
+   it reads as one presence indicator rather than floating beside the glyph. */
+.sidebar-brand-mark .dot {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--sidebar-dot-a), var(--sidebar-dot-b));
+  box-shadow: 0 0 0 1.5px var(--bg-raised);
+}
+.sidebar-brand-mark .dot.off {
+  background: var(--text-tertiary);
+}
+.shell:has(.new-chat-pane) .sidebar-brand-mark .dot.off {
+  background: var(--text-tertiary);
+  border: 0;
+}
+.sidebar-brand-mark .panda-mark {
+  width: 19px;
+  height: 19px;
+}
+/* Slightly heavier stroke at 19px keeps the open orbit crisp inside the 28px tile. */
+.sidebar-brand-mark .panda-mark g { stroke-width: 2.9; }
 .sidebar-workspace { gap: 8px; }
-.sidebar .nav-new-chat { justify-content: flex-start; padding-inline: 10px; background: linear-gradient(110deg, color-mix(in srgb,var(--task-violet) 8%,var(--bg-raised)), var(--bg-raised)); border-color: color-mix(in srgb,var(--task-violet) 24%,var(--border-soft)); box-shadow: var(--shadow-xs); }
-.nav-new-chat > svg { color: var(--task-violet); }
-.nav-key { margin-inline-start: auto; font-size: 10px; }
-.sidebar .history-label { display: flex; align-items: center; gap: 8px; font-weight: 600; }
-.history-label::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+/* The shortcut is a hint, not a label: it keeps its slot in the row (so the
+   row never reflows when it appears) but stays invisible until the pointer or
+   the keyboard is on the control it belongs to. */
+.nav-key {
+  margin-inline-start: auto;
+  font-size: 10px;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+.nav-item:hover .nav-key,
+.nav-search:hover .nav-key,
+.nav-item:focus-visible .nav-key,
+.nav-search:focus-visible .nav-key {
+  opacity: 1;
+}
 .sidebar .sidebar-foot { padding: 4px; border-radius: 11px; background: var(--bg-raised); border: 1px solid var(--border-soft); box-shadow: var(--shadow-xs); }
 @media (hover: none) { .nav-key { display: none; } }

@@ -7,6 +7,7 @@ import {
   type AgentInfo,
   type AgentTestResult,
   type AppSettings,
+  type AppSettingsPatch,
   type MCPSettings,
 } from '../api/client'
 import { useLocaleRerender, useTeamFeature } from '../hooks'
@@ -24,10 +25,15 @@ import { SkillsView } from './skills'
 import {
   AgentExecutionFields,
   ExecutionLimitsSection,
-  ExecutionSaveBar,
   useExecutionSettings,
   type ExecutionController,
 } from './execution-settings'
+import {
+  SettingsActionBar,
+  createSettingsActions,
+  useSettingsActions,
+  type SettingsActionsStore,
+} from './settings-actions'
 import { ItemSettings } from '../components/item-settings'
 import { SystemView } from './system'
 import { shortcuts, shortcutKeys, chordOf, eventChord, saveBindings, useBindings, shortcutIds, type ShortcutID, type Bindings } from '../shortcuts'
@@ -135,7 +141,13 @@ export function SettingsView(props: {
 }) {
   useLocaleRerender()
   const [section, setSection] = useState<Section>(() => normalizeSection(props.initialSection))
+  const mcp = useMCPSettings(section === 'mcp')
   const [query, setQuery] = useState('')
+  // One action bar for the whole sheet: sections publish their pending edits
+  // into this store and the footer subscribes, so 保存/撤销 exist once and
+  // every tab gets them — including the tabs that have nothing to save, where
+  // both stay disabled.
+  const [actions] = useState(createSettingsActions)
   // The endpoint form is opened by the active model's 编辑 button, not by a
   // disclosure at the bottom of the section: "fix my key" should not start
   // with scrolling past the registry to find a summary line.
@@ -230,23 +242,28 @@ export function SettingsView(props: {
           </nav>
         </aside>
 
-        {section === 'agents' ? (
-          <AgentsPane title={t(title)} onClose={props.onClose} />
-        ) : (
-          <section class="settings-pane">
-            <PaneHead title={t(title)} onClose={props.onClose} />
-            <div class="settings-pane-body">
-              {section === 'general' && <GeneralSection onLogout={props.onLogout} />}
-              {section === 'models' && <ModelsSection />}
-              {section === 'shortcuts' && <ShortcutSection />}
-              {section === 'team' && <TeamSection />}
-              {section === 'policy' && <PolicySection />}
-              {section === 'mcp' && <MCPSection />}
-              {section === 'skills' && <SkillsView />}
-              {section === 'system' && <SystemView />}
-            </div>
-          </section>
-        )}
+        <section class="settings-pane">
+          <PaneHead title={t(title)} onClose={props.onClose} />
+          <div class="settings-pane-body">
+            {section === 'general' && <GeneralSection onLogout={props.onLogout} />}
+            {section === 'models' && <ModelsSection />}
+            {section === 'shortcuts' && <ShortcutSection />}
+            {section === 'team' && <TeamSection />}
+            {section === 'policy' && <PolicySection actions={actions} />}
+            {section === 'agents' && <AgentsTab actions={actions} />}
+            {section === 'mcp' && <MCPSection actions={actions} settings={mcp} />}
+            {section === 'skills' && <SkillsView />}
+            {section === 'system' && <SystemView />}
+          </div>
+          {/* One footer for every tab. It lives outside the scrollport — a
+              sticky bar inside the body slices whichever row scrolls under it
+              and leaves the last rows unreadable — and it never unmounts, so
+              the two verbs keep the same place and the same size from tab to
+              tab. */}
+          <footer class="settings-pane-footer">
+            <SettingsActionBar store={actions} />
+          </footer>
+        </section>
       </div>
     </dialog>
   )
@@ -411,11 +428,11 @@ function TeamSection() {
  *  said the same thing three times over.
  *
  *  What is left is the one sentence a reader actually needs — what the
- *  *current* choice does — plus the action bar, which closes the form and
- *  carries the only two verbs. 保存 stays dead until something differs from
- *  what the node holds, so "did that save?" has an answer that is not a
- *  toast you may have missed. */
-function PolicySection() {
+ *  *current* choice does — plus the sheet's action bar, which carries the only
+ *  two verbs. 保存 stays dead until something differs from what the node
+ *  holds, so "did that save?" has an answer that is not a toast you may have
+ *  missed. */
+function PolicySection({ actions }: { actions: SettingsActionsStore }) {
   const [form, setForm] = useState<AppSettings | null>(null)
   /** What the node holds, to tell "edited" from "saved" — and to undo. */
   const [saved, setSaved] = useState<AppSettings | null>(null)
@@ -439,22 +456,16 @@ function PolicySection() {
       .catch(() => setRoster([]))
   }, [])
 
-  if (error && !form) {
-    return (
-      <div class="card settings-card">
-        <h2 class="block-title">{t('settings.policy')}</h2>
-        <p class="gate-error">{error}</p>
-      </div>
-    )
-  }
-  if (!form) return null
-  const current = form
-
-  const dirty = saved ? !samePolicy(current, saved) : false
+  // Both are computed before the early returns: the publish hook below has to
+  // run on every render, a failed load included, or the bar would keep the
+  // previous tab's state.
+  const edits = form && saved ? appPolicyEdits(saved, form) : null
+  const dirty = edits !== null && Object.keys(edits).length > 0
   const badLimits =
-    current.memory_limits.user <= 0 ||
-    current.memory_limits.memory <= 0 ||
-    current.memory_limits.project <= 0
+    form !== null &&
+    (form.memory_limits.user <= 0 ||
+      form.memory_limits.memory <= 0 ||
+      form.memory_limits.project <= 0)
 
   function patch(p: Partial<AppSettings>) {
     setForm((f) => (f ? { ...f, ...p } : f))
@@ -472,21 +483,25 @@ function PolicySection() {
     setNotice('')
   }
 
-  async function save(e: Event) {
-    e.preventDefault()
-    if (saving || badLimits) return
+  async function save() {
+    if (!form || !edits || !dirty || saving || badLimits) return
     setSaving(true)
     setError('')
     try {
-      // sandbox_mode is the write half of the read-only sandbox block; the
-      // rest of that object (backend, active, work_path) is ignored server-side.
-      // Omitted, not defaulted, when the node reported no sandbox block: an
-      // unknown mode must stay unknown rather than save as "off".
-      const next = await api.putAppSettings({
-        ...current,
-        sandbox_mode: current.sandbox?.mode,
+      const next = await api.patchAppSettings(edits)
+      setForm((current) => {
+        if (!current || current === form) return next
+        // Keep only the edits made while the save was pending. Untouched
+        // fields must adopt the node's reply, including saves from other tabs.
+        const { memory_limits, sandbox_mode, ...laterEdits } = appPolicyEdits(form, current)
+        const sandbox = next.sandbox ?? current.sandbox
+        return {
+          ...next,
+          ...laterEdits,
+          memory_limits: { ...next.memory_limits, ...memory_limits },
+          sandbox: sandbox && sandbox_mode !== undefined ? { ...sandbox, mode: sandbox_mode } : next.sandbox,
+        }
       })
-      setForm(next)
       setSaved(next)
       setNotice(t('settings.saved'))
     } catch (err) {
@@ -496,8 +511,43 @@ function PolicySection() {
     }
   }
 
+  function discard() {
+    if (saved) setForm(saved)
+    setNotice('')
+    setError('')
+  }
+
+  useSettingsActions(actions, {
+    dirty,
+    saving,
+    invalid: badLimits ? t('policy.limitsInvalid') : '',
+    // A failed load renders as the card below; only a failed save is the
+    // bar's to report.
+    error: form ? error : '',
+    notice,
+    save: () => void save(),
+    discard,
+  })
+
+  if (error && !form) {
+    return (
+      <div class="card settings-card">
+        <h2 class="block-title">{t('settings.policy')}</h2>
+        <p class="gate-error">{error}</p>
+      </div>
+    )
+  }
+  if (!form) return null
+  const current = form
+
   return (
-    <form class="policy-form" onSubmit={save}>
+    <form
+      class="policy-form"
+      onSubmit={(e) => {
+        e.preventDefault()
+        void save()
+      }}
+    >
       <PolicyGroup title={t('policy.group.inject')}>
         <PolicyRow
           label={t('settings.injection')}
@@ -582,60 +632,27 @@ function PolicySection() {
           <SandboxCard sandbox={current.sandbox} onPick={setSandboxMode} />
         )}
       </PolicyGroup>
-
-      <div class="policy-actions">
-        {error && <p class="gate-error">{error}</p>}
-        {notice && <p class="test-result ok">{notice}</p>}
-        <div class="policy-actions-bar">
-          {/* The live region stays mounted: a screen reader announces changes
-              inside it, and a node inserted with its first text in the same
-              frame is often not announced at all. */}
-          <span
-            class={`policy-actions-state${badLimits ? ' bad' : dirty ? ' dirty' : ''}`}
-            role="status"
-          >
-            {(dirty || badLimits) && (
-              <>
-                <span class="policy-actions-dot" aria-hidden="true" />
-                {badLimits ? t('policy.limitsInvalid') : t('policy.unsaved')}
-              </>
-            )}
-          </span>
-          <button
-            type="button"
-            class="btn ghost"
-            disabled={!dirty || saving}
-            onClick={() => {
-              if (saved) setForm(saved)
-              setNotice('')
-              setError('')
-            }}
-          >
-            {t('policy.discard')}
-          </button>
-          <button class="btn primary" type="submit" disabled={saving || !dirty || badLimits}>
-            {saving ? `${t('common.save')}…` : t('common.save')}
-          </button>
-        </div>
-      </div>
     </form>
   )
 }
 
-/** Both settings objects describe the same editable policy groups. The
- *  sandbox's backend/active/work_path are platform facts and never make the
- *  form dirty; its mode is a policy and does. */
-function samePolicy(a: AppSettings, b: AppSettings) {
-  return (
-    a.injection_model === b.injection_model &&
-    a.tools_policy === b.tools_policy &&
-    a.approval_mode === b.approval_mode &&
-    a.preferred_agents.join('\u0000') === b.preferred_agents.join('\u0000') &&
-    a.memory_limits.user === b.memory_limits.user &&
-    a.memory_limits.memory === b.memory_limits.memory &&
-    a.memory_limits.project === b.memory_limits.project &&
-    (a.sandbox?.mode || 'off') === (b.sandbox?.mode || 'off')
-  )
+function appPolicyEdits(saved: AppSettings, form: AppSettings): AppSettingsPatch {
+  const edits: AppSettingsPatch = {}
+  if (form.injection_model !== saved.injection_model) edits.injection_model = form.injection_model
+  if (form.tools_policy !== saved.tools_policy) edits.tools_policy = form.tools_policy
+  if (form.approval_mode !== saved.approval_mode) edits.approval_mode = form.approval_mode
+  if (form.preferred_agents.join('\u0000') !== saved.preferred_agents.join('\u0000')) {
+    edits.preferred_agents = form.preferred_agents
+  }
+  for (const key of ['user', 'memory', 'project'] as const) {
+    if (form.memory_limits[key] !== saved.memory_limits[key]) {
+      edits.memory_limits ??= {}
+      edits.memory_limits[key] = form.memory_limits[key]
+    }
+  }
+  const mode = form.sandbox?.mode
+  if (mode && mode !== (saved.sandbox?.mode || 'off')) edits.sandbox_mode = mode
+  return edits
 }
 
 /** One topic: a header, and the rows that answer it under it. The header is
@@ -902,12 +919,8 @@ function InstallCopy(props: { text: string }) {
   )
 }
 
-/** The Agents tab is one policy with two owners. Global limits stay in a
- *  section; everything that belongs to a single agent — its two model ids and
- *  its parallel cap — lives inside that agent's own settings disclosure.
- *  One controller keeps dirty tracking, discard and the single PUT intact. */
-/** The sheet's header is shared by the ordinary sections and the agents pane,
- *  which owns a footer and therefore needs a different pane skeleton. */
+/** The sheet's header is shared by every section; the footer that carries the
+ *  two verbs is the sheet's, not the pane's. */
 function PaneHead({ title, onClose }: { title: string; onClose(): void }) {
   return (
     <header class="settings-pane-head">
@@ -925,26 +938,28 @@ function PaneHead({ title, onClose }: { title: string; onClose(): void }) {
   )
 }
 
-/** Agents is the one section with a persistent action bar. It lives outside
- *  the scrollport: a sticky bar inside the body slices whichever row happens
- *  to scroll under it, and the last rows can never be read in full. */
-function AgentsPane({ title, onClose }: { title: string; onClose(): void }) {
+/** The Agents tab is one policy with two owners. Global limits stay in a
+ *  section; everything that belongs to a single agent — its two model ids and
+ *  its parallel cap — lives inside that agent's own settings disclosure.
+ *  One controller keeps dirty tracking, discard and the single PUT intact,
+ *  and publishes them to the sheet's footer. */
+function AgentsTab({ actions }: { actions: SettingsActionsStore }) {
   const ctrl = useExecutionSettings()
+  useSettingsActions(actions, {
+    dirty: ctrl.dirty,
+    saving: ctrl.saving,
+    // A failed load is the section's own problem — the limits block already
+    // says so. Only a failed save belongs in the bar.
+    error: ctrl.form ? ctrl.error : '',
+    notice: ctrl.notice,
+    save: () => void ctrl.save(),
+    discard: ctrl.discard,
+  })
   return (
-    <section class="settings-pane">
-      <PaneHead title={title} onClose={onClose} />
-      <div class="settings-pane-body">
-        <div class="agents-tab">
-          <ExecutionLimitsSection ctrl={ctrl} />
-          <AgentsSection ctrl={ctrl} />
-        </div>
-      </div>
-      {ctrl.form && (
-        <footer class="settings-pane-footer">
-          <ExecutionSaveBar ctrl={ctrl} />
-        </footer>
-      )}
-    </section>
+    <div class="agents-tab">
+      <ExecutionLimitsSection ctrl={ctrl} />
+      <AgentsSection ctrl={ctrl} />
+    </div>
   )
 }
 
@@ -1224,46 +1239,97 @@ function AgentsSection({ ctrl }: { ctrl: ExecutionController }) {
   )
 }
 
-/** MCP servers (Model Context Protocol): one stdio server command. Saving
- *  validates it by actually spawning the server and listing its tools, then
- *  hot-swaps the engine — the agent can call the new tools immediately. */
-function MCPSection() {
-  const [cmd, setCmd] = useState('')
-  const [loaded, setLoaded] = useState(false)
+// The settings sheet owns the draft and the request, so changing sections
+// cannot discard unsaved input or interrupt a save already in progress.
+function useMCPSettings(visible: boolean) {
+  const [draft, setDraft] = useState<string | null>(null)
+  const [saved, setSaved] = useState<MCPSettings | null>(null)
+  const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [error, setError] = useState('')
+  const [loadError, setLoadError] = useState('')
+  const [saveError, setSaveError] = useState('')
   const [notice, setNotice] = useState('')
+  const requesting = useRef(false)
+
+  async function load() {
+    if (requesting.current) return
+    requesting.current = true
+    setLoading(true)
+    try {
+      setSaved(await api.getMCPSettings())
+      setLoadError('')
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : String(err))
+    } finally {
+      requesting.current = false
+      setLoading(false)
+    }
+  }
 
   useEffect(() => {
-    api
-      .getMCPSettings()
-      .then((s: MCPSettings) => {
-        setCmd(s.command)
-        setLoaded(true)
-      })
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
-  }, [])
+    if (visible) void load()
+  }, [visible])
 
-  async function save(e: Event) {
-    e.preventDefault()
-    if (saving) return
+  const command = draft ?? saved?.command ?? ''
+  const dirty = draft !== null && command.trim() !== (saved?.command.trim() ?? '')
+
+  async function save() {
+    if (requesting.current || !dirty) return
+    requesting.current = true
     setSaving(true)
-    setError('')
+    setSaveError('')
     setNotice('')
     try {
-      await api.putMCPSettings({ command: cmd.trim() })
+      const next = await api.putMCPSettings({ command: command.trim() })
+      setDraft((current) => current === draft ? null : current)
+      setSaved(next)
+      setLoadError('')
       setNotice(t('settings.mcpSaved'))
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      setSaveError(err instanceof Error ? err.message : String(err))
     } finally {
+      requesting.current = false
       setSaving(false)
     }
   }
 
-  if (!loaded && !error) return null
+  function discard() {
+    setDraft(null)
+    setSaveError('')
+    setNotice('')
+  }
+
+  function edit(value: string) {
+    setDraft(value)
+    setNotice('')
+  }
+
+  return { command, dirty, saved, loading, saving, loadError, saveError, notice, load, save, discard, edit }
+}
+
+/** Saving validates the stdio command before hot-swapping the engine. */
+function MCPSection({ actions, settings }: { actions: SettingsActionsStore; settings: ReturnType<typeof useMCPSettings> }) {
+  const { command, dirty, saved, loading, saving, loadError, saveError, notice, load, save, discard, edit } = settings
+  useSettingsActions(actions, {
+    dirty: dirty && !loading,
+    saving,
+    error: saveError,
+    notice,
+    busyLabel: t('settings.mcpValidating'),
+    save: () => void save(),
+    discard,
+  })
+
+  if (!saved && !loadError) return null
 
   return (
-    <form class="card settings-card mcp-card" onSubmit={save}>
+    <form
+      class="card settings-card mcp-card"
+      onSubmit={(e) => {
+        e.preventDefault()
+        void save()
+      }}
+    >
       <div class="field-group">
         <label for="mcp-command">{t('settings.mcpCommand')}</label>
         <input
@@ -1271,21 +1337,19 @@ function MCPSection() {
           class="input mono"
           type="text"
           placeholder={t('settings.mcpPlaceholder')}
-          value={cmd}
-          onInput={(e) => {
-            setCmd((e.target as HTMLInputElement).value)
-            setNotice('')
-          }}
+          value={command}
+          onInput={(e) => edit(e.currentTarget.value)}
         />
         <p class="hint">{t('settings.mcpHelp')}</p>
       </div>
-      {error && <p class="gate-error">{error}</p>}
-      {notice && <p class="test-result ok">{notice}</p>}
-      <div class="settings-actions">
-        <button class="btn primary" type="submit" disabled={saving}>
-          {saving ? t('settings.mcpValidating') : t('common.save')}
-        </button>
-      </div>
+      {loadError && (
+        <>
+          <p class="gate-error" role="alert">{loadError}</p>
+          <button type="button" class="btn" onClick={() => void load()} disabled={loading || saving}>
+            {t('common.retry')}
+          </button>
+        </>
+      )}
     </form>
   )
 }

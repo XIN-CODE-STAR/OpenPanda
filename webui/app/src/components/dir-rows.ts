@@ -5,6 +5,7 @@
 // can be tested without a DOM — the component only paints what these return.
 
 import { lastPathSegment } from './dir-utils.ts'
+import type { DirectoryListing } from '../api/client.ts'
 
 /** One directory the console has already used. A directory only means
  *  something to the panel once a project points at it (`projectForDir` makes
@@ -25,9 +26,16 @@ export interface WorkdirRow {
   create?: boolean
 }
 
-/** Windows and POSIX both: a trailing separator is not a different directory,
- *  and the compare is the console's own (see `projectForDir`). */
-export const normDir = (p: string) => p.replace(/[\\/]+$/, '').toLowerCase()
+/** Windows and POSIX both: a trailing separator is not a different directory.
+ *  Case is another matter — a Windows path is case-insensitive, a POSIX one is
+ *  not, and folding both made `/w/New` and `/w/new` one row: the cursor landed
+ *  on the wrong folder and the "create" row disappeared. */
+export const normDir = (p: string) => {
+  const trimmed = trimPath(p)
+  return /^[A-Za-z]:/.test(trimmed) || (!trimmed.startsWith('/') && trimmed.includes('\\'))
+    ? trimmed.replaceAll('/', '\\').toLowerCase()
+    : trimmed
+}
 
 /** How a starred folder is identified: the same rule the server stores by
  *  (`favoriteKey` in internal/projects), so "D:\X\a" and "d:\x\a\" are one
@@ -87,30 +95,74 @@ export function groupRows(rows: WorkdirRow[], favorites: string[], now = Date.no
  *  argument; a picker that only lists projects cannot. */
 export function pathLike(q: string): boolean {
   const s = q.trim()
-  return /[\\/]/.test(s) || /^[A-Za-z]:$/.test(s)
+  // A path starts at a root: a separator, `~`, or a drive. `foo/bar` is a
+  // search word, not a path — the server would resolve it against its own
+  // working directory, which is not the directory the person is looking at.
+  return /^(?:[\\/]|(?:~|[A-Za-z]:)(?:[\\/]|$))/.test(s)
+}
+
+interface PathQuery {
+  base: string
+  prefix: string
+  self: string
+}
+
+function trimPath(path: string): string {
+  return path.replace(/[\\/]+$/, '') || path.charAt(0)
 }
 
 /** `D:\X\proj` → parent `D:\X`, prefix `proj`; `D:\X\` → parent `D:\X`, an
  *  empty prefix, and the folder itself offered as the first row. */
-export function splitPathQuery(q: string): { base: string; prefix: string; self: string } | null {
+export function splitPathQuery(q: string): PathQuery | null {
   const raw = q.trim()
   if (!raw) return null
-  const trailing = /[\\/]$/.test(raw)
-  const trimmed = raw.replace(/[\\/]+$/, '')
-  if (!trimmed) return null
-  if (trailing) return { base: driveRoot(trimmed), prefix: '', self: driveRoot(trimmed) }
-  const cut = Math.max(trimmed.lastIndexOf('\\'), trimmed.lastIndexOf('/'))
+  if (raw === '~' || /[\\/]$/.test(raw)) {
+    const self = driveRoot(trimPath(raw))
+    return { base: self, prefix: '', self }
+  }
+  const cut = Math.max(raw.lastIndexOf('\\'), raw.lastIndexOf('/'))
   // `C:` on its own: no separator to cut at, but the drive is a place to look.
   // Anything else without a separator is a search word, not a path.
   if (cut < 0) {
-    return /^[A-Za-z]:$/.test(trimmed) ? { base: driveRoot(trimmed), prefix: '', self: '' } : null
+    return /^[A-Za-z]:$/.test(raw) ? { base: driveRoot(raw), prefix: '', self: '' } : null
   }
-  return { base: driveRoot(trimmed.slice(0, cut)), prefix: trimmed.slice(cut + 1), self: '' }
+  // `/usr` cuts at 0: the base is the root, not the empty string. An empty
+  // base means "no path" to the server, which answers with the home directory,
+  // and the prefix filter then drops every row.
+  const head = raw.slice(0, cut)
+  const base = head === '' ? raw[0]! : driveRoot(head)
+  return { base, prefix: raw.slice(cut + 1), self: '' }
 }
 
 /** `D:` is not a folder — Windows reads it as "the current directory on D:". */
 export function driveRoot(p: string): string {
   return /^[A-Za-z]:$/.test(p) ? p + '\\' : p
+}
+
+/** Suggest the literal match before case-insensitive prefix completions. */
+export function pathQueryRows(query: string, parts: PathQuery, listing: DirectoryListing): WorkdirRow[] {
+  const prefix = parts.prefix.toLowerCase()
+  // Older panels can return null for an empty directory.
+  const rows: WorkdirRow[] = (listing.directories ?? [])
+    .filter((entry) => entry.name.toLowerCase().startsWith(prefix))
+    .map((entry) => ({ name: entry.name, dir: entry.path }))
+  if (parts.self) {
+    const dir = parts.self.startsWith('~') ? listing.current : parts.self
+    rows.unshift({ name: lastPathSegment(dir), dir })
+  } else if (parts.prefix) {
+    const typed = query.trim()
+    const base = listing.current.endsWith(listing.separator)
+      ? listing.current
+      : listing.current + listing.separator
+    const resolved = parts.base.startsWith('~')
+      ? base + parts.prefix
+      : typed
+    const key = normDir(resolved)
+    const exact = rows.findIndex((row) => normDir(row.dir) === key)
+    if (exact > 0) rows.unshift(rows.splice(exact, 1)[0]!)
+    if (exact < 0) rows.push({ name: lastPathSegment(typed), dir: typed, create: true })
+  }
+  return rows
 }
 
 /** What Enter takes in path mode.
@@ -134,8 +186,9 @@ export function pathEnterTarget(
     // `D:` means "the current directory on D:" and Windows resolves it to
     // wherever the last shell left that drive. The listing offers `D:\` for
     // the same input, so the fallback must too.
-    const trimmed = q.replace(/[\\/]+$/, '')
-    const typed = trimmed ? driveRoot(trimmed) : q === '/' ? '/' : ''
+    // The home alias needs the node's response before it can be selected.
+    if (q.startsWith('~')) return null
+    const typed = driveRoot(trimPath(q))
     return typed ? { name: lastPathSegment(typed), dir: typed } : null
   }
   return rows[cursor] ?? rows[0] ?? null

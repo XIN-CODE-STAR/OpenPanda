@@ -56,8 +56,11 @@ export interface FsReadResult {
  *  manager can arrive with an empty type. */
 export function isImageFile(file: { type?: string; name?: string }): boolean {
   const type = (file.type ?? '').toLowerCase()
-  if (type) return type.startsWith('image/')
-  return /\.(png|jpe?g|gif|webp|bmp|avif|svg)$/.test((file.name ?? '').toLowerCase())
+  if (type) return type.startsWith('image/') && type !== 'image/svg+xml'
+  // SVG is markup, and /api/fs/image refuses it (a script-bearing document
+  // must not come back under the file's own content type). Counting it here
+  // gave the pill a magnifier that silently did nothing.
+  return /\.(png|jpe?g|gif|webp|bmp|avif)$/.test((file.name ?? '').toLowerCase())
 }
 
 /** Extensions whose bytes must never be inlined into a prompt. A ref to one of
@@ -103,7 +106,9 @@ export function fileLabel(path: string): string {
 export function withAttachments(text: string, mentions: string[]): string {
   const uniq = [...new Set(mentions.filter(Boolean))]
   if (uniq.length === 0) return text
-  const block = ['', '', 'Attached files (read them from the workspace):', ...uniq.map((m) => `- @${m}`)].join('\n')
+  // Quote paths that the bare-token parser would split or trim.
+  const refs = uniq.map((path) => /[\s"]|[.,;:!?)]$/.test(path) ? JSON.stringify(path) : path)
+  const block = ['', '', 'Attached files (read them from the workspace):', ...refs.map((ref) => `- @${ref}`)].join('\n')
   const body = text.trim()
   return body ? body + block : block.trimStart()
 }
@@ -120,11 +125,11 @@ export async function expandFileRefs(
   const blocks: string[] = []
   const attached: string[] = []
   const seen = new Set<string>()
-  for (const field of text.split(/\s+/)) {
-    if (!field.startsWith('@')) continue
-    const raw = field.slice(1).replace(/[.,;:!?)]+$/, '')
-    if (!raw || seen.has(raw)) continue
+  for (const [, token] of text.matchAll(/(?:^|\s)@("(?:[^"\\]|\\.)*"|[^\s"]\S*)/g)) {
+    if (!token) continue
     try {
+      const raw = token.startsWith('"') ? JSON.parse(token) as string : token.replace(/[.,;:!?)]+$/, '')
+      if (!raw || seen.has(raw)) continue
       const f = await read(raw)
       seen.add(raw)
       attached.push(raw)

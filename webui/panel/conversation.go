@@ -76,6 +76,9 @@ func (h *handler) conversationControl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		if req.Action == "confirm" && errors.Is(err, conversation.ErrWaiting) {
+			w.Header().Set("X-OpenPanda-Error", "plan_implementation_unsettled")
+		}
 		writeConversationError(w, err)
 		return
 	}

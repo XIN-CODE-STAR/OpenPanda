@@ -1,19 +1,19 @@
 # Conversation planning and persistent goals
 
-Web, interactive CLI and TUI share one conversation service. The Web composer has a Plan button and opens each new proposal in the side dock as rendered Markdown. The proposal card above the composer has two doors: clicking the card reads the plan, clicking **Review plan** opens the same pane and a dialog for requesting changes or starting implementation. Leaving Plan never discards the proposal — the text stays readable and approvable until it is confirmed. Entering Plan again starts a new planning mode and retires the previous proposal; the immutable copy remains in the proposal archive. Click **Goal** in the chat toolbar to write an objective in the right sidebar. Start it there, then use the same sidebar to check progress or edit the objective.
+Web, interactive CLI and TUI share one conversation service. Open the proposal card above the Web composer to read the Markdown, request changes, or start implementation in the side pane. You can read and confirm the proposal after leaving Plan. Entering Plan again archives the previous proposal. Click **Goal** in the chat toolbar to create a goal, check progress, edit, pause, or resume.
 
-`/plan` toggles persistent planning. `/plan <description>` enters planning and submits the description. Planning survives subsequent messages, session switches and restarts. It overrides the permission picker with read-only access: mutation tools and implementation dispatch are refused. Exiting planning restores the original permissions.
+Enter `/plan` in the terminal to toggle persistent planning. On the Web, select **Plan** and send a description to enter persistent planning. Enter `/plan <description>` to enter planning and submit the description in one step. Planning survives subsequent messages, session switches and restarts. Tools have read-only access during planning. Exiting planning restores the original permissions.
 
-A complete proposal receives a version. The review dialog offers both outcomes: write what should change (the note becomes the next planning turn and produces a new version), or click **Start implementation** — or enter `/plan confirm <version>` in the terminal. The server accepts the exact current version once. Implementation runs in the current session without creating a goal. The round has no response stream of its own, so it writes its current phase (dispatch, staged plan, device choice, exec, tool, judge, retry, offline, answer) onto the session operation; the conversation state the console already polls carries it, the composer shows it as one line above the box with a **Stop** that reaches that round — instead of a spinner that could equally be a hang. If planning paused an existing goal, **Implement and continue goal** resumes that same goal only after successful implementation and task settlement.
+A complete proposal receives a version. Enter `/plan show` to review the current proposal or `/plan confirm <version>` to approve that version on the Web or in the terminal. Use `/plan -- <description>` for a description starting with a reserved word such as `confirm`. In the Web side pane, you can also request changes to generate a new version or click **Start implementation**. You can confirm the current version once, after any previously confirmed plan in the session has finished or stopped. The Web composer displays the implementation phase or pending question and provides **Stop** for that round. Implementation stays in the current session. A goal paused for planning resumes after successful implementation and task settlement.
 
 `/goal <full objective>` creates and starts a persistent goal. `/goal` opens the editor or displays its state. Web controls and terminal commands use the same service.
 
 | Command | Behavior |
 | --- | --- |
 | `/goal edit <full objective>` | Replace the objective and revoke the old execution generation |
-| `/goal pause` | Prevent the next round; let current work finish |
+| `/goal pause` | Pause continuation and the current model request while retaining dispatched tasks and pending questions |
 | `/goal stop` | Pause continuation and interrupt the current round and descendants |
-| `/goal resume` | Explicitly resume and reset the consecutive blocker counter |
+| `/goal resume` | Resume and reset the consecutive blocker counter. A pending question still needs an answer |
 | `/goal clear` | Remove the current goal, revoke continuation and retain history |
 | `/goal --tokens 100000 <objective>` | Create a goal with an explicit token budget |
 | `/goal --tokens 200000 resume` | Explicitly raise the budget and resume |

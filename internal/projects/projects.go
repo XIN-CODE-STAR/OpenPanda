@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -243,7 +244,42 @@ func ValidateWorkDir(abs string) error {
 			return fmt.Errorf("%w: %s is a system directory", ErrWorkDirTooBroad, clean)
 		}
 	}
+	// Naming a tree *inside* the OS-managed ones is the same statement as
+	// naming the tree itself: `C:\Windows\Temp\x` and `/etc/cron.d/y` are not
+	// projects either. Only the trees that never host one are matched this
+	// way — `C:\Users` and `/var`, `/opt` hold real checkouts, and the home
+	// rule above already refuses the wider ancestors.
+	for _, sys := range systemSubTrees {
+		if withinTree(real, sys) {
+			return fmt.Errorf("%w: %s is inside a system directory (%s)", ErrWorkDirTooBroad, clean, sys)
+		}
+	}
 	return nil
+}
+
+// withinTree reports whether path is root itself or lives under it, comparing
+// whole path components — `/etcetera` is not inside `/etc`. filepath.Rel folds
+// case on Windows and does not on Linux, which is the comparison each platform
+// wants.
+func withinTree(path, root string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// systemSubTrees are the OS-managed trees whose contents are never a project.
+// Kept apart from systemTrees because these are refused by containment, not by
+// name: a work dir may live under C:\Users or /var/www, but never under
+// C:\Windows or /etc.
+var systemSubTrees = []string{
+	"/etc", "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/boot",
+	"/dev", "/proc", "/sys", "/System", "/Library", "/private/etc", "/private/var",
+	`C:\Windows`, `C:\Program Files`, `C:\Program Files (x86)`, `C:\ProgramData`,
 }
 
 // systemTrees are the OS-managed trees that are never a project: naming one as
@@ -661,7 +697,14 @@ func (s *Store) SetFavorite(path string, on bool) ([]string, error) {
 // favoriteKey is the identity of a starred folder: cleaned, trimmed and
 // case-folded, which is what "the same directory" means to the console.
 func favoriteKey(p string) string {
-	return strings.ToLower(filepath.Clean(strings.TrimSpace(p)))
+	clean := filepath.Clean(strings.TrimSpace(p))
+	// A Windows path is case-insensitive, a POSIX one is not: folding
+	// unconditionally made /data/Reports and /data/reports one star, and
+	// starring the second silently dropped the first.
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(clean)
+	}
+	return clean
 }
 
 // writeFavorites replaces the row. An empty list deletes it rather than storing

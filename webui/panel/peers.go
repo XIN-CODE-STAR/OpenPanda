@@ -35,13 +35,14 @@ var (
 // directory row its address currently resolves to (when the daemon has seen
 // the peer).
 type peerJSON struct {
-	Addr     string `json:"addr"`
-	Trust    string `json:"trust"`
-	NodeID   string `json:"node_id,omitempty"`
-	Name     string `json:"name,omitempty"`
-	Status   string `json:"status,omitempty"`
-	Online   bool   `json:"online"`
-	LastSeen string `json:"last_seen,omitempty"`
+	Addr      string `json:"addr"`
+	Trust     string `json:"trust"`
+	NodeID    string `json:"node_id,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Status    string `json:"status,omitempty"`
+	Online    bool   `json:"online"`
+	LastSeen  string `json:"last_seen,omitempty"`
+	OfflineID string `json:"offline_id,omitempty"`
 }
 
 // peersView is GET /api/peers. HasSecret tells the card whether adding a peer
@@ -97,6 +98,9 @@ func (h *handler) listPeers(w http.ResponseWriter, r *http.Request) {
 				}
 				row.Status = n.Status
 				row.Online = n.Status == "online"
+				if !row.Online {
+					row.OfflineID = n.OfflineID
+				}
 				if n.LastSeen > 0 {
 					row.LastSeen = time.Unix(n.LastSeen, 0).UTC().Format(time.RFC3339)
 				}

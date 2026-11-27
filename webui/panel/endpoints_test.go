@@ -516,6 +516,107 @@ func TestSessionWorktreeRevert(t *testing.T) {
 	}
 }
 
+func TestSessionWorktreeRevertConflictLeavesCheckoutClean(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+	for _, scenario := range []string{"conflict", "manual revert", "independent later commit"} {
+		t.Run(scenario, func(t *testing.T) {
+			repo := newPanelGitRepo(t)
+			git := func(args ...string) (string, error) {
+				t.Helper()
+				cmd := exec.Command("git", append([]string{"-C", repo, "-c", "user.name=T", "-c", "user.email=t@t"}, args...)...)
+				out, err := cmd.CombinedOutput()
+				return strings.TrimSpace(string(out)), err
+			}
+			run := func(args ...string) string {
+				t.Helper()
+				out, err := git(args...)
+				if err != nil {
+					t.Fatalf("git %v: %v %s", args, err, out)
+				}
+				return out
+			}
+			put := func(dir, name, body string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(body+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			const file = "same.txt"
+			put(repo, file, "base")
+			run("add", file)
+			run("commit", "-m", "base")
+			wt, err := sessions.OpenWorktrees(repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := New(Deps{Store: newTestStore(t), Sessions: sessions.NewStore(t.TempDir()), Worktrees: wt,
+				StaticDir: t.TempDir(), Token: testToken})
+			code, out := doJSON(t, h, jsonReq(http.MethodPost, "/api/sessions", `{"title":"document edit"}`))
+			id, _ := out["id"].(string)
+			worktree, _ := out["worktree"].(string)
+			if code != http.StatusOK || id == "" || worktree == "" {
+				t.Fatalf("create: %d %v", code, out)
+			}
+			put(worktree, file, "session edit")
+			path := "/api/sessions/" + id
+			if code, out := doJSON(t, h, jsonReq(http.MethodPost, path+"/merge", "{}")); code != http.StatusOK {
+				t.Fatalf("merge: %d %v", code, out)
+			}
+			merged := run("rev-parse", "HEAD")
+			laterFile := file
+			if scenario == "independent later commit" {
+				laterFile = "other.txt"
+			}
+			put(repo, laterFile, "later edit")
+			run("add", laterFile)
+			run("commit", "-m", "later edit")
+			head := run("rev-parse", "HEAD")
+			if scenario == "manual revert" {
+				if msg, err := git("revert", "--no-edit", "-m", "1", merged); err == nil || !strings.Contains(msg, "CONFLICT") {
+					t.Fatalf("manual revert: %v %s", err, msg)
+				}
+				put(repo, file, "later edit")
+				run("add", file)
+				if run("rev-parse", "--verify", "REVERT_HEAD") != merged {
+					t.Fatal("manual revert is no longer active")
+				}
+			}
+			if status := run("status", "--porcelain"); status != "" {
+				t.Fatalf("expected a clean index and worktree before request: %q", status)
+			}
+			code, out = doJSON(t, h, jsonReq(http.MethodPost, path+"/revert", "{}"))
+			revertHead, revertErr := git("rev-parse", "--verify", "REVERT_HEAD")
+			if status := run("status", "--porcelain"); status != "" {
+				t.Errorf("revert left a dirty worktree: %q", status)
+			}
+			if data, err := os.ReadFile(filepath.Join(repo, laterFile)); err != nil || strings.TrimSpace(string(data)) != "later edit" {
+				t.Errorf("later edit changed: %q, %v", data, err)
+			}
+			if scenario == "independent later commit" {
+				if code != http.StatusOK || out["reverted"] != true || revertErr == nil || run("rev-parse", "HEAD^") != head {
+					t.Fatalf("independent revert: %d %v, REVERT_HEAD=%q %v", code, out, revertHead, revertErr)
+				}
+				return
+			}
+			if code != http.StatusConflict || run("rev-parse", "HEAD") != head ||
+				run("rev-parse", "--verify", "refs/openpanda/merged/"+id) != merged {
+				t.Errorf("conflict response or rollback ref: %d %v", code, out)
+			}
+			if scenario == "manual revert" {
+				if revertErr != nil || revertHead != merged {
+					t.Errorf("existing manual revert lost: %q %v", revertHead, revertErr)
+				}
+			} else if revertErr == nil {
+				t.Errorf("new failed revert left REVERT_HEAD=%q", revertHead)
+			}
+		})
+	}
+}
+
 // TestTaskRevertEndpoint exercises POST /api/tasks/{id}/revert: the run's git
 // baseline rolls back tracked edits and post-baseline files, and a second
 // revert answers 404 once the baseline ref is consumed.
@@ -668,6 +769,13 @@ func TestModelSettingsToConfigMerge(t *testing.T) {
 		Auth:           "bearer",
 		Params:         map[string]any{"temperature": 0.5},
 		Headers:        map[string]string{"X-Tenant": "blue"},
+		// A row may read its credential from elsewhere; the form edits only
+		// the inline key, and UpdateModelSection deletes an empty key_* from
+		// the `model:` section, so these must survive a sparse save.
+		KeyEnv:    "MINIMAX_KEY",
+		KeyRef:    "ccswitch:claude:work",
+		KeyScheme: "bearer",
+		Source:    "ccswitch",
 	}
 
 	// A sparse request (form save) must keep every field the form does not
@@ -678,6 +786,9 @@ func TestModelSettingsToConfigMerge(t *testing.T) {
 	}
 	if got.Thinking != "on" || got.ThinkingBudget != 8192 || got.ContextWindow != 1000000 || got.MaxRetries != 3 || !got.NoAuth {
 		t.Fatalf("sparse save wiped tuning fields: %+v", got)
+	}
+	if got.KeyEnv != "MINIMAX_KEY" || got.KeyRef != "ccswitch:claude:work" || got.KeyScheme != "bearer" || got.Source != "ccswitch" {
+		t.Fatalf("sparse save wiped the credential reference: %+v", got)
 	}
 	// The gateway has no form control: a save must not re-arm what the YAML
 	// turned off.
@@ -1485,5 +1596,289 @@ func TestRemoveNode(t *testing.T) {
 	// Unknown id: 404.
 	if code, _ := doJSON(t, h, authedReq(http.MethodDelete, "/api/nodes/ghost", nil)); code != http.StatusNotFound {
 		t.Fatalf("unknown remove = %d, want 404", code)
+	}
+}
+
+func TestMCPSettingsPersistenceFailureKeepsLiveServer(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if runtime.GOOS == "windows" {
+		python, err = exec.LookPath("python.exe")
+	}
+	if err != nil {
+		t.Skip("Python is needed for the local MCP test server")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fixture.py")
+	if err := os.WriteFile(script, []byte(`import json, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" not in request:
+        continue
+    if request["method"] == "initialize":
+        result = {"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}
+    else:
+        result = {"tools":[]}
+    print(json.dumps({"jsonrpc":"2.0","id":request["id"],"result":result}), flush=True)
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	h, cfg, path := newEnginePanel(t)
+	command := `"` + filepath.ToSlash(python) + `" "` + filepath.ToSlash(script) + `"`
+	save := func(command string) int {
+		t.Helper()
+		raw, err := json.Marshal(mcpSettingsJSON{Command: command})
+		if err != nil {
+			t.Fatal(err)
+		}
+		code, out := doJSON(t, h, jsonReq(http.MethodPut, "/api/settings/mcp", string(raw)))
+		if code == 400 {
+			t.Logf("MCP validation: %v", out)
+		}
+		return code
+	}
+	if code := save(command); code != 200 {
+		t.Fatalf("configure fixture: HTTP %d", code)
+	}
+	valid, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("mcp: ["), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := save(""); code != 500 {
+		t.Fatalf("expected persistence error, got HTTP %d", code)
+	}
+	_, result := doJSON(t, h, authedReq(http.MethodGet, "/api/settings/mcp", nil))
+	if result["command"] != command || cfg.MCP.Command != command {
+		t.Fatalf("failed save changed the live or loaded command: %v", result)
+	}
+	if err := os.WriteFile(path, valid, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := save(""); code != 200 {
+		t.Fatalf("retry after restoring config: HTTP %d", code)
+	}
+	_, result = doJSON(t, h, authedReq(http.MethodGet, "/api/settings/mcp", nil))
+	if result["command"] != "" || cfg.MCP.Command != "" {
+		t.Fatalf("successful save did not disable the live command: %v", result)
+	}
+}
+
+func TestSessionMergePreservesAlreadyPendingManualMerge(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+	for _, scenario := range []string{"session conflict", "existing manual conflict", "rerere conflict"} {
+		t.Run(scenario, func(t *testing.T) {
+			manual := scenario == "existing manual conflict"
+			rerere := scenario == "rerere conflict"
+			repo := newPanelGitRepo(t)
+			git := func(args ...string) (string, error) {
+				t.Helper()
+				cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+				out, err := cmd.CombinedOutput()
+				return string(out), err
+			}
+			run := func(args ...string) string {
+				t.Helper()
+				out, err := git(args...)
+				if err != nil {
+					t.Fatalf("git %v: %v, %s", args, err, out)
+				}
+				return out
+			}
+			put := func(path, body string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(path, "conflict.txt"), []byte(body+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			commit := func(label string) {
+				t.Helper()
+				run("add", "conflict.txt")
+				run("-c", "user.name=Fixture", "-c", "user.email=fixture@invalid", "commit", "-m", label)
+			}
+
+			put(repo, "base")
+			commit("base")
+			if manual || rerere {
+				run("switch", "-c", "incoming")
+				put(repo, "session change")
+				commit("incoming")
+				run("switch", "main")
+			}
+			worktrees, err := sessions.OpenWorktrees(repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := New(Deps{Store: newTestStore(t), Sessions: sessions.NewStore(t.TempDir()),
+				Worktrees: worktrees, StaticDir: t.TempDir(), Token: testToken})
+			code, out := doJSON(t, h, jsonReq(http.MethodPost, "/api/sessions", `{"title":"isolated merge"}`))
+			id, _ := out["id"].(string)
+			worktree, _ := out["worktree"].(string)
+			if code != http.StatusOK || id == "" || worktree == "" {
+				t.Fatalf("create session: %d %v", code, out)
+			}
+
+			put(worktree, "session change")
+			put(repo, "main")
+			commit("main")
+			if rerere {
+				run("config", "rerere.enabled", "true")
+				run("config", "rerere.autoupdate", "true")
+			}
+			if manual || rerere {
+				result, err := git("-c", "user.name=Fixture", "-c", "user.email=fixture@invalid", "merge", "incoming")
+				if err == nil || !strings.Contains(result, "CONFLICT") {
+					t.Fatalf("expected manual conflict: %v %s", err, result)
+				}
+				put(repo, "prepared resolution")
+				run("add", "conflict.txt")
+				if rerere {
+					run("rerere")
+					run("merge", "--abort")
+				}
+			}
+
+			head := run("rev-parse", "HEAD")
+			staged := run("diff", "--cached", "--", "conflict.txt")
+			code, out = doJSON(t, h, jsonReq(http.MethodPost, "/api/sessions/"+id+"/merge", "{}"))
+			if code != http.StatusConflict {
+				t.Errorf("merge response: %d %v", code, out)
+			}
+			if run("rev-parse", "HEAD") != head {
+				t.Error("failed merge moved HEAD")
+			}
+			_, pendingErr := git("rev-parse", "-q", "--verify", "MERGE_HEAD")
+			file, err := os.ReadFile(filepath.Join(repo, "conflict.txt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "main"
+			if manual {
+				want = "prepared resolution"
+			}
+			if (pendingErr == nil) != manual || run("diff", "--cached", "--", "conflict.txt") != staged ||
+				strings.TrimSpace(string(file)) != want {
+				t.Fatalf("merge pending=%v, file=%q, want pending=%v and %q", pendingErr == nil, file, manual, want)
+			}
+			if rerere {
+				result, err := git("-c", "user.name=Fixture", "-c", "user.email=fixture@invalid", "merge", "incoming")
+				if err == nil || run("ls-files", "--unmerged") != "" ||
+					strings.TrimSpace(run("show", ":conflict.txt")) != "prepared resolution" {
+					t.Fatalf("manual merge did not reuse and stage the recorded resolution: %v %s", err, result)
+				}
+				run("merge", "--abort")
+			}
+		})
+	}
+}
+
+func TestSessionMergePreservesPausedGitOperations(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+	for _, target := range []string{"checkout", "session"} {
+		for _, operation := range []string{"revert", "cherry-pick", "rebase"} {
+			t.Run(target+"/"+operation, func(t *testing.T) {
+				repo := newPanelGitRepo(t)
+				git := func(dir string, args ...string) (string, error) {
+					t.Helper()
+					cmd := exec.Command("git", append([]string{"-C", dir, "-c", "user.name=T", "-c", "user.email=t@t"}, args...)...)
+					out, err := cmd.CombinedOutput()
+					return strings.TrimSpace(string(out)), err
+				}
+				run := func(dir string, args ...string) string {
+					t.Helper()
+					out, err := git(dir, args...)
+					if err != nil {
+						t.Fatalf("git %v: %v %s", args, err, out)
+					}
+					return out
+				}
+				put := func(dir, file, body string) {
+					t.Helper()
+					if err := os.WriteFile(filepath.Join(dir, file), []byte(body+"\n"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				commit := func(dir, body string) string {
+					t.Helper()
+					put(dir, "conflict.txt", body)
+					run(dir, "add", "conflict.txt")
+					run(dir, "commit", "-m", body)
+					return run(dir, "rev-parse", "HEAD")
+				}
+				base := commit(repo, "base")
+				run(repo, "switch", "-c", "incoming")
+				incoming := commit(repo, "incoming")
+				run(repo, "switch", "main")
+				worktrees, err := sessions.OpenWorktrees(repo)
+				if err != nil {
+					t.Fatal(err)
+				}
+				h := New(Deps{Store: newTestStore(t), Sessions: sessions.NewStore(t.TempDir()),
+					Worktrees: worktrees, StaticDir: t.TempDir(), Token: testToken})
+				code, out := doJSON(t, h, jsonReq(http.MethodPost, "/api/sessions", `{"title":"paused operation"}`))
+				id, _ := out["id"].(string)
+				worktree, _ := out["worktree"].(string)
+				if code != http.StatusOK || id == "" || worktree == "" {
+					t.Fatalf("create session: %d %v", code, out)
+				}
+				dir := repo
+				if target == "session" {
+					dir = worktree
+				}
+				commit(dir, "current")
+				args := []string{operation, incoming}
+				marker := strings.ToUpper(strings.ReplaceAll(operation, "-", "_")) + "_HEAD"
+				if operation == "rebase" {
+					args = []string{"-c", "rebase.backend=merge", "rebase", "--onto", incoming, base}
+					marker = "rebase-merge"
+				}
+				if msg, err := git(dir, args...); err == nil || !strings.Contains(msg, "CONFLICT") {
+					t.Fatalf("expected %s to pause: %v %s", operation, err, msg)
+				}
+				// Resolve back to the current HEAD so the manually paused
+				// operation is the only reason to refuse the app merge.
+				put(dir, "conflict.txt", run(dir, "show", "HEAD:conflict.txt"))
+				run(dir, "add", "conflict.txt")
+				if status := run(dir, "status", "--porcelain"); status != "" {
+					t.Fatalf("paused operation has a dirty index or files: %q", status)
+				}
+				put(worktree, "session.txt", "session change")
+				gitDir := run(dir, "rev-parse", "--absolute-git-dir")
+				markerPath := filepath.Join(gitDir, marker)
+				if _, err := os.Stat(markerPath); err != nil {
+					t.Fatal(err)
+				}
+				checkoutHead, worktreeHead := run(repo, "rev-parse", "HEAD"), run(worktree, "rev-parse", "HEAD")
+				path := "/api/sessions/" + id + "/merge"
+				code, out = doJSON(t, h, jsonReq(http.MethodPost, path, "{}"))
+				if code != http.StatusConflict {
+					t.Errorf("merge during %s: %d %v", operation, code, out)
+				}
+				if _, err := os.Stat(markerPath); err != nil {
+					t.Errorf("paused operation no longer exists: %v", err)
+				}
+				if run(repo, "rev-parse", "HEAD") != checkoutHead || run(worktree, "rev-parse", "HEAD") != worktreeHead ||
+					run(worktree, "status", "--porcelain") != "?? session.txt" {
+					t.Fatalf("failed merge modified the checkout or the session")
+				}
+				run(dir, operation, "--abort")
+				if code, out := doJSON(t, h, jsonReq(http.MethodPost, path, "{}")); code != http.StatusOK {
+					t.Fatalf("merge after abort: %d %v", code, out)
+				}
+				if data, err := os.ReadFile(filepath.Join(repo, "session.txt")); err != nil || strings.TrimSpace(string(data)) != "session change" {
+					t.Fatalf("merged file: %q %v", data, err)
+				}
+			})
+		}
 	}
 }

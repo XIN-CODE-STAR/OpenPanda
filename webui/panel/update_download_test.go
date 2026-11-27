@@ -73,7 +73,12 @@ func TestBackgroundUpdateSurvivesRequestCancel(t *testing.T) {
 		return s.Stage == updater.StageDownloading && s.DownloadedBytes == 4 && s.TotalBytes == 8
 	})
 	start()
-	h.cancelUpdate(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/update/cancel", nil))
+	for i := 0; i < 2; i++ {
+		h.cancelUpdate(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/update/cancel", nil))
+		if s := manager.Status(); s.Stage != updater.StageAvailable || s.Latest != "9.0.0" || s.DownloadedBytes != 0 {
+			t.Fatalf("cancel %d lost the available update: %+v", i+1, s)
+		}
+	}
 	start()
 	select {
 	case <-stopped:

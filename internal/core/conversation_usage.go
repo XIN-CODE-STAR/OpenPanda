@@ -9,28 +9,28 @@ import (
 	"time"
 )
 
-// Task completion may become visible before the wire handler records usage.
-// In the metric insert's transaction, charge any already-settled goal ledgers;
-// a concurrent settlement either sees the inserted metric or precedes this
-// adjustment. Unsettled ledgers continue to use their ordinary recursive sum.
-func chargeSettledGoalMetric(ctx context.Context, tx *sql.Tx, taskID string, tokens int64) error {
-	rows, err := tx.QueryContext(ctx, `WITH RECURSIVE ancestors(id,parent_id) AS (
- SELECT task_id,parent_id FROM tasks WHERE task_id=?
- UNION SELECT t.task_id,t.parent_id FROM tasks t JOIN ancestors a ON t.task_id=a.parent_id
- ) UPDATE conversation_goal_rounds SET task_tokens=task_tokens+?
- WHERE settled=1 AND round_id IN (SELECT a.round_id FROM ask_round_tasks a JOIN ancestors p ON p.id=a.task_id)
- RETURNING goal_id`, taskID, tokens)
+// Record usage on the ledger independently of the board row. Settlement
+// charges accumulated usage, and metrics arriving afterward charge the goal
+// in the same transaction as the ledger increment.
+func chargeGoalMetric(ctx context.Context, tx *sql.Tx, taskID string, tokens int64) error {
+	rows, err := tx.QueryContext(ctx, askRoundAncestrySQL+`
+ UPDATE conversation_goal_rounds SET task_tokens=task_tokens+?
+ WHERE round_id IN (SELECT id FROM rounds)
+ RETURNING goal_id,settled`, taskID, tokens)
 	if err != nil {
 		return err
 	}
 	deltas := map[string]int64{}
 	for rows.Next() {
 		var id string
-		if err = rows.Scan(&id); err != nil {
+		var settled bool
+		if err = rows.Scan(&id, &settled); err != nil {
 			rows.Close()
 			return err
 		}
-		deltas[id] += tokens
+		if settled {
+			deltas[id] += tokens
+		}
 	}
 	err = rows.Err()
 	rows.Close()

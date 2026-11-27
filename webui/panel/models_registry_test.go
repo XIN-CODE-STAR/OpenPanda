@@ -8,7 +8,10 @@ package panel
 // same vendor is refused instead of persisted.
 
 import (
+	"database/sql"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -17,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/Xustalis/OpenPanda/internal/config"
+	"github.com/Xustalis/OpenPanda/internal/localmodels"
 	"gopkg.in/yaml.v3"
 )
 
@@ -110,6 +114,74 @@ func TestAddModelKeepsASecondAccountSideBySide(t *testing.T) {
 	keys := cfg.Models[0].APIKey + " " + cfg.Models[1].APIKey
 	if !strings.Contains(keys, "sk-first") || !strings.Contains(keys, "sk-second") {
 		t.Fatalf("one account overwrote the other: keys = %q", keys)
+	}
+}
+
+func TestModelNoAuthClearsCredentialsAndAllowsKnownProviderRelay(t *testing.T) {
+	for _, storage := range []string{"env", "ref", "subscription", "inline"} {
+		t.Run(storage, func(t *testing.T) {
+			t.Setenv("PANDA_PANEL_TEST_KEY", "synthetic-key")
+			h, path := newModelPanel(t, func(c *config.Config) {
+				m := config.ModelConfig{Name: "relay", Provider: "custom", BaseURL: "http://127.0.0.1:18701/v1", Model: "demo", APIType: config.APITypeOpenAI}
+				switch storage {
+				case "env":
+					m.KeyEnv = "PANDA_PANEL_TEST_KEY"
+				case "ref":
+					m.KeyRef = "ccswitch:claude:fixture"
+					m.KeyScheme = "bearer"
+				case "subscription":
+					m.Auth = "openai-codex"
+				case "inline":
+					m.APIKey = "synthetic-key"
+				}
+				c.Model = m
+				c.Models = []config.ModelConfig{m}
+			})
+			code, out := doJSON(t, h, jsonReq(http.MethodPut, "/api/models/relay",
+				`{"model":"demo","no_auth":true}`))
+			if code != http.StatusOK || out["no_auth"] != true {
+				t.Fatalf("no-auth update = %d %v", code, out)
+			}
+			cfg := readConfig(t, path)
+			for _, m := range append(cfg.Models, cfg.Model) {
+				if !m.NoAuth || m.APIKey != "" || m.KeyEnv != "" || m.KeyRef != "" || m.KeyScheme != "" || m.Auth != "" {
+					t.Fatalf("credential survived no-auth save for %s", storage)
+				}
+			}
+		})
+	}
+	h, path := newModelPanel(t, nil)
+	code, out := doJSON(t, h, jsonReq(http.MethodPost, "/api/models",
+		`{"provider":"deepseek","model":"deepseek-chat","base_url":"http://127.0.0.1:18701/v1","no_auth":true}`))
+	if code != http.StatusOK || out["no_auth"] != true {
+		t.Fatalf("known provider relay = %d %v", code, out)
+	}
+	if cfg := readConfig(t, path); len(cfg.Models) != 1 || !cfg.Models[0].NoAuth || !cfg.Model.NoAuth {
+		t.Fatal("new no-auth relay is missing from the registry or active model")
+	}
+}
+
+func TestImportModelsSkipsLegacyActiveIdentity(t *testing.T) {
+	for _, registered := range []bool{false, true} {
+		h, path := newModelPanel(t, func(c *config.Config) {
+			c.Model = config.ModelConfig{Name: "legacy", Provider: "custom", BaseURL: "https://example.invalid/v1", Model: "demo", APIType: config.APITypeOpenAI, NoAuth: true}
+			if registered {
+				c.Models = []config.ModelConfig{c.Model}
+			}
+		})
+		code, out := doJSON(t, h, jsonReq(http.MethodPost, "/api/models/import",
+			`{"items":[{"provider":"custom","model":"demo","base_url":"https://example.invalid/v1","api_type":"openai","no_auth":true}]}`))
+		if code != http.StatusOK || out["added"] != 0.0 {
+			t.Fatalf("import existing identity = %d %v", code, out)
+		}
+		cfg := readConfig(t, path)
+		want := 0
+		if registered {
+			want = 1
+		}
+		if len(cfg.Models) != want || cfg.Model.Name != "legacy" {
+			t.Fatalf("import changed existing configuration: registry size %d, active alias %q", len(cfg.Models), cfg.Model.Name)
+		}
 	}
 }
 
@@ -384,6 +456,69 @@ func TestUpdateModelRewritesOneRowInPlace(t *testing.T) {
 	}
 }
 
+func TestUpdateModelLeavesRegistryUnchangedWhenConfigWriteFails(t *testing.T) {
+	for _, scenario := range []string{"inactive row", "active row"} {
+		t.Run(scenario, func(t *testing.T) {
+			const oldContext = 8192
+			row := config.ModelConfig{Name: "original", Provider: "custom", APIType: config.APITypeOpenAI,
+				BaseURL: "https://custom.example/v1", Model: "example", APIKey: "fixture-key", ContextWindow: oldContext}
+			active := scenario == "active row"
+			h, path := newModelPanel(t, func(c *config.Config) {
+				c.Models = []config.ModelConfig{row}
+				if active {
+					c.Model = row
+				}
+			})
+			original, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			invalid := "models: ["
+			if active {
+				// A valid document with an invalid active mapping used to allow
+				// the registry persist, then fail during the active model persist.
+				invalid = "model: invalid\n"
+			}
+			if err := os.WriteFile(path, []byte(invalid), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			save := func() (int, map[string]any) {
+				return doJSON(t, h, jsonReq(http.MethodPut, entryURL(row.Name, row.Model, row.BaseURL),
+					`{"alias":"renamed","context_window":16384}`))
+			}
+			if code, out := save(); code != http.StatusInternalServerError {
+				t.Fatalf("failed save: %d %v", code, out)
+			}
+			if data, err := os.ReadFile(path); err != nil || string(data) != invalid {
+				t.Errorf("failed save changed the file: %v", err)
+			}
+			_, out := doJSON(t, h, authedReq(http.MethodGet, "/api/models", nil))
+			models := out["models"].([]any)
+			if len(models) != 1 {
+				t.Fatalf("live registry after failed save: %v", models)
+			}
+			listed := models[0].(map[string]any)
+			if listed["alias"] != row.Name || listed["context_window"] != float64(oldContext) {
+				t.Errorf("failed save changed the live registry: %v", models)
+			}
+			if active && out["active"].(map[string]any)["alias"] != row.Name {
+				t.Errorf("failed save changed the active model: %v", out["active"])
+			}
+			if err := os.WriteFile(path, original, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if code, out := save(); code != http.StatusOK {
+				t.Fatalf("retry: %d %v", code, out)
+			}
+			cfg := readConfig(t, path)
+			if len(cfg.Models) != 1 || cfg.Models[0].Alias() != "renamed" || cfg.Models[0].ContextWindow != 16384 ||
+				(active && (cfg.Model.Alias() != "renamed" || cfg.Model.ContextWindow != 16384)) {
+				t.Fatalf("retry did not persist updated models: %+v, active=%+v", cfg.Models, cfg.Model)
+			}
+		})
+	}
+}
+
 // The edit form paints the model, not the row's provenance or the shape of its
 // credential. Editing a connection rewrites every kept row, so a field the form
 // cannot echo must survive that rewrite: an isolated edit that only fixed the
@@ -430,6 +565,72 @@ func TestUpdateModelKeepsFieldsTheFormNeverShows(t *testing.T) {
 	}
 	if got.ContextWindow != 123456 {
 		t.Fatalf("edited limit did not land: %d", got.ContextWindow)
+	}
+}
+
+// A connection has no record of its own — it is the rows sharing a provider,
+// an endpoint, a dialect and a key — so the name the console paints on the card
+// rides on every one of them. Three ways it has to move: out through the list,
+// through an edit that never mentions it, and back to empty on purpose. Without
+// the middle one a rename would survive only until the next unrelated save.
+func TestConnectionNameRidesTheRows(t *testing.T) {
+	row := config.ModelConfig{
+		Name: "relay", Provider: "custom", APIType: config.APITypeOpenAI,
+		BaseURL: "https://relay.example/v1", Model: "m-1", APIKey: "sk-x",
+		ConnName: "公司中转",
+	}
+	h, path := newModelPanel(t, func(c *config.Config) {
+		c.Model = row
+		c.Models = []config.ModelConfig{row}
+	})
+
+	code, out := doJSON(t, h, authedReq(http.MethodGet, "/api/models", nil))
+	if code != http.StatusOK {
+		t.Fatalf("list = %d", code)
+	}
+	models, _ := out["models"].([]any)
+	if len(models) != 1 {
+		t.Fatalf("models = %v", out["models"])
+	}
+	first, _ := models[0].(map[string]any)
+	if first["conn_name"] != "公司中转" {
+		t.Fatalf("conn_name on the wire = %v", first["conn_name"])
+	}
+
+	code, out = doJSON(t, h, jsonReq(http.MethodPut,
+		entryURL("relay", "m-1", "https://relay.example/v1"), `{"max_tokens":4096}`))
+	if code != http.StatusOK {
+		t.Fatalf("update = %d %v", code, out)
+	}
+	if got := readConfig(t, path).Models[0].ConnName; got != "公司中转" {
+		t.Fatalf("conn_name lost on an edit that did not mention it: %q", got)
+	}
+
+	// "" is the deliberate "name the card after the vendor again", which is a
+	// different instruction from the omitted field above.
+	code, out = doJSON(t, h, jsonReq(http.MethodPut,
+		entryURL("relay", "m-1", "https://relay.example/v1"), `{"conn_name":""}`))
+	if code != http.StatusOK {
+		t.Fatalf("clear = %d %v", code, out)
+	}
+	if got := readConfig(t, path).Models[0].ConnName; got != "" {
+		t.Fatalf("conn_name not cleared: %q", got)
+	}
+
+	// A duplicate shares the source's endpoint and key, so it joins the same
+	// card and inherits the name instead of arriving nameless.
+	code, out = doJSON(t, h, jsonReq(http.MethodPut,
+		entryURL("relay", "m-1", "https://relay.example/v1"), `{"conn_name":"公司中转"}`))
+	if code != http.StatusOK {
+		t.Fatalf("rename = %d %v", code, out)
+	}
+	code, out = doJSON(t, h, jsonReq(http.MethodPost, "/api/models",
+		`{"provider":"custom","model":"m-1","base_url":"https://relay.example/v1","api_type":"openai","alias":"relay-copy","copy_from":"relay"}`))
+	if code != http.StatusOK {
+		t.Fatalf("copy = %d %v", code, out)
+	}
+	if out["conn_name"] != "公司中转" {
+		t.Fatalf("a copy of a named connection arrived nameless: %v", out["conn_name"])
 	}
 }
 
@@ -1493,5 +1694,219 @@ func TestUseModelWritesTheCredentialForm(t *testing.T) {
 	}
 	if cfg.Model.KeyScheme != "bearer" {
 		t.Fatalf("model.key_scheme = %q, want bearer", cfg.Model.KeyScheme)
+	}
+}
+
+func TestCCSwitchRegistrationMatchesProtocol(t *testing.T) {
+	const base = "https://relay.invalid/v1"
+	const model = "shared-model"
+	dbPath := filepath.Join(t.TempDir(), "cc-switch.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Exec("CREATE TABLE providers (id TEXT, app_type TEXT, name TEXT, settings_config TEXT, is_current BOOLEAN, sort_index INTEGER)"); err != nil {
+		t.Fatal(err)
+	}
+	documents := map[string]map[string]any{
+		"claude": {"env": map[string]string{"ANTHROPIC_BASE_URL": base, "ANTHROPIC_MODEL": model, "ANTHROPIC_API_KEY": "fixture"}},
+		"codex": {
+			"auth":   map[string]string{"OPENAI_API_KEY": "fixture"},
+			"config": "model_provider = \"fixture\"\nmodel = \"shared-model\"\n[model_providers.fixture]\nbase_url = \"https://relay.invalid/v1\"\nwire_api = \"chat\"\n",
+		},
+	}
+	for app, doc := range documents {
+		raw, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec("INSERT INTO providers VALUES (?,?,?,?,1,1)", app, app, app, string(raw)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A second Codex entry uses the same URL and model via Responses.
+	responses := documents["codex"]
+	responses["config"] = strings.Replace(responses["config"].(string), "\"chat\"", "\"responses\"", 1)
+	raw, err := json.Marshal(responses)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO providers VALUES (?,?,?,?,0,2)", "codex-responses", "codex", "Responses", string(raw)); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CC_SWITCH_DB", dbPath)
+	h, _ := newModelPanel(t, func(c *config.Config) {
+		c.Models = []config.ModelConfig{{BaseURL: base, Model: model, APIType: "openai"}}
+	})
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, authedReq(http.MethodGet, "/api/models/ccswitch", nil))
+	var payload struct {
+		Groups []localmodels.Source `json:"groups"`
+	}
+	if rr.Code != http.StatusOK || json.Unmarshal(rr.Body.Bytes(), &payload) != nil {
+		t.Fatalf("discover CC Switch: HTTP %d, %s", rr.Code, rr.Body.String())
+	}
+	rows := make(map[string]localmodels.Candidate)
+	for _, group := range payload.Groups {
+		for _, row := range group.Candidates {
+			rows[row.APIType] = row
+		}
+	}
+	if !rows["openai"].Existing || !rows["anthropic"].Importable || rows["anthropic"].Existing ||
+		!rows["responses"].Importable || rows["responses"].Existing {
+		t.Fatalf("expected only the registered OpenAI row to be marked existing: %+v", rows)
+	}
+	if rows["openai"].ID == rows["responses"].ID || rows["openai"].Group == rows["responses"].Group {
+		t.Fatal("CC Switch merged the two Codex protocols into one selectable row or group")
+	}
+}
+
+func TestCCSwitchDiscoveredCandidatesImportToDisk(t *testing.T) {
+	isolateUserDirs(t)
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("LOCALAPPDATA", home)
+	t.Setenv("CODEX_HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", home)
+	t.Setenv("PATH", home)
+	t.Setenv("NO_PROXY", "*")
+	t.Setenv("UNSLOTH_STUDIO_AUTH_TOKEN", "")
+	const base = "https://relay.invalid/v1"
+	const model = "shared-model"
+	dbPath := filepath.Join(home, "cc-switch.db")
+	t.Setenv("CC_SWITCH_DB", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Exec("CREATE TABLE providers (id TEXT, app_type TEXT, name TEXT, settings_config TEXT, is_current BOOLEAN, sort_index INTEGER)"); err != nil {
+		t.Fatal(err)
+	}
+	claude := `{"env":{"ANTHROPIC_BASE_URL":"https://relay.invalid/v1","ANTHROPIC_MODEL":"shared-model[1M]","ANTHROPIC_AUTH_TOKEN":"synthetic-claude"}}`
+	codex := `{"auth":{"OPENAI_API_KEY":"synthetic-codex"},"config":"model_provider = \"fixture\"\nmodel = \"shared-model\"\n[model_providers.fixture]\nbase_url = \"https://relay.invalid/v1\"\nwire_api = \"responses\"\n"}`
+	gemini := `{"env":{"GOOGLE_GEMINI_BASE_URL":"https://relay.invalid/v1","GEMINI_MODEL":"models/shared-model","GEMINI_API_KEY":"synthetic-gemini"}}`
+	for app, settings := range map[string]string{"claude": claude, "codex": codex, "gemini": gemini} {
+		if _, err := db.Exec("INSERT INTO providers VALUES (?,?,?,?,1,1)", app, app, app, settings); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec("ALTER TABLE providers ADD COLUMN meta TEXT"); err != nil {
+		t.Fatal(err)
+	}
+	desktop := `{"env":{"ANTHROPIC_BASE_URL":"https://relay.invalid/desktop","ANTHROPIC_MODEL":"shared-model","ANTHROPIC_API_KEY":"synthetic-desktop"}}`
+	if _, err := db.Exec("INSERT INTO providers VALUES (?,?,?,?,1,1,?)", "desktop", "claude-desktop", "Desktop", desktop,
+		`{"apiFormat":"openai_chat"}`); err != nil {
+		t.Fatal(err)
+	}
+	h, path := newModelPanel(t, func(c *config.Config) {
+		c.Model = config.ModelConfig{BaseURL: base, APIType: "openai", Model: model}
+		c.Models = []config.ModelConfig{c.Model}
+	})
+	list := func() []localmodels.Candidate {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, authedReq(http.MethodGet, "/api/models/ccswitch", nil))
+		var payload struct{ Groups []localmodels.Source }
+		if rr.Code != http.StatusOK || json.Unmarshal(rr.Body.Bytes(), &payload) != nil {
+			t.Fatalf("discover CC Switch: HTTP %d, %s", rr.Code, rr.Body.String())
+		}
+		var candidates []localmodels.Candidate
+		for _, group := range payload.Groups {
+			candidates = append(candidates, group.Candidates...)
+		}
+		return candidates
+	}
+	var items []modelImportItem
+	for _, c := range list() {
+		if c.Existing || !c.Importable || c.Model != model || c.KeyRef == "" {
+			t.Fatalf("expected separate selectable row: %+v", c)
+		}
+		items = append(items, modelImportItem{CandidateID: c.ID, Provider: c.Provider, Model: c.Model, BaseURL: c.BaseURL,
+			APIType: c.APIType, KeyRef: c.KeyRef, NoAuth: c.NoAuth, Auth: c.Auth, ContextWindow: c.ContextWindow})
+	}
+	if len(items) != 4 {
+		t.Fatalf("discovered %d candidates, want 4", len(items))
+	}
+	submitItems := func(selected []modelImportItem) (int, map[string]any) {
+		t.Helper()
+		raw, err := json.Marshal(map[string]any{"items": selected})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return doJSON(t, h, jsonReq(http.MethodPost, "/api/models/import", string(raw)))
+	}
+	importItems := func(selected []modelImportItem) map[string]any {
+		t.Helper()
+		code, result := submitItems(selected)
+		if code != http.StatusOK {
+			t.Fatalf("import: HTTP %d %v", code, result)
+		}
+		return result
+	}
+	validConfig, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("models: ["), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := submitItems(items); code != http.StatusInternalServerError {
+		t.Fatalf("malformed config should prevent import, got HTTP %d", code)
+	}
+	for _, candidate := range list() {
+		if candidate.Existing {
+			t.Fatalf("failed import changed the registry in memory: %s", candidate.APIType)
+		}
+	}
+	if err := os.WriteFile(path, validConfig, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := importItems(items); result["added"] != float64(4) {
+		t.Fatalf("expected four imported model rows, got %v", result)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := make(map[string]config.ModelConfig)
+	for _, row := range cfg.Models {
+		rows[row.APIType] = row
+	}
+	if len(cfg.Models) != 5 || rows["anthropic"].KeyRef != "ccswitch:claude:claude" ||
+		rows["anthropic"].KeyScheme != "bearer" || rows["anthropic"].ContextWindow != 1_000_000 ||
+		rows["responses"].KeyRef != "ccswitch:codex:codex" || rows["google"].KeyRef != "ccswitch:gemini:gemini" ||
+		rows["openai"].KeyRef != "ccswitch:claude-desktop:desktop" || rows["openai"].ConnName != "Desktop" {
+		t.Fatalf("persisted protocols and credential metadata differ: api types found=%d", len(rows))
+	}
+	persisted, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(persisted), "synthetic-") {
+		t.Fatal("import wrote a credential value instead of its reference")
+	}
+	for _, c := range list() {
+		if !c.Existing {
+			t.Fatalf("imported protocol %s is still selectable", c.APIType)
+		}
+	}
+
+	// A row selected before CC Switch changes its endpoint is stale. A later
+	// import must still match the provider currently stored in CC Switch.
+	moved := strings.ReplaceAll(claude, "relay.invalid", "other.invalid")
+	if _, err := db.Exec("UPDATE providers SET settings_config=? WHERE app_type='claude'", moved); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if item.APIType == "anthropic" {
+			result := importItems([]modelImportItem{item})
+			skipped, _ := result["skipped"].([]any)
+			if result["added"] != float64(0) || len(skipped) != 1 ||
+				!strings.Contains(skipped[0].(string), "no longer matches") {
+				t.Fatalf("stale CC Switch candidate was not rejected: %v", result)
+			}
+		}
 	}
 }

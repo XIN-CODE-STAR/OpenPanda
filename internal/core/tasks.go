@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1625,32 +1624,62 @@ func (s *TaskStore) ClaimApproved(ctx context.Context, taskID, expectedOwner, ne
 	})
 }
 
-// RequeueForContinue atomically returns a follow-up-parked review to the
-// schedulable queue — the same review→queued+scheduled=1 transition an
-// approved resume uses, gated on the accept_work disposition. The queue
-// scheduler (this process's or the daemon sharing the store) then claims and
-// runs it like any queued row, which is what makes continue work
-// cross-process: a CLI or console marks the row, the executor's scheduler
-// does the running. The caller is responsible for the needs_followup check
-// (it lives in the parked result, not the row).
-func (s *TaskStore) RequeueForContinue(ctx context.Context, taskID, expectedOwner string) error {
+// RequeueForContinue commits the continue directive and the queue transition
+// in the same transaction. The version guard prevents a stale request from
+// claiming a later review of the same task.
+func (s *TaskStore) RequeueForContinue(ctx context.Context, expected Task, directive string) error {
+	taskID := expected.TaskID
 	return s.withTx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx, `
 			UPDATE tasks SET state=?, scheduled=1, state_version=state_version+1, updated_at=?
-			WHERE task_id=? AND state=? AND owner_node=?
+			WHERE task_id=? AND state=? AND owner_node=? AND state_version=?
 				AND approval_disposition=?`,
-			StateQueued, s.now(), taskID, StateReview, expectedOwner,
+			StateQueued, s.now(), taskID, StateReview, expected.OwnerNode, expected.StateVersion,
 			string(ApprovalAcceptWork))
 		if err != nil {
 			return fmt.Errorf("requeue for continue: %w", err)
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
-			return fmt.Errorf("%w: task %s continue claimed concurrently", ErrConflict, taskID)
+			return s.explainContinueConflict(ctx, tx, taskID)
 		}
-		return s.recordEventTx(ctx, tx, taskID, EvReview, map[string]any{
-			"continued": true,
-		})
+		msg, err := postUserNoteTx(ctx, tx, taskID, directive, nil, MsgGradeSteer)
+		if err != nil {
+			return err
+		}
+		if err := s.recordEventTx(ctx, tx, taskID, EvUserMsg, map[string]any{
+			"mode": "continue", "text": msg.Body, "seq": msg.SenderSeq,
+		}); err != nil {
+			return err
+		}
+		return s.recordEventTx(ctx, tx, taskID, EvReview, map[string]any{"continued": true})
 	})
+}
+
+// explainContinueConflict turns an empty continue CAS into the reason it was
+// empty. "claimed concurrently" is only one of three possibilities and was the
+// least likely one: a row parked for changed input (a model-config refusal, an
+// exhausted turn budget) can never satisfy the accept_work guard, so operators
+// were told about a race that never happened while the real fix — changing the
+// configuration the park named — went unstated.
+func (s *TaskStore) explainContinueConflict(ctx context.Context, tx *sql.Tx, taskID string) error {
+	var state, disposition string
+	err := tx.QueryRowContext(ctx, `
+		SELECT state, COALESCE(approval_disposition,'')
+		FROM tasks WHERE task_id=?`, taskID).Scan(&state, &disposition)
+	if err != nil {
+		return fmt.Errorf("%w: task %s continue claimed concurrently", ErrConflict, taskID)
+	}
+	switch {
+	case state != StateReview:
+		return fmt.Errorf("%w: task %s is %s — only a review park can continue", ErrConflict, taskID, state)
+	case disposition == "":
+		return fmt.Errorf("%w: task %s has no approval disposition — continue requires accept_work", ErrConflict, taskID)
+	case disposition != string(ApprovalAcceptWork):
+		return fmt.Errorf("%w: task %s is parked as %s — continue requires accept_work", ErrConflict, taskID, disposition)
+	default:
+		// The review version or owner changed after the caller read it.
+		return fmt.Errorf("%w: task %s continue claimed concurrently", ErrConflict, taskID)
+	}
 }
 
 // reviewFromAuthorizationRefusal is the legacy-row compatibility path. Only a
@@ -3292,6 +3321,10 @@ func (s *TaskStore) cancelCascade(ctx context.Context, taskID string, visited ma
 // its result handling and lease renewals against a task that no longer exists.
 var ErrTaskActive = errors.New("task is active")
 
+// ErrPlanDependency reports that a finished stage still supplies an active
+// successor. A successor may fetch its inputs after it has been queued.
+var ErrPlanDependency = errors.New("finished stage still supplies an active plan stage")
+
 // Deletable reports whether a task in state s may be removed from the store:
 // anything not yet claimed (submitted/queued) and every terminal state. The
 // active states refuse with ErrTaskActive — see Delete.
@@ -3312,42 +3345,56 @@ func Deletable(s string) bool {
 // rows were removed.
 func (s *TaskStore) Delete(ctx context.Context, taskID string) (int, error) {
 	var ids []string
-	visited := make(map[string]bool)
-	if err := s.deleteSubtree(ctx, taskID, visited, &ids); err != nil {
-		return 0, err
-	}
-	if err := s.deleteTaskRows(ctx, ids); err != nil {
+	if err := s.withTx(ctx, func(tx *sql.Tx) error {
+		// Claiming work and creating a child use the same writer lock as
+		// finding and deleting the complete subtree.
+		rows, err := tx.QueryContext(ctx, `WITH RECURSIVE tree(id) AS (
+			SELECT task_id FROM tasks WHERE task_id=?
+			UNION SELECT t.task_id FROM tasks t JOIN tree ON t.parent_id=tree.id
+		) SELECT t.task_id,t.state,COALESCE(t.plan_id,'') FROM tasks t JOIN tree ON t.task_id=tree.id`, taskID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		var producers []string
+		for rows.Next() {
+			var id, state, planID string
+			if err := rows.Scan(&id, &state, &planID); err != nil {
+				return err
+			}
+			if !Deletable(state) {
+				return fmt.Errorf("%w: %s is %s — cancel it first", ErrTaskActive, id, state)
+			}
+			ids = append(ids, id)
+			if state == StateDone && planID != "" {
+				producers = append(producers, id)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if len(ids) == 0 {
+			return sql.ErrNoRows
+		}
+		for _, id := range producers {
+			var needed bool
+			err := tx.QueryRowContext(ctx, `WITH RECURSIVE successors(plan_id,stage_id,state) AS (
+				SELECT plan_id,stage_id,state FROM tasks WHERE task_id=?
+				UNION SELECT t.plan_id,t.stage_id,t.state FROM tasks t JOIN successors s ON t.plan_id=s.plan_id
+				WHERE EXISTS(SELECT 1 FROM json_each(CASE WHEN json_valid(t.needs_json) THEN t.needs_json ELSE '[]' END) WHERE value=s.stage_id)
+			) SELECT EXISTS(SELECT 1 FROM successors WHERE state NOT IN ('done','failed','cancelled','expired'))`, id).Scan(&needed)
+			if err != nil {
+				return err
+			}
+			if needed {
+				return ErrPlanDependency
+			}
+		}
+		return deleteTaskRowsTx(ctx, tx, ids)
+	}); err != nil {
 		return 0, err
 	}
 	return len(ids), nil
-}
-
-// deleteSubtree walks parent_id links depth-first, collecting the subtree in
-// ids. The visited set guards against a parent_id cycle, exactly like
-// cancelCascade.
-func (s *TaskStore) deleteSubtree(ctx context.Context, taskID string, visited map[string]bool, ids *[]string) error {
-	if visited[taskID] {
-		return nil
-	}
-	visited[taskID] = true
-	cur, err := s.Get(ctx, taskID)
-	if err != nil {
-		return err
-	}
-	if !Deletable(cur.State) {
-		return fmt.Errorf("%w: %s is %s — cancel it first", ErrTaskActive, taskID, cur.State)
-	}
-	*ids = append(*ids, taskID)
-	children, err := s.Children(ctx, taskID)
-	if err != nil {
-		return err
-	}
-	for _, c := range children {
-		if err := s.deleteSubtree(ctx, c.TaskID, visited, ids); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // ClearQueue empties the board: every non-terminal task is cancelled first
@@ -3382,27 +3429,35 @@ func (s *TaskStore) ClearQueue(ctx context.Context) (cancelled, deleted int, err
 
 // deleteTaskRows removes the given task ids (nil = every task) together with
 // their satellite rows: event timeline, delegation metrics and any parked
-// result/cancel outbox deliveries. Artifacts and the audit chain are
-// content-addressed history, not queue state — they stay.
+// result outbox deliveries. A parked cancel addresses a remote copy that can
+// still be running even after the local row has gone. Keep it until delivered.
+// Artifacts and the audit chain are content-addressed history and also stay.
 func (s *TaskStore) deleteTaskRows(ctx context.Context, ids []string) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
-		if ids == nil {
-			for _, table := range append(slices.Clone(taskSatellites), "tasks") {
-				if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
-					return fmt.Errorf("clear %s: %w", table, err)
-				}
-			}
-			return nil
-		}
-		for _, id := range ids {
-			for _, table := range append(slices.Clone(taskSatellites), "tasks") {
-				if _, err := tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE task_id = ?", id); err != nil {
-					return fmt.Errorf("delete %s from %s: %w", id, table, err)
-				}
+		return deleteTaskRowsTx(ctx, tx, ids)
+	})
+}
+
+func deleteTaskRowsTx(ctx context.Context, tx *sql.Tx, ids []string) error {
+	// Deleting task rows first lets their round snapshots see the task events
+	// that still describe the verdict.
+	tables := append([]string{"tasks"}, taskSatellites...)
+	if ids == nil {
+		for _, table := range tables {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
+				return fmt.Errorf("clear %s: %w", table, err)
 			}
 		}
 		return nil
-	})
+	}
+	for _, id := range ids {
+		for _, table := range tables {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE task_id = ?", id); err != nil {
+				return fmt.Errorf("delete %s from %s: %w", id, table, err)
+			}
+		}
+	}
+	return nil
 }
 
 // TaskOutboxPending reports whether a parked outbox delivery exists for
@@ -3680,11 +3735,11 @@ var settledStates = []string{StateDone, StateFailed, StateCancelled, StateExpire
 const retentionSweepBatch = 2000
 
 // taskSatellites are the per-task tables deleted alongside a tasks row: the
-// event timeline, routing metrics, and every pending-delivery outbox. A row
-// whose task is gone has no one left to answer to, so delivery records die
-// with it rather than replaying for a task that no longer exists.
+// event timeline, routing metrics, and pending task and result deliveries.
+// The cancel outbox has its own lifetime because the remote copy can outlive
+// this row and still needs the stop signal.
 var taskSatellites = []string{
-	"task_events", "delegation_metrics", "result_outbox", "cancel_outbox",
+	"task_events", "delegation_metrics", "result_outbox",
 	"task_outbox", "artifact_push_outbox", "resume_outbox",
 }
 
@@ -3698,7 +3753,11 @@ func (s *TaskStore) DeleteSettledBefore(ctx context.Context, cutoff int64) (int,
 	for i := range settledStates {
 		ph[i] = "?"
 	}
-	pred := `state IN (` + strings.Join(ph, ",") + `) AND updated_at < ?`
+	// An old stage can still supply artifacts to a newer running stage. Keep
+	// the graph intact until the entire plan reaches terminal states.
+	pred := `state IN (` + strings.Join(ph, ",") + `) AND updated_at < ?
+		AND (plan_id='' OR NOT EXISTS(SELECT 1 FROM tasks pending WHERE pending.plan_id=tasks.plan_id
+			AND pending.state NOT IN ('done','failed','cancelled','expired')))`
 	predArgs := func() []any {
 		args := make([]any, 0, len(settledStates)+1)
 		for _, st := range settledStates {

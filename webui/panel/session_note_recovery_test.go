@@ -15,6 +15,82 @@ import (
 	"github.com/Xustalis/OpenPanda/internal/storage"
 )
 
+func TestSessionQueuedResumeRequiresIdleAndConsumesOnce(t *testing.T) {
+	f := newSummaryDeliveryFixture(t, false)
+	f.h.engine, _ = newApprovalQueueEngine(t)
+	f.h.store = f.h.engine.TaskStore()
+	f.h.cfgMu = &sync.RWMutex{}
+	ctx := context.Background()
+	note, ok := f.h.pushSteer(f.sessionID, "canonical queued text", false)
+	if !ok {
+		t.Fatal("note not queued")
+	}
+	ask := func() *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"prompt":"stale client preview","resume_queued":true}`))
+		r.SetPathValue("id", f.sessionID)
+		w := httptest.NewRecorder()
+		f.h.sessionAsk(w, r)
+		return w
+	}
+	wantConflict := func() {
+		t.Helper()
+		if w := ask(); w.Code != http.StatusConflict {
+			t.Fatalf("automatic resume = %d, want conflict: %s", w.Code, w.Body.String())
+		}
+	}
+
+	oldCtx, oldCancel := context.WithCancel(ctx)
+	defer oldCancel()
+	op, err := f.h.registerSessionAsk(f.sessionID, oldCancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantConflict()
+	if oldCtx.Err() != nil || !f.h.hasActiveAsk(f.sessionID) {
+		t.Fatal("automatic resume canceled or replaced the live ask")
+	}
+	f.h.unregisterSessionAsk(f.sessionID, op)
+
+	// The operation map is per handler. A main round published by another
+	// handler has the same durable exclusion, even before the session write.
+	if err := f.h.store.BeginAskRound(ctx, "other-panel-main", f.sessionID, "en"); err != nil {
+		t.Fatal(err)
+	}
+	wantConflict()
+	if got := f.h.listSteer(f.sessionID); len(got) != 1 || got[0] != note {
+		t.Fatalf("failed admission changed the queue: %+v", got)
+	}
+	f.assertTurns(t, 0)
+	if err := f.h.store.CloseAskRound(ctx, "other-panel-main", "closed"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.h.store.BeginSideAskRound(ctx, "parallel-side", f.sessionID, "en"); err != nil {
+		t.Fatal(err)
+	}
+	if w := ask(); w.Code != http.StatusOK {
+		t.Fatalf("side round blocked main continuation: %d %s", w.Code, w.Body.String())
+	}
+	wantConflict()
+	sess, err := f.h.sessions.Get(f.sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	users := 0
+	for _, turn := range sess.Turns {
+		if turn.Role == "user" {
+			users++
+			if turn.Text != note.text {
+				t.Errorf("persisted %q, want queued text %q", turn.Text, note.text)
+			}
+		}
+	}
+	side, err := f.h.store.AskRoundProgress(ctx, f.sessionID, "parallel-side")
+	if users != 1 || len(f.h.listSteer(f.sessionID)) != 0 || err != nil || side.Status != "open" {
+		t.Fatalf("users=%d, notes=%+v, side round=%+v (%v)", users, f.h.listSteer(f.sessionID), side, err)
+	}
+}
+
 func TestSessionAskRestoresNotesAfterRoundFailure(t *testing.T) {
 	for _, live := range []bool{false, true} {
 		name := "carry"

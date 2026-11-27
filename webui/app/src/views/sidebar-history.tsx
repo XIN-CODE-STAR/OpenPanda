@@ -363,7 +363,9 @@ export function SidebarHistory({
   return (
     <div class="sidebar-history">
       {loadError && <p class="thread-empty">{loadError}</p>}
-      {grouped.length > 0 && <h2 class="history-label">{t('sessions.threads')}</h2>}
+      {/* No section title, no rule: the rail's only list is this one, and a
+          header that names it ("会话列表") above a hairline spends the top of
+          the pane saying what the pane already is. */}
       <div class="thread-list">
         {ordered.length === 0 && !loadError && <p class="thread-empty">{t('sessions.railEmpty')}</p>}
         {grouped.map(([projectName, items]) => {
@@ -469,7 +471,7 @@ export function SidebarHistory({
                     }`}
                     role="button"
                     tabIndex={0}
-                    aria-current={s.id === activeId}
+                    aria-current={s.id === activeId ? 'page' : undefined}
                     aria-pressed={editing ? selected.has(s.id) : undefined}
                     onClick={() =>
                       editing ? toggleSelect(s.id, !selected.has(s.id)) : openThread(s)

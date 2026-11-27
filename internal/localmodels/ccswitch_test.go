@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Xustalis/OpenPanda/internal/ccswitch"
 	_ "modernc.org/sqlite"
 )
 
@@ -49,8 +50,19 @@ func seedCCSwitch(t *testing.T) string {
 	// trailing slash must not split the group.
 	insert("id-a", "claude", "Zhipu GLM", "https://open.bigmodel.cn/api/anthropic", "tok-a", true, false, 1)
 	insert("id-b", "claude", "Zhipu 备用", "https://open.bigmodel.cn/api/anthropic/", "tok-b", true, true, 2)
+	// A second relay, alphabetically first but listed after the Zhipu pair:
+	// the sheet keeps CC Switch's own order instead of sorting endpoints.
+	insert("id-d", "claude", "Alpha Relay", "https://aaa.example/v1", "tok-d", true, false, 4)
 	// A Claude Desktop row with no model: nothing to import.
 	insert("id-c", "claude-desktop", "Desktop only", "https://api.xiaomimimo.com/anthropic", "tok-c", false, false, 3)
+	// The same model pinned twice, once with Claude Code's 1M marker: the
+	// marker is split off the id and becomes the row's window.
+	oneM := `{"env":{"ANTHROPIC_BASE_URL":"https://onem.example/v1","ANTHROPIC_AUTH_TOKEN":"tok-e","ANTHROPIC_MODEL":"claude-opus-5[1M]","ANTHROPIC_DEFAULT_OPUS_MODEL":"claude-opus-5"}}`
+	if _, err := db.Exec(
+		`INSERT INTO providers (id, app_type, name, settings_config, is_current, sort_index) VALUES (?,?,?,?,?,?)`,
+		"id-e", "claude", "OneM", oneM, false, 5); err != nil {
+		t.Fatalf("insert id-e: %v", err)
+	}
 	return path
 }
 
@@ -74,9 +86,31 @@ func TestCCSwitchGroupsMergesByEndpoint(t *testing.T) {
 	if src.Status != StatusOK {
 		t.Fatalf("status = %s (%s), want ok", src.Status, src.Detail)
 	}
-	// Two models from the merged pair; the model-less Desktop row is skipped.
-	if len(src.Candidates) != 2 {
-		t.Fatalf("candidates = %d, want 2: %+v", len(src.Candidates), src.Candidates)
+	// Two models per endpoint, one more on the 1M relay; the model-less
+	// Desktop row is skipped.
+	if len(src.Candidates) != 5 {
+		t.Fatalf("candidates = %d, want 5: %+v", len(src.Candidates), src.Candidates)
+	}
+	// The console draws one heading per endpoint, in the order CC Switch shows
+	// them — not alphabetised by URL.
+	wantGroups := []struct{ key, label string }{
+		{"https://open.bigmodel.cn/api/anthropic|anthropic", "Zhipu 备用"},
+		{"https://aaa.example/v1|anthropic", "Alpha Relay"},
+		{"https://onem.example/v1|anthropic", "OneM"},
+	}
+	gotGroups := make([]struct{ key, label string }, 0, 3)
+	for _, c := range src.Candidates {
+		if n := len(gotGroups); n == 0 || gotGroups[n-1].key != c.Group {
+			gotGroups = append(gotGroups, struct{ key, label string }{c.Group, c.GroupLabel})
+		}
+	}
+	if len(gotGroups) != len(wantGroups) {
+		t.Fatalf("groups = %+v, want %+v", gotGroups, wantGroups)
+	}
+	for i, want := range wantGroups {
+		if gotGroups[i] != want {
+			t.Fatalf("group %d = %+v, want %+v", i, gotGroups[i], want)
+		}
 	}
 	for _, c := range src.Candidates {
 		if c.Provider != "custom" {
@@ -84,6 +118,15 @@ func TestCCSwitchGroupsMergesByEndpoint(t *testing.T) {
 		}
 		if c.APIType != "anthropic" {
 			t.Errorf("%s api_type = %q, want anthropic", c.Model, c.APIType)
+		}
+		if c.Group != strings.ToLower(strings.TrimRight(c.BaseURL, "/"))+"|"+c.APIType {
+			t.Errorf("%s group = %q, want its endpoint", c.Model, c.Group)
+		}
+		if strings.Contains(c.GroupLabel, "+1") {
+			t.Errorf("%s group label = %q, want the provider name without the merge count", c.Model, c.GroupLabel)
+		}
+		if c.BaseURL != "https://open.bigmodel.cn/api/anthropic" {
+			continue
 		}
 		// The live entry's id, not the first row's: its token is the one that
 		// works right now.
@@ -99,6 +142,25 @@ func TestCCSwitchGroupsMergesByEndpoint(t *testing.T) {
 		if !strings.Contains(c.Note, "Zhipu 备用 +1") {
 			t.Errorf("%s note = %q, want the live name and the merge count", c.Model, c.Note)
 		}
+	}
+	// The marker is Claude Code's own syntax, not part of the id a relay
+	// serves: it is split off, the two entries collapse into one row, and the
+	// window it asked for lands on that row.
+	var oneMRows int
+	for _, c := range src.Candidates {
+		if c.BaseURL != "https://onem.example/v1" {
+			continue
+		}
+		oneMRows++
+		if c.Model != "claude-opus-5" {
+			t.Errorf("model = %q, want the id without the marker", c.Model)
+		}
+		if c.ContextWindow != 1_000_000 {
+			t.Errorf("context_window = %d, want 1000000", c.ContextWindow)
+		}
+	}
+	if oneMRows != 1 {
+		t.Fatalf("the 1M relay produced %d candidates, want the two entries merged into 1", oneMRows)
 	}
 	// The console keeps one tick set keyed by ID across all four rosters, so an
 	// empty or repeated ID ticks every row at once.
@@ -127,6 +189,22 @@ func TestCCSwitchGroupsMissingStore(t *testing.T) {
 	})
 	if len(groups) != 1 || groups[0].Status != StatusMissing {
 		t.Fatalf("groups = %+v, want a single missing source", groups)
+	}
+}
+
+func TestCCSwitchMergedModelsKeepTheirOwnCredentials(t *testing.T) {
+	rows, _ := ccSwitchCandidates([]ccswitch.Provider{
+		{ID: "active", AppType: "claude", Name: "Active", Current: true, HasToken: true,
+			BaseURL: "https://relay.invalid/Tenant", APIType: "anthropic", Models: []string{"shared", "active-only"}},
+		{ID: "other", AppType: "claude", Name: "Other", HasToken: true, Bearer: true,
+			BaseURL: "https://RELAY.invalid/Tenant", APIType: "anthropic", Models: []string{"shared[1M]", "other-only"}},
+		{ID: "case", AppType: "claude", HasToken: true,
+			BaseURL: "https://relay.invalid/tenant", APIType: "anthropic", Models: []string{"shared"}},
+	})
+	if len(rows) != 4 || rows[0].KeyRef != "ccswitch:claude:active" || rows[0].ContextWindow != 1_000_000 ||
+		rows[2].KeyRef != "ccswitch:claude:other" || !rows[2].Bearer || rows[2].Suggested ||
+		rows[0].Group != rows[2].Group || rows[0].Group == rows[3].Group {
+		t.Fatalf("credential or endpoint pairing changed: %+v", rows)
 	}
 }
 

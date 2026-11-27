@@ -44,6 +44,7 @@ type codexProvider struct {
 	// Codex install has neither.
 	WireAPI string
 	Bearer  string
+	Profile string
 }
 
 type codexFile struct {
@@ -84,6 +85,7 @@ func parseCodexToml(text string) codexFile {
 	byID := make(map[string]*codexProvider)
 	var order []string
 	var cur *codexProvider
+	inTable := false
 
 	for _, raw := range strings.Split(text, "\n") {
 		line := strings.TrimSpace(stripTomlComment(raw))
@@ -91,6 +93,7 @@ func parseCodexToml(text string) codexFile {
 			continue
 		}
 		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			inTable = true
 			inner := strings.TrimSpace(line[1 : len(line)-1])
 			cur = nil
 			rest, ok := strings.CutPrefix(inner, "model_providers.")
@@ -125,6 +128,9 @@ func parseCodexToml(text string) codexFile {
 			out.CLIPath = value
 		}
 		if cur == nil {
+			if inTable {
+				continue
+			}
 			switch key {
 			case "model":
 				out.Model = value
@@ -513,6 +519,11 @@ func collectCodex(ctx context.Context, opt Options) Source {
 	// "the model I am running" is the row a person looks for first.
 	type configuredModel struct{ provider, model string }
 	var configured []configuredModel
+	type profileModel struct {
+		provider codexProvider
+		model    string
+	}
+	var profiles []profileModel
 
 	// The root model, under the reference implementation's rule:
 	//
@@ -549,13 +560,6 @@ func collectCodex(ctx context.Context, opt Options) Source {
 				continue
 			}
 			profile := parseCodexToml(body)
-			for _, p := range profile.Providers {
-				if _, known := byID[p.ID]; known || p.BaseURL == "" {
-					continue
-				}
-				byID[p.ID] = p
-				dialable = append(dialable, p)
-			}
 			provider := profile.ModelProvider
 			if provider == "" {
 				provider = main.ModelProvider
@@ -563,7 +567,24 @@ func collectCodex(ctx context.Context, opt Options) Source {
 			if provider == "" && officialSet[profile.Model] {
 				provider = officialProviderID(byID)
 			}
-			add(provider, profile.Model)
+			ownProvider := false
+			for _, p := range profile.Providers {
+				if p.BaseURL == "" {
+					continue
+				}
+				p.Profile = e.Name()
+				if p.ID == provider {
+					profiles = append(profiles, profileModel{p, profile.Model})
+					ownProvider = true
+				}
+				if _, known := byID[p.ID]; !known {
+					byID[p.ID] = p
+					dialable = append(dialable, p)
+				}
+			}
+			if !ownProvider {
+				add(provider, profile.Model)
+			}
 			if profile.Model != "" {
 				configured = append(configured, configuredModel{provider, profile.Model})
 			}
@@ -595,25 +616,32 @@ func collectCodex(ctx context.Context, opt Options) Source {
 		}
 	}
 
-	for _, pr := range pairs {
-		p, known := byID[pr.provider]
-		if !known || p.BaseURL == "" {
-			continue
+	addProviderModel := func(p codexProvider, model string) {
+		id, window := cleanModelID(model)
+		if p.BaseURL == "" || id == "" {
+			return
 		}
 		keyValue, keyRef := p.key(opt)
 		src.Candidates = append(src.Candidates, Candidate{
-			Source:      SourceCodex,
-			Provider:    "custom",
-			Model:       pr.model,
-			Label:       pr.model,
-			BaseURL:     strings.TrimRight(p.BaseURL, "/"),
-			APIType:     wireAPIToType(p.WireAPI),
-			KeyRef:      keyRef,
-			Placeholder: strings.HasPrefix(keyRef, "codex:") && !looksLikeCredential(keyValue),
-			Suggested:   true,
-			Importable:  true,
-			Note:        p.Name,
+			Source:        SourceCodex,
+			Provider:      "custom",
+			Model:         id,
+			Label:         id,
+			BaseURL:       strings.TrimRight(p.BaseURL, "/"),
+			APIType:       wireAPIToType(p.WireAPI),
+			KeyRef:        keyRef,
+			ContextWindow: window,
+			Placeholder:   strings.HasPrefix(keyRef, "codex:") && !looksLikeCredential(keyValue),
+			Suggested:     true,
+			Importable:    true,
+			Note:          p.Name,
 		})
+	}
+	for _, pr := range pairs {
+		addProviderModel(byID[pr.provider], pr.model)
+	}
+	for _, profile := range profiles {
+		addProviderModel(profile.provider, profile.model)
 	}
 
 	// A Codex login opens ChatGPT's own Responses backend — the surface the CLI
@@ -764,6 +792,9 @@ func (p codexProvider) key(opt Options) (value, ref string) {
 		return opt.env(p.EnvKey), "env:" + p.EnvKey
 	}
 	if p.Bearer != "" {
+		if p.Profile != "" {
+			return p.Bearer, "codex:" + p.Profile + ":" + p.ID
+		}
 		return p.Bearer, "codex:" + p.ID
 	}
 	return "", ""

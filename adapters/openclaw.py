@@ -256,7 +256,7 @@ def main():
     harness.progress("using injected model %s via a pinned openclaw config" % qualified)
     label = "openclaw"
     harness.emit_event("tool_use", id=label, name=label,
-                       input={"argc": max(0, len(cmd) - 1)})
+                       input={"argc": max(0, len(cmd) - 1)}, phase="spawn")
     try:
         rc, out, err = harness.run_plain(cmd, cwd=cwd, timeout=timeout,
                                          heartbeat_s=HEARTBEAT_S)
